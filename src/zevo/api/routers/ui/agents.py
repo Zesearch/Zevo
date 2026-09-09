@@ -58,6 +58,9 @@ class AgentDTO(BaseModel):
     # nothing about when it is the right choice.
     skill_cards: list["SkillCardDTO"] = Field(default_factory=list)
     identity_path: str = ""
+    # How many wakeups of this agent the scheduler runs at once, across all
+    # runs. 1 serialises every run's stage behind one another.
+    max_concurrent_runs: int = 1
 
 
 class HeartbeatDTO(BaseModel):
@@ -131,6 +134,7 @@ def _agent_dto(r: Agent) -> AgentDTO:
         skills=[c.name for c in cards],
         skill_cards=cards,
         identity_path=r.identity_path or "",
+        max_concurrent_runs=max(1, int(r.max_concurrent_runs or 1)),
     )
 
 
@@ -250,6 +254,7 @@ class PatchAgentBody(StrictBody):
     default_driver: str | None = None
     default_model: str | None = None
     sandbox: str | None = None
+    max_concurrent_runs: int | None = Field(None, ge=1, le=32)
 
 
 @router.patch("/agents/{agent_id}", response_model=AgentDTO)
@@ -282,6 +287,8 @@ async def patch_agent(
         r.default_driver = body.default_driver
     if body.default_model is not None:
         r.default_model = body.default_model
+    if body.max_concurrent_runs is not None:
+        r.max_concurrent_runs = body.max_concurrent_runs
     if body.sandbox is not None:
         sb = (body.sandbox or "").strip().lower()
         if sb not in ("none", "openshell"):
