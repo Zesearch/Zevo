@@ -49,7 +49,7 @@ export const SECRETS: SecretSpec[] = [
     driver: "claude_cli",
     kind: "oauth_token",
     format_hint: "starts with sk-ant-oat…, valid ~1 year",
-    obtain: "Run `claude setup-token` on your laptop (browser-based)",
+    obtain: "Run `claude setup-token` on your laptop, paste the browser's code back into the terminal, then copy the sk-ant-oat… token the terminal prints (not the browser code)",
     obtain_cmd: "claude setup-token",
   },
   {
