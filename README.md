@@ -29,16 +29,24 @@ Zevo is a self-improving system that uses multi-agent collaboration to autonomou
 
 ![Human-led model training compared with Zevo](figs/human-vs-zevo.png)
 
-| Advantage | What It Means |
-|---|---|
-| 🤖 **Autonomous** | Zevo plans and runs the complete improvement loop end to end without human intervention after launch. |
-| 🎯 **Reliable Evaluation** | ▸ Zevo supports user-defined test sets and metrics, so improvement is measured against each user's objective.<br>▸ Zevo optimizes on validation and keeps the optimization loop schema-isolated from the test set, preventing test-set overfitting. |
-| ⚖️ **Fair Comparison** | Zevo fixes prompts, chat templates, decoding strategies, and inference settings in the baseline round so later score gains reflect model evolution rather than a moving setup. |
-| 🧠 **Flexible Agent Stack** | Zevo supports many model families as agents, including GPT models from OpenAI, Claude models from Anthropic, and the latest open-source models through Amazon Bedrock and OpenRouter. |
-| ⚡ **Infrastructure-Agnostic** | ▸ Zevo supports rented cloud GPUs, user-owned Slurm clusters, and dedicated GPU machines.<br>▸ Zevo automatically queues and runs jobs, monitors their status, and reads back the results. |
-| 🔒 **Secure** | Zevo keeps secrets and private run state in the local deployment and provides sandbox mode with explicitly scoped agent permissions. |
-| 🔍 **Transparent** | Zevo records every decision, configuration, dataset, model, prediction, score, log, and artifact. |
-| ♻️ **Resilient** | Zevo uses schema, artifact, and heuristic checks to detect failures, automatically repairs recoverable issues, and safely resumes the workflow. |
+- 🤖 **Autonomous**
+  - Zevo plans and runs the complete improvement loop end to end without human intervention after launch.
+- 🎯 **Reliable Evaluation**
+  - Zevo supports user-defined test sets and metrics, so improvement is measured against each user's objective.
+  - Zevo optimizes on validation and keeps the optimization loop schema-isolated from the test set, preventing test-set overfitting.
+- ⚖️ **Fair Comparison**
+  - Zevo fixes prompts, chat templates, decoding strategies, and inference settings in the baseline round so later score gains reflect model evolution rather than a moving setup.
+- 🧠 **Flexible Agent Stack**
+  - Zevo supports many model families as agents, including GPT models from OpenAI, Claude models from Anthropic, and the latest open-source models through Amazon Bedrock and OpenRouter.
+- ⚡ **Infrastructure-Agnostic**
+  - Zevo supports rented cloud GPUs, user-owned Slurm clusters, and dedicated GPU machines.
+  - Zevo automatically queues and runs jobs, monitors their status, and reads back the results.
+- 🔒 **Secure**
+  - Zevo keeps secrets and private run state in the local deployment and provides sandbox mode with explicitly scoped agent permissions.
+- 🔍 **Transparent**
+  - Zevo records every decision, configuration, dataset, model, prediction, score, log, and artifact.
+- ♻️ **Resilient**
+  - Zevo uses schema, artifact, and heuristic checks to detect failures, automatically repairs recoverable issues, and safely resumes the workflow.
 
 ## Agentic Workflow
 
@@ -116,9 +124,9 @@ Both dimensions describe how much control the user delegates to Zevo, but at dif
 Zevo supports both a CLI and Web UI for launching, monitoring, and inspecting the complete improvement loop.
 
 <p align="center">
-  <img src="figs/cli.png" alt="Zevo CLI" width="47%" height="260">
+  <img src="figs/cli.png" alt="Zevo CLI" width="47%">
   &nbsp;&nbsp;&nbsp;
-  <img src="figs/ui.png" alt="Zevo Web UI" width="47%" height="260">
+  <img src="figs/ui.png" alt="Zevo Web UI" width="47%">
   <br><br>
   <strong>Zevo CLI</strong>
   &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;
