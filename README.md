@@ -69,18 +69,18 @@ Both dimensions describe how much control the user delegates to Zevo, but at dif
 
 ### System Control Modes
 
-![Zevo control modes from Single Stage to Auto](figs/system-control-modes.png)
+**From M1 to M4, higher modes delegate more workflow-level control to Zevo.**
 
 | Mode | Zevo Runs End-to-End Workflow | Zevo Decides Test Set | No User-Specific Constraints on Zevo Agents |
 |---|:---:|:---:|:---:|
-| **Single Stage**<br>The user sends one focused task to one specialized agent. | ✕ | ✕ | ✕ |
-| **Customized**<br>The user provides the evaluation and adds constraints to selected agents. Zevo runs the complete workflow. | ✓ | ✕ | ✕ |
-| **Standard**<br>The user provides the evaluation. Zevo runs the complete workflow. | ✓ | ✕ | ✓ |
-| **Auto**<br>Zevo creates the evaluation and runs the complete workflow. | ✓ | ✓ | ✓ |
+| **M1 · Single Stage**<br>The user sends one focused task to one specialized agent. | ✕ | ✕ | ✕ |
+| **M2 · Customized**<br>The user provides the evaluation and adds constraints to selected agents. Zevo runs the complete workflow. | ✓ | ✕ | ✕ |
+| **M3 · Standard**<br>The user provides the evaluation. Zevo runs the complete workflow. | ✓ | ✕ | ✓ |
+| **M4 · Auto**<br>Zevo creates the evaluation and runs the complete workflow. | ✓ | ✓ | ✓ |
 
 ### Training Autonomy Levels
 
-![Zevo training autonomy levels from L1 to L4](figs/training-autonomy-levels.png)
+**From L1 to L4, higher levels delegate more optimization-level control to Zevo.**
 
 <table width="100%">
   <thead>
