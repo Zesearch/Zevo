@@ -1,0 +1,33 @@
+# Linux/CUDA runtime used by generated Train and Inference scripts. This is not
+# installed in the backend or scheduler containers; install it in the remote
+# GPU environment that executes train.py and predict.py.
+#
+# Install with:
+#   pip install -r requirements-training.txt
+#
+# A CUDA-capable GPU and a driver compatible with the resolved PyTorch/vLLM
+# wheels are required. Generated train.py refuses to run on CPU.
+
+# TRL's vLLM extra is the compatibility authority. TRL 1.12 supports vLLM
+# 0.19-0.27.1; pinning 0.27.1 also resolves its matching Torch, torchvision,
+# and torchaudio wheels (currently Torch 2.13 with CUDA 13). The assigned-node
+# NVIDIA driver must support that runtime. Do not independently install a
+# different CUDA-flavored Torch build into this environment afterward.
+torch>=2.5,<3
+transformers>=5.5.3,<6
+peft>=0.13,<1
+trl[vllm]>=1.12,<1.13
+vllm==0.27.1
+datasets>=4.7,<6
+accelerate>=1.4,<2
+bitsandbytes>=0.50,<1   # optional 4/8-bit base-model loading
+
+sentencepiece>=0.2,<1   # required by many tokenizers (Qwen, Llama, ...)
+protobuf>=5.29.6        # tokenizer serialization and vLLM protocol schemas
+safetensors>=0.6,<1     # checkpoint save/load format
+scipy>=1.13,<2          # required by some TRL objectives
+pandas>=2,<4            # dataset reshaping in generated scripts
+einops>=0.8,<1          # attention utilities some base models import
+huggingface_hub>=1.27,<2  # Python client and built-in hf CLI
+wandb>=0.18,<1          # public per-Train run tracking when W&B is configured
+pyyaml>=6,<7            # generated Train/Inference YAML read and write

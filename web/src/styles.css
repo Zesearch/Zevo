@@ -1,0 +1,276 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ZEVO — instrument-console primitives.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  color-scheme: dark;
+  --canvas: #0a0e13;
+  --panel: #10161e;
+  --hair: #1c2731;
+  --brass: #e08d38;
+  --phosphor: #4fd1b5;
+  --coral: #f26f58;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  /* Observatory atmosphere: two faint sodium/phosphor glows + a hairline
+     coordinate grid, fixed behind everything. */
+  background-color: var(--canvas);
+  background-image:
+    radial-gradient(900px 520px at 82% -8%, rgba(224, 141, 56, 0.08), transparent 60%),
+    radial-gradient(760px 620px at -6% 108%, rgba(79, 209, 181, 0.06), transparent 55%),
+    linear-gradient(rgba(255, 255, 255, 0.014) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 44px 44px, 44px 44px;
+  background-attachment: fixed;
+}
+
+h1, h2, h3, .font-display {
+  font-family: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: -0.01em;
+}
+
+/* A faint CRT scanline film — applied on the app root, pointer-events off. */
+.scanlines::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.035) 3px
+  );
+  mix-blend-mode: multiply;
+}
+
+/* ── Instrument bezel: the panel primitive everything is built from ── */
+.bezel {
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0) 42%),
+    #10161e;
+  border: 1px solid var(--hair);
+  border-radius: 14px;
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.045),
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 14px 34px -18px rgba(0, 0, 0, 0.7);
+}
+.bezel-flat {
+  background: #0e141b;
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+}
+/* Dashed instrument intake (file dropzones). */
+.bezel-dashed {
+  background: #0e141b;
+  border: 1.5px dashed #29404f;
+  border-radius: 12px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.bezel-dashed:hover {
+  border-color: rgba(224, 141, 56, 0.55);
+  background: #10171f;
+}
+
+/* ── Tracked micro-label ("kicker") — the console's voice ── */
+.kicker {
+  font-family: "Spline Sans Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #66788a;
+}
+
+/* One voice for labels attached directly to an input. Keep this below the
+   section scale: it names a box, not a block of the form. */
+.field-label {
+  font-family: "Spline Sans Mono", ui-monospace, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.05rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #8b9cab;
+}
+
+/* Column headings use one scale across native tables and table-like grids. */
+.table-label {
+  font-family: "Spline Sans Mono", ui-monospace, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.05rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #8b9cab;
+}
+
+/* ── Section title — the top of the dialog's heading scale ──
+   A form reads in three levels: what the section IS (this), the groups inside
+   it (.kicker, strong), and the fields themselves. They were all one size, so
+   "Task name" and "Ground truth columns" carried equal weight and the eye had
+   nothing to land on. */
+.section-title {
+  font-family: "Spline Sans Mono", ui-monospace, monospace;
+  font-size: 1rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #e9eef2;
+}
+
+/* ── Status lamp: a small glowing indicator dot ── */
+.lamp {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+.lamp-live {
+  background: var(--phosphor);
+  box-shadow: 0 0 10px -1px rgba(79, 209, 181, 0.85), 0 0 0 1px rgba(79, 209, 181, 0.25);
+  animation: lamp-pulse 1.8s ease-in-out infinite;
+}
+.lamp-brass { background: var(--brass); box-shadow: 0 0 10px -1px rgba(224, 141, 56, 0.8); }
+/* Work in flight. Same pulse as .lamp-live, brass instead of phosphor so a
+   running station never reads as a finished one. */
+.lamp-running {
+  background: var(--brass);
+  box-shadow: 0 0 10px -1px rgba(224, 141, 56, 0.85), 0 0 0 1px rgba(224, 141, 56, 0.25);
+  animation: lamp-pulse 1.8s ease-in-out infinite;
+}
+.lamp-coral { background: var(--coral); box-shadow: 0 0 10px -1px rgba(242, 111, 88, 0.8); }
+.lamp-idle  { background: #3b4c5b; }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 9px;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  border: 1px solid var(--hair);
+  color: #b2c0cc;
+  background: #131b24;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.btn:hover { border-color: #34485a; color: #e9eef2; background: #182230; }
+.btn-brass {
+  border-color: rgba(224, 141, 56, 0.4);
+  background: linear-gradient(180deg, rgba(224, 141, 56, 0.18), rgba(224, 141, 56, 0.08));
+  color: #f2c185;
+}
+.btn-brass:hover {
+  border-color: rgba(224, 141, 56, 0.7);
+  background: linear-gradient(180deg, rgba(224, 141, 56, 0.28), rgba(224, 141, 56, 0.12));
+  color: #fbedd6;
+  box-shadow: 0 0 18px -6px rgba(224, 141, 56, 0.65);
+}
+
+/* Secondary launch path (Customized Pipeline). Sky reads as the alternate route
+   without competing with brass, which marks the primary action. */
+.btn-sky {
+  border-color: rgba(95, 176, 221, 0.4);
+  background: linear-gradient(180deg, rgba(95, 176, 221, 0.18), rgba(95, 176, 221, 0.08));
+  color: #8fcdeb;
+}
+.btn-sky:hover {
+  border-color: rgba(95, 176, 221, 0.7);
+  background: linear-gradient(180deg, rgba(95, 176, 221, 0.28), rgba(95, 176, 221, 0.12));
+  color: #d6edf9;
+  box-shadow: 0 0 18px -6px rgba(95, 176, 221, 0.65);
+}
+
+/* Big instrument readout numeral. */
+.readout {
+  font-family: "Spline Sans Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Focus ring — brass. */
+*:focus-visible {
+  outline: 2px solid rgba(224, 141, 56, 0.7);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Staggered entrance for lists / grids. */
+.stagger > * {
+  animation: zevo-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger > *:nth-child(2) { animation-delay: 0.06s; }
+.stagger > *:nth-child(3) { animation-delay: 0.10s; }
+.stagger > *:nth-child(4) { animation-delay: 0.14s; }
+.stagger > *:nth-child(5) { animation-delay: 0.18s; }
+.stagger > *:nth-child(6) { animation-delay: 0.22s; }
+.stagger > *:nth-child(7) { animation-delay: 0.26s; }
+.stagger > *:nth-child(8) { animation-delay: 0.30s; }
+
+/* Scrollbar polish */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(102, 120, 138, 0.22);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(102, 120, 138, 0.4); background-clip: padding-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .scanlines::after { display: none; }
+}
+
+/* ── A list that shows it scrolls ──────────────────────────────────────── */
+.scroll-visible {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;                    /* Firefox */
+  scrollbar-color: #3b4c5b transparent;
+}
+.scroll-visible::-webkit-scrollbar { width: 8px; }
+.scroll-visible::-webkit-scrollbar-track { background: transparent; }
+.scroll-visible::-webkit-scrollbar-thumb {
+  background: #3b4c5b;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-visible::-webkit-scrollbar-thumb:hover { background-clip: content-box; background-color: #66788a; }
+
+/* ── Bars grow out of the zero line when a list is (re)drawn ───────────────
+   scaleX rather than width: it composites on the GPU and does not relayout
+   the row on every frame. The origin is the zero line, so a negative bar
+   grows leftwards the way it is drawn. */
+@keyframes zevo-bar-grow {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+.bar-grow { animation: zevo-bar-grow 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bar-grow { animation: none; }
+}

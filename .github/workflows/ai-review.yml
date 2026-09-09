@@ -1,0 +1,137 @@
+name: ai-review
+
+# Stage 2 of the AI loop: a second Claude account reviews the draft PR and
+# records a verdict as a label. Dispatched by ai-implement and ai-address.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: write
+  # claude-code-action fetches an OIDC token at startup whatever the auth
+  # method is, so this is required even with a plain OAuth token.
+  id-token: write
+
+concurrency:
+  group: ai-loop-pr-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+env:
+  MAX_ROUNDS: "3"
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ inputs.pr_number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      APP_CLIENT_ID: ${{ secrets.AI_REVIEWER_APP_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mint the reviewer App token
+        id: apptoken
+        if: env.APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ secrets.AI_REVIEWER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AI_REVIEWER_APP_PRIVATE_KEY }}
+
+      - name: Check out the PR branch
+        run: gh pr checkout "$PR"
+
+      - name: Load prompt
+        id: p
+        run: |
+          set -euo pipefail
+          # Clear last round's verdict so the router reads only this round's.
+          gh pr edit "$PR" -R "$REPO" \
+            --remove-label "ai:changes-requested" --remove-label "ai:approved" || true
+          gh pr edit "$PR" -R "$REPO" --add-label "ai:reviewing" || true
+
+          ROUND=$(gh pr view "$PR" -R "$REPO" --json labels --jq \
+            '[.labels[].name | select(startswith("ai:round-")) | ltrimstr("ai:round-") | tonumber] | first // 1')
+          echo "round=$ROUND" >> "$GITHUB_OUTPUT"
+          {
+            echo "text<<PROMPT_EOF"
+            ROUND="$ROUND" envsubst < .github/ai-loop/prompts/review.md
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Review
+        id: primary
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_OAUTH_REVIEWER }}
+          github_token: ${{ steps.apptoken.outputs.token || github.token }}
+          # This stage is always dispatched by the previous one via GITHUB_TOKEN,
+          # so github.actor is a bot. Without this the action refuses to run.
+          allowed_bots: "github-actions[bot],github-actions"
+          prompt: ${{ steps.p.outputs.text }}
+          claude_args: |
+            --model opus
+            --max-turns 50
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,TodoWrite"
+
+      - name: Review (failover account)
+        if: steps.primary.outcome == 'failure'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_OAUTH_FAILOVER }}
+          github_token: ${{ steps.apptoken.outputs.token || github.token }}
+          # This stage is always dispatched by the previous one via GITHUB_TOKEN,
+          # so github.actor is a bot. Without this the action refuses to run.
+          allowed_bots: "github-actions[bot],github-actions"
+          prompt: ${{ steps.p.outputs.text }}
+          claude_args: |
+            --model opus
+            --max-turns 50
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,TodoWrite"
+
+      - name: Route on the verdict
+        if: always()
+        env:
+          ROUND: ${{ steps.p.outputs.round }}
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR" -R "$REPO" --remove-label "ai:reviewing" || true
+          LABELS=$(gh pr view "$PR" -R "$REPO" --json labels --jq '[.labels[].name] | join(" ")')
+
+          stop_for_human() {
+            gh pr edit "$PR" -R "$REPO" --add-label "ai:needs-human"
+            gh pr comment "$PR" -R "$REPO" --body "⚙️ **Loop** · $1"
+            exit 0
+          }
+
+          # changes-requested is tested first, so a reviewer that applied both
+          # labels routes to another round rather than to a merge.
+          case " $LABELS " in
+            *" ai:changes-requested "*)
+              if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
+                stop_for_human "Still requesting changes after $MAX_ROUNDS rounds. Handing back to a human."
+              fi
+              gh workflow run ai-address.yml -R "$REPO" -f pr_number="$PR"
+              echo "Dispatched address for PR #$PR (round $ROUND)"
+              ;;
+            *" ai:approved "*)
+              gh pr comment "$PR" -R "$REPO" --body \
+                "⚙️ **Loop** · Reviewed and approved after round $ROUND. Mark this PR ready for review to run CI, then merge."
+              ;;
+            *)
+              stop_for_human "The reviewer recorded no verdict label. Run: $RUN_URL"
+              ;;
+          esac

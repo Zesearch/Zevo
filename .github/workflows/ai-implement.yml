@@ -1,0 +1,119 @@
+name: ai-implement
+
+# Stage 1 of the AI loop: a new issue becomes a draft PR.
+#
+# The next stage starts with an explicit `gh workflow run`, not by letting
+# `pull_request: opened` fire. A PR opened with the default GITHUB_TOKEN does not
+# trigger other workflows (GitHub's recursion guard). workflow_dispatch is the
+# documented exception to that rule, so the whole loop is chained through it.
+# Consequence: all three ai-*.yml files must exist on the default branch.
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to implement
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+  # claude-code-action fetches an OIDC token at startup whatever the auth
+  # method is, so this is required even with a plain OAuth token.
+  id-token: write
+
+concurrency:
+  group: ai-loop-issue-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    # An agent holding write access is only ever driven by someone who already
+    # has write access. Otherwise issue text is an untrusted prompt with commit rights.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+       && !contains(github.event.issue.labels.*.name, 'ai:skip'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      APP_CLIENT_ID: ${{ secrets.AI_IMPLEMENTER_APP_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mint the implementer App token
+        id: apptoken
+        if: env.APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ secrets.AI_IMPLEMENTER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AI_IMPLEMENTER_APP_PRIVATE_KEY }}
+
+      - name: Claim the issue
+        run: gh issue edit "$ISSUE" -R "$REPO" --add-label "ai:implementing"
+
+      - name: Load prompt
+        id: p
+        env:
+          BRANCH: ai/issue-${{ github.event.issue.number || inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          {
+            echo "text<<PROMPT_EOF"
+            envsubst < .github/ai-loop/prompts/implement.md
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Implement
+        id: primary
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_OAUTH_IMPLEMENTER }}
+          github_token: ${{ steps.apptoken.outputs.token || github.token }}
+          prompt: ${{ steps.p.outputs.text }}
+          claude_args: |
+            --model opus
+            --max-turns 80
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep,TodoWrite,WebFetch"
+
+      - name: Implement (failover account)
+        if: steps.primary.outcome == 'failure'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_OAUTH_FAILOVER }}
+          github_token: ${{ steps.apptoken.outputs.token || github.token }}
+          prompt: ${{ steps.p.outputs.text }}
+          claude_args: |
+            --model opus
+            --max-turns 80
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep,TodoWrite,WebFetch"
+
+      - name: Hand off to review
+        if: always()
+        run: |
+          set -euo pipefail
+          gh issue edit "$ISSUE" -R "$REPO" --remove-label "ai:implementing" || true
+
+          PR=$(gh pr list -R "$REPO" --head "ai/issue-$ISSUE" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            gh issue edit "$ISSUE" -R "$REPO" --add-label "ai:needs-human"
+            gh issue comment "$ISSUE" -R "$REPO" \
+              --body "⚙️ **Loop** · No PR was opened for this issue. Run: $RUN_URL"
+            exit 0
+          fi
+
+          gh pr edit "$PR" -R "$REPO" --add-label "ai:round-1"
+          gh workflow run ai-review.yml -R "$REPO" -f pr_number="$PR"
+          echo "Dispatched review for PR #$PR"

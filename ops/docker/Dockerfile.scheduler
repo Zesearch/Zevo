@@ -1,0 +1,58 @@
+# Scheduler image -- runs the internal `daemon` heartbeat loop.
+#
+# Shares the same base + dependency surface as the backend image. Could
+# be the same image with a different CMD, but keeping them separate gives
+# us independent CPU/memory limits per service.
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        file \
+        openssh-client \
+        sshpass \
+        rsync \
+        ca-certificates \
+        gnupg \
+        procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 + Codex CLI + Claude Code CLI -- see Dockerfile.backend for
+# rationale. The scheduler spawns subprocesses for whichever driver an
+# agent is configured with, so both CLIs must be on PATH inside this
+# container too.
+ARG CODEX_CLI_VERSION=0.153.4
+ARG CLAUDE_CODE_VERSION=2.1.261
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
+                      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && codex --version \
+    && claude --version \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# See Dockerfile.backend -- same rationale: source must be present before
+# `pip install -e .` because setuptools.packages verifies each dir exists.
+COPY . .
+RUN pip install --upgrade pip && pip install -e .
+
+# The daemon never serves HTTP; just polls Postgres + spawns runners
+# (which shell out to `codex exec`). The host login is authoritative; an API
+# key is used only when there is no host or persisted credential cache.
+CMD ["sh", "-c", "\
+if [ -f /run/zevo-codex-seed/auth.json ] && [ \"$(python -c \"from zevo.engine.agent.drivers.codex_auth import codex_auth_mode; print(codex_auth_mode('/run/zevo-codex-seed/auth.json'))\")\" != \"invalid\" ]; then \
+  umask 077; cp /run/zevo-codex-seed/auth.json /root/.codex/auth.json.scheduler.tmp; \
+  mv -f /root/.codex/auth.json.scheduler.tmp /root/.codex/auth.json; \
+  echo \"[scheduler] synchronized Codex login from host auth.json\"; \
+fi; \
+if [ \"$(python -c \"from zevo.engine.agent.drivers.codex_auth import codex_auth_mode; print(codex_auth_mode('/root/.codex/auth.json'))\")\" = \"missing\" ] && [ -n \"$OPENAI_API_KEY\" ]; then printenv OPENAI_API_KEY | codex login --with-api-key 2>&1 | tail -2; fi && \
+if [ ! -f /root/.claude.json ]; then LATEST=$(ls -t /root/.claude/backups/.claude.json.backup.* 2>/dev/null | head -1); if [ -n \"$LATEST\" ]; then cp \"$LATEST\" /root/.claude.json && echo \"[scheduler] restored .claude.json from $LATEST\"; fi; fi && \
+alembic upgrade head && \
+ZEVO_INTERACTIVE_COMMAND=1 zevo daemon --poll 3\
+"]

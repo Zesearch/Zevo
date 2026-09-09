@@ -1,0 +1,50 @@
+# Custom OpenShell provider profile: Claude Code on a Max/Pro subscription.
+#
+# The built-in `claude-code` profile only accepts an Anthropic API key
+# (ANTHROPIC_API_KEY, metered per call). Our framework runs on a Claude Max/Pro
+# subscription via CLAUDE_CODE_OAUTH_TOKEN. This profile injects THAT token into
+# the sandbox as an env var so the `claude` CLI inside picks up the subscription
+# auth — no API key, no per-call billing.
+#
+# Register once against the gateway:
+#   openshell provider profile import ops/openshell/claude-code-oauth.profile.yaml
+#   CLAUDE_CODE_OAUTH_TOKEN=<token> \
+#     openshell provider create --name claude-oauth --type claude-code-oauth \
+#       --credential CLAUDE_CODE_OAUTH_TOKEN
+# then attach it: openshell sandbox create --provider claude-oauth -- claude …
+id: claude-code-oauth
+display_name: Claude Code (Max OAuth)
+description: Claude Code CLI authenticated with a Max/Pro subscription OAuth token
+category: agent
+credentials:
+- name: oauth_token
+  description: Claude Code OAuth token (Max/Pro subscription; from `claude setup-token`)
+  env_vars:
+  - CLAUDE_CODE_OAUTH_TOKEN
+  required: true
+  auth_style: header
+  header_name: authorization
+  query_param: ''
+endpoints:
+- host: api.anthropic.com
+  port: 443
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+- host: statsig.anthropic.com
+  port: 443
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+- host: sentry.io
+  port: 443
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+binaries:
+- /usr/bin/claude
+- /usr/local/bin/claude
+inference_capable: true
+discovery:
+  credentials:
+  - oauth_token

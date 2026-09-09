@@ -1,0 +1,47 @@
+# Python bytecode + caches
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# Local pipeline outputs (the dispatcher writes here by default)
+
+*.pyc
+
+# Harness v1
+*.db
+*.sqlite*
+.env
+.env.local
+/data/
+/.zevo-private/
+/user_data/
+web/node_modules/
+web/dist/
+web/.vite/
+
+# OS
+.DS_Store
+web/tsconfig.tsbuildinfo
+
+# understand-anything generated knowledge-graph artifacts
+.understand-anything/
+
+# Claude Code local settings
+.claude/
+
+# Local vendor documentation used while maintaining private site Skills.
+/*_job_submission_guide.html
+
+# Site-specific Infrastructure Skills contain deployment policy and may refer to
+# private clusters. Keep only the generic template in Git; local site folders
+# are discovered by Zevo but remain private to each installation.
+/playbook/skills/infrastructure/*/

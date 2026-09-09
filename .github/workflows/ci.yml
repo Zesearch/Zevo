@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: zevo
+          POSTGRES_PASSWORD: zevo
+          POSTGRES_DB: zevo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zevo -d zevo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ZEVO_DATABASE_URL: postgresql+asyncpg://zevo:zevo@127.0.0.1:5432/zevo_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install backend and test dependencies
+        run: python -m pip install -e ".[test]"
+      - name: Run backend tests
+        run: pytest -q
+      - name: Verify migrations match the ORM
+        run: |
+          alembic upgrade head
+          alembic check
+      - name: Verify the distributable wheel contains runtime packages
+        run: |
+          python -m pip wheel --no-deps --no-build-isolation --wheel-dir /tmp/zevo-wheel .
+          python -c "import glob, zipfile; p=glob.glob('/tmp/zevo-wheel/zevo-*.whl')[0]; names=zipfile.ZipFile(p).namelist(); assert 'zevo/api/hardware/ssh_verify.py' in names"
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: corepack enable
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Type-check and build frontend
+        run: pnpm build

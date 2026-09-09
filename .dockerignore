@@ -1,0 +1,40 @@
+# Keep the build context lean.
+
+# RUNTIME DATA IS NEVER PART OF AN IMAGE. It is bind-mounted at /app/data, so
+# copying it in only makes the image enormous and the copy stale: `runs/` alone
+# was 20 GB, and both the backend and scheduler images weighed 39.7 GB because
+# of it. Nothing in the image reads these — every process reads the mount.
+data/
+.zevo-private/
+
+# The same directories under their pre-consolidation names, so a checkout that
+# still has them (or an older branch) does not quietly put them back.
+runs/
+workspace/
+user_data/
+
+.git
+
+# Tests and project documentation are not read by an image.
+tests/
+docs/
+
+# NOTE THE `**/`. A bare `__pycache__` matches only a top-level entry, so
+# without it 113 stale .pyc files from tests/, ops/ and alembic/ were being
+# baked into the image -- compiled against whatever the host's Python was,
+# and shadowing nothing useful since the container recompiles anyway.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+.venv
+venv
+env
+**/node_modules
+web/dist
+web/.vite
+.env
+.env.local
+**/.DS_Store
+**/*.log
+/tmp

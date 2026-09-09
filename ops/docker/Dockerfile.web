@@ -1,0 +1,33 @@
+# Web image -- two-stage: build the Vite bundle, then serve via nginx.
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Install deps first for layer caching. Pin pnpm via the `packageManager`
+# field in package.json so corepack uses exactly that version (matches
+# what generated pnpm-lock.yaml). Without the pin, `corepack enable`
+# silently fetches the latest pnpm, which currently requires Node 22+
+# and crashes our Node 20 base image with ERR_UNKNOWN_BUILTIN_MODULE.
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN corepack enable \
+    && corepack prepare pnpm@10.30.3 --activate \
+    && pnpm install --frozen-lockfile
+
+# Build.
+COPY web/ ./
+RUN pnpm build
+
+# ---- Runtime: nginx ----
+FROM nginx:1.27-alpine
+
+# Drop the default config and substitute ours (forwards /api + /ws to the
+# backend service, otherwise serves the SPA with HTML5-history fallback).
+RUN rm -f /etc/nginx/conf.d/default.conf
+COPY ops/docker/nginx.conf /etc/nginx/templates/default.conf.template
+COPY ops/docker/web-entrypoint.sh /usr/local/bin/zevo-web-entrypoint
+RUN chmod 755 /usr/local/bin/zevo-web-entrypoint
+
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+CMD ["/usr/local/bin/zevo-web-entrypoint"]

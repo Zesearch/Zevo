@@ -1,0 +1,108 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zevo"
+version = "0.2.0"
+description = "Zevo: A self-improving system for evolving language models."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Haoyan Yang" },
+  { name = "Sai Akhil Kogilathota" },
+  { name = "Jiawei Zhou" },
+]
+
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "pydantic>=2.7",
+  "python-frontmatter>=1.1",
+  "pyyaml>=6",
+  "httpx>=0.27",
+
+  # DB
+  "sqlalchemy>=2.0,<3",
+  "asyncpg>=0.29",
+  "alembic>=1.13",
+  "psycopg2-binary>=2.9; sys_platform != 'linux'",
+  "aiosqlite>=0.20",
+  "greenlet>=3.0",
+
+  # API
+  "fastapi>=0.111",
+  "uvicorn[standard]>=0.30",
+  "python-multipart>=0.0.9",
+  "websockets>=12.0",
+
+  # BedrockDriver (AWS Bedrock Converse API). >=1.40 for Bedrock API-key
+  # (bearer-token) auth via $AWS_BEARER_TOKEN_BEDROCK.
+  "boto3>=1.40",
+  "huggingface_hub>=0.30",
+
+  "pandas>=2.0",
+  "pypdf>=4.0",
+  # Parquet engine behind pd.read_parquet in ui/files.py (dataset preview).
+  "pyarrow>=15.0",
+  "ijson>=3.2",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.24,<2",
+]
+
+[project.scripts]
+zevo = "zevo.cli.zevo:main"
+
+[tool.setuptools]
+# ONE top-level name, `zevo`, and everything is a module of it. The packages
+# used to be installed flat — `harness`, `schemas`, `backend`, `cli`, `lib` —
+# which claimed five very generic names in whatever environment this is
+# installed into, and left `import zevo` resolving to nothing at all. `lib` in
+# particular is the sort of name any dependency might also want, and the loser
+# of that collision is decided by sys.path order rather than by anyone.
+#
+#   zevo.api        the FastAPI app the dashboard talks to (was backend.app)
+#   zevo.engine     the run/schedule/execute machinery      (was harness)
+#   zevo.contracts  the agent input/output schemas          (was schemas)
+#   zevo.providers  cloud GPU SDKs                          (was lib)
+#   zevo.cli        the `zevo` command
+package-dir = { "" = "src" }
+packages = [
+  "zevo",
+  "zevo.api",
+  "zevo.api.hardware",
+  "zevo.api.routers",
+  "zevo.api.routers.agent",
+  "zevo.api.routers.shared",
+  "zevo.api.routers.ui",
+  "zevo.cli",
+  "zevo.contracts",
+  "zevo.db",
+  # The engine, grouped by what each part DOES rather than as 22 flat modules:
+  #   run/      the execution path — runner, wakeup, the scheduler daemon
+  #   agent/    what an agent is and how it is driven — loader, skills, drivers
+  #   observe/  what happened — markers, transcript, metrics, audit, model card
+  #   method/   experiment methodology — framing, loop policy, splits, scorers
+  #   cost/     budget and pricing
+  "zevo.engine",
+  "zevo.engine.agent",
+  "zevo.engine.agent.drivers",
+  "zevo.engine.cost",
+  "zevo.engine.method",
+  "zevo.engine.observe",
+  "zevo.engine.run",
+  "zevo.engine.run.scheduler",
+  "zevo.providers",
+  "zevo.providers.vastai",
+  "zevo.providers.lambda_labs",
+]
+
+[tool.pytest.ini_options]
+# src layout: let `pytest` resolve `from zevo...` without an editable install
+# (the container installs `-e .`; this keeps local runs working).
+pythonpath = ["src"]

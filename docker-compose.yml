@@ -1,0 +1,307 @@
+# Full stack for Zevo.
+#
+# Quick start (local):
+#   cp .env.example .env                    # compose bind-mounts this file
+#   export CLAUDE_CODE_OAUTH_TOKEN=...      # agents run on the claude_cli driver
+#   docker compose up -d
+#   open http://localhost:5173
+#
+# Tear down:
+#   docker compose down            # keeps the postgres volume
+#   docker compose down -v         # also drops the db
+#
+# Host-path variables: ZEVO_HOST_REPO / ZEVO_HOST_HOME exist because ${PWD} and
+# ${HOME} are empty under systemd (the EC2 unit runs compose as a system
+# service). Interactive shells fall back to ${PWD}/${HOME}; deployments pin
+# both in .env (ec2-bootstrap.sh writes them).
+
+# Keep every newly-created Compose resource under the Zevo project name.
+name: zevo
+
+# The environment shared by backend and scheduler. ONE block — a knob added
+# here reaches both containers; the only backend-specific variable is
+# ZEVO_CORS_ORIGINS below.
+x-zevo-env: &zevo-env
+  ZEVO_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-zevo}:${POSTGRES_PASSWORD:-zevo}@postgres:5432/${POSTGRES_DB:-zevo_dev}
+  ZEVO_API_BASE: http://backend:8000
+  # Root for per-run artifacts under the shared ./data bind mount.
+  ZEVO_WORK_DIR: ${ZEVO_WORK_DIR:-/app/data/runs}
+  # Engine-private Test assets. Only backend + holdout-scheduler mount it;
+  # the ordinary optimization scheduler sees no directory at this path.
+  ZEVO_HOLDOUT_ROOT: /run/zevo-holdout
+  # Where this repo lives ON THE HOST. The container only knows /app, so
+  # without this it can only ever offer repo-RELATIVE paths, and a command
+  # to copy a model somewhere else needs the absolute one.
+  ZEVO_HOST_REPO: ${ZEVO_HOST_REPO:-${PWD}}
+  # Host home is also passed into the containers so the Settings API can map
+  # a UI-entered host key path (for example /Users/me/.ssh/id_ed25519) onto
+  # the read-only /root/.ssh bind mount without copying the private key.
+  ZEVO_HOST_HOME: ${ZEVO_HOST_HOME:-${HOME}}
+  # claude_cli auth: OAuth token, or an API key as fallback.
+  CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+  # codex_cli: personal ChatGPT-plan auth is seeded from the host auth.json
+  # into the persistent Codex volume below. An API key remains an optional
+  # usage-billed fallback.
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  VASTAI_API_KEY: ${VASTAI_API_KEY:-}
+  # gpu_provider=cloud has two backends; ZEVO_CLOUD_BACKEND picks one
+  # (vastai|lambda), else auto (vastai if its key is set, else lambda).
+  # Lambda Cloud (lambda.ai): API key + optional pre-registered SSH key name.
+  ZEVO_CLOUD_BACKEND: ${ZEVO_CLOUD_BACKEND:-}
+  LAMBDA_API_KEY: ${LAMBDA_API_KEY:-}
+  LAMBDA_SSH_KEY_NAME: ${LAMBDA_SSH_KEY_NAME:-}
+  # Private key (in-container path) whose .pub we register with Lambda; the
+  # host ~/.ssh is mounted at /root/.ssh. Empty = probe id_ed25519 then
+  # id_rsa (zevo.providers.resolve_ssh_key). Set only if your key has
+  # another name.
+  LAMBDA_SSH_KEY_PATH: ${LAMBDA_SSH_KEY_PATH:-}
+  # gpu_provider=cluster: SSH into a configured Slurm login node. Key path is
+  # in-container (the host's ~/.ssh is mounted into the scheduler);
+  # empty = the same id_ed25519 → id_rsa probe as every other SSH key.
+  ZEVO_CLUSTER_SSH_NAME: ${ZEVO_CLUSTER_SSH_NAME:-}
+  ZEVO_CLUSTER_SSH_HOST: ${ZEVO_CLUSTER_SSH_HOST:-}
+  ZEVO_CLUSTER_SSH_PORT: ${ZEVO_CLUSTER_SSH_PORT:-22}
+  ZEVO_CLUSTER_SSH_USER: ${ZEVO_CLUSTER_SSH_USER:-root}
+  ZEVO_CLUSTER_SSH_KEY: ${ZEVO_CLUSTER_SSH_KEY:-}
+  ZEVO_CLUSTER_SSH_PASSWORD_FILE: ${ZEVO_CLUSTER_SSH_PASSWORD_FILE:-}
+  # Shell line that initializes the scheduler when needed and activates the
+  # selected Python environment in submission and compute shells.
+  ZEVO_CLUSTER_ENV_SETUP: ${ZEVO_CLUSTER_ENV_SETUP:-source ~/miniconda3/bin/activate zevo}
+  # Empty lets the selected site skill verify and choose its site default.
+  ZEVO_CLUSTER_SLURM_PARTITION: ${ZEVO_CLUSTER_SLURM_PARTITION:-}
+  ZEVO_CLUSTER_SLURM_ACCOUNT: ${ZEVO_CLUSTER_SLURM_ACCOUNT:-}
+  ZEVO_CLUSTER_SLURM_QOS: ${ZEVO_CLUSTER_SLURM_QOS:-}
+  # Optional site-specific Pyxis/Enroot image, including an absolute .sqsh path.
+  ZEVO_CLUSTER_CONTAINER_IMAGE: ${ZEVO_CLUSTER_CONTAINER_IMAGE:-}
+  # Remote base for run data and the model cache. Required, absolute, outside
+  # the remote user's HOME, and used AS-IS.
+  ZEVO_CLUSTER_REMOTE_DIR: ${ZEVO_CLUSTER_REMOTE_DIR:-}
+  # gpu_provider=instance: use a fixed, directly reachable GPU host. This route
+  # never invokes Slurm. Set HOST/USER in .env; empty key probes the usual keys.
+  ZEVO_INSTANCE_SSH_NAME: ${ZEVO_INSTANCE_SSH_NAME:-}
+  ZEVO_INSTANCE_SSH_HOST: ${ZEVO_INSTANCE_SSH_HOST:-}
+  ZEVO_INSTANCE_SSH_PORT: ${ZEVO_INSTANCE_SSH_PORT:-22}
+  ZEVO_INSTANCE_SSH_USER: ${ZEVO_INSTANCE_SSH_USER:-}
+  ZEVO_INSTANCE_SSH_KEY: ${ZEVO_INSTANCE_SSH_KEY:-}
+  ZEVO_INSTANCE_SSH_PASSWORD_FILE: ${ZEVO_INSTANCE_SSH_PASSWORD_FILE:-}
+  ZEVO_INSTANCE_ENV_SETUP: ${ZEVO_INSTANCE_ENV_SETUP:-source ~/miniconda3/bin/activate zevo}
+  ZEVO_INSTANCE_REMOTE_DIR: ${ZEVO_INSTANCE_REMOTE_DIR:-}   # required absolute non-HOME remote root
+  # Tells Claude Code that root-in-container is intentional so its
+  # non-interactive permission mode is accepted. This is not an isolation claim.
+  IS_SANDBOX: "1"
+  # These settings are used only when the claude_cli orchestrator selects
+  # sandbox='openshell'. Workers always use the regular terminal because they
+  # require cross-ticket files or SSH outside the current policy.
+  ZEVO_OPENSHELL_BIN: ${ZEVO_OPENSHELL_BIN:-openshell}
+  ZEVO_OPENSHELL_IMAGE: ${ZEVO_OPENSHELL_IMAGE:-zevo-openshell-sandbox:latest}
+  ZEVO_OPENSHELL_PROVIDER: ${ZEVO_OPENSHELL_PROVIDER:-claude-code}
+  ZEVO_OPENSHELL_POLICY: ${ZEVO_OPENSHELL_POLICY:-/app/ops/openshell/zevo.yaml}
+  # Host gateway endpoint (started by the OpenShell installer on the host).
+  # From a container reach it via host.docker.internal; TLS is self-signed.
+  ZEVO_OPENSHELL_GATEWAY: ${ZEVO_OPENSHELL_GATEWAY:-https://host.docker.internal:17670}
+  ZEVO_OPENSHELL_GATEWAY_INSECURE: ${ZEVO_OPENSHELL_GATEWAY_INSECURE:-1}
+  ZEVO_OPENSHELL_CREATE_ARGS: ${ZEVO_OPENSHELL_CREATE_ARGS:-}
+  # Sandbox lifetime in seconds (src/zevo/engine/agent/drivers/sandbox.py).
+  ZEVO_OPENSHELL_TTL: ${ZEVO_OPENSHELL_TTL:-3600}
+  # Long remote training runs synchronously in ONE bash command — raise the
+  # bash-tool ceilings so it isn't killed. Claude Code reads BASH_*_TIMEOUT_MS;
+  # the bedrock loop reads ZEVO_BASH_MAX_SEC.
+  BASH_DEFAULT_TIMEOUT_MS: ${BASH_DEFAULT_TIMEOUT_MS:-120000}
+  # A finite Train/Inference Slurm job may legitimately wait in queue before
+  # its real workload starts. The stage's own execution remains bounded.
+  BASH_MAX_TIMEOUT_MS: ${BASH_MAX_TIMEOUT_MS:-605400000}
+  ZEVO_BASH_MAX_SEC: ${ZEVO_BASH_MAX_SEC:-605400}
+  # Bedrock auth — a Bedrock API key (bearer token) + region is all boto3 needs.
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+  # Optional Hugging Face Hub access for gated/private assets.
+  HF_TOKEN: ${HF_TOKEN:-}
+  # Optional public training telemetry. All three values are required together.
+  WANDB_API_KEY: ${WANDB_API_KEY:-}
+  WANDB_ENTITY: ${WANDB_ENTITY:-}
+  WANDB_PROJECT: ${WANDB_PROJECT:-}
+
+# The bind mounts shared by backend and scheduler — also ONE list.
+x-zevo-volumes: &zevo-volumes
+  # ALL runtime data under one root, and the SAME path on both sides:
+  # ./data/files (the Files page), ./data/uploads (attachments) and
+  # ./data/runs (per-run artifacts, browsable on the host).
+  - ./data:/app/data
+  - ./playbook:/app/playbook
+  # Live source mount -- edits to src/zevo/ (api, engine, cli, contracts,
+  # providers) on the host take effect without rebuilding the image. The
+  # image already did `pip install -e .` so the editable install resolves
+  # to these mounts.
+  - ./src:/app/src
+  - ./alembic:/app/alembic
+  # ops/ (Dockerfiles, scripts, openshell/zevo.yaml policy) — live so the
+  # OpenShell policy is editable without a rebuild.
+  - ./ops:/app/ops
+  # .env mounted RW so the Settings page (/api/settings) can persist
+  # provider keys back to the host. Compose itself uses this same
+  # file at startup, so a `docker compose up -d --force-recreate
+  # backend scheduler holdout-scheduler` activates whatever the UI just wrote.
+  - ./.env:/app/.env
+  # Host SSH keys (read-only) so the scheduler can drive Slurm/cloud boxes
+  # and the backend can `scancel` finite stage jobs when a run is cancelled.
+  - ${ZEVO_HOST_HOME:-${HOME}}/.ssh:/root/.ssh:ro
+  # Isolated Claude Code OAuth credentials. User runs
+  # `docker compose exec scheduler claude auth login` once; tokens
+  # land in this named volume and persist across container restarts.
+  # Both containers mount it so they see the same login.
+  - claude_home:/root/.claude
+  # Keep Codex runtime state container-native. Mounting the host directory at
+  # /root/.codex also imports state_*.sqlite, whose rollout rows contain macOS
+  # absolute paths (/Users/...). Codex in Linux then reports every such row as
+  # a stale rollout path. The image copies only auth.json from this read-only
+  # seed on every boot; sessions/state stay under /root. Host auth wins over
+  # the optional OPENAI_API_KEY fallback deterministically.
+  - codex_home:/root/.codex
+  - ${ZEVO_HOST_HOME:-${HOME}}/.codex:/run/zevo-codex-seed:ro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-zevo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zevo}
+      POSTGRES_DB: ${POSTGRES_DB:-zevo_dev}
+    ports:
+      # 55432 by default so a host-level postgres on :5432 (homebrew, distro
+      # package) is left alone — the same invariant restart-stack.sh and the
+      # README promise.
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zevo} -d ${POSTGRES_DB:-zevo_dev}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: ops/docker/Dockerfile.backend
+    restart: unless-stopped
+    environment:
+      <<: *zevo-env
+      ZEVO_CORS_ORIGINS: "http://localhost:5173,http://localhost"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The API runs alembic then uvicorn; /health answers once it's serving.
+    # start_period covers the migration + boot so early probes don't fail.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    ports:
+      # Host port defaults to 8001 to dodge macOS Docker Desktop's stuck
+      # port reservations on :8000 (vpnkit holds them across container
+      # restarts). The web UI talks to `backend:8000` over the docker
+      # network and doesn't care about the host mapping.
+      - "127.0.0.1:${BACKEND_PORT:-8001}:8000"
+    # Same application mounts as the Scheduler, plus one private credential
+    # volume shared only with the Web proxy. Agents never receive this mount.
+    volumes:
+      - ./data:/app/data
+      - ./playbook:/app/playbook
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./ops:/app/ops
+      - ./.env:/app/.env
+      - ${ZEVO_HOST_HOME:-${HOME}}/.ssh:/root/.ssh:ro
+      - claude_home:/root/.claude
+      - codex_home:/root/.codex
+      - ${ZEVO_HOST_HOME:-${HOME}}/.codex:/run/zevo-codex-seed:ro
+      - ui_auth:/run/zevo-ui-auth
+      - ./.zevo-private/holdout:/run/zevo-holdout
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: ops/docker/Dockerfile.scheduler
+    restart: unless-stopped
+    environment:
+      <<: *zevo-env
+      ZEVO_SCHEDULER_LANE: optimization
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes: *zevo-volumes
+    # Liveness of the wakeup daemon (no HTTP port). A crash exits the process
+    # and restart:unless-stopped brings it back; this catches a hung daemon.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'zevo daemon' > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  holdout-scheduler:
+    build:
+      context: .
+      dockerfile: ops/docker/Dockerfile.scheduler
+    restart: unless-stopped
+    environment:
+      <<: *zevo-env
+      ZEVO_SCHEDULER_LANE: held_out_test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'zevo daemon' > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    # Same run artifacts and code as the ordinary scheduler, plus read-only
+    # access to the private Test root. This list is deliberately explicit:
+    # adding the private mount to x-zevo-volumes would expose it to agents on
+    # the optimization lane.
+    volumes:
+      - ./data:/app/data
+      - ./playbook:/app/playbook
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./ops:/app/ops
+      - ./.env:/app/.env
+      - ${ZEVO_HOST_HOME:-${HOME}}/.ssh:/root/.ssh:ro
+      - claude_home:/root/.claude
+      - codex_home:/root/.codex
+      - ${ZEVO_HOST_HOME:-${HOME}}/.codex:/run/zevo-codex-seed:ro
+      - ./.zevo-private/holdout:/run/zevo-holdout:ro
+
+  web:
+    build:
+      context: .
+      dockerfile: ops/docker/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      ZEVO_UI_TOKEN_FILE: /run/zevo-ui-auth/token
+    volumes:
+      - ui_auth:/run/zevo-ui-auth:ro
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5173}:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  pgdata:
+  claude_home:
+  codex_home:
+  ui_auth:

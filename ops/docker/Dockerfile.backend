@@ -1,0 +1,71 @@
+# Python backend image -- FastAPI + alembic + the engine.
+#
+# Build:
+#   docker build -f ops/docker/Dockerfile.backend -t zevo-backend .
+#
+# Run (manual; compose handles this normally):
+#   docker run -e ZEVO_DATABASE_URL=postgresql+asyncpg://... -p 8000:8000 zevo-backend
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# OS deps: build essentials for the few wheels that need them + ssh client
+# (the Infrastructure, Train, Inference, and Registry agents use ssh/scp).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        file \
+        openssh-client \
+        sshpass \
+        rsync \
+        ca-certificates \
+        gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 + OpenAI Codex CLI + Anthropic Claude Code CLI. Each agent
+# runs as a `codex exec` OR `claude -p` subprocess, with the CLI's
+# native bash/edit/read tools available inside the ticket's policy boundary.
+ARG CODEX_CLI_VERSION=0.153.4
+ARG CLAUDE_CODE_VERSION=2.1.261
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
+                      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && codex --version \
+    && claude --version \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy source first, then editable install. The setuptools `packages = [...]`
+# block in pyproject.toml verifies each declared package directory exists,
+# so we can't separate the pip cache layer without splitting deps out
+# to a requirements.txt.
+COPY . .
+RUN pip install --upgrade pip && pip install -e .
+
+# Default port matches the rest of the stack.
+EXPOSE 8000
+
+# Run migrations then launch uvicorn. The lifespan hook in main.py
+# auto-seeds the agents table from playbook/agents/*/identity.md. The shared
+# Host Codex login is authoritative on every start.  Both services apply the
+# same order, so the API-key fallback cannot win a first-boot race and replace
+# a personal ChatGPT login in the shared volume.
+CMD ["sh", "-c", "\
+if [ -f /run/zevo-codex-seed/auth.json ] && [ \"$(python -c \"from zevo.engine.agent.drivers.codex_auth import codex_auth_mode; print(codex_auth_mode('/run/zevo-codex-seed/auth.json'))\")\" != \"invalid\" ]; then \
+  umask 077; cp /run/zevo-codex-seed/auth.json /root/.codex/auth.json.backend.tmp; \
+  mv -f /root/.codex/auth.json.backend.tmp /root/.codex/auth.json; \
+  echo \"[backend] synchronized Codex login from host auth.json\"; \
+fi; \
+if [ \"$(python -c \"from zevo.engine.agent.drivers.codex_auth import codex_auth_mode; print(codex_auth_mode('/root/.codex/auth.json'))\")\" = \"missing\" ] && [ -n \"$OPENAI_API_KEY\" ]; then printenv OPENAI_API_KEY | codex login --with-api-key 2>&1 | tail -2; fi && \
+if [ ! -f /root/.claude.json ]; then LATEST=$(ls -t /root/.claude/backups/.claude.json.backup.* 2>/dev/null | head -1); if [ -n \"$LATEST\" ]; then cp \"$LATEST\" /root/.claude.json && echo \"[backend] restored .claude.json from $LATEST\"; fi; fi && \
+mkdir -p /run/zevo-ui-auth && \
+if [ ! -s /run/zevo-ui-auth/token ]; then umask 077; head -c 48 /dev/urandom | base64 > /run/zevo-ui-auth/token; fi && \
+alembic upgrade head && \
+uvicorn zevo.api.main:app --host 0.0.0.0 --port 8000\
+"]

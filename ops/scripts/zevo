@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Host entry point for the interactive `zevo` command shell.
+#
+# Commands entered inside the shell are forwarded to the running `backend`
+# container, so they execute with the fully-wired environment (the DB
+# connection, secrets, and the driver CLIs). Operator API requests are routed
+# through the web proxy, which applies the private UI trust header; Agent
+# processes still use the backend URL directly and therefore cannot inspect
+# live held-out inputs. This means even the
+# DB-direct commands (`ticket list`, `wakeups`, `models`, …) work from
+# the host without exporting ZEVO_DATABASE_URL.
+#
+# Install: run `./install.sh` from the repo root (symlinks this onto your PATH).
+#   Or, manually: alias zevo="<repo>/ops/scripts/zevo" in your shell rc.
+# Overrides:
+#   ZEVO_REPO  -- repo root (defaults to this script's repo)
+#   ZEVO_SVC   -- compose service to exec into (default: backend; scheduler also works)
+set -euo pipefail
+
+# Resolve the repo root from this script's own location (…/ops/scripts/zevo -> repo).
+_self="${BASH_SOURCE[0]}"
+while [ -h "$_self" ]; do _self="$(readlink "$_self")"; done
+REPO="${ZEVO_REPO:-$(cd "$(dirname "$_self")/../.." && pwd)}"
+SVC="${ZEVO_SVC:-backend}"
+
+if [ "$#" -ne 0 ]; then
+  echo "Zevo commands run inside the interactive shell." >&2
+  echo "Start it with: zevo" >&2
+  exit 2
+fi
+
+exec python3 "$REPO/src/zevo/cli/shell.py" --repo "$REPO" --service "$SVC"

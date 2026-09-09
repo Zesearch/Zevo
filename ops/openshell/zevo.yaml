@@ -1,0 +1,156 @@
+# NVIDIA OpenShell policy for ZEVO agents (Feature 5).
+#
+# Applied when the claude_cli orchestrator has sandbox='openshell'.
+# The gateway enforces this at the kernel (Landlock) + network-proxy level, so an
+# agent can experiment freely without touching the host or reaching arbitrary
+# networks, and every allow/deny is audited.
+#
+# Scope it to what our agents ACTUALLY do:
+#   - read/write only their per-ticket workspace (the run dir) + scratch;
+#   - reach only the model, package, dataset, and GPU-provider endpoints below;
+#   - run as an unprivileged `sandbox` user (not root).
+# Tighten/loosen the network allowlist as agents gain skills.
+
+version: 1
+
+filesystem_policy:
+  # The driver sets cwd to the ticket workspace (…/runs/<run-id>/<ticket-id>);
+  # include_workdir surfaces it inside the sandbox so staged
+  # <workspace>/.claude/skills/ and the agent's artifacts are reachable.
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /lib64
+    - /bin
+    - /etc
+    - /opt
+    - /proc
+    - /dev/urandom
+    - /app            # the mounted source (read-only to the agent)
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+    - /home/sandbox   # the sandbox user's HOME — Claude Code writes its
+                      # session/cache/memory under ~/.claude (OAuth creds are
+                      # injected as env, not written here)
+
+landlock:
+  compatibility: best_effort   # enforce where the kernel supports it, warn otherwise
+
+process:
+  # Drop root — agents run as an unprivileged user inside the sandbox.
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+# IMPORTANT: every endpoint needs a `binaries` allowlist — the process that
+# opens the connection must be named, or OpenShell denies it (verified: without
+# it, `claude` gets "CONNECT api.anthropic.com:443 not permitted by policy").
+# claude/codex make their HTTP calls via node; the data/train skills use
+# python3/pip/curl. Protocol must be one of: rest, websocket, graphql, sql,
+# json-rpc, mcp (there is no raw-tcp tunnel — OpenShell L7-proxies).
+network_policies:
+  # ---- Model / agent-control-plane APIs (the agent CLI itself, via node) ----
+  anthropic:
+    name: anthropic-api
+    endpoints:
+      - host: api.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: /usr/local/bin/node
+      - path: /usr/local/bin/claude
+  bedrock:
+    name: aws-bedrock
+    endpoints:
+      # MUST match AWS_REGION: the policy file is passed to OpenShell as-is
+      # (no templating), so a non-us-east-1 deployment edits this host.
+      - host: bedrock-runtime.us-east-1.amazonaws.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: /usr/local/bin/node
+      - path: /usr/bin/python3
+
+  # ---- Packages + datasets/models the data/train skills fetch (python/pip/curl) ----
+  pypi:
+    name: pypi
+    endpoints:
+      - host: pypi.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: files.pythonhosted.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /usr/bin/python3
+      - path: /usr/bin/pip3
+      - path: /usr/bin/curl
+  huggingface:
+    name: huggingface
+    endpoints:
+      - host: huggingface.co
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write        # hub downloads + (registry) uploads
+      - host: cdn-lfs.huggingface.co
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /usr/bin/python3
+      - path: /usr/bin/curl
+
+  # ---- GPU providers (infrastructure agent, cloud mode; via python httpx/curl) ----
+  vastai:
+    name: vastai-api
+    endpoints:
+      - host: console.vast.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: /usr/bin/python3
+      - path: /usr/bin/curl
+  lambda:
+    name: lambda-cloud-api
+    endpoints:
+      - host: cloud.lambda.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: /usr/bin/python3
+      - path: /usr/bin/curl
+
+  # ---- Our own backend (agents POST comments / register instances) ----
+  zevo_backend:
+    name: zevo-backend
+    endpoints:
+      - host: backend
+        port: 8000
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: /usr/local/bin/node
+      - path: /usr/bin/curl
+      - path: /usr/bin/python3
+
+  # SSH egress to rented/allocated GPU boxes (train/infra scp +
+  # remote exec) needs a per-run policy naming the specific host — OpenShell
+  # rejects a bare `host: "*"` wildcard. Injected once the infra agent knows the
+  # box's address, not as a static allow-all here.
