@@ -14,18 +14,18 @@
 <h3 align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="https://zevoai.dev/docs">User Manual</a> ·
-  <a href="https://github.com/Zesearch/Zevo">GitHub</a> ·
-  <a href="https://zevoai.dev">Website</a>
+  <a href="https://zevoai.dev">Website</a> ·
+  <a href="https://github.com/Zesearch/Zevo">GitHub</a>
 </h3>
 
 ## Changelog
 
-- **09/2026** — Open-sourced the preview version of [Zevo](https://github.com/Zesearch/Zevo) with the [User Manual](https://zevoai.dev/docs).
+- **09/2026** — Open-sourced the preview version of [Zevo GitHub repo](https://github.com/Zesearch/Zevo) with the [User Manual](https://zevoai.dev/docs).
 - **08/2026** — Released the [Zevo project website](https://zevoai.dev).
 
 ## Zevo Demo
 
-Click to watch the demo.
+▶️ Click the following image to watch the demo video.
 
 [![Zevo demo](figs/demo-poster.jpg)](https://huggingface.co/datasets/VolleySai/zevo-assets/resolve/main/my-demo.mp4)
 
