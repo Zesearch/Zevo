@@ -25,6 +25,8 @@
 
 ## Zevo Demo
 
+Click to watch the demo.
+
 [![Zevo demo](figs/demo-poster.jpg)](https://huggingface.co/datasets/VolleySai/zevo-assets/resolve/main/my-demo.mp4)
 
 ## Overview
