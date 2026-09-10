@@ -20,7 +20,7 @@
 
 ## Changelog
 
-- **09/2026** — Open-sourced the preview version of [Zevo GitHub repo](https://github.com/Zesearch/Zevo) with the [User Manual](https://zevoai.dev/docs).
+- **09/2026** — Released [Zevo v0.1.0-preview](https://github.com/Zesearch/Zevo/releases/tag/v0.1.0-preview) with the [User Manual](https://zevoai.dev/docs/).
 - **08/2026** — Released the [Zevo project website](https://zevoai.dev).
 
 ## Zevo Demo
