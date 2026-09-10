@@ -8,7 +8,7 @@ from zevo.paths import work_dir_root
 
 class Settings:
     app_name: str = "Zevo"
-    app_version: str = "0.2.0"
+    app_version: str = "0.1.0"
     api_prefix: str = "/api"
 
     @property
