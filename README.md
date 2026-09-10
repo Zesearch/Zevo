@@ -1,15 +1,8 @@
 <div align="center">
 
 <img src="figs/title.svg" alt="Zevo: from Zero to evolved — A Self-Improving System For Evolving Language Models" width="100%">
-
-[![Website](https://img.shields.io/badge/Website-zevoai.dev-E94F17?style=for-the-badge)](https://zevoai.dev)
-[![User Manual](https://img.shields.io/badge/User%20Manual-Read%20the%20Guide-2563EB?style=for-the-badge)](https://zevoai.dev/docs)
-[![License](https://img.shields.io/badge/License-Apache%202.0-1F2937?style=for-the-badge)](LICENSE)
-
-<h3>
-  <a href="mailto:haoyan.yang@stonybrook.edu">Haoyan Yang</a> ·
-  <a href="mailto:saiakhilkogilathota@gmail.com">Sai Akhil Kogilathota</a> ·
-  <a href="mailto:jiawei.zhou.1@stonybrook.edu">Jiawei Zhou</a>
+<h3 style="margin-top: 0.25rem;">
+  Haoyan Yang · Sai Akhil Kogilathota · Jiawei Zhou
   <br><br>
   Zesearch NLP Lab, Stony Brook University
 </h3>
@@ -18,10 +11,21 @@
 
 [![Zevo introduction](figs/intro.png)](https://zevoai.dev)
 
-## News
+<h3 align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="https://zevoai.dev/docs">User Manual</a> ·
+  <a href="https://github.com/Zesearch/Zevo">GitHub</a> ·
+  <a href="https://zevoai.dev">Website</a>
+</h3>
 
-- **09/2026** — Open-sourced the preview version of Zevo and published the [User Manual](https://zevoai.dev/docs).
+## Changelog
+
+- **09/2026** — Open-sourced the preview version of [Zevo](https://github.com/Zesearch/Zevo) with the [User Manual](https://zevoai.dev/docs).
 - **08/2026** — Released the [Zevo project website](https://zevoai.dev).
+
+## Zevo Demo
+
+[![Zevo demo](figs/demo-poster.jpg)](https://huggingface.co/datasets/VolleySai/zevo-assets/resolve/main/my-demo.mp4)
 
 ## Overview
 
@@ -71,7 +75,7 @@ Both dimensions describe how much control the user delegates to Zevo, but at dif
 
 **From M1 to M4, higher modes delegate more workflow-level control to Zevo.**
 
-| Mode | Zevo Runs End-to-End Workflow | Zevo Decides Test Set | No User-Specific Constraints on Zevo Agents |
+| Mode | End-to-End Workflow | Zevo Creates Evaluation | Unconstrained Agents |
 |---|:---:|:---:|:---:|
 | **M1 · Single Stage**<br>The user sends one focused task to one specialized agent. | ✕ | ✕ | ✕ |
 | **M2 · Customized**<br>The user provides the evaluation and adds constraints to selected agents. Zevo runs the complete workflow. | ✓ | ✕ | ✕ |
@@ -133,6 +137,57 @@ Zevo supports both a CLI and Web UI for launching, monitoring, and inspecting th
   <strong>Zevo Web UI</strong>
 </p>
 
+## Quick Start
+
+> **Prerequisites:** Docker with the Compose plugin and Git. A host Python environment is not required.
+
+Clone Zevo and create the five application containers:
+
+```bash
+git clone https://github.com/Zesearch/Zevo.git
+cd Zevo
+cp .env.example .env
+docker compose up -d --build
+docker compose ps
+```
+
+This starts PostgreSQL, the backend, the Web UI, the workflow scheduler, and the isolated held-out Test scheduler.
+
+Install the optional host CLI and enter its interactive shell:
+
+```bash
+./install.sh
+zevo
+```
+
+Open the Web UI at [http://localhost:5173](http://localhost:5173). The Web UI is the primary and recommended way to use Zevo. Compared with the CLI, it provides a more user-friendly interface for configuration, experiment creation, launching Runs, and monitoring progress.
+
+Complete the initial configuration in the Web UI:
+
+1. Open **Settings → Agent API** and save a credential for at least one Agent driver.
+2. Recreate the Python services so they load the saved credential:
+
+   ```bash
+   docker compose up -d --force-recreate backend scheduler holdout-scheduler
+   ```
+
+3. Open **Agents** and choose a ready driver and model for each configurable LLM Agent.
+4. Open **Settings → GPU Providers** and configure either a cloud GPU provider or a verified Instance/Cluster SSH connection.
+
+The visible Web UI navigation contains:
+
+- **Dashboard:** Launch a Run and view active Runs, saved models, time, cost, and improvement summaries.
+- **Runs:** Monitor iterations, the Agent timeline, artifacts, Tickets, scores, and remote jobs.
+- **Agents:** Configure driver and model choices and inspect instructions, Skills, Tickets, and heartbeats.
+- **Tasks:** Define reusable objectives and Test contracts, then add reusable experiment Settings.
+- **Files:** Upload and organize Test, Validation, and training files, or register remote datasets.
+- **Models:** Inspect saved champion models, model cards, results, and lineage.
+- **Settings:** Configure Agent credentials, cloud providers, SSH compute, Hugging Face, and Weights & Biases.
+
+For a typical first Run, save the evaluation assets under **Files**, create a Task and optional Setting under **Tasks**, then choose **Launch run** on the Dashboard. Select the Workflow Control mode, configure the requested optimization and compute fields, review the summary, and launch.
+
+For complete instructions, including file formats, every Task and Run parameter, Agent authentication, compute lifecycles, custom evaluators, monitoring, recovery, and CLI commands, see the [User Manual](https://zevoai.dev/docs).
+
 ## Citation
 
 If you use Zevo in your research, please cite:
@@ -142,8 +197,18 @@ If you use Zevo in your research, please cite:
   author = {Haoyan Yang and Sai Akhil Kogilathota and Jiawei Zhou},
   title  = {Zevo: A Self-Improving System for Evolving Language Models},
   year   = {2026},
-  url    = {https://github.com/Zesearch/Zevo-ZeroToEvolved}
+  url    = {https://github.com/Zesearch/Zevo}
 }
 ```
 
 Zevo is released under the [Apache License 2.0](LICENSE).
+
+## Team
+
+Zevo is developed by the Zesearch NLP Lab at Stony Brook University:
+
+- Haoyan Yang — [haoyan.yang@stonybrook.edu](mailto:haoyan.yang@stonybrook.edu)
+- Sai Akhil Kogilathota — [saiakhilkogilathota@gmail.com](mailto:saiakhilkogilathota@gmail.com)
+- Jiawei Zhou — [jiawei.zhou.1@stonybrook.edu](mailto:jiawei.zhou.1@stonybrook.edu)
+
+We are interested in the self-improvement of LLMs and recursive self-improvement (RSI). If you have any questions or ideas, feel free to reach out.
