@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 from starlette.requests import Request
 from sqlalchemy import select
@@ -8,12 +9,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from zevo.api.routers.shared.runs import (
     CreateRunRequest,
-    _default_gpu_provider,
+    _resolve_run_compute,
     _summary,
     create_run,
 )
 from zevo.contracts.orchestrator import UserRequest
-from zevo.db.models import Agent, Base, Run, Task, TaskSetting, Ticket
+from zevo.db.models import Agent, Base, Run, SshHost, Task, TaskSetting, Ticket
 
 
 def _request() -> UserRequest:
@@ -52,57 +53,48 @@ def test_selection_queries_are_empty_guidance_not_decision_pins() -> None:
     assert guided.training_method == ""
 
 
-def test_default_gpu_provider_ignores_environment_override(monkeypatch) -> None:
-    monkeypatch.setenv("ZEVO_DEFAULT_GPU_PROVIDER", "cluster")
-    monkeypatch.delenv("VASTAI_API_KEY", raising=False)
-    assert _default_gpu_provider() == "instance"
+@pytest.mark.asyncio
+async def test_blank_gpu_provider_requires_a_concrete_default(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("VASTAI_API_KEY=configured-but-not-selected\n", encoding="utf-8")
+    monkeypatch.setenv("ZEVO_ENV_FILE", str(env_file))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _resolve_run_compute(None, CreateRunRequest(task_name="t", run_name="r"))
+    assert getattr(exc_info.value, "status_code", None) == 422
+    assert "GPU backend is required" in str(getattr(exc_info.value, "detail", ""))
+
+@pytest.mark.asyncio
+async def test_credentials_do_not_become_default_without_an_explicit_choice(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "VASTAI_API_KEY=configured\n"
+        "LAMBDA_API_KEY=secret_configured\n"
+        "ZEVO_CLUSTER_SSH_HOST=login.example.edu\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZEVO_ENV_FILE", str(env_file))
+    with pytest.raises(HTTPException) as exc_info:
+        await _resolve_run_compute(None, CreateRunRequest(task_name="t", run_name="r"))
+    assert getattr(exc_info.value, "status_code", None) == 422
+
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8") + "ZEVO_DEFAULT_COMPUTE=cloud:lambda\n",
+        encoding="utf-8",
+    )
+    target = await _resolve_run_compute(None, CreateRunRequest(task_name="t", run_name="r"))
+    assert target.provider == "cloud"
+    assert target.cloud_backend == "lambda"
 
 
-# The two tests that used to live here asserted the OPPOSITE: that a configured
-# VASTAI key made `cloud` the default and an SSH host made it `cluster`. They
-# encoded the bug rather than the intent — having credentials on file is not a
-# decision to spend money, and inferring one from the other is how a run nobody
-# aimed at the cloud started renting a GPU. What replaces them is
-# `test_an_unspecified_gpu_provider_never_resolves_to_renting_hardware` below.
-
-
-def test_an_unspecified_gpu_provider_never_resolves_to_renting_hardware(monkeypatch) -> None:
-    """A blank provider must not become `cloud`, whatever keys are in the env.
-
-    It used to: `cloud` was inferred from the presence of a VASTAI/LAMBDA key,
-    so any empty provider anywhere in the chain — a task row created without
-    one, a setting that stored a blank, a form field that lost its value —
-    silently meant "rent a GPU and bill for it". That happened, and the run had
-    to be cancelled by hand.
-
-    `instance` is the safe blank: attaching to an allocation that does not
-    exist fails immediately and costs nothing, which is what an unmade decision
-    should do.
-    """
-    from zevo.api.routers.shared.runs import _default_gpu_provider
-
-    monkeypatch.setenv("VASTAI_API_KEY", "sk-live-whatever")
-    monkeypatch.setenv("LAMBDA_API_KEY", "secret")
-    monkeypatch.setenv("ZEVO_CLUSTER_SSH_HOST", "login.example.edu")
-    monkeypatch.delenv("ZEVO_DEFAULT_GPU_PROVIDER", raising=False)
-    assert _default_gpu_provider() == "instance"
-
-    # A deployment-wide override is not part of the contract.
-    monkeypatch.setenv("ZEVO_DEFAULT_GPU_PROVIDER", "cloud")
-    assert _default_gpu_provider() == "instance"
-    monkeypatch.setenv("ZEVO_DEFAULT_GPU_PROVIDER", "nonsense")
-    assert _default_gpu_provider() == "instance"
-
-
-def test_preflight_uses_the_same_run_level_gpu_default(monkeypatch) -> None:
+def test_preflight_requires_a_provider_when_no_default_was_resolved(monkeypatch) -> None:
     from zevo.api.routers.ui.preflight import PreflightBody, _check_infra
 
     monkeypatch.setenv("VASTAI_API_KEY", "configured-but-not-selected")
-    monkeypatch.delenv("ZEVO_INSTANCE_SSH_HOST", raising=False)
     items = []
     _check_infra(None, items)
     assert [item.code for item in items] == [
-        "instance_no_host", "gpu_count", "generation_backend",
+        "gpu_provider_required", "gpu_count", "generation_backend",
     ]
 
     body = PreflightBody(
@@ -361,6 +353,13 @@ async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_
     from zevo.api.routers.shared import runs as runs_router
 
     monkeypatch.setenv("ZEVO_WORK_DIR", str(tmp_path / "runs"))
+    default_host_id = "default-empire-ai"
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"ZEVO_DEFAULT_COMPUTE=connection:{default_host_id}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZEVO_ENV_FILE", str(env_file))
 
     async def settled(run, request):
         return request, {"test_set": request.test_set}, "already settled"
@@ -375,6 +374,18 @@ async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_
         db.add(Agent(
             id="orchestrator", name="Orchestrator", title="Supervisor",
             identity_path="playbook/agents/orchestrator/identity.md",
+        ))
+        db.add(SshHost(
+            id=default_host_id,
+            label="Empire AI Beta",
+            host="beta.example.edu",
+            port=22,
+            username="researcher",
+            category="cluster",
+            key_path="/tmp/test-key",
+            remote_dir="/projects/researcher/zevo",
+            env_setup="source /projects/researcher/env.sh",
+            status="verified",
         ))
         db.add(Task(metric="accuracy",
             name="budgeted", task_objective="Improve the model.",
@@ -398,7 +409,8 @@ async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_
         assert run.max_runtime_hours == 0
         assert run.stop_threshold is None
         assert run.generation_backend == "vllm"
-        assert run.gpu_provider == "instance"
+        assert run.gpu_provider == "cluster"
+        assert run.ssh_host_id == default_host_id
         assert run.num_gpus == 0
         assert run.task_objective == "Improve the model."
         assert run.agent_objective == (
@@ -462,6 +474,7 @@ async def test_validation_carve_preserves_source_pin_and_initializes_governance(
         })
         response = await create_run(CreateRunRequest(
             task_name="carved", run_name="carved-run", user_request=request,
+            gpu_provider="instance",
         ), db)
         run = await db.get(Run, response.run_id)
         assert run.decision_pins["dataset_source"] == original
@@ -522,6 +535,7 @@ async def test_predefined_task_test_metric_can_be_overridden_for_one_run(tmp_pat
             task_name="lower-is-better",
             run_name="test-metric-override",
             user_request=request,
+            gpu_provider="instance",
         ), db)
         run = await db.get(Run, response.run_id)
         assert run is not None
@@ -580,6 +594,7 @@ async def test_saving_first_custom_setting_creates_task_and_setting(tmp_path, mo
             task_name="new-benchmark",
             run_name="first-attempt",
             user_request=request,
+            gpu_provider="instance",
             save_setting=True,
             setting_name="baseline",
         ), db)

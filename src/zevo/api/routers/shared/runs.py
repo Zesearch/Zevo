@@ -15,7 +15,7 @@ from pathlib import Path
 import asyncio
 import os
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -23,6 +23,12 @@ from sqlalchemy import asc, delete as sa_delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.config import settings
+from zevo.api.compute_defaults import (
+    ComputeProvider,
+    ComputeTarget,
+    DefaultComputeError,
+    resolve_default_compute,
+)
 from zevo.contracts.cancel import CancelWeightsPolicy
 from zevo.providers import resolve_ssh_key
 from zevo.api.database import get_db
@@ -64,9 +70,22 @@ def _normalize_gpu_provider(value: str) -> str:
     return v if v in ("cluster", "cloud", "instance") else ""
 
 
-def _default_gpu_provider() -> str:
-    """The one implicit runtime choice: attach to a user-owned instance."""
-    return "instance"
+async def _resolve_run_compute(
+    db: AsyncSession, body: "CreateRunRequest",
+) -> ComputeTarget:
+    """Resolve an explicit picker value or the configured concrete default."""
+    provider = _normalize_gpu_provider(body.gpu_provider or "")
+    if provider:
+        return ComputeTarget(
+            value="explicit",
+            provider=cast(ComputeProvider, provider),
+            cloud_backend=(body.cloud_backend or "").strip().lower(),
+            ssh_host_id=(body.ssh_host_id or "").strip(),
+        )
+    try:
+        return await resolve_default_compute(db)
+    except DefaultComputeError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def _dataset_profile_for(dataset_path: str) -> dict | None:
@@ -1423,12 +1442,12 @@ async def delete_run(
 
 
 async def _check_selected_ssh_host(
-    db: AsyncSession, body: CreateRunRequest, resolved_gpu_provider: str,
+    db: AsyncSession, ssh_host_id: str, resolved_gpu_provider: str,
 ) -> None:
     """A selected Cluster/Instance connection must exist, be verified, and have
     the same category as the Run. The runner re-checks this defense-in-depth."""
-    if resolved_gpu_provider in ("cluster", "instance") and body.ssh_host_id.strip():
-        _sid = (body.ssh_host_id or "").strip()
+    if resolved_gpu_provider in ("cluster", "instance") and ssh_host_id.strip():
+        _sid = ssh_host_id.strip()
         _box = None
         if _sid:
             _box = (await db.execute(
@@ -1490,11 +1509,9 @@ async def _create_auto_run(
     if not task_objective:
         raise HTTPException(400, "task_objective is required and must describe the task.")
 
-    resolved_gpu_provider = (
-        _normalize_gpu_provider(body.gpu_provider or "")
-        or _default_gpu_provider()
-    )
-    await _check_selected_ssh_host(db, body, resolved_gpu_provider)
+    compute = await _resolve_run_compute(db, body)
+    resolved_gpu_provider = compute.provider
+    await _check_selected_ssh_host(db, compute.ssh_host_id, resolved_gpu_provider)
 
     from zevo.contracts.training_methods import (
         method_config_errors,
@@ -1545,11 +1562,11 @@ async def _create_auto_run(
     run.num_gpus = max(0, int(body.num_gpus or 0))
     run.gpu_provider = resolved_gpu_provider
     run.ssh_host_id = (
-        ((body.ssh_host_id or "").strip() or None)
+        (compute.ssh_host_id or None)
         if resolved_gpu_provider in ("cluster", "instance") else None
     )
     run.cloud_backend = (
-        (body.cloud_backend or "").strip().lower() if resolved_gpu_provider == "cloud" else ""
+        compute.cloud_backend if resolved_gpu_provider == "cloud" else ""
     )
     run.setting_id = None
     run.setting_name = ""
@@ -1755,11 +1772,9 @@ async def create_run(
     scoring_errors = scoring_asset_errors(user_request)
     if scoring_errors:
         raise HTTPException(400, "; ".join(scoring_errors))
-    resolved_gpu_provider = (
-        _normalize_gpu_provider(body.gpu_provider or "")
-        or _default_gpu_provider()
-    )
-    await _check_selected_ssh_host(db, body, resolved_gpu_provider)
+    compute = await _resolve_run_compute(db, body)
+    resolved_gpu_provider = compute.provider
+    await _check_selected_ssh_host(db, compute.ssh_host_id, resolved_gpu_provider)
 
     # Saving the first setting of a newly named task also writes down the task
     # itself. Previously the UI offered "save this setting" for a custom task,
@@ -1985,10 +2000,10 @@ async def create_run(
     # ssh_hosts now, and '' could never satisfy it. All readers already treat
     # falsy/None as "use the deployment-level fallback".
     run.ssh_host_id = (
-        ((body.ssh_host_id or "").strip() or None)
+        (compute.ssh_host_id or None)
         if resolved_gpu_provider in ("cluster", "instance") else None
     )
-    run.cloud_backend = (body.cloud_backend or "").strip().lower() if resolved_gpu_provider == "cloud" else ""
+    run.cloud_backend = compute.cloud_backend if resolved_gpu_provider == "cloud" else ""
     run.mode = body.mode
     # Ownership is determined only by what the user supplied at launch. These
     # pins do not encode an autonomy level and do not acquire defaults later.

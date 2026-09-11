@@ -1,7 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { ChevronRight, Upload, X } from "lucide-react";
-import { Kicker } from "./zevo/primitives";
 import { FILES_ROOT, splitDatasetPath } from "../lib/format";
 import { api } from "../lib/api";
 import type { FileSetDTO, GenerationBackend, GpuProvider } from "../lib/api";
@@ -35,6 +34,8 @@ const fieldCls =
   "w-full rounded-md border border-hair bg-canvas p-2.5 text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none";
 const completeFieldCls =
   "!border-brass-500/55 !bg-brass-500/[0.07] !text-brass-100";
+export const requiredFieldStateCls = (_complete: boolean) =>
+  "!border-hair !bg-canvas !text-slate-200 focus:!border-brass-500/50";
 
 async function uploadFile(f: File): Promise<string> {
   const fd = new FormData();
@@ -60,6 +61,84 @@ function SlotLabel({ label, required, tag = true }: { label: string; required?: 
           {required ? "required" : "optional"}
         </span>
       )}
+    </div>
+  );
+}
+
+export type RunSummaryValue = {
+  name: string;
+  value: string;
+  complete?: boolean;
+  overridden?: boolean;
+};
+
+function SummaryColumn({
+  title, values, required,
+}: {
+  title: string;
+  values: RunSummaryValue[];
+  required?: boolean;
+}) {
+  const completeCount = values.filter((value) => value.complete).length;
+  const allComplete = completeCount === values.length;
+  return (
+    <div className="min-w-0 rounded-md border border-hair bg-white/[0.018] p-3">
+      <div className="mb-1 flex items-center justify-between gap-3 px-1 pb-2">
+        <span className="font-mono text-[0.64rem] uppercase tracking-[0.14em] text-brass-300">
+          {title}
+        </span>
+        <span className={`font-mono text-[0.6rem] ${
+          required ? allComplete ? "text-phosphor-300" : "text-coral-300" : "text-slate-600"
+        }`}>
+          {required ? `${completeCount}/${values.length}` : values.length}
+        </span>
+      </div>
+      <table className="w-full table-fixed border-separate border-spacing-y-0.5 font-mono text-2xs">
+        <tbody>
+          {values.map(({ name, value, complete, overridden }) => (
+            <tr key={name} className="group">
+              <th className="w-[42%] rounded-l px-2 py-1.5 text-left font-normal text-slate-500 transition-colors group-hover:bg-white/[0.025]">
+                {name}
+              </th>
+              <td className="rounded-r px-2 py-1.5 text-right transition-colors group-hover:bg-white/[0.025]">
+                <span className="inline-flex max-w-full items-center justify-end gap-1.5">
+                  {required && (
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                      complete ? "bg-phosphor-400" : "bg-coral-400"
+                    }`} />
+                  )}
+                  <span
+                    className={`truncate ${
+                      required
+                        ? complete ? "text-slate-200" : "italic text-slate-600"
+                        : overridden ? "text-brass-300" : "text-slate-400"
+                    }`}
+                    title={value}
+                  >
+                    {value}
+                  </span>
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function RunSummaryTable({
+  requiredValues, optionalValues,
+}: {
+  requiredValues: RunSummaryValue[];
+  optionalValues: RunSummaryValue[];
+}) {
+  return (
+    <div className="mt-3">
+      <div className="grid gap-3 md:grid-cols-2">
+        <SummaryColumn title="Required Values" values={requiredValues} required />
+        <SummaryColumn title="Optional Values" values={optionalValues} />
+      </div>
     </div>
   );
 }
@@ -314,8 +393,8 @@ function Chosen({
 }: { value: string; onChange: (v: string) => void; note?: string }) {
   const inCatalogue = splitDatasetPath(value);
   return (
-    <div className="flex items-center gap-2 rounded-md border border-brass-500/55 bg-brass-500/[0.07] px-2.5 py-2">
-      <span className="min-w-0 flex-1 truncate font-mono text-sm text-brass-100" title={value}>
+    <div className="flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2">
+      <span className="min-w-0 flex-1 truncate font-mono text-sm text-slate-100" title={value}>
         {inCatalogue ? inCatalogue.label : short(value)}
       </span>
       {note && <span className="shrink-0 font-mono text-2xs text-slate-500">{note}</span>}
@@ -586,10 +665,10 @@ export function validationContractFromInputs(inputs: RunInputValues) {
 
 /** A plain optional text field, labelled like the slots around it. */
 export function TextField({
-  label, value, onChange, placeholder = "", mono = true, hint = "",
+  label, value, onChange, placeholder = "", mono = true, hint = "", required = false,
 }: {
   label: string; value: string; onChange: (v: string) => void;
-  placeholder?: string; mono?: boolean; hint?: string;
+  placeholder?: string; mono?: boolean; hint?: string; required?: boolean;
 }) {
   return (
     <div>
@@ -599,7 +678,9 @@ export function TextField({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder || hint}
         spellCheck={false}
-        className={`${fieldCls} ${mono ? "font-mono" : ""} ${value.trim() ? completeFieldCls : ""}`}
+        className={`${fieldCls} ${mono ? "font-mono" : ""} ${
+          required ? requiredFieldStateCls(Boolean(value.trim())) : value.trim() ? completeFieldCls : ""
+        }`}
       />
     </div>
   );
@@ -745,6 +826,7 @@ export function ValidationSetField({
                 label="Answer fields"
                 value={answerFields ?? ""}
                 onChange={onAnswerFields}
+                required
                 placeholder=""
                 hint="Columns containing the validation ground truth."
               />
@@ -756,6 +838,7 @@ export function ValidationSetField({
                 label="Sample submission"
                 value={sampleSubmission ?? ""}
                 onChange={onSampleSubmission}
+                required
                 tag={false}
                 hint="Defines the required validation prediction format."
               />
@@ -777,10 +860,10 @@ export function ValidationSetField({
 
 /** An optional choice with a named default. */
 export function ChoiceField({
-  label, value, onChange, options, disabled = false, hint = "",
+  label, value, onChange, options, disabled = false, hint = "", required = false,
 }: {
   label: string; value: string; onChange: (v: string) => void;
-  options: [string, string][]; disabled?: boolean; hint?: string;
+  options: [string, string][]; disabled?: boolean; hint?: string; required?: boolean;
 }) {
   // The light hint stays in the closed control. The shared themed list receives
   // only real choices, so no browser can expose the hint as a menu item.
@@ -797,7 +880,9 @@ export function ChoiceField({
         placeholder={hint}
         ariaLabel={label}
         disabled={disabled}
-        buttonClassName={`${fieldCls} h-11 font-mono ${selected ? completeFieldCls : "!text-slate-600"}`}
+        buttonClassName={`${fieldCls} h-11 font-mono ${
+          required ? requiredFieldStateCls(Boolean(selected)) : selected ? completeFieldCls : "!text-slate-600"
+        }`}
       />
     </div>
   );
@@ -979,8 +1064,87 @@ export function MultiFileSlot({
   );
 }
 
+export type ComputeTargetOption = {
+  value: string;
+  label: string;
+  gpuProvider: GpuProvider;
+  cloudBackend: "" | "vastai" | "lambda";
+  sshHostId: string;
+};
+
+export function computeTargetValue({
+  gpuProvider, cloudBackend, sshHostId,
+}: Pick<RunInputValues, "gpuProvider" | "cloudBackend" | "sshHostId">): string {
+  if (gpuProvider === "cloud") return cloudBackend ? `cloud:${cloudBackend}` : "";
+  if (sshHostId) return `connection:${sshHostId}`;
+  return gpuProvider ? `environment:${gpuProvider}` : "";
+}
+
+/** Available picker values plus the concrete installation default. */
+export function useComputeTargets() {
+  const { data: hosts } = useSWR<Array<{
+    id: string;
+    name: string;
+    category: "cluster" | "instance";
+    host: string;
+    status: string;
+  }>>("/api/hardware/ssh");
+  const { data: settings } = useSWR<{
+    entries: Array<{ name: string; present: boolean; preview: string }>;
+    ssh_connections: Array<{
+      id: "cluster" | "instance";
+      label: string;
+      configured: boolean;
+      status: string;
+    }>;
+  }>("/api/settings");
+
+  const targets = useMemo<ComputeTargetOption[]>(() => {
+    const keyPresent = (key: string) =>
+      settings?.entries.some((entry) => entry.name === key && entry.present) ?? false;
+    return [
+      ...(keyPresent("VASTAI_API_KEY") ? [{
+        value: "cloud:vastai", label: "Vast.ai", gpuProvider: "cloud" as const,
+        cloudBackend: "vastai" as const, sshHostId: "",
+      }] : []),
+      ...(keyPresent("LAMBDA_API_KEY") ? [{
+        value: "cloud:lambda", label: "Lambda.ai", gpuProvider: "cloud" as const,
+        cloudBackend: "lambda" as const, sshHostId: "",
+      }] : []),
+      ...(settings?.ssh_connections ?? [])
+        .filter((connection) => connection.configured)
+        .map((connection) => ({
+          value: `environment:${connection.id}`,
+          label: connection.label,
+          gpuProvider: connection.id,
+          cloudBackend: "" as const,
+          sshHostId: "",
+        })),
+      ...(hosts ?? [])
+        .filter((host) => host.status === "verified")
+        .map((host) => ({
+          value: `connection:${host.id}`,
+          label: host.name || host.host,
+          gpuProvider: host.category,
+          cloudBackend: "" as const,
+          sshHostId: host.id,
+        })),
+    ];
+  }, [hosts, settings]);
+
+  const configuredDefault = settings?.entries.find(
+    (entry) => entry.name === "ZEVO_DEFAULT_COMPUTE" && entry.present,
+  )?.preview ?? "";
+  const defaultTarget = targets.find((target) => target.value === configuredDefault);
+  return {
+    targets,
+    defaultTarget,
+    loading: settings === undefined || hosts === undefined,
+  };
+}
+
 /** Unified GPU picker: cloud API backends plus verified Cluster/Instance SSH
- *  profiles. Provider category is carried by the selected connection. */
+ *  profiles. A blank Run selection displays the concrete Settings default. */
 export function BackendPicker({
   gpuProvider, cloudBackend, sshHostId, onChange,
 }: {
@@ -989,84 +1153,38 @@ export function BackendPicker({
   sshHostId: string;
   onChange: (patch: Partial<RunInputValues>) => void;
 }) {
-  const { data } = useSWR<Array<{
-    id: string;
-    name: string;
-    category: "cluster" | "instance";
-    host: string;
-    status: string;
-  }>>(
-    "/api/hardware/ssh",
-  );
-  const verified = (data ?? []).filter((h) => h.status === "verified");
-  const { data: settings } = useSWR<{
-    entries: Array<{ name: string; present: boolean }>;
-    ssh_connections: Array<{
-      id: "cluster" | "instance";
-      label: string;
-      configured: boolean;
-      status: string;
-    }>;
-  }>("/api/settings");
-  const configuredEnvironment = (settings?.ssh_connections ?? []).filter(
-    (connection) => connection.configured,
-  );
-  // Only offer a cloud backend whose API key is configured — mirrors how the
-  // SSH options are gated by `configured`. While settings are still loading we
-  // show no cloud options rather than dead ones (SSH connections still appear).
-  const cloudKeyPresent = (key: string) =>
-    settings?.entries.some((entry) => entry.name === key && entry.present) ?? false;
-  const cloudOptions: [string, string][] = [
-    ...(cloudKeyPresent("VASTAI_API_KEY")
-      ? [["cloud:vastai", "Vast.ai · cloud rental"] as [string, string]] : []),
-    ...(cloudKeyPresent("LAMBDA_API_KEY")
-      ? [["cloud:lambda", "Lambda · cloud rental"] as [string, string]] : []),
-  ];
-
-  // Encode the current (provider, backend, host) into one option value.
-  const value =
-    gpuProvider === "cloud" ? (cloudBackend ? `cloud:${cloudBackend}` : "cloud")
-    : sshHostId ? `connection:${sshHostId}`
-    : gpuProvider ? `environment:${gpuProvider}`
-    : "";
-
-  const options: [string, string][] = [
-    ...cloudOptions,
-    ...configuredEnvironment.map((connection) => [
-      `environment:${connection.id}`,
-      connection.label,
-    ] as [string, string]),
-    ...verified.map((connection) => [
-      `connection:${connection.id}`,
-      connection.name || connection.host,
-    ] as [string, string]),
-  ];
+  const compute = useComputeTargets();
+  const explicitValue = computeTargetValue({ gpuProvider, cloudBackend, sshHostId });
+  const effectiveValue = explicitValue || compute.defaultTarget?.value || "";
 
   return (
-    <ChoiceField
-      label="GPU backend"
-      value={value}
-      options={options}
-      hint="Cloud uses an API; Cluster and Instance use an SSH connection from Settings or .env."
-      onChange={(v) => {
-        if (v.startsWith("cloud:"))
-          onChange({ gpuProvider: "cloud", cloudBackend: v.slice(6) as "vastai" | "lambda", sshHostId: "" });
-        else if (v === "cloud")
-          onChange({ gpuProvider: "cloud", cloudBackend: "", sshHostId: "" });
-        else if (v.startsWith("environment:"))
-          onChange({ gpuProvider: v.slice(12) as "cluster" | "instance", sshHostId: "", cloudBackend: "" });
-        else if (v.startsWith("connection:")) {
-          const connection = verified.find((item) => item.id === v.slice(11));
-          onChange({
-            gpuProvider: connection?.category ?? "",
-            sshHostId: connection?.id ?? "",
-            cloudBackend: "",
-          });
-        }
-        else
-          onChange({ gpuProvider: v as GpuProvider | "", cloudBackend: "", sshHostId: "" });
-      }}
-    />
+    <div>
+      <ChoiceField
+        label="GPU backend"
+        value={effectiveValue}
+        options={compute.targets.map((target) => [target.value, target.label])}
+        required
+        hint={compute.loading ? "Loading available compute…" : "Choose a GPU backend or set a default in Settings."}
+        onChange={(value) => {
+          const target = compute.targets.find((item) => item.value === value);
+          onChange(target ? {
+            gpuProvider: target.gpuProvider,
+            cloudBackend: target.cloudBackend,
+            sshHostId: target.sshHostId,
+          } : { gpuProvider: "", cloudBackend: "", sshHostId: "" });
+        }}
+      />
+      {!explicitValue && compute.defaultTarget && (
+        <p className="mt-1.5 inline-flex items-center gap-1.5 rounded-full border border-hair bg-white/[0.025] px-2 py-1 font-mono text-2xs text-slate-400">
+          <span>Default from Settings: <span className="text-slate-200">{compute.defaultTarget.label}</span></span>
+        </p>
+      )}
+      {!compute.loading && !effectiveValue && (
+        <p className="mt-1.5 inline-flex items-center gap-1.5 rounded-full border border-hair bg-white/[0.025] px-2 py-1 font-mono text-2xs text-slate-400">
+          <span>No default is configured. Choose a backend here or set one in Settings.</span>
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -1147,6 +1265,7 @@ export function TrainingSetupFields({
           label="Teacher model"
           value={teacherModel}
           onChange={(value) => onChange({ teacherModel: value })}
+          required
           hint="Frozen teacher used by GKD; enter its Hugging Face owner/model id."
         />
       )}
@@ -1155,6 +1274,7 @@ export function TrainingSetupFields({
           label="Reward model"
           value={rewardModel}
           onChange={(value) => onChange({ rewardModel: value })}
+          required
           hint="Reward model used to rank Online DPO responses; enter its Hugging Face owner/model id."
         />
       )}
@@ -1187,7 +1307,7 @@ export function RunInputs({
   gpuProvider, cloudBackend, sshHostId, numGpus, generation_backend,
   iterations, budget, timeLimitHours, queueWaitHours, stopThreshold,
   onChange, extra, requiredPrefix, optionalPrefix, beforeChecklist,
-  requiredMissing = [],
+  requiredMissing = [], requiredPrefixValues = [],
 }: RunInputValues & {
   onChange: (patch: Partial<RunInputValues>) => void;
   /** Slot for anything the named fields don't cover — rendered under Optional,
@@ -1198,6 +1318,7 @@ export function RunInputs({
   /** Mode-specific controls that should remain above the shared checklist. */
   beforeChecklist?: React.ReactNode;
   requiredMissing?: string[];
+  requiredPrefixValues?: RunSummaryValue[];
 }) {
   // Collapsed by default so the form leads with the actual inputs, not a wall
   // of status. The header still shows the "N missing / ready" badge, so the
@@ -1207,6 +1328,12 @@ export function RunInputs({
   const [showTraining, setShowTraining] = useState(false);
   const [showValidationSetup, setShowValidationSetup] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
+  const compute = useComputeTargets();
+  const explicitComputeValue = computeTargetValue({ gpuProvider, cloudBackend, sshHostId });
+  const effectiveComputeTarget = (
+    compute.targets.find((target) => target.value === explicitComputeValue)
+    ?? (!explicitComputeValue ? compute.defaultTarget : undefined)
+  );
   const validationIsIndependent = !!validationSet.trim();
   const updateValidationSet = (value: string) => onChange({
     validationSet: value,
@@ -1219,28 +1346,69 @@ export function RunInputs({
       validationSampleSubmission: "",
     } : {}),
   });
-  // The checklist mirrors the form. Unselected metric controls stay visibly
-  // unselected; only complete choices are highlighted in gold.
-  const optionalValues: Array<{ name: string; value: string; overridden: boolean }> = [
+  const requiredValues: RunSummaryValue[] = [
+    ...requiredPrefixValues,
     {
-      name: "Test metric",
-      value: !metricType
-        ? "Choose"
-        : metricType === "custom"
-          ? `custom · ${metric.trim() || "metric"}`
-          : `built-in ${metric.trim() || "metric"}`,
-      overridden: !!metricType && !!metric.trim(),
+      name: "GPU backend",
+      value: effectiveComputeTarget?.label || "Not set",
+      complete: Boolean(effectiveComputeTarget),
+    },
+    { name: "Test metric type", value: metricType || "Not set", complete: Boolean(metricType) },
+    { name: "Test metric", value: metric.trim() || "Not set", complete: Boolean(metric.trim()) },
+    ...(metricType === "custom" ? [{
+      name: "Test evaluation script",
+      value: evaluationScript.trim() ? short(evaluationScript) : "Not set",
+      complete: Boolean(evaluationScript.trim()),
+    }] : []),
+    { name: "Test target", value: metricDirection || "Not set", complete: Boolean(metricDirection) },
+    { name: "Test set", value: testSet.trim() ? short(testSet) : "Not set", complete: Boolean(testSet.trim()) },
+    { name: "Test answer fields", value: answerFields.trim() || "Not set", complete: Boolean(answerFields.trim()) },
+    {
+      name: "Test sample submission",
+      value: testSampleSubmission.trim() ? short(testSampleSubmission) : "Not set",
+      complete: Boolean(testSampleSubmission.trim()),
     },
     ...(validationIsIndependent ? [
       {
-        name: "Validation metric",
-        value: !validationMetricType
-          ? "Choose"
-          : validationMetricType === "custom"
-            ? `custom · ${validationMetric.trim() || "metric"}`
-            : `built-in ${validationMetric.trim() || "metric"}`,
-        overridden: !!validationMetricType && !!validationMetric.trim(),
+        name: "Validation metric type",
+        value: validationMetricType || "Not set",
+        complete: Boolean(validationMetricType),
       },
+      {
+        name: "Validation metric",
+        value: validationMetric.trim() || "Not set",
+        complete: Boolean(validationMetric.trim()),
+      },
+      ...(validationMetricType === "custom" ? [{
+        name: "Validation evaluation script",
+        value: validationEvaluationScript.trim() ? short(validationEvaluationScript) : "Not set",
+        complete: Boolean(validationEvaluationScript.trim()),
+      }] : []),
+      {
+        name: "Validation target",
+        value: validationMetricDirection || "Not set",
+        complete: Boolean(validationMetricDirection),
+      },
+      {
+        name: "Validation answer fields",
+        value: validationAnswerFields.trim() || "Not set",
+        complete: Boolean(validationAnswerFields.trim()),
+      },
+      {
+        name: "Validation sample submission",
+        value: validationSampleSubmission.trim() ? short(validationSampleSubmission) : "Not set",
+        complete: Boolean(validationSampleSubmission.trim()),
+      },
+    ] : []),
+    ...(trainingMethod === "gkd" ? [{
+      name: "Teacher model", value: teacherModel.trim() || "Not set", complete: Boolean(teacherModel.trim()),
+    }] : []),
+    ...(trainingMethod === "online_dpo" ? [{
+      name: "Reward model", value: rewardModel.trim() || "Not set", complete: Boolean(rewardModel.trim()),
+    }] : []),
+  ];
+  const optionalValues: RunSummaryValue[] = [
+    ...(validationIsIndependent ? [
       { name: "Validation set", value: short(validationSet), overridden: true },
     ] : [
       {
@@ -1255,13 +1423,9 @@ export function RunInputs({
     { name: "Model query", value: modelQuery.trim() || "not set", overridden: !!modelQuery.trim() },
     { name: "Training method", value: trainingMethod.trim() || "Decided by Zevo", overridden: !!trainingMethod.trim() },
     { name: "Method query", value: methodQuery.trim() || "not set", overridden: !!methodQuery.trim() },
-    ...(trainingMethod === "gkd" ? [{
-      name: "Teacher model", value: teacherModel.trim() || "required", overridden: !!teacherModel.trim(),
-    }] : []),
-    ...(trainingMethod === "online_dpo" ? [{
-      name: "Reward model", value: rewardModel.trim() || "required", overridden: !!rewardModel.trim(),
-    }] : []),
-    { name: "GPU provider", value: gpuProvider || "instance", overridden: !!gpuProvider },
+    ...(["cpo", "dpo", "gkd", "grpo", "kto", "online_dpo", "orpo", "rft", "rloo"].includes(trainingMethod)
+      ? [{ name: "PEFT", value: usePeft === "true" ? "Use PEFT" : usePeft === "false" ? "Full parameters" : "Skill default", overridden: Boolean(usePeft) }]
+      : []),
     { name: "Maximum GPUs", value: numGpus.trim() || "unlimited", overridden: !!numGpus.trim() },
     { name: "Generation backend", value: (generation_backend || "vllm").toUpperCase(), overridden: !!generation_backend },
     { name: "Iterations", value: iterations.trim() || "unlimited", overridden: !!iterations.trim() },
@@ -1311,6 +1475,7 @@ export function RunInputs({
                 <ChoiceField
                   label="Test metric type"
                   value={metricType}
+                  required
                   onChange={(v) => onChange({
                     metricType: v as "" | "builtin" | "custom",
                     ...(v === "builtin" ? { evaluationScript: "" } : {}),
@@ -1327,14 +1492,14 @@ export function RunInputs({
                       options={BUILTIN_METRICS.map((value) => ({ value, label: value }))}
                       placeholder="Choose metric"
                       ariaLabel="Built-in Test metric"
-                      buttonClassName={`h-10 w-full rounded-md border border-hair bg-canvas px-2.5 font-mono text-sm text-slate-200 ${metric.trim() ? completeFieldCls : ""}`}
+                      buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(Boolean(metric.trim()))}`}
                     />
                   ) : metricType === "custom" ? (
                     <input
                       value={metric}
                       onChange={(e) => onChange({ metric: e.target.value })}
                       placeholder="e.g. benchmark_average"
-                      className={`h-10 w-full rounded-md border border-hair bg-canvas px-2.5 font-mono text-sm text-slate-200 placeholder:text-slate-600 focus:border-brass-500/50 focus:outline-none ${metric.trim() ? completeFieldCls : ""}`}
+                      className={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm placeholder:text-slate-600 focus:outline-none ${requiredFieldStateCls(Boolean(metric.trim()))}`}
                     />
                   ) : (
                     <ThemedSelect
@@ -1344,13 +1509,14 @@ export function RunInputs({
                       placeholder="Choose metric type first"
                       ariaLabel="Test metric"
                       disabled
-                      buttonClassName="h-10 w-full rounded-md border border-hair bg-canvas px-2.5 font-mono text-sm text-slate-600"
+                      buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(false)}`}
                     />
                   )}
                 </div>
                 <ChoiceField
                   label="Test target"
                   value={metricDirection}
+                  required
                   onChange={(v) => onChange({ metricDirection: v as "" | "max" | "min" })}
                   options={[["max", "Max"], ["min", "Min"]]}
                   hint="Choose"
@@ -1360,6 +1526,7 @@ export function RunInputs({
                 <FileSlot
                   label="Test evaluation script" tag={false} value={evaluationScript}
                   onChange={(v) => onChange({ evaluationScript: v })}
+                  required
                   hint="Frozen for Test and run only after predictions match the Test sample submission."
                 />
               )}
@@ -1369,6 +1536,7 @@ export function RunInputs({
               <FileSlot
                 label="Test set" tag={false} value={testSet}
                 onChange={(v) => onChange({ testSet: v })}
+                required
                 hint="Held-out data used only for the final test score."
               />
               {/* Not a second file: the fields. The data agent drops exactly these
@@ -1378,12 +1546,14 @@ export function RunInputs({
                 label="Test answer fields"
                 value={answerFields}
                 onChange={(v) => onChange({ answerFields: v })}
+                required
                 placeholder="Ground-truth columns, e.g. answer, gold"
                 hint="Columns or keys containing the test ground truth."
               />
               <FileSlot
                 label="Test sample submission" tag={false} value={testSampleSubmission}
                 onChange={(v) => onChange({ testSampleSubmission: v })}
+                required
                 hint="Defines prediction columns, order, and example formatting; its row count need not match Test."
               />
             </div>
@@ -1462,6 +1632,7 @@ export function RunInputs({
                 <ChoiceField
                   label="Validation metric type"
                   value={validationMetricType}
+                  required
                   onChange={(v) => onChange({
                     validationMetricType: v as "" | "builtin" | "custom",
                     ...(v === "builtin" ? { validationEvaluationScript: "" } : {}),
@@ -1478,14 +1649,14 @@ export function RunInputs({
                       options={BUILTIN_METRICS.map((value) => ({ value, label: value }))}
                       placeholder="Choose metric"
                       ariaLabel="Built-in Validation metric"
-                      buttonClassName={`h-10 w-full rounded-md border border-hair bg-canvas px-2.5 font-mono text-sm text-slate-200 ${validationMetric.trim() ? completeFieldCls : ""}`}
+                      buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(Boolean(validationMetric.trim()))}`}
                     />
                   ) : validationMetricType === "custom" ? (
                     <input
                       value={validationMetric}
                       onChange={(e) => onChange({ validationMetric: e.target.value })}
                       placeholder="e.g. token_f1"
-                      className={`h-10 w-full rounded-md border border-hair bg-canvas px-2.5 font-mono text-sm text-slate-200 placeholder:text-slate-600 focus:border-brass-500/50 focus:outline-none ${validationMetric.trim() ? completeFieldCls : ""}`}
+                      className={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm placeholder:text-slate-600 focus:outline-none ${requiredFieldStateCls(Boolean(validationMetric.trim()))}`}
                     />
                   ) : (
                     <ThemedSelect
@@ -1495,13 +1666,14 @@ export function RunInputs({
                       placeholder="Choose metric type first"
                       ariaLabel="Validation metric"
                       disabled
-                      buttonClassName="h-10 w-full rounded-md border border-hair bg-canvas px-2.5 font-mono text-sm text-slate-600"
+                      buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(false)}`}
                     />
                   )}
                 </div>
                 <ChoiceField
                   label="Validation target"
                   value={validationMetricDirection}
+                  required
                   onChange={(v) => onChange({ validationMetricDirection: v as "" | "max" | "min" })}
                   options={[["max", "Max"], ["min", "Min"]]}
                   hint="Choose"
@@ -1512,6 +1684,7 @@ export function RunInputs({
                   label="Validation evaluation script" tag={false}
                   value={validationEvaluationScript}
                   onChange={(v) => onChange({ validationEvaluationScript: v })}
+                  required
                   hint="Frozen for Validation and run only after predictions match its sample submission."
                 />
               )}
@@ -1618,37 +1791,13 @@ export function RunInputs({
             <h3 className="section-title !text-brass-300">Checklist</h3>
           </span>
           <span className={`font-mono text-[0.62rem] uppercase tracking-[0.12em] ${
-            requiredMissing.length ? "text-coral-300" : "text-brass-300"
+            requiredMissing.length ? "text-coral-300" : "text-phosphor-300"
           }`}>
             {requiredMissing.length ? `${requiredMissing.length} missing` : "ready"}
           </span>
         </button>
         {showChecklist && (
-          <div className="mt-3 grid gap-4 md:grid-cols-2">
-            <div>
-              <Kicker>Required still missing</Kicker>
-              {requiredMissing.length ? (
-                <ul className="mt-2 space-y-1 font-mono text-2xs text-slate-400">
-                  {requiredMissing.map((name) => <li key={name}>• {name}</li>)}
-                </ul>
-              ) : (
-                <p className="mt-2 font-mono text-2xs text-slate-400">none</p>
-              )}
-            </div>
-            <div>
-              <Kicker>Optional values</Kicker>
-              <dl className="mt-2 space-y-1 font-mono text-2xs">
-                {optionalValues.map(({ name, value, overridden }) => (
-                  <div key={name} className="flex justify-between gap-4">
-                    <dt className="text-slate-500">{name}</dt>
-                    <dd className={`min-w-0 truncate text-right ${overridden ? "text-brass-300" : "text-slate-300"}`} title={value}>
-                      {value}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          </div>
+          <RunSummaryTable requiredValues={requiredValues} optionalValues={optionalValues} />
         )}
       </section>
     </div>

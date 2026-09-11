@@ -45,7 +45,8 @@ function RestartNotice() {
   return (
     <div className="flex items-center rounded-md border border-brass-500/25 bg-brass-500/[0.06] px-4 py-3 text-brass-200">
       <span className="min-w-0 text-sm leading-relaxed">
-        After saving, restart the containers to load the new values:
+        Credential changes require a restart. A Default compute change applies
+        to the next Run immediately.
         <span className="mt-1 block max-w-full overflow-x-auto whitespace-nowrap font-mono text-xs font-semibold text-slate-200">
           docker compose up -d --force-recreate backend scheduler holdout-scheduler
         </span>
@@ -140,6 +141,8 @@ export function SettingsPage() {
           <ComputeProvidersPanel
             rows={providerRows}
             loading={data === undefined || sshHosts === undefined}
+            defaultSettingKey="ZEVO_DEFAULT_COMPUTE"
+            defaultValueForRow={(row) => row.key}
             error={
               settingsError ? "Could not load Settings. Check the backend and try again."
               : sshError ? "Could not load SSH connections. Check the backend and try again."

@@ -83,6 +83,7 @@ def _auto_body(**overrides) -> dict:
     body = dict(
         mode="auto", task_name="bar-exam-auto", run_name="first-auto",
         user_request={"task_objective": "Improve bar-exam answering."},
+        gpu_provider="instance",
     )
     body.update(overrides)
     return body
@@ -303,6 +304,7 @@ async def test_full_pipeline_still_requires_scoring_and_settles_at_creation(
             await create_run(CreateRunRequest.model_validate({
                 "task_name": "custom", "run_name": "r",
                 "user_request": _full_request(test_set=""),
+                "gpu_provider": "instance",
             }), db)
         assert exc.value.status_code == 400
         assert "test_set is required" in str(exc.value.detail)
@@ -310,6 +312,7 @@ async def test_full_pipeline_still_requires_scoring_and_settles_at_creation(
 
         response = await create_run(CreateRunRequest.model_validate({
             "task_name": "custom", "run_name": "r", "user_request": _full_request(),
+            "gpu_provider": "instance",
         }), db)
         run = await db.get(Run, response.run_id)
         assert calls == [run.id]  # settled exactly once, at creation

@@ -8,6 +8,7 @@ import { CustomizedRunForm } from "./CustomizedRunModal";
 import { ModeInfo } from "./RunModeInfo";
 import {
   RunInputs,
+  RunSummaryTable,
   MultiFileSlot,
   BackendPicker,
   ChoiceField,
@@ -17,6 +18,9 @@ import {
   TrainingSetupFields,
   EMPTY_RUN_INPUTS,
   methodConfigFromInputs,
+  computeTargetValue,
+  requiredFieldStateCls,
+  useComputeTargets,
   validationContractFromInputs,
   type RunInputValues,
 } from "./RunInputs";
@@ -31,7 +35,6 @@ import type {
   UserRequest,
 } from "../lib/api";
 import { ThemedSelect } from "./ThemedSelect";
-import { Kicker } from "./zevo/primitives";
 
 export type RunLaunchMode = "auto" | "full_pipeline" | "customized_pipeline" | "single_stage";
 type Mode = RunLaunchMode;
@@ -156,8 +159,6 @@ function backendFromInputs(inputs: RunInputValues) {
 
 const fieldCls =
   "w-full rounded-md border border-hair bg-canvas p-2.5 text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none";
-const completeFieldCls =
-  "!border-brass-500/55 !bg-brass-500/[0.07] !text-brass-100";
 
 export function NewRunModal({
   open,
@@ -190,6 +191,7 @@ export function NewRunModal({
   // The named inputs. They used to be the first attachment (dataset) plus a
   // JSON hints blob; every other uploaded file was silently unused.
   const [inputs, setInputs] = useState<RunInputValues>(EMPTY_RUN_INPUTS);
+  const compute = useComputeTargets();
   // Every run is named. A name that matches a predefined task runs that task
   // as-is; any other name is a custom task and needs an objective.
   const [taskName, setTaskName] = useState("");
@@ -341,8 +343,8 @@ export function NewRunModal({
       // NOT the GPU provider or the generation_backend: a setting no longer carries
       // them, because where the work runs is a choice about today rather than
       // about the experiment. Overwriting them here is what put a blank into a
-      // dropdown with no blank option — the box showed `instance`, the state
-      // held "", and the run went out with no provider at all.
+      // dropdown with no blank option. The Run-level choice or the concrete
+      // Settings default remains authoritative when a saved Setting is picked.
       iterations: s.iteration_budget ? String(s.iteration_budget) : "",
       budget: s.max_cost_usd ? String(s.max_cost_usd) : "",
       stopThreshold: s.stop_threshold != null ? String(s.stop_threshold) : "",
@@ -364,11 +366,17 @@ export function NewRunModal({
 
   const requiredColumns = (v: string) =>
     v.split(",").map((c) => c.trim()).filter(Boolean);
+  const explicitComputeValue = computeTargetValue(inputs);
+  const effectiveComputeTarget = (
+    compute.targets.find((target) => target.value === explicitComputeValue)
+    ?? (!explicitComputeValue ? compute.defaultTarget : undefined)
+  );
   const validationContract = validationContractFromInputs(inputs);
   const fullMissing = [
     !runName.trim() && "Run name",
     !trimmedTask && "Task name",
     !(predefined?.task_objective || nl).trim() && "Objective",
+    !effectiveComputeTarget && "GPU backend",
     !inputs.metricType && "Test metric type",
     !inputs.metric.trim() && "Metric",
     inputs.metricType === "custom" && !inputs.evaluationScript.trim() && "Evaluation script",
@@ -413,6 +421,7 @@ export function NewRunModal({
     !trimmedTask && "Task name",
     autoNameClash && "Task name that is not a predefined task",
     !nl.trim() && "Objective",
+    !effectiveComputeTarget && "GPU backend",
     inputs.trainingMethod === "gkd" && !inputs.teacherModel.trim() && "Teacher model",
     inputs.trainingMethod === "online_dpo" && !inputs.rewardModel.trim() && "Reward model",
   ].filter(Boolean) as string[];
@@ -424,6 +433,30 @@ export function NewRunModal({
   } as Record<string, string>)[[
     !!inputs.dataset.trim(), !!inputs.baseModel.trim(), !!inputs.trainingMethod.trim(),
   ].join(",")] ?? "Custom";
+  const autoRequiredValues = [
+    { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
+    {
+      name: "Task name",
+      value: trimmedTask || "Not set",
+      complete: Boolean(trimmedTask) && !autoNameClash,
+    },
+    { name: "Objective", value: nl.trim() || "Not set", complete: Boolean(nl.trim()) },
+    {
+      name: "GPU backend",
+      value: effectiveComputeTarget?.label || "Not set",
+      complete: Boolean(effectiveComputeTarget),
+    },
+    ...(inputs.trainingMethod === "gkd" ? [{
+      name: "Teacher model",
+      value: inputs.teacherModel.trim() || "Not set",
+      complete: Boolean(inputs.teacherModel.trim()),
+    }] : []),
+    ...(inputs.trainingMethod === "online_dpo" ? [{
+      name: "Reward model",
+      value: inputs.rewardModel.trim() || "Not set",
+      complete: Boolean(inputs.rewardModel.trim()),
+    }] : []),
+  ];
   const autoOptionalValues: Array<{ name: string; value: string; overridden: boolean }> = [
     { name: "Test query", value: autoTestQuery.trim() || "not set", overridden: !!autoTestQuery.trim() },
     { name: "Training data", value: inputs.dataset.trim() || "Prepared by Zevo", overridden: !!inputs.dataset.trim() },
@@ -432,7 +465,6 @@ export function NewRunModal({
     { name: "Model query", value: inputs.modelQuery.trim() || "not set", overridden: !!inputs.modelQuery.trim() },
     { name: "Training method", value: inputs.trainingMethod.trim() || "Decided by Zevo", overridden: !!inputs.trainingMethod.trim() },
     { name: "Method query", value: inputs.methodQuery.trim() || "not set", overridden: !!inputs.methodQuery.trim() },
-    { name: "GPU provider", value: inputs.gpuProvider || "not set", overridden: !!inputs.gpuProvider },
     { name: "Maximum GPUs", value: inputs.numGpus.trim() || "unlimited", overridden: !!inputs.numGpus.trim() },
     { name: "Generation backend", value: (inputs.generation_backend || "vllm").toUpperCase(), overridden: !!inputs.generation_backend },
     { name: "Iterations", value: inputs.iterations.trim() || "unlimited", overridden: !!inputs.iterations.trim() },
@@ -441,6 +473,22 @@ export function NewRunModal({
     { name: "Queue limit", value: inputs.queueWaitHours.trim() ? `${inputs.queueWaitHours.trim()} h` : "24 h", overridden: !!inputs.queueWaitHours.trim() },
     { name: "Stop threshold", value: inputs.stopThreshold.trim() || "not set", overridden: !!inputs.stopThreshold.trim() },
   ];
+  const selectedAgent = callableAgents.find((agent) => agent.id === agentId);
+  const singleRequiredValues = [
+    { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
+    { name: "Task name", value: trimmedTask || "Not set", complete: Boolean(trimmedTask) },
+    {
+      name: "Agent",
+      value: selectedAgent ? selectedAgent.title || selectedAgent.id : "Not set",
+      complete: Boolean(selectedAgent),
+    },
+    { name: "Objective", value: singleNl.trim() || "Not set", complete: Boolean(singleNl.trim()) },
+  ];
+  const singleOptionalValues = [{
+    name: "Attachments",
+    value: singleAttachments.length ? `${singleAttachments.length} selected` : "none",
+    overridden: singleAttachments.length > 0,
+  }];
   const launchMissing =
     mode === "auto" ? autoMissing
     : mode === "full_pipeline" ? fullMissing
@@ -1009,7 +1057,7 @@ export function NewRunModal({
                   value={runName}
                   onChange={(e) => setRunName(e.target.value)}
                   placeholder="what to call this run, e.g. bar-exam-take1"
-                  className={`${fieldCls} font-mono ${runName.trim() ? completeFieldCls : ""}`}
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`}
                   spellCheck={false}
                 />
               </Field>
@@ -1021,7 +1069,7 @@ export function NewRunModal({
                   onChange={(e) => setTaskName(e.target.value)}
                   placeholder="name the task, e.g. bar-exam-reasoning"
                   className={`${fieldCls} font-mono ${
-                    autoNameClash ? "!border-coral-500/50" : trimmedTask ? completeFieldCls : ""
+                    requiredFieldStateCls(Boolean(trimmedTask) && !autoNameClash)
                   }`}
                   spellCheck={false}
                 />
@@ -1038,10 +1086,16 @@ export function NewRunModal({
                   onChange={(e) => setNl(e.target.value)}
                   placeholder="e.g. Improve a small open model's accuracy on US bar-exam style MCQs."
                   rows={4}
-                  className={`${fieldCls} font-mono ${nl.trim() ? completeFieldCls : ""}`}
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(nl.trim()))}`}
                   spellCheck
                 />
               </Field>
+              <BackendPicker
+                gpuProvider={inputs.gpuProvider}
+                cloudBackend={inputs.cloudBackend}
+                sshHostId={inputs.sshHostId}
+                onChange={(patch) => setInputs((value) => ({ ...value, ...patch }))}
+              />
             </section>
 
             <section className="space-y-3">
@@ -1107,12 +1161,6 @@ export function NewRunModal({
               </button>
               {showAutoOthers && (
                 <div className="space-y-3">
-                  <BackendPicker
-                    gpuProvider={inputs.gpuProvider}
-                    cloudBackend={inputs.cloudBackend}
-                    sshHostId={inputs.sshHostId}
-                    onChange={(patch) => setInputs((v) => ({ ...v, ...patch }))}
-                  />
                   <div className="grid grid-cols-2 gap-3">
                     <NumberField
                       label="Maximum GPUs" value={inputs.numGpus}
@@ -1164,37 +1212,16 @@ export function NewRunModal({
                   <span className="section-title !text-brass-300">Checklist</span>
                 </span>
                 <span className={`font-mono text-[0.62rem] uppercase tracking-[0.12em] ${
-                  autoMissing.length ? "text-coral-300" : "text-brass-300"
+                  autoMissing.length ? "text-coral-300" : "text-phosphor-300"
                 }`}>
                   {autoMissing.length ? `${autoMissing.length} missing` : "ready"}
                 </span>
               </button>
               {showAutoChecklist && (
-                <div className="mt-3 grid gap-4 md:grid-cols-2">
-                  <div>
-                    <Kicker>Required still missing</Kicker>
-                    {autoMissing.length ? (
-                      <ul className="mt-2 space-y-1 font-mono text-2xs text-slate-400">
-                        {autoMissing.map((name) => <li key={name}>• {name}</li>)}
-                      </ul>
-                    ) : (
-                      <p className="mt-2 font-mono text-2xs text-slate-400">none</p>
-                    )}
-                  </div>
-                  <div>
-                    <Kicker>Optional values</Kicker>
-                    <dl className="mt-2 space-y-1 font-mono text-2xs">
-                      {autoOptionalValues.map(({ name, value, overridden }) => (
-                        <div key={name} className="flex justify-between gap-4">
-                          <dt className="text-slate-500">{name}</dt>
-                          <dd className={`min-w-0 truncate text-right ${overridden ? "text-brass-300" : "text-slate-300"}`} title={value}>
-                            {value}
-                          </dd>
-                        </div>
-                      ))}
-                    </dl>
-                  </div>
-                </div>
+                <RunSummaryTable
+                  requiredValues={autoRequiredValues}
+                  optionalValues={autoOptionalValues}
+                />
               )}
             </section>
 
@@ -1209,21 +1236,30 @@ export function NewRunModal({
           <RunInputs
             {...inputs}
             requiredMissing={fullMissing}
+            requiredPrefixValues={[
+              { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
+              { name: "Task name", value: trimmedTask || "Not set", complete: Boolean(trimmedTask) },
+              {
+                name: "Objective",
+                value: (predefined?.task_objective || nl).trim() || "Not set",
+                complete: Boolean((predefined?.task_objective || nl).trim()),
+              },
+            ]}
             requiredPrefix={(
               <>
                 <Field label="Run name">
                   <input value={runName} onChange={(e) => setRunName(e.target.value)}
                     placeholder="what to call this run, e.g. capy-lora-r16-take2"
-                    className={`${fieldCls} font-mono ${runName.trim() ? completeFieldCls : ""}`} spellCheck={false} />
+                    className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`} spellCheck={false} />
                 </Field>
                 <Field label="Task name">
                   <TaskNameInput value={taskName} onChange={changeFullTaskName}
                     placeholder="e.g. med for a predefined task, or name your own"
-                    className={`${fieldCls} font-mono ${trimmedTask ? completeFieldCls : ""}`} />
+                    className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(trimmedTask))}`} />
                 </Field>
                 {predefined ? (
                   <Field label="Objective">
-                    <p className="rounded-md border border-brass-500/55 bg-brass-500/[0.07] p-2.5 font-mono text-sm leading-relaxed text-brass-100">
+                    <p className="rounded-md border border-hair bg-canvas p-2.5 font-mono text-sm leading-relaxed text-slate-100">
                       {predefined.task_objective}
                     </p>
                   </Field>
@@ -1231,7 +1267,7 @@ export function NewRunModal({
                   <Field label="Objective">
                     <textarea value={nl} onChange={(e) => setNl(e.target.value)}
                       placeholder="e.g. Train a model that answers football-rules questions from this PDF, target 80% accuracy."
-                      rows={4} className={`${fieldCls} font-mono ${nl.trim() ? completeFieldCls : ""}`} spellCheck />
+                      rows={4} className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(nl.trim()))}`} spellCheck />
                   </Field>
                 )}
               </>
@@ -1275,7 +1311,7 @@ export function NewRunModal({
                   value={runName}
                   onChange={(e) => setRunName(e.target.value)}
                   placeholder="what to call this run, e.g. capy-lora-r16-take2"
-                  className={`${fieldCls} font-mono ${runName.trim() ? completeFieldCls : ""}`}
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`}
                   spellCheck={false}
                 />
               </Field>
@@ -1285,7 +1321,7 @@ export function NewRunModal({
                   value={taskName}
                   onChange={(e) => setTaskName(e.target.value)}
                   placeholder="what this work is"
-                  className={`${fieldCls} font-mono ${trimmedTask ? completeFieldCls : ""}`}
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(trimmedTask))}`}
                   spellCheck={false}
                 />
               </Field>
@@ -1297,7 +1333,7 @@ export function NewRunModal({
                   options={callableAgents.map((a) => ({ value: a.id, label: `${a.id} · ${a.title}` }))}
                   placeholder="Select the agent that will run this stage"
                   ariaLabel="Agent"
-                  buttonClassName={`${fieldCls} font-mono ${agentId ? completeFieldCls : ""}`}
+                  buttonClassName={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(agentId))}`}
                 />
               </Field>
               <Field label="Objective">
@@ -1306,7 +1342,7 @@ export function NewRunModal({
                   onChange={(e) => setSingleNl(e.target.value)}
                   placeholder="e.g. Make a 200-row chat-JSONL dataset from this PDF, USMLE-style MCQs."
                   rows={4}
-                  className={`${fieldCls} font-mono ${singleNl.trim() ? completeFieldCls : ""}`}
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(singleNl.trim()))}`}
                   spellCheck
                 />
               </Field>
@@ -1332,21 +1368,16 @@ export function NewRunModal({
                   <span className="section-title !text-brass-300">Checklist</span>
                 </span>
                 <span className={`font-mono text-[0.62rem] uppercase tracking-[0.12em] ${
-                  singleMissing.length ? "text-coral-300" : "text-brass-300"
+                  singleMissing.length ? "text-coral-300" : "text-phosphor-300"
                 }`}>
                   {singleMissing.length ? `${singleMissing.length} missing` : "ready"}
                 </span>
               </button>
               {showSingleChecklist && (
-                <div className="mt-3">
-                  {singleMissing.length ? (
-                    <ul className="space-y-1 font-mono text-2xs text-slate-400">
-                      {singleMissing.map((name) => <li key={name}>• {name}</li>)}
-                    </ul>
-                  ) : (
-                    <p className="font-mono text-2xs text-brass-300">none</p>
-                  )}
-                </div>
+                <RunSummaryTable
+                  requiredValues={singleRequiredValues}
+                  optionalValues={singleOptionalValues}
+                />
               )}
             </section>
 
