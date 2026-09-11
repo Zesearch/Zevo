@@ -263,7 +263,12 @@ export function splitDatasetPath(
 ): { dataset: string; file: string; label: string } | null {
   const p = (path || "").replace(/\/+$/, "");
   if (!p.startsWith(`${FILES_ROOT}/`)) return null;
-  const rest = p.slice(FILES_ROOT.length + 1);
+  let rest = p.slice(FILES_ROOT.length + 1);
+  // The hosted edition keeps each workspace's file sets under
+  // `_t/<workspace id>/`. That namespace is plumbing, not a dataset: skip it
+  // so the label and the preview link name the real set.
+  const namespaced = rest.match(/^_t\/[^/]+\/(.+)$/);
+  if (namespaced) rest = namespaced[1];
   const cut = rest.indexOf("/");
   if (cut < 0) return null;
   const dataset = rest.slice(0, cut);
