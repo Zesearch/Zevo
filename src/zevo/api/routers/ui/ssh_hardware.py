@@ -62,6 +62,9 @@ class SshHostDTO(BaseModel):
     port: int
     username: str
     private_key_path: str
+    # True when the key was uploaded through the UI and lives in Zevo's own
+    # credential store rather than the host's ~/.ssh mount.
+    private_key_uploaded: bool = False
     authentication: Literal["private_key", "password", "none"]
     remote_dir: str
     env_setup: str
@@ -90,6 +93,7 @@ def _to_dto(h: SshHost) -> SshHostDTO:
         port=h.port,
         username=h.username,
         private_key_path=_host_private_key_path(h.key_path or ""),
+        private_key_uploaded=_is_managed_credential(h.key_path or ""),
         authentication=auth,
         remote_dir=h.remote_dir,
         env_setup=h.env_setup,
@@ -123,6 +127,9 @@ class CreateSshHostBody(BaseModel):
     port: int = Field(22, ge=1, le=65535)
     username: str = Field(min_length=1, max_length=64)
     private_key_path: str = ""
+    # Contents of the private key file (PEM / OpenSSH). Stored by Zevo under
+    # its credential root, so it works when the browser is not on the host.
+    private_key: str = Field("", max_length=20_000)
     password: str = ""
     # Parent directory selected by the user. Zevo creates/uses its `zevo`
     # child, unless the supplied path already ends in `zevo`.
@@ -134,8 +141,9 @@ class CreateSshHostBody(BaseModel):
 
     @model_validator(mode="after")
     def require_one_credential(self) -> "CreateSshHostBody":
-        if bool(self.private_key_path.strip()) == bool(self.password):
-            raise ValueError("provide exactly one of private_key_path or password")
+        given = sum(bool(v.strip()) for v in (self.private_key_path, self.private_key, self.password))
+        if given != 1:
+            raise ValueError("provide exactly one of an uploaded private key, private_key_path or password")
         if any(ch in self.password for ch in ("\n", "\r", "\0")):
             raise ValueError("password cannot contain line breaks or NUL")
         if self.skill_markdown is not None:
@@ -175,6 +183,34 @@ def _connection_credential_dir(name: str, host_id: str) -> Path:
 
 def _connection_password_path(name: str, host_id: str) -> Path:
     return _connection_credential_dir(name, host_id) / "password"
+
+
+def _connection_key_path(name: str, host_id: str) -> Path:
+    return _connection_credential_dir(name, host_id) / "id_key"
+
+
+def _is_managed_credential(path: str) -> bool:
+    if not path:
+        return False
+    try:
+        Path(path).resolve().relative_to(SSH_CREDENTIAL_ROOT.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _write_private_key(path: Path, contents: str) -> None:
+    """Store an uploaded private key with the permissions ssh insists on."""
+    text = contents.replace("\r\n", "\n").strip()
+    if "PRIVATE KEY" not in text or "\0" in text:
+        raise HTTPException(400, "Upload the private key file (OpenSSH or PEM), not the .pub public key")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _infra_skill_slug(h: SshHost) -> str:
@@ -756,14 +792,18 @@ async def create_ssh_host(
     )
     db.add(h)
     await db.flush()
-    h.key_path = (
-        _resolve_host_private_key_path(body.private_key_path)
-        if body.private_key_path.strip() else ""
-    )
+    if body.private_key.strip():
+        h.key_path = str(_connection_key_path(name, h.id))
+    elif body.private_key_path.strip():
+        h.key_path = _resolve_host_private_key_path(body.private_key_path)
+    else:
+        h.key_path = ""
     h.password_path = (
         str(_connection_password_path(name, h.id)) if body.password else ""
     )
     try:
+        if body.private_key.strip():
+            _write_private_key(Path(h.key_path), body.private_key)
         if h.password_path:
             _write_password(Path(h.password_path), body.password)
     except Exception:
@@ -824,12 +864,13 @@ async def verify_environment_ssh(
 
 class ReverifyBody(BaseModel):
     private_key_path: str = ""  # optional: switch to/replace key authentication
+    private_key: str = Field("", max_length=20_000)  # optional: uploaded key contents
     password: str = ""     # optional: switch to/replace password authentication
 
     @model_validator(mode="after")
     def at_most_one_credential(self) -> "ReverifyBody":
-        if self.private_key_path.strip() and self.password:
-            raise ValueError("provide only one of private_key_path or password")
+        if sum(bool(v.strip()) for v in (self.private_key_path, self.private_key, self.password)) > 1:
+            raise ValueError("provide only one of an uploaded private key, private_key_path or password")
         if any(ch in self.password for ch in ("\n", "\r", "\0")):
             raise ValueError("password cannot contain line breaks or NUL")
         return self
@@ -842,6 +883,7 @@ class UpdateSshHostBody(BaseModel):
     port: int = Field(22, ge=1, le=65535)
     username: str = Field(min_length=1, max_length=64)
     private_key_path: str = ""
+    private_key: str = Field("", max_length=20_000)
     password: str = ""
     remote_parent_dir: str = Field(min_length=1)
     env_setup: str = Field(min_length=1)
@@ -855,8 +897,8 @@ class UpdateSshHostBody(BaseModel):
 
     @model_validator(mode="after")
     def validate_optional_replacement_credential(self) -> "UpdateSshHostBody":
-        if self.private_key_path.strip() and self.password:
-            raise ValueError("provide only one of private_key_path or password")
+        if sum(bool(v.strip()) for v in (self.private_key_path, self.private_key, self.password)) > 1:
+            raise ValueError("provide only one of an uploaded private key, private_key_path or password")
         if any(ch in self.password for ch in ("\n", "\r", "\0")):
             raise ValueError("password cannot contain line breaks or NUL")
         if self.skill_markdown is not None:
@@ -884,9 +926,18 @@ async def update_ssh_host(
         raise HTTPException(409, f"SSH connection {name!r} already exists")
 
     new_key_path = body.private_key_path.strip()
-    if new_key_path:
+    if body.private_key.strip():
+        key_path = _connection_key_path(name, h.id)
+        _write_private_key(key_path, body.private_key)
+        _remove_managed_credential(h.password_path or "")
+        if h.key_path and Path(h.key_path) != key_path:
+            _remove_managed_credential(h.key_path)
+        h.key_path = str(key_path)
+        h.password_path = ""
+    elif new_key_path:
         resolved_key_path = _resolve_host_private_key_path(new_key_path)
         _remove_managed_credential(h.password_path or "")
+        _remove_managed_credential(h.key_path or "")
         h.key_path = resolved_key_path
         h.password_path = ""
     elif body.password:
@@ -925,8 +976,18 @@ async def reverify_ssh_host(
     h = await _load(db, host_id)
 
     new_key_path = ((body.private_key_path if body else "") or "").strip()
+    new_key = ((body.private_key if body else "") or "").strip()
     new_password = (body.password if body else "") or ""
-    if new_key_path:
+    if new_key:
+        key_path = _connection_key_path(h.label, h.id)
+        _write_private_key(key_path, new_key)
+        if h.password_path:
+            _remove_managed_credential(h.password_path)
+            h.password_path = ""
+        if h.key_path and Path(h.key_path) != key_path:
+            _remove_managed_credential(h.key_path)
+        h.key_path = str(key_path)
+    elif new_key_path:
         resolved_key_path = _resolve_host_private_key_path(new_key_path)
         if h.password_path:
             _remove_managed_credential(h.password_path)

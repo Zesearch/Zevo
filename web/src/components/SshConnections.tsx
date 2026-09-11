@@ -16,6 +16,7 @@ export type SshHost = {
   port: number;
   username: string;
   private_key_path: string;
+  private_key_uploaded: boolean;
   authentication: "private_key" | "password" | "none";
   remote_dir: string;
   env_setup: string;
@@ -94,6 +95,67 @@ function SkillFilePicker({
   );
 }
 
+type KeyFile = { name: string; contents: string };
+
+function PrivateKeyPicker({
+  selected, onChange, replace = false,
+}: {
+  selected: KeyFile | null;
+  onChange: (file: KeyFile | null) => void;
+  replace?: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState("");
+
+  async function choose(file?: File) {
+    if (!file) return;
+    setError("");
+    if (file.name.toLowerCase().endsWith(".pub")) {
+      setError("That is the public key. Choose the private key file (e.g. id_ed25519).");
+      return;
+    }
+    if (file.size > 20_000) {
+      setError("Private key must be 20 KB or smaller.");
+      return;
+    }
+    const contents = await file.text();
+    if (!contents.includes("PRIVATE KEY")) {
+      setError("This does not look like an OpenSSH or PEM private key.");
+      return;
+    }
+    onChange({ name: file.name, contents });
+  }
+
+  return (
+    <div className="mt-0.5">
+      <div className="flex min-w-0 items-center gap-2">
+        <button type="button" onClick={() => inputRef.current?.click()} className="btn !px-2.5 !py-1.5 !text-[12px]">
+          <Upload size={12} /> {replace ? "replace private key" : "upload private key"}
+        </button>
+        <div className="flex min-w-0 items-center gap-1.5 font-mono text-2xs text-slate-500">
+          <FileText size={12} className="shrink-0" />
+          <span className="truncate" title={selected?.name}>{selected ? selected.name : "No file selected"}</span>
+        </div>
+        {selected && (
+          <button type="button" onClick={() => onChange(null)} title="Remove" className="shrink-0 text-slate-500 hover:text-coral-300">
+            <X size={13} />
+          </button>
+        )}
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        className="hidden"
+        onChange={(event) => {
+          void choose(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+      {error && <p className="mt-1 text-2xs text-coral-300">{error}</p>}
+    </div>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   if (status === "verified")
     return <span className="inline-flex items-center gap-1 rounded border border-phosphor-500/40 bg-phosphor-500/10 px-1.5 py-0.5 font-mono text-2xs uppercase tracking-[0.14em] text-phosphor-300"><ShieldCheck size={10} /> verified</span>;
@@ -110,7 +172,6 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
     host: "",
     port: "22",
     username: "",
-    private_key_path: "",
     password: "",
     remote_parent_dir: "",
     env_setup: "",
@@ -118,6 +179,7 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
   };
   const [f, setF] = useState(empty);
   const [skillFile, setSkillFile] = useState<SkillFile | null>(null);
+  const [keyFile, setKeyFile] = useState<KeyFile | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
@@ -131,7 +193,7 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
         body: JSON.stringify({
           name: f.name.trim(), category: f.category, host: f.host.trim(),
           port: Number(f.port) || 22, username: f.username.trim(),
-          private_key_path: f.private_key_path.trim(),
+          private_key: keyFile?.contents ?? "",
           password: f.password,
           remote_parent_dir: f.remote_parent_dir.trim(),
           env_setup: f.env_setup.trim(),
@@ -151,7 +213,7 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
   }
 
   const inputCls = "w-full rounded-md border border-hair bg-canvas px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:border-brass-500/50";
-  const close = () => { setOpen(false); setError(null); };
+  const close = () => { setOpen(false); setKeyFile(null); setError(null); };
   return (
     <>
       <button onClick={() => setOpen(true)} className="btn btn-brass !px-2.5 !py-1 !text-[12px] uppercase !tracking-[0.1em]">
@@ -209,21 +271,21 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
       <p className="mt-1 text-2xs text-slate-500">
         Upload a complete SKILL.md with name and description frontmatter. Zevo installs its instruction body under <code>playbook/skills/infrastructure</code>. Do not include credentials or private-key contents.
       </p>
-      <label className="mt-2.5 block text-2xs text-slate-400">Private key path <span className="text-slate-600">(optional)</span>
-        <input className={`${inputCls} mt-0.5`} value={f.private_key_path} onChange={set("private_key_path")}
-          placeholder="/Users/you/.ssh/id_ed25519" autoComplete="off" spellCheck={false} />
-      </label>
+      <div className="mt-2.5 text-2xs text-slate-400">
+        Private key <span className="text-slate-600">(optional)</span>
+        <PrivateKeyPicker selected={keyFile} onChange={setKeyFile} />
+      </div>
       <label className="mt-2.5 block text-2xs text-slate-400">Password <span className="text-slate-600">(optional)</span>
         <input className={`${inputCls} mt-0.5`} type="password" value={f.password} onChange={set("password")}
           placeholder="SSH password" autoComplete="new-password" spellCheck={false} />
       </label>
       <p className="mt-1 text-2xs text-slate-500">
-        Provide either a host Private Key Path or a Password, not both. Zevo reads keys from the host <code>~/.ssh</code> mount and does not copy them.
+        Upload the private key file (e.g. <code>id_ed25519</code>) or enter a password, not both. Zevo keeps the key in its own credential store, readable only by Zevo.
       </p>
       {error && <div className="mt-2 rounded-md border border-coral-500/30 bg-coral-500/10 p-2 text-2xs text-coral-300">{error}</div>}
       <div className="mt-4 flex justify-end gap-2">
         <button onClick={close} className="btn justify-center !px-3 !py-1 !text-[12px] uppercase !tracking-[0.1em]">cancel</button>
-        <button onClick={submit} disabled={busy || !f.name.trim() || !f.category || !f.host.trim() || !f.username.trim() || !f.remote_parent_dir.trim() || !f.env_setup.trim() || (Boolean(f.private_key_path.trim()) === Boolean(f.password))}
+        <button onClick={submit} disabled={busy || !f.name.trim() || !f.category || !f.host.trim() || !f.username.trim() || !f.remote_parent_dir.trim() || !f.env_setup.trim() || (Boolean(keyFile) === Boolean(f.password))}
           className="btn btn-brass justify-center !px-3 !py-1 !text-[12px] uppercase !tracking-[0.1em] !text-phosphor-300 disabled:opacity-40">
           {busy ? <RotateCw size={11} className="inline animate-spin" /> : "save & verify"}
         </button>
@@ -242,7 +304,6 @@ type EditDraft = {
   remote_parent_dir: string;
   env_setup: string;
   container_image: string;
-  private_key_path: string;
   password: string;
 };
 
@@ -256,7 +317,6 @@ function editDraft(h: SshHost): EditDraft {
     remote_parent_dir: h.remote_dir,
     env_setup: h.env_setup,
     container_image: h.container_image,
-    private_key_path: "",
     password: "",
   };
 }
@@ -266,6 +326,7 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EditDraft>(() => editDraft(h));
   const [skillFile, setSkillFile] = useState<SkillFile | null>(null);
+  const [keyFile, setKeyFile] = useState<KeyFile | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const set = (key: keyof EditDraft) => (
@@ -290,7 +351,7 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
             skill_filename: skillFile.name,
             skill_markdown: skillFile.markdown,
           } : {}),
-          private_key_path: draft.private_key_path.trim(),
+          private_key: keyFile?.contents ?? "",
           password: draft.password,
         }),
       });
@@ -308,7 +369,7 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
   }
 
   const inputCls = "w-full rounded-md border border-hair bg-canvas px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:border-brass-500/50";
-  const invalidCredential = Boolean(draft.private_key_path.trim()) && Boolean(draft.password);
+  const invalidCredential = Boolean(keyFile) && Boolean(draft.password);
   const saveDisabled = busy === "save" || !draft.name.trim() || !draft.host.trim()
     || !draft.username.trim() || !draft.remote_parent_dir.trim()
     || !draft.env_setup.trim() || invalidCredential;
@@ -342,8 +403,8 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
               <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.skill_path || "Not set"}</dd>
               {h.authentication === "private_key" ? (
                 <>
-                  <dt className="text-slate-500">Private key path</dt>
-                  <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.private_key_path}</dd>
+                  <dt className="text-slate-500">Private key</dt>
+                  <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.private_key_uploaded ? "uploaded · stored by Zevo" : h.private_key_path}</dd>
                 </>
               ) : (
                 <>
@@ -397,7 +458,7 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
             <SkillFilePicker selected={skillFile} currentPath={h.skill_path} onChange={setSkillFile} />
           </div>
           <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-            <label className="text-2xs text-slate-400">New private key path <span className="text-slate-600">(optional)</span><input className={inputCls} value={draft.private_key_path} onChange={set("private_key_path")} placeholder="Keep blank to retain current credential" /></label>
+            <div className="text-2xs text-slate-400">New private key <span className="text-slate-600">(optional)</span><PrivateKeyPicker selected={keyFile} onChange={setKeyFile} replace /></div>
             <label className="text-2xs text-slate-400">New password <span className="text-slate-600">(optional)</span><input className={inputCls} type="password" value={draft.password} onChange={set("password")} placeholder="Keep blank to retain current credential" autoComplete="new-password" /></label>
           </div>
           <p className="mt-1 text-2xs text-slate-500">Leave both credential fields blank to keep the current authentication method.</p>
