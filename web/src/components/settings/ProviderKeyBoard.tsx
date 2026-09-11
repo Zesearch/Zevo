@@ -12,7 +12,7 @@
  * fills the GPU section's two compute slots with whatever backend inventory it
  * can see. Sections and cards left empty by that filter are dropped.
  */
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import {
   KeyRound, Eye, EyeOff, Check, RotateCw, AlertTriangle,
   ExternalLink, Copy, Cloud, Server, ShieldCheck, Clock, XCircle,
@@ -20,6 +20,14 @@ import {
 
 /** Current state of one credential, as every backend reports it. */
 export type KeyEntry = { name: string; present: boolean; preview: string };
+
+type ProviderBoardContextValue = {
+  entries: KeyEntry[];
+  onSave: (name: string, value: string) => Promise<void>;
+};
+
+const ProviderBoardContext = createContext<ProviderBoardContextValue | null>(null);
+const CLOUD_BACKEND_KEY = "ZEVO_CLOUD_BACKEND";
 
 export type AuthDriver = {
   driver: string; mode: "subscription" | "api_key" | "either" | "none";
@@ -473,15 +481,37 @@ export function ProviderStatusPill({ row }: { row: ProviderRow }) {
   );
 }
 
-// Read-only roll-up of every compute provider the New Run picker can offer, so
-// the available backends are visible from Settings and not only mid-run.
+// Roll-up of compute providers the New Run picker can use right now. Cloud rows
+// also own the default-backend choice, keeping that setting beside the usable
+// providers instead of rendering it as a separate credential card.
 export function ComputeProvidersPanel({
-  rows, loading = false,
+  rows, loading = false, error,
 }: {
   rows: ProviderRow[];
   loading?: boolean;
+  error?: string;
 }) {
-  const availableCount = rows.filter((row) => row.available).length;
+  const board = useContext(ProviderBoardContext);
+  const [savingDefault, setSavingDefault] = useState("");
+  const [defaultError, setDefaultError] = useState("");
+  const availableRows = rows.filter((row) => row.available);
+  const defaultBackend = (
+    board?.entries.find((entry) => entry.name === CLOUD_BACKEND_KEY && entry.present)?.preview ?? ""
+  ).toLowerCase();
+
+  async function chooseDefault(backend: string) {
+    if (!board || savingDefault) return;
+    setSavingDefault(backend);
+    setDefaultError("");
+    try {
+      await board.onSave(CLOUD_BACKEND_KEY, backend);
+    } catch (cause) {
+      setDefaultError(String((cause as Error).message || cause));
+    } finally {
+      setSavingDefault("");
+    }
+  }
+
   return (
     <section className="mb-4 min-w-0 rounded-md border border-hair bg-panel/40 p-4 sm:p-5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -489,43 +519,68 @@ export function ComputeProvidersPanel({
           Available compute
         </h3>
         <span className="font-mono text-2xs uppercase tracking-[0.14em] text-slate-500">
-          {loading ? "loading…" : `${availableCount} of ${rows.length} ready for a run`}
+          {loading && !error ? "loading…" : `${availableRows.length} ready for a run`}
         </span>
       </div>
       <p className="mt-1 text-2xs leading-relaxed text-slate-500">
         Backends the New Run picker can offer right now. Cloud needs its API key;
         Cluster and Instance need a configured, verified SSH connection.
       </p>
-      {loading ? (
+      {error ? (
+        <p className="mt-3 text-2xs text-coral-300">{error}</p>
+      ) : loading ? (
         <p className="mt-3 font-mono text-2xs text-slate-500">Checking providers…</p>
-      ) : rows.length === 0 ? (
+      ) : availableRows.length === 0 ? (
         <p className="mt-3 text-2xs text-slate-500">
-          No compute providers configured yet. Add a cloud API key or an SSH
-          connection below to make one available in a run.
+          No compute providers are available yet. Add a cloud API key or a
+          verified Cluster or Instance SSH connection below.
         </p>
       ) : (
         <div className="mt-3 divide-y divide-hair/70">
-          {rows.map((row) => (
-            <div key={row.key} className="flex items-center justify-between gap-3 py-2.5 first:pt-1">
-              <div className="flex min-w-0 items-center gap-2.5">
-                <span className={row.available ? "text-brass-400" : "text-slate-600"}>
-                  {row.icon === "cloud" ? <Cloud size={15} /> : <Server size={15} />}
-                </span>
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="truncate font-display text-sm font-semibold text-ink">{row.name}</span>
-                    <span className="rounded bg-canvas px-1.5 py-px font-mono text-2xs uppercase tracking-[0.12em] text-slate-400">
-                      {row.type}
-                    </span>
+          {availableRows.map((row) => {
+            const cloudBackend = row.key.startsWith("cloud:") ? row.key.slice("cloud:".length) : "";
+            const isDefault = Boolean(cloudBackend) && cloudBackend === defaultBackend;
+            return (
+              <div key={row.key} className="flex items-center justify-between gap-3 py-2.5 first:pt-1">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span className="text-brass-400">
+                    {row.icon === "cloud" ? <Cloud size={15} /> : <Server size={15} />}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="truncate font-display text-sm font-semibold text-ink">{row.name}</span>
+                      <span className="rounded bg-canvas px-1.5 py-px font-mono text-2xs uppercase tracking-[0.12em] text-slate-400">
+                        {row.type}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 truncate font-mono text-2xs text-slate-500">
+                      {row.detail}{row.note ? ` · ${row.note}` : ""}
+                    </p>
                   </div>
-                  <p className="mt-0.5 truncate font-mono text-2xs text-slate-500">
-                    {row.detail}{row.note ? ` · ${row.note}` : ""}
-                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {cloudBackend && board && (
+                    isDefault ? (
+                      <span className="inline-flex items-center gap-1 rounded border border-brass-500/40 bg-brass-500/10 px-1.5 py-0.5 font-mono text-2xs uppercase tracking-[0.14em] text-brass-300">
+                        <Check size={10} /> default
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void chooseDefault(cloudBackend)}
+                        disabled={Boolean(savingDefault)}
+                        className="btn !px-2 !py-1 !text-[11px] uppercase !tracking-[0.1em] disabled:opacity-40"
+                      >
+                        {savingDefault === cloudBackend ? "saving…" : "set default"}
+                      </button>
+                    )
+                  )}
+                  <ProviderStatusPill row={row} />
                 </div>
               </div>
-              <ProviderStatusPill row={row} />
-            </div>
-          ))}
+            );
+          })}
+          {defaultError && <p className="pt-2 text-2xs text-coral-300">{defaultError}</p>}
         </div>
       )}
     </section>
@@ -617,12 +672,6 @@ export const BOARD_SECTIONS: BoardSection[] = [
     computeSlots: true,
     gridClass: "grid grid-cols-1 gap-4 xl:grid-cols-3",
     groups: [
-      {
-        id: "cloud_backend",
-        title: "Cloud backend",
-        subtitle: "Which rental provider a Cloud run uses by default. Its API key has to be set below.",
-        keys: ["ZEVO_CLOUD_BACKEND"],
-      },
       {
         id: "vastai",
         title: "Vast.ai",
@@ -734,36 +783,38 @@ export function ProviderKeyBoard({
   );
 
   return (
-    <div className="space-y-6">
-      {notice}
-      {sections.map(({ section, groups }) => (
-        <SettingsSection
-          key={section.id}
-          title={section.title}
-          subtitle={section.subtitle}
-          singleLineSubtitle={section.singleLineSubtitle}
-        >
-          {showStatus && section.status === "drivers" && (
-            <SectionStatusRow items={driverStatusItems(entries, drivers)} loading={loading} />
-          )}
-          {showStatus && section.status === "integrations" && (
-            <SectionStatusRow items={integrationStatusItems(entries)} loading={loading} />
-          )}
-          {section.computeSlots && compute}
-          <div className={section.gridClass}>
-            {groups.map((group) => (
-              <CredentialCard
-                key={group.id}
-                group={group}
-                entries={entries}
-                onSave={onSave}
-                onClear={onClear}
-              />
-            ))}
-            {section.computeSlots && computeCard}
-          </div>
-        </SettingsSection>
-      ))}
-    </div>
+    <ProviderBoardContext.Provider value={{ entries, onSave }}>
+      <div className="space-y-6">
+        {notice}
+        {sections.map(({ section, groups }) => (
+          <SettingsSection
+            key={section.id}
+            title={section.title}
+            subtitle={section.subtitle}
+            singleLineSubtitle={section.singleLineSubtitle}
+          >
+            {showStatus && section.status === "drivers" && (
+              <SectionStatusRow items={driverStatusItems(entries, drivers)} loading={loading} />
+            )}
+            {showStatus && section.status === "integrations" && (
+              <SectionStatusRow items={integrationStatusItems(entries)} loading={loading} />
+            )}
+            {section.computeSlots && compute}
+            <div className={section.gridClass}>
+              {groups.map((group) => (
+                <CredentialCard
+                  key={group.id}
+                  group={group}
+                  entries={entries}
+                  onSave={onSave}
+                  onClear={onClear}
+                />
+              ))}
+              {section.computeSlots && computeCard}
+            </div>
+          </SettingsSection>
+        ))}
+      </div>
+    </ProviderBoardContext.Provider>
   );
 }
