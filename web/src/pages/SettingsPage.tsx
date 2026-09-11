@@ -55,9 +55,9 @@ function RestartNotice() {
 }
 
 export function SettingsPage() {
-  const { data, mutate } = useSWR<SecretsResponse>("/api/settings");
+  const { data, error: settingsError, mutate } = useSWR<SecretsResponse>("/api/settings");
   const { data: authData, mutate: mutateAuth } = useSWR<AuthResponse>("/api/auth-status");
-  const { data: sshHosts } = useSWR<SshHost[]>("/api/hardware/ssh");
+  const { data: sshHosts, error: sshError } = useSWR<SshHost[]>("/api/hardware/ssh");
 
   const entries = data?.entries ?? [];
   const write = async (name: string, value: string) => {
@@ -140,6 +140,11 @@ export function SettingsPage() {
           <ComputeProvidersPanel
             rows={providerRows}
             loading={data === undefined || sshHosts === undefined}
+            error={
+              settingsError ? "Could not load Settings. Check the backend and try again."
+              : sshError ? "Could not load SSH connections. Check the backend and try again."
+              : undefined
+            }
           />
         }
         computeCard={<SshConnections embedded />}
