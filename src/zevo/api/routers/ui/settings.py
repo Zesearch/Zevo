@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from zevo.api.compute_defaults import DEFAULT_COMPUTE_KEY, DEFAULT_COMPUTE_PATTERN
 from zevo.api.database import get_db
 from zevo.contracts._base import StrictBody
 from zevo.db import EnvironmentSshVerification, SshHost
@@ -60,10 +61,11 @@ ALLOWED_KEYS = {
     "AWS_REGION",
     # openrouter driver -- one key fronts every model it offers
     "OPENROUTER_API_KEY",
-    # GPU — cloud mode has two backends (pick with ZEVO_CLOUD_BACKEND)
+    # GPU — one concrete default target plus the legacy cloud-only preference.
     "VASTAI_API_KEY",
     "LAMBDA_API_KEY",       # Lambda Cloud (lambda.ai) API key
     "LAMBDA_SSH_KEY_NAME",  # optional: name of a pre-registered Lambda account SSH key
+    DEFAULT_COMPUTE_KEY,      # cloud:<backend> | environment:<category> | connection:<id>
     "ZEVO_CLOUD_BACKEND",    # "vastai" | "lambda" — which cloud backend to rent on
     # Hugging Face Hub access for gated/private model and dataset downloads.
     "HF_TOKEN",
@@ -73,10 +75,12 @@ ALLOWED_KEYS = {
     "WANDB_PROJECT",
 }
 
-# Keys that are configuration, not credentials: a region name and a choice
-# between two literals. Redacting these only hides the current setting from the
-# page that exists to show it, so they come back in the clear.
-PLAIN_KEYS = {"AWS_REGION", "ZEVO_CLOUD_BACKEND", "WANDB_ENTITY", "WANDB_PROJECT"}
+# Configuration values, not credentials. Redacting these would hide the current
+# choice from the page that exists to show it, so they come back in the clear.
+PLAIN_KEYS = {
+    "AWS_REGION", DEFAULT_COMPUTE_KEY, "ZEVO_CLOUD_BACKEND",
+    "WANDB_ENTITY", "WANDB_PROJECT",
+}
 
 # Lenient per-key format check so the UI catches obvious paste errors
 # before we write garbage to .env. Empty string is always allowed
@@ -94,6 +98,7 @@ KEY_FORMATS: dict[str, re.Pattern] = {
     # Lambda Cloud keys look like 'secret_<label>_<hex>'; stay lenient.
     "LAMBDA_API_KEY":            re.compile(r"^secret_[A-Za-z0-9._-]{16,}$"),
     "LAMBDA_SSH_KEY_NAME":       re.compile(r"^[A-Za-z0-9 ._-]{1,64}$"),
+    DEFAULT_COMPUTE_KEY:           DEFAULT_COMPUTE_PATTERN,
     "ZEVO_CLOUD_BACKEND":         re.compile(r"^(vastai|lambda)$"),
     "HF_TOKEN":                    re.compile(r"^hf_[A-Za-z0-9]{20,}$"),
     "WANDB_API_KEY":              re.compile(r"^[A-Za-z0-9_-]{20,}$"),
@@ -424,4 +429,13 @@ async def set_secrets(body: SetSecretsBody) -> SetSecretsResponse:
         comment_header="Added by /api/settings (the Settings page)",
     )
 
-    return SetSecretsResponse(updated=updated, cleared=cleared)
+    next_step = (
+        "The default compute applies to the next Run immediately."
+        if set(body.values) == {DEFAULT_COMPUTE_KEY}
+        else SetSecretsResponse.model_fields["next_step"].default
+    )
+    return SetSecretsResponse(
+        updated=updated,
+        cleared=cleared,
+        next_step=next_step,
+    )

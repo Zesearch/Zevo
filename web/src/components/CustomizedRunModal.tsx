@@ -10,7 +10,10 @@ import {
   TextField,
   EMPTY_RUN_INPUTS,
   contractPreferencesFromInputs,
+  computeTargetValue,
   methodConfigFromInputs,
+  requiredFieldStateCls,
+  useComputeTargets,
   validationContractFromInputs,
   type RunInputValues,
 } from "./RunInputs";
@@ -85,8 +88,6 @@ const emptyAgent = (open = false): AgentState => ({ instructions: "", inputs: []
 // label tracking read as two different products.
 const fieldCls =
   "w-full rounded-md border border-hair bg-canvas p-2.5 text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none";
-const completeFieldCls =
-  "!border-brass-500/55 !bg-brass-500/[0.07] !text-brass-100";
 const labelCls = "field-label mb-1.5 block";
 // Block headings match the other modes exactly — the same `section-title` the
 // full-pipeline form uses, not a kicker a size down. The dimmer labelCls stays
@@ -113,6 +114,7 @@ export function CustomizedRunForm({
   const [runName, setRunName] = useState("");
   const [objective, setObjective] = useState("");
   const [inputs, setInputs] = useState<RunInputValues>(EMPTY_RUN_INPUTS);
+  const compute = useComputeTargets();
   const [pickedSetting, setPickedSetting] = useState("");
   // Matches Full Pipeline: the save-reuse prompt appears only after the user
   // has chosen or changed a Setting-owned value, not on an untouched form.
@@ -247,10 +249,16 @@ export function CustomizedRunForm({
     setInputs((current) => ({ ...current, ...patch }));
   }
 
+  const explicitComputeValue = computeTargetValue(inputs);
+  const effectiveComputeTarget = (
+    compute.targets.find((target) => target.value === explicitComputeValue)
+    ?? (!explicitComputeValue ? compute.defaultTarget : undefined)
+  );
   const requiredMissing = [
     !runName.trim() && "Run name",
     !taskName.trim() && "Task name",
     !objective.trim() && "Objective",
+    !effectiveComputeTarget && "GPU backend",
     !inputs.metricType && "Test metric type",
     !inputs.metric.trim() && "Metric",
     inputs.metricType === "custom" && !inputs.evaluationScript.trim() && "Evaluation script",
@@ -466,30 +474,39 @@ export function CustomizedRunForm({
     <>
       <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
         <RunInputs {...inputs} requiredMissing={requiredMissing}
+          requiredPrefixValues={[
+            { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
+            { name: "Task name", value: taskName.trim() || "Not set", complete: Boolean(taskName.trim()) },
+            {
+              name: "Objective",
+              value: (predefined?.task_objective || objective).trim() || "Not set",
+              complete: Boolean((predefined?.task_objective || objective).trim()),
+            },
+          ]}
           requiredPrefix={(
             <>
               <div>
                 <label className={labelCls}>Run name</label>
                 <input value={runName} onChange={(e) => setRunName(e.target.value)}
                   placeholder="what to call this run"
-                  className={`${fieldCls} font-mono ${runName.trim() ? completeFieldCls : ""}`} />
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`} />
               </div>
               <div>
                 <label className={labelCls}>Task name</label>
                 <TaskNameInput value={taskName} onChange={changeTaskName}
                   placeholder="a predefined task, or name your own"
-                  className={`${fieldCls} font-mono ${taskName.trim() ? completeFieldCls : ""}`} />
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(taskName.trim()))}`} />
               </div>
               <div>
                 <label className={labelCls}>Objective</label>
                 {predefined ? (
-                  <p className="rounded-md border border-brass-500/55 bg-brass-500/[0.07] p-2.5 font-mono text-sm leading-relaxed text-brass-100">
+                  <p className="rounded-md border border-hair bg-canvas p-2.5 font-mono text-sm leading-relaxed text-slate-100">
                     {predefined.task_objective}
                   </p>
                 ) : (
                   <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={4}
                     placeholder="e.g. Fine-tune to answer MedQA multiple-choice questions."
-                    className={`${fieldCls} font-mono ${objective.trim() ? completeFieldCls : ""}`} />
+                    className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(objective.trim()))}`} />
                 )}
               </div>
             </>

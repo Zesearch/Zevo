@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from zevo.api.compute_defaults import DefaultComputeError, resolve_default_compute
 from zevo.api.database import get_db
 from zevo.db import Agent, InfraInstance
 from zevo.contracts.customizations import RunCustomizations
@@ -66,9 +67,10 @@ class PreflightBody(BaseModel):
 
     user_request: UserRequest
     # Mirror CreateRunRequest: execution runtime is top-level and never part of
-    # UserRequest. A missing provider resolves to the same safe default used by
-    # run creation for a free-form run.
+    # UserRequest. A missing provider resolves to the concrete Settings default.
     gpu_provider: Literal["cluster", "cloud", "instance"] | None = None
+    cloud_backend: Literal["", "vastai", "lambda"] = ""
+    ssh_host_id: str = ""
     num_gpus: int | None = Field(None, ge=0)
     generation_backend: Literal["hf", "vllm"] | None = None
     customizations: RunCustomizations | None = None
@@ -332,16 +334,24 @@ def _check_infra(
     items: list[PreflightItem],
     num_gpus: int | None = None,
     generation_backend: str | None = None,
+    cloud_backend: str = "",
+    ssh_host_id: str = "",
 ) -> None:
-    # Free-form run creation resolves a missing provider to `instance`. Never
-    # infer a billable provider merely because credentials happen to exist.
-    gp = (gpu_provider or "instance").strip().lower()
+    gp = (gpu_provider or "").strip().lower()
+    if not gp:
+        _block(
+            items,
+            "gpu_provider_required",
+            "GPU backend is required and no usable default is configured.",
+            "Choose a GPU backend for this Run or set a default in Settings.",
+        )
     if gp == "cloud":
         # The preference is deployment context, not a provision payload value.
         # With no preference, Infrastructure chooses among every credentialed
         # backend using live feasibility, price, and budget evidence.
-        backend = str(
-            os.environ.get("ZEVO_CLOUD_BACKEND", "")
+        backend = (
+            cloud_backend
+            or os.environ.get("ZEVO_CLOUD_BACKEND", "")
         ).strip().lower()
         has_vast = bool(os.environ.get("VASTAI_API_KEY", "").strip())
         has_lambda = bool(
@@ -393,7 +403,9 @@ def _check_infra(
                 + ", ".join(available) + ".",
             )
     elif gp == "cluster":
-        if not os.environ.get("ZEVO_CLUSTER_SSH_HOST", "").strip():
+        if ssh_host_id:
+            _ok(items, "cluster_ready", "A verified Cluster SSH connection is selected.")
+        elif not os.environ.get("ZEVO_CLUSTER_SSH_HOST", "").strip():
             _block(items, "cluster_no_host",
                    "gpu_provider=cluster but ZEVO_CLUSTER_SSH_HOST is not set in the backend container.",
                    "Set ZEVO_CLUSTER_SSH_HOST (and optionally _PORT/_USER/_KEY) in .env, then "
@@ -405,7 +417,9 @@ def _check_infra(
                 f"gpu_provider=cluster; will SSH to {os.environ.get('ZEVO_CLUSTER_SSH_HOST')} "
                 "and probe nvidia-smi at run time.")
     elif gp == "instance":
-        if not os.environ.get("ZEVO_INSTANCE_SSH_HOST", "").strip():
+        if ssh_host_id:
+            _ok(items, "instance_ready", "A verified Instance SSH connection is selected.")
+        elif not os.environ.get("ZEVO_INSTANCE_SSH_HOST", "").strip():
             _block(items, "instance_no_host",
                    "gpu_provider=instance but ZEVO_INSTANCE_SSH_HOST is not set in the backend container.",
                    "Set ZEVO_INSTANCE_SSH_HOST + ZEVO_INSTANCE_SSH_USER in .env, then restart the backend + "
@@ -604,11 +618,25 @@ async def preflight(body: PreflightBody, db: AsyncSession = Depends(get_db)) -> 
     _check_eval(req, items)
     _check_base_model(req, items)
     _check_method_config(req, items)
+    provider = body.gpu_provider
+    cloud_backend = body.cloud_backend
+    ssh_host_id = body.ssh_host_id
+    if not provider:
+        try:
+            default_compute = await resolve_default_compute(db)
+        except DefaultComputeError:
+            default_compute = None
+        if default_compute is not None:
+            provider = default_compute.provider
+            cloud_backend = default_compute.cloud_backend
+            ssh_host_id = default_compute.ssh_host_id
     _check_infra(
-        body.gpu_provider,
+        provider,
         items,
         num_gpus=body.num_gpus,
         generation_backend=body.generation_backend,
+        cloud_backend=cloud_backend,
+        ssh_host_id=ssh_host_id,
     )
     await _check_provider_creds(items, db)
     await _check_orphaned_instances(items, db)  # B.3: surface GPU leaks

@@ -481,30 +481,36 @@ export function ProviderStatusPill({ row }: { row: ProviderRow }) {
   );
 }
 
-// Roll-up of compute providers the New Run picker can use right now. Cloud rows
-// also own the default-backend choice, keeping that setting beside the usable
-// providers instead of rendering it as a separate credential card.
+// Roll-up of compute providers the New Run picker can use right now. Every row
+// can be the installation default, so a particular SSH connection is just as
+// selectable as a particular cloud backend.
 export function ComputeProvidersPanel({
   rows, loading = false, error,
+  defaultSettingKey = CLOUD_BACKEND_KEY,
+  defaultValueForRow = (row) => (
+    row.key.startsWith("cloud:") ? row.key.slice("cloud:".length) : ""
+  ),
 }: {
   rows: ProviderRow[];
   loading?: boolean;
   error?: string;
+  defaultSettingKey?: string;
+  defaultValueForRow?: (row: ProviderRow) => string;
 }) {
   const board = useContext(ProviderBoardContext);
   const [savingDefault, setSavingDefault] = useState("");
   const [defaultError, setDefaultError] = useState("");
   const availableRows = rows.filter((row) => row.available);
-  const defaultBackend = (
-    board?.entries.find((entry) => entry.name === CLOUD_BACKEND_KEY && entry.present)?.preview ?? ""
-  ).toLowerCase();
+  const defaultCompute = (
+    board?.entries.find((entry) => entry.name === defaultSettingKey && entry.present)?.preview ?? ""
+  );
 
-  async function chooseDefault(backend: string) {
+  async function chooseDefault(target: string) {
     if (!board || savingDefault) return;
-    setSavingDefault(backend);
+    setSavingDefault(target);
     setDefaultError("");
     try {
-      await board.onSave(CLOUD_BACKEND_KEY, backend);
+      await board.onSave(defaultSettingKey, target);
     } catch (cause) {
       setDefaultError(String((cause as Error).message || cause));
     } finally {
@@ -538,8 +544,8 @@ export function ComputeProvidersPanel({
       ) : (
         <div className="mt-3 divide-y divide-hair/70">
           {availableRows.map((row) => {
-            const cloudBackend = row.key.startsWith("cloud:") ? row.key.slice("cloud:".length) : "";
-            const isDefault = Boolean(cloudBackend) && cloudBackend === defaultBackend;
+            const defaultValue = defaultValueForRow(row);
+            const isDefault = Boolean(defaultValue) && defaultValue === defaultCompute;
             return (
               <div key={row.key} className="flex items-center justify-between gap-3 py-2.5 first:pt-1">
                 <div className="flex min-w-0 items-center gap-2.5">
@@ -559,7 +565,7 @@ export function ComputeProvidersPanel({
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  {cloudBackend && board && (
+                  {board && defaultValue && (
                     isDefault ? (
                       <span className="inline-flex items-center gap-1 rounded border border-brass-500/40 bg-brass-500/10 px-1.5 py-0.5 font-mono text-2xs uppercase tracking-[0.14em] text-brass-300">
                         <Check size={10} /> default
@@ -567,11 +573,11 @@ export function ComputeProvidersPanel({
                     ) : (
                       <button
                         type="button"
-                        onClick={() => void chooseDefault(cloudBackend)}
+                        onClick={() => void chooseDefault(defaultValue)}
                         disabled={Boolean(savingDefault)}
                         className="btn !px-2 !py-1 !text-[11px] uppercase !tracking-[0.1em] disabled:opacity-40"
                       >
-                        {savingDefault === cloudBackend ? "saving…" : "set default"}
+                        {savingDefault === defaultValue ? "saving…" : "set default"}
                       </button>
                     )
                   )}
