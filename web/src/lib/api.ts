@@ -49,12 +49,25 @@ export type GpuProvider = "cluster" | "cloud" | "instance";
 export type MetricDirection = "max" | "min";
 export type MetricType = "builtin" | "custom";
 
+export type TaskInferenceProtocol = {
+  schema_version: 1;
+  source: "auto" | "user" | "backend";
+  task_type: "generation" | "classification" | "multiple_choice" | "math_reasoning" | "code";
+  instruction: string;
+  user_prompt_template: string;
+  output_instruction: string;
+  response_format: "plain_text" | "label" | "choice" | "boxed_answer" | "code";
+  answer_parser: "raw" | "choice" | "boxed" | "regex" | "code";
+  answer_regex: string;
+};
+
 export type TaskDTO = {
   name: string;
   task_objective: string;
   test_set: string;
   test_answer_fields: string[];
   test_sample_submission: string;
+  inference_protocol: TaskInferenceProtocol;
   metric_type: MetricType;
   evaluation_script: string;
   evaluator_sha256: string;

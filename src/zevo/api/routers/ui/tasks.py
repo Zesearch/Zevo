@@ -25,6 +25,10 @@ from zevo.engine.method.score_direction import is_better
 from zevo.db import Task, TaskSetting
 from zevo.db.models import Run
 from zevo.contracts.orchestrator import BUILTIN_METRICS, UserRequest
+from zevo.contracts.task_protocol import (
+    TaskInferenceProtocol,
+    default_task_inference_protocol,
+)
 from zevo.contracts.training_methods import (
     method_config_errors,
     normalize_method_config,
@@ -206,18 +210,16 @@ class TaskBody(BaseModel):
     test_set: str = ""
     test_answer_fields: list[str] = Field(default_factory=list)
     test_sample_submission: str = ""
+    inference_protocol: TaskInferenceProtocol | None = None
     metric_type: Literal["builtin", "custom"] = "builtin"
     evaluation_script: str = ""
-    metric: str = Field(min_length=1, max_length=64)
-    metric_direction: Literal["max", "min"]
+    metric: str = Field(default="", max_length=64)
+    metric_direction: Literal["max", "min"] = "max"
 
     @field_validator("metric")
     @classmethod
     def normalize_metric(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("metric must not be blank")
-        return normalized
+        return value.strip()
 
 
 class TaskPatch(BaseModel):
@@ -235,6 +237,7 @@ class TaskPatch(BaseModel):
     test_set: str | None = None
     test_answer_fields: list[str] | None = None
     test_sample_submission: str | None = None
+    inference_protocol: TaskInferenceProtocol | None = None
     metric_type: Literal["builtin", "custom"] | None = None
     evaluation_script: str | None = None
     metric: str | None = Field(None, min_length=1, max_length=64)
@@ -257,6 +260,7 @@ class TaskDTO(BaseModel):
     test_set: str
     test_answer_fields: list[str]
     test_sample_submission: str
+    inference_protocol: TaskInferenceProtocol
     metric_type: Literal["builtin", "custom"]
     evaluation_script: str
     evaluator_sha256: str
@@ -279,6 +283,8 @@ def _task_asset_error(
         missing.append("test_answer_fields")
     if not sample.strip():
         missing.append("test_sample_submission")
+    if not metric.strip():
+        missing.append("metric")
     if missing:
         return "task requires " + ", ".join(missing)
     if metric_type == "builtin":
@@ -311,6 +317,10 @@ def _dto(t: Task, stats: dict | None = None) -> TaskDTO:
         test_set=t.test_set or "",
         test_answer_fields=list(t.test_answer_fields or []),
         test_sample_submission=t.test_sample_submission or "",
+        inference_protocol=TaskInferenceProtocol.model_validate(
+            t.inference_protocol
+            or default_task_inference_protocol(t.task_objective or "", t.metric).model_dump()
+        ),
         metric_type=t.metric_type,
         evaluation_script=t.evaluation_script or "",
         evaluator_sha256=t.evaluator_sha256 or "",
@@ -343,6 +353,10 @@ def task_to_user_request(t: Task) -> UserRequest:
         test_set=t.test_set or "",
         test_answer_fields=list(t.test_answer_fields or []),
         test_sample_submission=t.test_sample_submission or "",
+        inference_protocol=TaskInferenceProtocol.model_validate(
+            t.inference_protocol
+            or default_task_inference_protocol(t.task_objective or "", t.metric).model_dump()
+        ),
         constraints=[],
     )
 
@@ -392,6 +406,36 @@ async def create_task(body: TaskBody, db: AsyncSession = Depends(get_db)) -> Tas
         raise HTTPException(409, f"task {name!r} already exists — delete it first, or pick another name.")
     if not (body.task_objective or "").strip():
         raise HTTPException(400, "task_objective is required — it is what the agents are asked to achieve.")
+    if body.metric_type == "builtin":
+        from zevo.engine.method.task_defaults import resolve_dataset_task_defaults
+
+        try:
+            defaults = await run_in_threadpool(
+                resolve_dataset_task_defaults,
+                task_name=name,
+                objective=body.task_objective,
+                test_set=body.test_set,
+                answer_fields=body.test_answer_fields,
+                sample_submission=body.test_sample_submission,
+                metric=body.metric,
+                metric_direction=body.metric_direction,
+                inference_protocol=body.inference_protocol,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        body = body.model_copy(update={
+            "test_answer_fields": defaults.answer_fields,
+            "test_sample_submission": defaults.sample_submission,
+            "metric": defaults.metric,
+            "metric_direction": defaults.metric_direction,
+            "inference_protocol": defaults.inference_protocol,
+        })
+    elif body.inference_protocol is None:
+        body = body.model_copy(update={
+            "inference_protocol": default_task_inference_protocol(
+                body.task_objective, body.metric,
+            ),
+        })
     asset_error = _task_asset_error(
         test_set=body.test_set,
         answer_fields=body.test_answer_fields,
@@ -425,6 +469,7 @@ async def create_task(body: TaskBody, db: AsyncSession = Depends(get_db)) -> Tas
         test_set=test_set,
         test_answer_fields=[c.strip() for c in (body.test_answer_fields or []) if c.strip()],
         test_sample_submission=test_sample,
+        inference_protocol=body.inference_protocol.model_dump(mode="json"),
         metric_type=body.metric_type,
         evaluation_script=evaluation_script,
         evaluator_sha256=evaluator_sha256,
@@ -453,6 +498,21 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
         raise HTTPException(400, "task_objective cannot be emptied.")
     if "metric" in changed and not (changed["metric"] or "").strip():
         raise HTTPException(400, "metric cannot be emptied.")
+    current_protocol = TaskInferenceProtocol.model_validate(
+        t.inference_protocol
+        or default_task_inference_protocol(
+            t.task_objective or "", t.metric,
+        ).model_dump()
+    )
+    if (
+        "inference_protocol" not in changed
+        and current_protocol.source == "auto"
+        and ({"task_objective", "metric"} & set(changed))
+    ):
+        changed["inference_protocol"] = default_task_inference_protocol(
+            str(changed.get("task_objective", t.task_objective) or ""),
+            str(changed.get("metric", t.metric) or ""),
+        ).model_dump(mode="json")
     if not changed:
         return _dto(t)
 
@@ -460,6 +520,7 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
         "test_set",
         "test_answer_fields",
         "test_sample_submission",
+        "inference_protocol",
         "metric_type",
         "evaluation_script",
         "metric",
@@ -469,6 +530,10 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
     def normalized(field_name: str, value: Any) -> Any:
         if field_name == "test_answer_fields":
             return tuple(str(item).strip() for item in (value or []) if str(item).strip())
+        if field_name == "inference_protocol":
+            if isinstance(value, TaskInferenceProtocol):
+                return value.model_dump(mode="json")
+            return dict(value or {})
         return value.strip() if isinstance(value, str) else value
 
     changed_evaluation_fields = [
@@ -496,6 +561,8 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
             continue  # sent as null = "leave it alone", same as omitting it
         if isinstance(value, list):
             value = [str(c).strip() for c in value if str(c).strip()]
+        elif isinstance(value, TaskInferenceProtocol):
+            value = value.model_dump(mode="json")
         elif isinstance(value, str):
             value = value.strip()
         setattr(t, field_name, value)

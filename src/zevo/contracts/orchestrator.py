@@ -42,6 +42,7 @@ from zevo.contracts.prompting import (
     validate_inference_config,
     validate_loss_objective_config,
 )
+from zevo.contracts.task_protocol import TaskInferenceProtocol
 from zevo.contracts.tickets import RunMode, RunStatus, TicketStatus
 from zevo.contracts.train import TrainingDiagnostics
 
@@ -327,6 +328,14 @@ class UserRequest(BaseModel):
     inference_config: dict[str, Any] = Field(
         default_factory=dict,
         description="Customized Pipeline pin for task mapping and parsing. Full Pipeline lets baseline Inference select it.",
+    )
+    inference_protocol: TaskInferenceProtocol | None = Field(
+        default=None,
+        description=(
+            "Task-owned semantic instruction/output protocol. The API resolves "
+            "an automatic protocol for predefined dataset Tasks; callers only "
+            "supply this field when using the advanced contract directly."
+        ),
     )
     decoding_config: dict[str, Any] = Field(
         default_factory=dict,

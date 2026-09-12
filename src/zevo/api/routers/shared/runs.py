@@ -1677,6 +1677,51 @@ async def create_run(
                 f"or pick one of the predefined tasks from GET /tasks.",
             )
         user_request = task_to_user_request(task_row)
+    # A Task's semantic inference protocol is authoritative regardless of
+    # whether the launch came from its saved Setting or a complete request
+    # assembled by another client.  Resolve it once, then project it into the
+    # existing inference mapping so every baseline/checkpoint reuses the exact
+    # instruction, output format and answer parser without another form.
+    from zevo.contracts.task_protocol import (
+        TaskInferenceProtocol,
+        default_task_inference_protocol,
+    )
+
+    requested_protocol = user_request.inference_protocol
+    if task_row is not None:
+        protocol = TaskInferenceProtocol.model_validate(
+            task_row.inference_protocol
+            or default_task_inference_protocol(
+                task_row.task_objective or "", task_row.metric,
+            ).model_dump()
+        )
+        if requested_protocol is not None and requested_protocol != protocol:
+            raise HTTPException(
+                409,
+                "the launch inference protocol conflicts with the predefined "
+                "Task's frozen protocol",
+            )
+    else:
+        protocol = requested_protocol or default_task_inference_protocol(
+            user_request.task_objective, user_request.metric,
+        )
+    protocol_mapping = protocol.inference_mapping()
+    supplied_mapping = dict(user_request.inference_config or {})
+    conflicts = sorted(
+        key for key, value in protocol_mapping.items()
+        if key in supplied_mapping and supplied_mapping[key] != value
+    )
+    if conflicts:
+        raise HTTPException(
+            409,
+            "the launch inference mapping conflicts with the Task's frozen "
+            f"inference protocol: {', '.join(conflicts)}",
+        )
+    # Keep Setting-owned inference knobs separate. The Task protocol is merged
+    # only when an Inference work order is stamped; otherwise saving a Setting
+    # before its first Run and matching it at launch would produce two
+    # identities for the same experiment.
+    user_request = user_request.model_copy(update={"inference_protocol": protocol})
     from zevo.contracts.training_methods import (
         method_config_errors,
         normalize_method_config,
@@ -2022,6 +2067,7 @@ async def create_run(
             "system_prompt": user_request.system_prompt,
             "loss_objective_config": dict(user_request.loss_objective_config or {}),
             "inference_config": dict(user_request.inference_config or {}),
+            "inference_protocol": protocol.model_dump(mode="json"),
             "decoding_config": dict(user_request.decoding_config or {}),
         }.items()
         if value not in ("", {}, None)

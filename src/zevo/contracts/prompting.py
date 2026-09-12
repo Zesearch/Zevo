@@ -349,6 +349,11 @@ def validate_inference_config(
     config = dict(value or {})
     supported = {
         "input_fields", "answer_regex", "answer_column", "batch_size", "stop",
+        # Task-owned semantic protocol.  Unlike prompt_framing/chat-template
+        # identity, these values describe what one evaluation row asks and how
+        # the generated response should be represented.
+        "task_instruction", "user_prompt_template", "output_instruction",
+        "response_format", "answer_parser",
         # Opt-in multiple-choice option-scoring mode. Default (key absent) is
         # unchanged free generation. When set to "option_loglikelihood",
         # Inference scores each answer option under the frozen prompt and writes
@@ -360,9 +365,52 @@ def validate_inference_config(
     unknown = sorted(set(config) - supported)
     if unknown:
         raise ValueError("unsupported inference_config keys: " + ", ".join(unknown))
-    for key in ("answer_regex", "answer_column"):
+    for key in (
+        "answer_regex", "answer_column", "task_instruction",
+        "user_prompt_template", "output_instruction", "response_format",
+        "answer_parser",
+    ):
         if key in config and not isinstance(config[key], str):
             raise ValueError(f"inference_config.{key} must be a string")
+    for key in ("task_instruction", "user_prompt_template", "output_instruction"):
+        if key in config and not config[key].strip():
+            raise ValueError(f"inference_config.{key} must not be blank")
+    if "response_format" in config and config["response_format"] not in {
+        "plain_text", "label", "choice", "boxed_answer", "code",
+    }:
+        raise ValueError("inference_config.response_format is not supported")
+    if "answer_parser" in config and config["answer_parser"] not in {
+        "raw", "choice", "boxed", "regex", "code",
+    }:
+        raise ValueError("inference_config.answer_parser is not supported")
+    semantic_keys = {
+        "task_instruction", "user_prompt_template", "output_instruction",
+        "response_format", "answer_parser",
+    }
+    present_semantics = semantic_keys & set(config)
+    if present_semantics and present_semantics != semantic_keys:
+        missing = sorted(semantic_keys - present_semantics)
+        raise ValueError(
+            "inference_config task protocol is incomplete; missing: "
+            + ", ".join(missing)
+        )
+    if present_semantics:
+        parser = config["answer_parser"]
+        response_format = config["response_format"]
+        expected_format = {
+            "boxed": "boxed_answer",
+            "choice": "choice",
+            "code": "code",
+        }.get(parser)
+        if expected_format and response_format != expected_format:
+            raise ValueError(
+                f"inference_config.answer_parser={parser!r} requires "
+                f"response_format={expected_format!r}"
+            )
+        if parser == "regex" and not str(config.get("answer_regex") or "").strip():
+            raise ValueError(
+                "inference_config.answer_parser='regex' requires answer_regex"
+            )
     for key in ("input_fields", "stop", "option_fields"):
         if key in config and (
             not isinstance(config[key], list)

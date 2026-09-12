@@ -153,6 +153,12 @@ class Task(Base):
     # stale the moment either file was edited.
     test_answer_fields: Mapped[list[str]] = mapped_column(JsonCol, default=list)
     test_sample_submission: Mapped[str] = mapped_column(Text, default="")
+    # What measured Inference asks the model to do with each answer-free Test
+    # row.  This is distinct from the sample submission (a CSV shape) and from
+    # the model-level chat/tokenizer contract shared with Train.
+    inference_protocol: Mapped[dict[str, Any]] = mapped_column(
+        JsonCol, default=dict, server_default="{}"
+    )
     # Reusable held-out Test metric defaults. Each Run snapshots these values
     # and may override them without mutating the Task. Built-ins leave
     # script/hash blank; custom metrics pin exact managed evaluator bytes.

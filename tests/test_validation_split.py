@@ -1271,6 +1271,45 @@ def test_pipeline_data_payload_does_not_receive_unsettled_validation() -> None:
     assert "answer_fields" not in stamped
 
 
+def test_pipeline_inference_payload_combines_setting_with_task_protocol() -> None:
+    """Task semantics reach Inference without becoming part of Setting identity."""
+    from zevo.api.routers.shared.tickets import _stamp_pipeline_payload
+    from zevo.contracts.task_protocol import default_task_inference_protocol
+
+    protocol = default_task_inference_protocol("Solve each mathematics problem")
+    setting_mapping = {
+        "input_fields": ["question"],
+        "answer_column": "prediction",
+        "batch_size": 4,
+    }
+    run = Run(
+        metric="exact_match", validation_metric="exact_match",
+        validation_metric_direction="max",
+        id="r", task_name="t", mode="full_pipeline",
+        started_at=datetime.now(timezone.utc),
+        holdout={
+            "validation_public": "/task/validation.public.jsonl",
+            "validation_sample_submission": "/task/val_sample.csv",
+        },
+        decision_pins={
+            "inference_config": setting_mapping,
+            "inference_protocol": protocol.model_dump(mode="json"),
+        },
+    )
+
+    stamped = _stamp_pipeline_payload(
+        run=run, agent_id="inference", payload={"operation": "predict"},
+    )
+
+    assert stamped["configuration_pins"]["inference_config"] == {
+        **setting_mapping,
+        **protocol.inference_mapping(),
+    }
+    assert run.decision_pins["inference_config"] == setting_mapping
+    assert stamped["scoring_set"] == "/task/validation.public.jsonl"
+    assert stamped["sample_submission"] == "/task/val_sample.csv"
+
+
 @pytest.mark.asyncio
 async def test_prepared_data_preserves_the_test_derived_validation_contract(
     session_factory, tmp_path: Path,

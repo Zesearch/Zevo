@@ -648,9 +648,16 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
             field: f"<INPUT:{field}>"
             for field in measurement.inference_config["input_fields"]
         }
-        input_text = "\n".join(
-            f"{field}: {value}" for field, value in input_values.items()
-        )
+        if measurement.inference_config.get("task_instruction"):
+            from zevo.contracts.task_protocol import render_task_user_content
+
+            input_text = render_task_user_content(
+                measurement.inference_config, input_values,
+            )
+        else:
+            input_text = "\n".join(
+                f"{field}: {value}" for field, value in input_values.items()
+            )
         if prompt.prompt_framing == "chat" or prompt.prompt_framing.startswith("chat:"):
             template_kwargs = (
                 {"enable_thinking": True}

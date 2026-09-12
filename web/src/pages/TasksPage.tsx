@@ -141,6 +141,11 @@ function TestFiles({
       path: "",
       value: `${t.metric_type} · ${fmtMetric(t.metric)} · ${t.metric_direction}`,
     },
+    {
+      label: "inference protocol",
+      path: "",
+      value: `${t.inference_protocol.source} · ${t.inference_protocol.task_type} · ${t.inference_protocol.response_format}`,
+    },
     { label: "evaluation script", path: t.evaluation_script, value: "" },
     { label: "sample submission", path: t.test_sample_submission, value: "" },
   ].filter((r) => r.path || r.value);

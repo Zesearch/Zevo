@@ -47,6 +47,11 @@ def inference_mapping_contract() -> dict[str, Any]:
             "answer_column": "string",
             "batch_size": "integer >= 1",
             "stop": "list[non-empty string]",
+            "task_instruction": "non-empty string",
+            "user_prompt_template": "non-empty string",
+            "output_instruction": "non-empty string",
+            "response_format": "'plain_text' | 'label' | 'choice' | 'boxed_answer' | 'code'",
+            "answer_parser": "'raw' | 'choice' | 'boxed' | 'regex' | 'code'",
             # Opt-in multiple-choice option scoring. Absent = default free
             # generation. When "option_loglikelihood", predict.py emits per-
             # option log-likelihoods (see playbook/runners/option_scoring.py)
@@ -531,6 +536,30 @@ class InferenceRunConfig(BaseModel):
                 "prompt_example.input_values must preserve measurement.inference_config "
                 "input_fields order"
             )
+        task_instruction = str(
+            self.measurement.inference_config.get("task_instruction") or ""
+        )
+        if task_instruction:
+            from zevo.contracts.task_protocol import render_task_user_content
+
+            expected_user = render_task_user_content(
+                self.measurement.inference_config,
+                dict(self.prompt_example.input_values),
+            )
+            if framing == "chat" or framing.startswith("chat:"):
+                user_messages = [
+                    message.content for message in self.prompt_example.messages
+                    if message.role == "user"
+                ]
+                if user_messages != [expected_user]:
+                    raise ValueError(
+                        "chat prompt_example user turn differs from the frozen "
+                        "Task inference protocol"
+                    )
+            elif expected_user not in self.prompt_example.rendered_prompt:
+                raise ValueError(
+                    "rendered_prompt omits the frozen Task inference protocol"
+                )
         if (framing == "chat" or framing.startswith("chat:")) and not (
             self.chat_template_source and self.chat_template_hash
         ):
