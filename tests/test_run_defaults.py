@@ -305,22 +305,16 @@ async def test_task_evaluation_contract_is_immutable_after_a_run_exists() -> Non
 
 def test_task_contract_contains_no_hidden_setting_or_runtime_defaults() -> None:
     from zevo.api.routers.ui.tasks import TaskBody
+    from pydantic import ValidationError
 
     fields = set(TaskBody.model_fields)
     assert fields == {
         "name", "task_objective", "test_set", "test_answer_fields",
         "test_sample_submission", "metric_type", "evaluation_script",
-        "metric", "metric_direction", "inference_protocol",
+        "metric", "metric_direction",
     }
-    # The ordinary dashboard path deliberately sends only these three values;
-    # create_task resolves the mechanical scoring fields before persistence.
-    draft = TaskBody(
-        name="low-input", task_objective="Classify the sentiment.",
-        test_set="/test.csv",
-    )
-    assert draft.metric == ""
-    assert draft.metric_direction == "max"
-    assert draft.inference_protocol is None
+    with pytest.raises(ValidationError):
+        TaskBody(name="missing-target")
 
 
 def test_setting_contract_has_no_target_override() -> None:

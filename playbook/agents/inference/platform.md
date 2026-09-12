@@ -184,18 +184,6 @@ for multiple-choice option scoring — `scoring_mode` and `option_fields`.
 Use `inference_mapping_contract` as the machine-readable authority for which are
 required and for their value types.
 
-When the mapping carries the Task-owned semantic protocol, it contains all of
-`task_instruction`, `user_prompt_template`, `output_instruction`,
-`response_format`, and `answer_parser`. These values are binding, not advice.
-For every row, render `{input}` as the sole input value when there is one, or as
-newline-separated `field: value` pairs in `input_fields` order when there are
-several; direct `{field_name}` placeholders are also allowed. Join the task
-instruction, rendered row input, and output instruction with blank lines to
-form the user turn. Never substitute `sample_submission.csv` for this protocol:
-the sample defines output columns, not what the model is asked to say. Apply
-`answer_regex`/`answer_parser` to the generated response and write the parsed
-scoring value to the declared prediction column.
-
 ### Multiple-choice option scoring (opt-in)
 
 By default `scoring_mode` is absent and Inference generates a free completion

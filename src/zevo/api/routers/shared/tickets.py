@@ -254,33 +254,13 @@ def _stamp_pipeline_payload(
         return stamped
     if agent_id == "inference":
         stamp_exact("base_model", pins.get("base_model"))
-        setting_mapping = dict(pins.get("inference_config") or {})
-        protocol_value = dict(pins.get("inference_protocol") or {})
-        if protocol_value:
-            from zevo.contracts.task_protocol import TaskInferenceProtocol
-
-            protocol_mapping = TaskInferenceProtocol.model_validate(
-                protocol_value
-            ).inference_mapping()
-            conflicts = sorted(
-                key for key, value in protocol_mapping.items()
-                if key in setting_mapping and setting_mapping[key] != value
-            )
-            if conflicts:
-                raise ValueError(
-                    "Run inference settings conflict with its frozen Task "
-                    f"protocol: {conflicts}"
-                )
-            setting_mapping = {**setting_mapping, **protocol_mapping}
         run_configuration_pins = {
-            **{
-                key: pins[key]
-                for key in (
-                    "prompt_framing", "system_prompt", "decoding_config",
-                )
-                if pins.get(key) not in (None, "", {})
-            },
-            **({"inference_config": setting_mapping} if setting_mapping else {}),
+            key: pins[key]
+            for key in (
+                "prompt_framing", "system_prompt",
+                "inference_config", "decoding_config",
+            )
+            if pins.get(key) not in (None, "", {})
         }
         supplied = dict(stamped.get("configuration_pins") or {})
         conflicts = sorted(

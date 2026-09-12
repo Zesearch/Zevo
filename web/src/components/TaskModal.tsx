@@ -22,11 +22,6 @@ export type TaskRecord = {
   test_set: string;
   test_answer_fields: string[];
   test_sample_submission: string;
-  inference_protocol?: {
-    task_type: string;
-    response_format: string;
-    output_instruction: string;
-  };
   metric_type: "builtin" | "custom";
   evaluation_script: string;
   evaluator_sha256: string;
@@ -35,10 +30,7 @@ export type TaskRecord = {
 };
 
 const cols = (s: string) => s.split(",").map((c) => c.trim()).filter(Boolean);
-const BUILTIN_TASK_METRICS = [
-  "accuracy", "exact_match", "f1", "token_f1", "bleu", "rouge_l",
-  "mc_loglikelihood", "accuracy_norm",
-];
+const BUILTIN_TASK_METRICS = ["accuracy", "exact_match", "f1", "token_f1", "bleu", "rouge_l"];
 
 /** A comma-separated column list, laid out like the file slots beside it. */
 function TextRow({
@@ -99,17 +91,13 @@ export function TaskModal({
   const formComplete = !!(
     name.trim()
     && objective.trim()
+    && metricType
+    && normalizedMetric
+    && metricDirection
     && testSet.trim()
-    && (
-      metricType !== "custom"
-      || (
-        normalizedMetric
-        && metricDirection
-        && cols(answerFields).length
-        && testSampleSubmission.trim()
-        && hasEvaluator
-      )
-    )
+    && cols(answerFields).length
+    && testSampleSubmission.trim()
+    && hasEvaluator
   );
 
   // Reopening always re-seeds: from the row in edit mode, from nothing in
@@ -138,34 +126,31 @@ export function TaskModal({
     try {
       if (!name.trim()) throw new Error("Give the task a name.");
       if (!objective.trim()) throw new Error("Describe what the task should achieve.");
+      if (!metricType) throw new Error("Choose the Test metric type.");
+      if (!metric.trim()) throw new Error("Name the metric produced by the evaluator.");
+      if (!metricDirection) throw new Error("Choose whether the evaluation target is Max or Min.");
       if (!testSet.trim()) throw new Error("Choose the held-out test set.");
-      if (metricType === "custom") {
-        if (!metric.trim()) throw new Error("Name the metric produced by the evaluator.");
-        if (!metricDirection) throw new Error("Choose whether the evaluation target is Max or Min.");
-        if (!cols(answerFields).length) throw new Error("Name at least one test answer field.");
-        if (!testSampleSubmission.trim()) throw new Error("Choose the test sample submission.");
-        if (!hasEvaluator) throw new Error("Choose the custom evaluation script.");
-      }
+      if (!cols(answerFields).length) throw new Error("Name at least one test answer field.");
+      if (!testSampleSubmission.trim()) throw new Error("Choose the test sample submission.");
+      if (!hasEvaluator) throw new Error(
+        metricType === "custom"
+          ? "Choose the custom evaluation script."
+          : "Choose one of Zevo's built-in metrics.",
+      );
       // `name` is never sent in edit mode: it is the key runs reference.
       const url = editing ? `/tasks/${encodeURIComponent(task!.name)}` : "/tasks";
-      const advanced = editing || metricType || metric.trim() || metricDirection
-        || answerFields.trim() || testSampleSubmission.trim() || evaluationScript.trim();
       await api(url, {
         method: editing ? "PATCH" : "POST",
         body: JSON.stringify({
           ...(editing ? {} : { name: name.trim() }),
           task_objective: objective.trim(),
           test_set: testSet.trim(),
-          ...(advanced ? {
-            ...(cols(answerFields).length ? { test_answer_fields: cols(answerFields) } : {}),
-            ...(testSampleSubmission.trim()
-              ? { test_sample_submission: testSampleSubmission.trim() } : {}),
-            ...(metricType ? { metric_type: metricType } : {}),
-            ...(metricType === "custom"
-              ? { evaluation_script: evaluationScript.trim() } : {}),
-            ...(metric.trim() ? { metric: metric.trim() } : {}),
-            ...(metricDirection ? { metric_direction: metricDirection } : {}),
-          } : {}),
+          test_answer_fields: cols(answerFields),
+          test_sample_submission: testSampleSubmission.trim(),
+          metric_type: metricType,
+          evaluation_script: metricType === "custom" ? evaluationScript.trim() : "",
+          metric: metric.trim(),
+          metric_direction: metricDirection,
         }),
       });
       onSaved();
@@ -200,25 +185,8 @@ export function TaskModal({
         </div>
 
         <div>
-          <label className={head}>Test set</label>
-          <FileSlot label="Held-out data" required tag={false} value={testSet} onChange={setTestSet}
-            hint="Zevo infers the answer field, output schema, metric, and inference protocol" />
-          <p className="mt-2 text-2xs leading-relaxed text-slate-500">
-            Zevo inspects the schema and freezes a reproducible prompt and scoring contract.
-            You only need Advanced when the answer column is ambiguous or the task uses a custom scorer.
-          </p>
-        </div>
-
-        <details className="rounded-md border border-hair bg-white/[0.015] p-3">
-          <summary className="cursor-pointer select-none font-mono text-xs uppercase tracking-[0.12em] text-slate-400">
-            Advanced evaluation contract
-            {editing && task?.inference_protocol?.task_type
-              ? ` · ${task.inference_protocol.task_type}` : ""}
-          </summary>
-          <div className="mt-4 space-y-4">
-            <div>
-              <label className={head}>Test metric contract</label>
-              <div className="space-y-3">
+          <label className={head}>Test metric contract</label>
+          <div className="space-y-3">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div>
                 <div className="field-label mb-1">Type</div>
@@ -231,7 +199,6 @@ export function TaskModal({
                     if (next === "builtin") setEvaluationScript("");
                   }}
                   options={[
-                    { value: "", label: "Auto" },
                     { value: "builtin", label: "Built-in" },
                     { value: "custom", label: "Custom" },
                   ]}
@@ -282,35 +249,23 @@ export function TaskModal({
                 value={evaluationScript} onChange={setEvaluationScript}
                 hint="Frozen for held-out Test and run only after predictions match the Test sample submission" />
             )}
-              </div>
-            </div>
-
-            <div>
-              <label className={head}>Data contract overrides</label>
-              <div className="space-y-3">
-                <TextRow label="Test answer fields" value={answerFields} onChange={setAnswerFields}
-                  placeholder="Auto, or answer, gold"
-                  hint="Zevo detects conventional answer columns automatically." />
-                <FileSlot label="Test sample submission" tag={false} value={testSampleSubmission}
-                  onChange={setTestSampleSubmission}
-                  hint="Optional; Zevo normally creates id,prediction from the Test schema" />
-              </div>
-            </div>
-
-            {editing && task?.inference_protocol && (
-              <div className="rounded-md border border-hair bg-canvas p-3">
-                <div className="field-label mb-2">Resolved inference protocol</div>
-                <div className="grid gap-2 font-mono text-2xs text-slate-400 sm:grid-cols-2">
-                  <span>type: <span className="text-slate-200">{task.inference_protocol.task_type}</span></span>
-                  <span>response: <span className="text-slate-200">{task.inference_protocol.response_format}</span></span>
-                </div>
-                <p className="mt-2 text-2xs leading-relaxed text-slate-500">
-                  {task.inference_protocol.output_instruction}
-                </p>
-              </div>
-            )}
           </div>
-        </details>
+        </div>
+
+        <div>
+          {/* The held-out specification, and nothing else: how the task is
+              ATTACKED (training data, model, method, budgets) is a setting. */}
+          <label className={head}>Test setup</label>
+          <div className="space-y-3">
+            <FileSlot label="Test set" required tag={false} value={testSet} onChange={setTestSet}
+              hint="scored by the harness alone, never by the loop" />
+            <TextRow label="Test answer fields" value={answerFields} onChange={setAnswerFields}
+              placeholder="answer, gold"
+              hint="where the ground truth lives in the test set: a column of a CSV, a key of a JSON record. Dropped to make the copy inference sees." />
+            <FileSlot label="Test sample submission" required tag={false} value={testSampleSubmission} onChange={setTestSampleSubmission}
+              hint="prediction columns, order, and example formatting; the example row count need not match Test" />
+          </div>
+        </div>
 
         {error && (
           <div className="rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-2xs text-coral-300">
