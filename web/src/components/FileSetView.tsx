@@ -123,7 +123,7 @@ export function FileSetView({
               </div>
             ))}
           </div>
-          <div className="mt-1.5 flex flex-wrap gap-1.5">
+          <div className="mt-1.5 grid min-w-0 gap-1.5 sm:grid-cols-2">
             {/* Not on disk, but still a file of this dataset. Marked the same
                 way a selected local file is when that is the one you came in
                 for: arriving at a bundle of six and having to work out which
@@ -144,13 +144,13 @@ export function FileSetView({
                 // stored is already said by the HF/URL mark it carries; saying
                 // it again in the border only made one row of one list look
                 // like a different kind of control.
-                className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-2xs transition ${
+                className={`flex min-w-0 max-w-full items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-2xs transition ${
                   picked
                     ? "border-brass-500/40 bg-brass-500/15 text-brass-300"
                     : "border-hair bg-raised text-slate-300 hover:text-ink"
                 }`}
               >
-                {r.id}
+                <span className="min-w-0 truncate">{r.id}</span>
                 {/* The split is what tells two entries of one repo apart. */}
                 <span className="text-slate-500">
                   {r.config ? `${r.config}/` : ""}{r.split || "train"}
@@ -189,7 +189,11 @@ export function FileSetView({
 
       {/* Plain text: it is a sentence about the dataset, not a callout. */}
       {preview && preview.notes && (
-        <p className="mt-3 text-2xs leading-relaxed text-slate-400">{preview.notes}</p>
+        <p className="mt-3 text-2xs leading-relaxed text-slate-400">
+          {preview.kind === "empty" && (ds?.source?.remote.length ?? 0) > 0
+            ? `${ds?.source?.remote.length} remote sources. They are fetched at run time; choose a source above to open it.`
+            : preview.notes}
+        </p>
       )}
 
       {tabular && preview && (

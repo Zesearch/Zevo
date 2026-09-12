@@ -47,7 +47,7 @@ function RestartNotice() {
       <span className="min-w-0 text-sm leading-relaxed">
         Credential changes require a restart. A Default compute change applies
         to the next Run immediately.
-        <span className="mt-1 block max-w-full overflow-x-auto whitespace-nowrap font-mono text-xs font-semibold text-slate-200">
+        <span className="mt-1 block max-w-full break-words font-mono text-xs font-semibold text-slate-200">
           docker compose up -d --force-recreate backend scheduler holdout-scheduler
         </span>
       </span>

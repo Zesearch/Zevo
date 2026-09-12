@@ -390,21 +390,21 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
             </summary>
             <dl className="mt-2 grid min-w-0 gap-x-3 gap-y-1.5 border-l border-hair pl-3 font-mono text-2xs sm:grid-cols-[8.5rem_minmax(0,1fr)]">
               <dt className="text-slate-500">SSH host</dt>
-              <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.username}@{h.host}:{h.port}</dd>
+              <dd className="min-w-0 break-all text-slate-400">{h.username}@{h.host}:{h.port}</dd>
               <dt className="text-slate-500">Remote directory</dt>
-              <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.remote_dir}</dd>
+              <dd className="min-w-0 break-all text-slate-400">{h.remote_dir}</dd>
               <dt className="text-slate-500">Environment</dt>
-              <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.env_setup}</dd>
+              <dd className="min-w-0 whitespace-pre-wrap break-words text-slate-400">{h.env_setup}</dd>
               {h.category === "cluster" && <>
                 <dt className="text-slate-500">Container image</dt>
-                <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.container_image || "Not set"}</dd>
+                <dd className="min-w-0 break-all text-slate-400">{h.container_image || "Not set"}</dd>
               </>}
               <dt className="text-slate-500">Infrastructure Skill</dt>
-              <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.skill_path || "Not set"}</dd>
+              <dd className="min-w-0 break-all text-slate-400">{h.skill_path || "Not set"}</dd>
               {h.authentication === "private_key" ? (
                 <>
                   <dt className="text-slate-500">Private key</dt>
-                  <dd className="min-w-0 overflow-x-auto whitespace-nowrap pb-3 text-slate-400">{h.private_key_uploaded ? "uploaded · stored by Zevo" : h.private_key_path}</dd>
+                  <dd className="min-w-0 break-all text-slate-400">{h.private_key_uploaded ? "uploaded · stored by Zevo" : h.private_key_path}</dd>
                 </>
               ) : (
                 <>

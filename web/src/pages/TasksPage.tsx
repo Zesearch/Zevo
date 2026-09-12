@@ -1,7 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
-import { Folder, ListChecks, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { ChevronRight, Folder, ListChecks, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { TaskModal } from "../components/TaskModal";
 import { TaskSettingHistory } from "../components/TaskSettings";
 import { FileSetView } from "../components/FileSetView";
@@ -104,23 +104,18 @@ function TestFiles({
   t, onPeek,
 }: { t: TaskSummary; onPeek: (name: string, file: string) => void }) {
   const [open, setOpen] = useState(false);
+  const [selectedBenchmark, setSelectedBenchmark] = useState<number | null>(null);
+  const suite = t.test_sets ?? [];
 
-  /** `ifeval-eval/test.csv`, plus the dataset it belongs to when it has one.
-   *
-   *  The folder used to sit on its own line above the files, which read fine
-   *  until a task drew its files from two datasets and the rows underneath
-   *  stopped saying which was which. Qualifying each path says it once, where
-   *  it is needed. */
   const fileRow = (path: string) => {
     if (!path) return null;
     const inCatalogue = splitDatasetPath(path);
     if (inCatalogue) {
-      // `folder` is the DATASET, and `file` its path inside — which is what the
-      // preview is opened with, so a file in a subfolder has to keep the
-      // subfolder in it.
       return {
-        file: inCatalogue.file, folder: inCatalogue.dataset,
-        packaged: true, label: inCatalogue.label,
+        file: inCatalogue.file,
+        folder: inCatalogue.dataset,
+        packaged: true,
+        label: inCatalogue.label,
       };
     }
     const parts = path.replace(/\/+$/, "").split("/");
@@ -129,67 +124,219 @@ function TestFiles({
     return { file, folder, packaged: false, label: folder ? `${folder}/${file}` : file };
   };
 
-  const rows = (t.test_sets ?? []).flatMap((item) => [
-    { label: item.name, path: item.test_set, value: "" },
-    { label: `${item.name} · inference`, path: "", value: item.inference_query },
-    { label: `${item.name} · answers`, path: "", value: item.answer_fields.join(", ") },
+  const benchmarkName = (name: string) => {
+    const parts = name.split("·");
+    return parts.length > 1 ? parts.slice(1).join("·").trim() : name;
+  };
+
+  const PathValue = ({
+    path, peek = false, display,
+  }: {
+    path: string;
+    peek?: boolean;
+    display?: string;
+  }) => {
+    const f = fileRow(path);
+    if (!f) return <span className="text-slate-600">—</span>;
+    const managedFile = path.startsWith("/app/data/uploads/")
+      || path.startsWith("/app/data/evaluators/");
+    const shown = display || (managedFile ? path.split("/").pop() || f.label : f.label);
+    if (peek && f.packaged) {
+      return (
+        <button
+          type="button"
+          onClick={(event) => { event.stopPropagation(); onPeek(f.folder, f.file); }}
+          title={path}
+          className="flex min-w-0 max-w-full items-start gap-1 text-left text-slate-300 transition hover:text-brass-300 hover:underline"
+        >
+          <Folder size={10} className="mt-0.5 shrink-0 text-slate-500" />
+          <span className="min-w-0 break-all font-mono text-2xs">{shown}</span>
+        </button>
+      );
+    }
+    return (
+      <span title={path} className="break-all font-mono text-2xs text-slate-300">
+        {shown}
+      </span>
+    );
+  };
+
+  if (!suite.length) {
+    return <span className="font-mono text-xs text-slate-600">none given</span>;
+  }
+
+  if (suite.length > 1) {
+    return (
+      <div className="min-w-0 rounded-md border border-hair bg-canvas p-2.5">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <span className="font-mono text-xs text-slate-100">{suite.length} benchmarks</span>
+          <span className="font-mono text-2xs text-slate-500">
+            {fmtMetric(t.metric)} {t.metric_direction === "min" ? "↓" : "↑"}
+          </span>
+        </div>
+
+        {open && (
+          <div className="mt-2 max-h-[28rem] space-y-1 overflow-y-auto pr-1">
+            {suite.map((member, index) => {
+              const f = fileRow(member.test_set);
+              const selected = selectedBenchmark === index;
+              return (
+                <div key={`${member.name}:${index}`} className="min-w-0 rounded border border-hair/70 bg-raised/35">
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSelectedBenchmark(selected ? null : index);
+                    }}
+                    className="grid w-full min-w-0 grid-cols-[1.25rem_minmax(0,1fr)_auto] items-start gap-1.5 px-2 py-1.5 text-left transition hover:bg-raised"
+                  >
+                    <span className="pt-px text-right font-mono text-[0.6rem] text-slate-600">
+                      {index + 1}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate font-mono text-2xs text-slate-200" title={benchmarkName(member.name)}>
+                        {benchmarkName(member.name)}
+                      </span>
+                      <span className="block truncate font-mono text-[0.6rem] text-slate-500" title={member.test_set}>
+                        {f?.label ?? member.test_set}
+                      </span>
+                    </span>
+                    <ChevronRight
+                      size={12}
+                      className={`mt-1 shrink-0 text-slate-500 transition-transform ${selected ? "rotate-90" : ""}`}
+                    />
+                  </button>
+
+                  {selected && (
+                    <div className="space-y-3 border-t border-hair px-2.5 py-2.5">
+                      <div>
+                        <div className="table-label">Test set</div>
+                        <div className="mt-1"><PathValue path={member.test_set} peek /></div>
+                      </div>
+
+                      <div>
+                        <div className="table-label">Inference query</div>
+                        <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-slate-300">
+                          {member.inference_query || "not set"}
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="min-w-0 rounded border border-hair bg-canvas/60 p-2">
+                          <div className="table-label">Metric</div>
+                          <div className="mt-1 break-words font-mono text-2xs text-slate-200">
+                            {fmtMetric(member.metric)} · {member.metric_type === "custom" ? "custom" : "built-in"}
+                          </div>
+                        </div>
+                        <div className="min-w-0 rounded border border-hair bg-canvas/60 p-2">
+                          <div className="table-label">Target</div>
+                          <div className="mt-1 font-mono text-2xs text-slate-200">
+                            {member.metric_direction === "min" ? "Minimize ↓" : "Maximize ↑"}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="table-label">Answer fields</div>
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {member.answer_fields.map((field) => (
+                            <span key={field} className="rounded border border-hair bg-canvas/60 px-1.5 py-0.5 font-mono text-[0.62rem] text-slate-300">
+                              {field}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      {member.metric_type === "custom" && member.evaluation_script && (
+                        <div>
+                          <div className="table-label">Evaluation script</div>
+                          <div className="mt-1">
+                            <PathValue path={member.evaluation_script} display="Python scorer (.py)" />
+                          </div>
+                          {member.evaluator_sha256 && (
+                            <div className="mt-1 truncate font-mono text-[0.58rem] text-slate-600" title={member.evaluator_sha256}>
+                              sha256 {member.evaluator_sha256}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <div>
+                        <div className="table-label">Sample submission</div>
+                        <div className="mt-1"><PathValue path={member.sample_submission} /></div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setOpen((value) => !value);
+            setSelectedBenchmark(null);
+          }}
+          className="mt-2 font-mono text-2xs text-slate-500 transition hover:text-brass-300"
+        >
+          {open ? "hide benchmarks" : "show benchmarks"}
+        </button>
+      </div>
+    );
+  }
+
+  const item = suite[0];
+  const rows = [
+    { label: "data", path: item.test_set, value: "" },
+    { label: "inference query", path: "", value: item.inference_query },
+    { label: "answer fields", path: "", value: item.answer_fields.join(", ") },
     {
-      label: `${item.name} · metric`,
+      label: "metric",
       path: "",
       value: `${fmtMetric(item.metric)} · ${item.metric_type === "custom" ? "custom" : "built-in"} · ${item.metric_direction}`,
     },
     ...(item.metric_type === "custom" ? [{
-      label: `${item.name} · evaluator`, path: item.evaluation_script, value: "",
+      label: "evaluator", path: item.evaluation_script, value: "",
     }] : []),
-    { label: `${item.name} · submission`, path: item.sample_submission, value: "" },
-  ]).filter((r) => r.path || r.value);
-
-  if (!rows.length) return <span className="font-mono text-xs text-slate-600">none given</span>;
+    { label: "submission", path: item.sample_submission, value: "" },
+  ].filter((row) => row.path || row.value);
   const [first, ...rest] = rows;
 
   const Row = ({ label, path, value }: { label: string; path: string; value: string }) => {
     const f = fileRow(path);
     return (
-      <div className="flex min-w-0 items-baseline gap-2">
-        <span className="w-[11.5rem] shrink-0 whitespace-nowrap font-mono text-2xs text-slate-100">{label}</span>
+      <div className="grid min-w-0 grid-cols-[7rem_minmax(0,1fr)] items-baseline gap-2">
+        <span className="whitespace-nowrap font-mono text-2xs text-slate-100">{label}</span>
         {f ? (
-          <span className="flex min-w-0 items-baseline gap-1">
-            {/* Only a catalogued file gets the mark: it says "this one you can
-                go and open", which is not true of a path typed by hand. */}
-            {f.packaged && <Folder size={11} className="shrink-0 translate-y-px text-slate-500" />}
-            {f.packaged ? (
-              <button
-                onClick={(e) => { e.stopPropagation(); onPeek(f.folder, f.file); }}
-                title={path}
-                className="min-w-0 truncate font-mono text-2xs text-slate-300 transition hover:text-brass-300 hover:underline"
-              >
-                {f.label}
-              </button>
-            ) : (
-              <span title={path} className="min-w-0 truncate font-mono text-2xs text-slate-300">{f.label}</span>
-            )}
-          </span>
+          f.packaged ? (
+            <button
+              onClick={(event) => { event.stopPropagation(); onPeek(f.folder, f.file); }}
+              title={path}
+              className="flex min-w-0 items-baseline gap-1 text-slate-300 transition hover:text-brass-300 hover:underline"
+            >
+              <Folder size={11} className="shrink-0 translate-y-px text-slate-500" />
+              <span className="min-w-0 truncate font-mono text-2xs">{f.label}</span>
+            </button>
+          ) : (
+            <span title={path} className="min-w-0 truncate font-mono text-2xs text-slate-300">{f.label}</span>
+          )
         ) : (
-          <span className="min-w-0 truncate font-mono text-2xs text-slate-300">{value}</span>
+          <span title={value} className="min-w-0 truncate font-mono text-2xs text-slate-300">{value}</span>
         )}
       </div>
     );
   };
 
   return (
-    // A box rather than an indent. The rows had to read as the contents of TEST
-    // FILES and not as another section of the card, and indenting them bought
-    // that by pushing them out of line with everything else on the card. The
-    // box says the same thing while keeping its own left edge where the rest of
-    // the card's is, and the darker fill separates it from the card behind it.
     <div className="min-w-0 space-y-1 rounded-md border border-hair bg-canvas p-2.5">
       <Row {...first} />
-      <div className={`space-y-1 ${open ? "" : "hidden"}`}>
-        {rest.map((r) => <Row key={r.label} {...r} />)}
-      </div>
+      {open && <div className="space-y-1">{rest.map((row) => <Row key={row.label} {...row} />)}</div>}
       {rest.length > 0 && (
         <button
-          onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+          onClick={(event) => { event.stopPropagation(); setOpen((value) => !value); }}
           className="font-mono text-2xs text-slate-500 transition hover:text-brass-300"
         >
           {open ? "show less" : `show ${rest.length} more`}
@@ -443,19 +590,12 @@ export function TasksPage() {
       )}
 
       {/* A task opened: what it is, and the settings it has been attacked
-          with. A dialog rather than an expanding card — a card that grows to
-          five times its height reflows every card beside it. Wide, because a
-          setting is six decisions and they belong on one line. */}
+          with. Each setting groups related decisions into responsive cards, so
+          the dialog remains readable without horizontal scrolling. */}
       <Modal
         open={!!detail}
         title={detail ?? ""}
-        // Wider than the 7xl the other dialogs use: a setting row carries two
-        // file columns now, and validation's opens into four lines of its own.
-        // At 7xl the extra width came out of the training column, which then
-        // truncated the dataset name. Not wider than the columns need, though:
-        // the surplus went to the widest one, and validation ended up with a
-        // hand's width of nothing between it and the model.
-        width="max-w-[95rem]"
+        width="max-w-7xl"
         onClose={() => { setAddingSetting(false); setDetail(null); }}
       >
         {opened && (
