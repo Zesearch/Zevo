@@ -283,6 +283,15 @@ async def test_task_evaluation_contract_is_immutable_after_a_run_exists() -> Non
         db.add(Task(
             name="stable-task",
             task_objective="stable objective",
+            test_sets=[{
+                "name": "quality",
+                "test_set": "/test.jsonl",
+                "inference_query": "Answer {input}.",
+                "sample_submission": "/sample.jsonl",
+                "metric": "accuracy",
+                "answer_fields": ["answer"],
+                "metric_direction": "max",
+            }],
             test_set="/test.jsonl",
             test_answer_fields=["answer"],
             test_sample_submission="/sample.jsonl",
@@ -296,7 +305,16 @@ async def test_task_evaluation_contract_is_immutable_after_a_run_exists() -> Non
 
         with pytest.raises(HTTPException) as exc:
             await update_task(
-                "stable-task", TaskPatch(metric="token_f1"), db=db,
+                "stable-task",
+                TaskPatch(test_sets=[{
+                    "name": "quality",
+                    "test_set": "/test.jsonl",
+                    "inference_query": "Answer {input}.",
+                    "sample_submission": "/sample.jsonl",
+                    "metric": "token_f1",
+                    "answer_fields": ["answer"],
+                }]),
+                db=db,
             )
         assert exc.value.status_code == 409
         assert "evaluation contract is immutable" in str(exc.value.detail)
@@ -308,11 +326,7 @@ def test_task_contract_contains_no_hidden_setting_or_runtime_defaults() -> None:
     from pydantic import ValidationError
 
     fields = set(TaskBody.model_fields)
-    assert fields == {
-        "name", "task_objective", "test_set", "test_answer_fields",
-        "test_sample_submission", "metric_type", "evaluation_script",
-        "metric", "metric_direction",
-    }
+    assert fields == {"name", "task_objective", "test_sets"}
     with pytest.raises(ValidationError):
         TaskBody(name="missing-target")
 
@@ -486,8 +500,8 @@ async def test_validation_carve_preserves_source_pin_and_initializes_governance(
 
 
 @pytest.mark.asyncio
-async def test_predefined_task_test_metric_can_be_overridden_for_one_run(tmp_path, monkeypatch) -> None:
-    """A Task supplies defaults without locking one Run's Test scorer."""
+async def test_predefined_task_test_suite_cannot_be_overridden_for_one_run(tmp_path, monkeypatch) -> None:
+    """A Task owns its Test suite; a launch controls only optimization settings."""
     monkeypatch.setenv("ZEVO_WORK_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("ZEVO_EVALUATORS_ROOT", str(tmp_path / "evaluators"))
     evaluator = tmp_path / "benchmark_average.py"
@@ -513,9 +527,18 @@ async def test_predefined_task_test_metric_can_be_overridden_for_one_run(tmp_pat
         db.add(Task(metric="accuracy",
             name="lower-is-better",
             task_objective="Reduce the benchmark error.",
-            metric_direction="min",
-            test_set="/data/test.csv", test_answer_fields=["answer"],
-            test_sample_submission="/data/sample.csv",
+            metric_direction="max",
+            test_sets=[{
+                "name": "fixed-test",
+                "test_set": str(test_set),
+                "inference_query": "Return the answer for {question}.",
+                "sample_submission": str(test_sample),
+                "metric": "accuracy",
+                "answer_fields": ["answer"],
+                "metric_direction": "max",
+            }],
+            test_set=str(test_set), test_answer_fields=["answer"],
+            test_sample_submission=str(test_sample),
         ))
         await db.commit()
 
@@ -539,18 +562,19 @@ async def test_predefined_task_test_metric_can_be_overridden_for_one_run(tmp_pat
         ), db)
         run = await db.get(Run, response.run_id)
         assert run is not None
-        assert run.metric == "benchmark_average"
+        assert run.metric == "accuracy"
         assert run.metric_direction == "max"
-        assert run.holdout["test_metric_type"] == "custom"
-        assert run.holdout["test_evaluation_script"] != str(evaluator)
-        assert run.holdout["test_evaluator_sha256"]
+        assert run.holdout["test_sets"][0]["name"] == "fixed-test"
+        assert run.holdout["test_sets"][0]["metric"] == "accuracy"
+        assert run.holdout["test_metric_type"] == "builtin"
+        assert run.holdout["test_evaluation_script"] == ""
 
         # The reusable Task remains the default for later launches.
         task = await db.get(Task, "lower-is-better")
         assert task is not None
         assert task.metric_type == "builtin"
         assert task.metric == "accuracy"
-        assert task.metric_direction == "min"
+        assert task.metric_direction == "max"
 
     await engine.dispose()
 
@@ -576,12 +600,12 @@ async def test_saving_first_custom_setting_creates_task_and_setting(tmp_path, mo
 
     request = _request().model_copy(update={
         "task_objective": "Answer the benchmark questions.",
-        "metric_direction": "min",
+        "metric_direction": "max",
         "test_set": "/data/test.csv",
         "test_answer_fields": ["answer"],
         "test_sample_submission": "/data/sample.csv",
-        "metric_type": "custom",
-        "evaluation_script": str(evaluator),
+        "metric_type": "builtin",
+        "evaluation_script": "",
     })
     async with Session() as db:
         db.add(Agent(
@@ -605,12 +629,13 @@ async def test_saving_first_custom_setting_creates_task_and_setting(tmp_path, mo
         )).scalars().all()
         assert task is not None
         assert task.task_objective == "Answer the benchmark questions."
-        assert task.evaluation_script.endswith(".py")
-        assert len(task.evaluator_sha256) == 64
-        assert task.metric_direction == "min"
+        assert task.evaluation_script == ""
+        assert task.evaluator_sha256 == ""
+        assert task.metric_direction == "max"
+        assert task.test_sets[0]["inference_query"] == "Answer the benchmark questions."
         run = await db.get(Run, response.run_id)
         assert run is not None
-        assert run.metric_direction == "min"
+        assert run.metric_direction == "max"
         assert run.task_objective == "Answer the benchmark questions."
         assert run.agent_objective.startswith("Answer the benchmark questions. ")
         assert "NO training set is provided" in run.agent_objective

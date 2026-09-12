@@ -45,12 +45,26 @@ def _stub_data(payload: dict, work_dir: Path) -> BaseModel:
     prepare_script = work_dir / "prepare_data.py"
     prepare_script.write_text("# deterministic stub data preparation\n", encoding="utf-8")
     if operation == "prepare_holdout_data":
+        from zevo.contracts.data import InferenceDataProfile
+
         public = work_dir / "scoring_public.csv"
         public.write_text("id,instruction\n1,stub question\n", encoding="utf-8")
+        profile = work_dir / "inference_data_profile.json"
+        profile.write_text(InferenceDataProfile(
+            n_rows=1,
+            task_shape="single text instruction",
+            record_fields={"id": "string", "instruction": "string"},
+            input_fields=["instruction"],
+            answer_fields_removed=list(payload.get("answer_fields") or ["answer"]),
+            submission_columns=["id", "prediction"],
+            prediction_encoding="plain text",
+            stable_ids_present=True,
+        ).model_dump_json(indent=2), encoding="utf-8")
         return DataResult(
             status="succeeded", operation=operation,
             ticket_id=payload.get("ticket_id", "data-holdout-stub"),
             scoring_public_path=str(public),
+            inference_data_profile_path=str(profile),
             prepare_script_path=str(prepare_script),
             error_message="", notes="stub questions-only held-out copy",
         )
@@ -648,9 +662,15 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
             field: f"<INPUT:{field}>"
             for field in measurement.inference_config["input_fields"]
         }
-        input_text = "\n".join(
-            f"{field}: {value}" for field, value in input_values.items()
-        )
+        query = str(measurement.inference_config.get("inference_query") or "")
+        if query:
+            from zevo.contracts.prompting import render_inference_query
+
+            input_text = render_inference_query(query, input_values)
+        else:
+            input_text = "\n".join(
+                f"{field}: {value}" for field, value in input_values.items()
+            )
         if prompt.prompt_framing == "chat" or prompt.prompt_framing.startswith("chat:"):
             template_kwargs = (
                 {"enable_thinking": True}

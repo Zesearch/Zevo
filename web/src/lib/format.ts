@@ -3,7 +3,7 @@
 const PERCENTAGE_SCORE_METRICS = new Set([
   "accuracy", "exact_match", "em", "f1", "f1_micro", "f1_macro", "token_f1",
   "precision", "recall", "bleu", "rouge", "rouge_l", "pass_rate", "win_rate",
-  "pass@1", "pass_at_1",
+  "pass@1", "pass_at_1", "mc_loglikelihood", "accuracy_norm", "suite_average",
 ]);
 
 export function isPercentageMetric(metric: string | null | undefined): boolean {

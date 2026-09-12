@@ -153,11 +153,12 @@ function operationCaption(t: {
   iteration?: number;
   operation?: string;
   model_source?: string;
+  test_set_name?: string;
 }, heartbeatOperation = "", activationPhase = ""): string {
   const op = heartbeatOperation || t.operation || "";
   const phase = activationPhase.trim().toLowerCase();
   const inferenceName = t.lane === "held_out_test"
-    ? "Held-Out Inference"
+    ? `Held-Out Inference${t.test_set_name ? ` · ${t.test_set_name}` : ""}`
     : t.model_source === "base_model"
       ? "Baseline Inference"
       : "Candidate Inference";
@@ -191,10 +192,12 @@ function operationCaption(t: {
   const labels: Record<string, string> = {
     provision: "Provision compute",
     prepare_run_data: "Prepare Run data and Validation setup",
-    prepare_holdout_data: "Prepare questions-only held-out data",
+    prepare_holdout_data: `Prepare questions-only held-out data${
+      t.test_set_name ? ` · ${t.test_set_name}` : ""
+    }`,
     train: "Select config and train candidate",
     run_inference: t.lane === "held_out_test"
-      ? "Run held-out inference"
+      ? `Run held-out inference${t.test_set_name ? ` · ${t.test_set_name}` : ""}`
       : t.model_source === "base_model"
         ? "Run Baseline Inference"
         : "Run Candidate Inference",
@@ -203,7 +206,7 @@ function operationCaption(t: {
   if (labels[op]) return labels[op];
   if (agentIdOf(t) === "evaluation") {
     return t.lane === "held_out_test"
-      ? "Run held-out evaluator via Bash"
+      ? `Run held-out evaluator via Bash${t.test_set_name ? ` · ${t.test_set_name}` : ""}`
       : "Run validation evaluator via Bash";
   }
   if (agentIdOf(t) === "registry") return "Select and save the best model";
@@ -1086,6 +1089,22 @@ export function RunDetailPage() {
 
   const live = !["success", "degraded", "failed", "halted", "cancelled"].includes(run.status);
   const stations = stationsFrom(run, wakesByTicket);
+  const measuredCandidates = (run.history ?? []).filter(
+    (entry) => entry.test_scores && Object.keys(entry.test_scores).length > 1,
+  );
+  const trainedCandidates = measuredCandidates.filter((entry) => entry.source !== "baseline");
+  const championCandidates = trainedCandidates.length ? trainedCandidates : measuredCandidates;
+  const championBreakdown = championCandidates.reduce<
+    (typeof championCandidates)[number] | undefined
+  >(
+    (best, entry) => {
+      if (!best) return entry;
+      return run.validation_metric_direction === "min"
+        ? entry.score < best.score ? entry : best
+        : entry.score > best.score ? entry : best;
+    },
+    undefined,
+  );
 
   return (
     <div className="w-full px-[max(1.5rem,1.5vw)] py-8">
@@ -1167,6 +1186,18 @@ export function RunDetailPage() {
                   bounded={isPercentageMetric(run.metric)}
                 />
               </div>
+              {championBreakdown?.test_scores && (
+                <div className="mx-auto mt-2 w-full max-w-[15rem] divide-y divide-hair border-y border-hair">
+                  {Object.entries(championBreakdown.test_scores).map(([name, value]) => (
+                    <div key={name} className="flex items-center justify-between gap-3 py-1.5 font-mono text-2xs">
+                      <span className="min-w-0 truncate text-slate-400" title={name}>{name}</span>
+                      <span className="shrink-0 tabular-nums text-phosphor-300">
+                        {fmtScore(value, championBreakdown.test_metrics?.[name] ?? "")}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-x-6 gap-y-5 pt-5 sm:col-span-2 sm:pl-6 sm:pt-0">

@@ -330,6 +330,7 @@ class DataPayload(StoredPayload):
     # objective and optional hints; every other operation leaves these empty.
     task_objective: str = ""
     test_query: str = ""
+    test_set_name: str = ""
     constraints: list[str] = Field(default_factory=list)
     dataset_source: str = ""
     dataset: str = ""
@@ -378,6 +379,7 @@ class DataPayload(StoredPayload):
                 self.dataset_config, self.data_query, self.training_method, self.scoring_set,
                 self.answer_fields, self.metric, self.evaluation_script,
                 self.evaluator_sha256, self.sample_submission,
+                self.test_set_name,
                 self.configuration_suggestions, self.configuration_pins,
                 self.data_intent_signature,
             )) or self.recipe_intent != DataRecipeIntent() or (
@@ -410,6 +412,7 @@ class DataPayload(StoredPayload):
                 raise ValueError("data_intent_signature does not match the stored recipe intent")
             self.data_intent_signature = expected_signature
             leaked = {
+                "test_set_name": self.test_set_name,
                 "scoring_set": self.scoring_set,
                 "answer_fields": self.answer_fields,
                 "metric": self.metric,
@@ -480,9 +483,11 @@ class DataPayload(StoredPayload):
             self.validation_policy != "supplied"
             or not self.scoring_set
             or not self.answer_fields
+            or not self.test_set_name.strip()
         ):
             raise ValueError(
-                "prepare_holdout_data requires a supplied scoring set and answer fields"
+                "prepare_holdout_data requires test_set_name, a supplied scoring "
+                "set, and answer fields"
             )
         self.training_method = self.training_method.strip().lower()
         return self
@@ -586,6 +591,7 @@ class InferencePayload(StoredPayload):
     configuration_pins: dict[str, Any] = Field(default_factory=dict)
     scoring_set: str = Field(min_length=1)
     sample_submission: str = Field(min_length=1)
+    test_set_name: str = ""
 
     @model_validator(mode="after")
     def validate_closed_inference_configuration(self) -> "InferencePayload":
@@ -632,6 +638,7 @@ class EvaluationPayload(StoredPayload):
     evaluator_sha256: str = Field("", pattern=r"^(?:|[0-9a-f]{64})$")
     answer_fields: list[str] = Field(min_length=1)
     sample_submission: str = Field(min_length=1)
+    test_set_name: str = ""
 
 
 class RegistryPayload(StoredPayload):

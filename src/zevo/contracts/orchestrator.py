@@ -68,6 +68,77 @@ VERIFIABLE_REWARD_METRICS = frozenset({
 })
 
 
+class TaskTestSet(BaseModel):
+    """One independently prompted and scored member of a Task's Test suite."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    test_set: str = Field(min_length=1)
+    inference_query: str = Field(min_length=1)
+    # Empty exists only for the scalar pre-suite Run projection. New Task
+    # suites validate this as required in ``validate_test_suite`` below.
+    sample_submission: str = ""
+    metric: str = Field(min_length=1, max_length=64)
+    answer_fields: list[str] = Field(min_length=1)
+    metric_direction: Literal["max", "min"] = "max"
+
+    @model_validator(mode="after")
+    def normalize_and_validate(self) -> "TaskTestSet":
+        self.name = self.name.strip()
+        self.test_set = self.test_set.strip()
+        self.inference_query = self.inference_query.strip()
+        self.sample_submission = self.sample_submission.strip()
+        self.metric = self.metric.strip().lower()
+        self.answer_fields = [str(value).strip() for value in self.answer_fields]
+        if not all((self.name, self.test_set, self.inference_query, self.metric)):
+            raise ValueError("Test set fields must not be blank")
+        if any(not value for value in self.answer_fields):
+            raise ValueError("answer_fields must contain non-empty field names")
+        if len(self.answer_fields) != len(set(self.answer_fields)):
+            raise ValueError("answer_fields must not contain duplicates")
+        if self.metric not in BUILTIN_METRICS:
+            raise ValueError(
+                f"unknown metric {self.metric!r}; installed metrics: "
+                + ", ".join(sorted(BUILTIN_METRICS))
+            )
+        return self
+
+
+def validate_test_suite(items: list[TaskTestSet]) -> list[TaskTestSet]:
+    if not items:
+        raise ValueError("at least one Test set is required")
+    names = [item.name.casefold() for item in items]
+    if len(names) != len(set(names)):
+        raise ValueError("Test set names must be unique within a Task")
+    if any(not item.sample_submission for item in items):
+        raise ValueError("each Test set requires a sample submission")
+    return items
+
+
+def effective_test_suite(request: "UserRequest") -> list[TaskTestSet]:
+    """Return the suite, projecting an older single built-in contract once."""
+    if request.test_sets:
+        return validate_test_suite(list(request.test_sets))
+    if (
+        request.metric_type == "builtin"
+        and request.test_set.strip()
+        and request.test_answer_fields
+    ):
+        # This one-time scalar projection accepts the old optional submission;
+        # newly authored suites always pass through validate_test_suite above.
+        return [TaskTestSet(
+            name="test",
+            test_set=request.test_set,
+            inference_query=request.task_objective,
+            sample_submission=request.test_sample_submission,
+            metric=request.metric,
+            answer_fields=list(request.test_answer_fields),
+            metric_direction=request.metric_direction,
+        )]
+    return []
+
+
 def verifiable_reward_available(metric: str, metric_type: str) -> bool:
     """Whether the scoring contract implies a deterministic correctness reward.
 
@@ -199,6 +270,13 @@ class UserRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_objective: str = Field(..., description="The user's high-level goal, in natural language.")
+    test_sets: list[TaskTestSet] = Field(
+        default_factory=list,
+        description=(
+            "Named held-out Test contracts. A one-dataset task contains one "
+            "item; a benchmark-like task contains several."
+        ),
+    )
     metric: str = Field(
         min_length=1,
         description="Name of the held-out Test metric, e.g. benchmark_average.",
@@ -449,6 +527,8 @@ class UserRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_experiment_preferences(self) -> "UserRequest":
+        if self.test_sets:
+            self.test_sets = validate_test_suite(self.test_sets)
         self.training_method = self.training_method.strip().lower()
         if self.prompt_framing:
             self.prompt_framing = normalize_prompt_framing(self.prompt_framing)

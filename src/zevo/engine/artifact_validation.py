@@ -483,23 +483,24 @@ def validate_data_artifacts(
         sample_submission, label="sample submission",
     )
     if operation == "prepare_holdout_data":
-        if training_dataset or validation_dataset or profile_path:
+        if training_dataset or validation_dataset:
             raise ValueError(
-                "held-out Data validation must not receive trainable/profile artifacts"
+                "held-out Data validation must not receive trainable artifacts"
             )
-        return DataArtifactReport(0, 0, len(question_rows))
-
-    _, training_rows = _read_records(
-        training_dataset, label="training dataset",
-    )
-    _, validation_rows = _read_records(
-        validation_dataset, label="validation dataset",
-    )
-    if len(validation_rows) != len(question_rows):
-        raise ValueError(
-            "trainer Validation row count differs from the full scoring "
-            f"population: expected {len(question_rows)}, got {len(validation_rows)}"
+        training_rows: list[dict[str, object]] = []
+        validation_rows: list[dict[str, object]] = []
+    else:
+        _, training_rows = _read_records(
+            training_dataset, label="training dataset",
         )
+        _, validation_rows = _read_records(
+            validation_dataset, label="validation dataset",
+        )
+        if len(validation_rows) != len(question_rows):
+            raise ValueError(
+                "trainer Validation row count differs from the full scoring "
+                f"population: expected {len(question_rows)}, got {len(validation_rows)}"
+            )
     profile_file = _absolute_file(profile_path, label="inference data profile")
     try:
         profile = InferenceDataProfile.model_validate_json(

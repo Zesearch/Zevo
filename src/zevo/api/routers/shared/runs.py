@@ -693,6 +693,7 @@ async def get_run(
                 "iteration": t.iteration,
                 "operation": str((t.payload or {}).get("operation") or ""),
                 "model_source": str((t.payload or {}).get("model_source") or ""),
+                "test_set_name": str((t.payload or {}).get("test_set_name") or ""),
                 "status": t.status,
                 "summary": t.summary or "",
                 "error_message": t.error_message or "",
@@ -1677,6 +1678,22 @@ async def create_run(
                 f"or pick one of the predefined tasks from GET /tasks.",
             )
         user_request = task_to_user_request(task_row)
+    elif task_row is not None:
+        # Test suites define the reusable problem and cannot be replaced by a
+        # launch/Setting. Keep optimization choices from the submitted request
+        # while restoring the Task-owned suite and its primary projection.
+        task_request = task_to_user_request(task_row)
+        user_request = user_request.model_copy(update={
+            "test_sets": task_request.test_sets,
+            "test_set": task_request.test_set,
+            "test_answer_fields": task_request.test_answer_fields,
+            "test_sample_submission": task_request.test_sample_submission,
+            "metric": task_request.metric,
+            "metric_direction": task_request.metric_direction,
+            "metric_type": "builtin",
+            "evaluation_script": "",
+            "evaluator_sha256": "",
+        })
     from zevo.contracts.training_methods import (
         method_config_errors,
         normalize_method_config,
@@ -1690,11 +1707,23 @@ async def create_run(
     # Test bytes must not share a path with anything on the optimization lane.
     # After this check, managed Test assets are moved beneath the private root;
     # the logical paths stay unchanged for Task/UI compatibility.
+    from zevo.contracts.orchestrator import effective_test_suite
+
+    suite = effective_test_suite(user_request)
+    if not suite:
+        raise HTTPException(
+            400,
+            (
+                "test_set is required"
+                if not user_request.test_set.strip()
+                else "at least one built-in Test set contract is required"
+            ),
+        )
     test_assets = {
-        str(v).strip() for v in (
-            user_request.test_set,
-            user_request.test_sample_submission,
-        ) if str(v).strip()
+        str(value).strip()
+        for item in suite
+        for value in (item.test_set, item.sample_submission)
+        if str(value).strip()
     }
     optimization_assets = {
         str(v).strip() for v in (user_request.dataset,) if str(v).strip()
@@ -1714,15 +1743,28 @@ async def create_run(
             "Test assets must be separate from Training and Validation assets; "
             f"shared path: {overlap[0]}",
         )
-    protected_test, protected_sample = await run_in_threadpool(
-        protect_assets,
-        user_request.test_set,
-        user_request.test_sample_submission,
-    )
-    user_request = user_request.model_copy(update={
-        "test_set": protected_test,
-        "test_sample_submission": protected_sample,
-    })
+    protected_suite = []
+    for item in suite:
+        protected_test, protected_sample = await run_in_threadpool(
+            protect_assets, item.test_set, item.sample_submission,
+        )
+        protected_suite.append(item.model_copy(update={
+            "test_set": protected_test,
+            "sample_submission": protected_sample,
+        }))
+    if protected_suite:
+        primary = protected_suite[0]
+        user_request = user_request.model_copy(update={
+            "test_sets": protected_suite,
+            "test_set": primary.test_set,
+            "test_answer_fields": list(primary.answer_fields),
+            "test_sample_submission": primary.sample_submission,
+            "metric": primary.metric,
+            "metric_direction": primary.metric_direction,
+            "metric_type": "builtin",
+            "evaluation_script": "",
+            "evaluator_sha256": "",
+        })
     if derived_validation:
         user_request = inherit_test_validation_contract(user_request)
     if user_request.metric_type == "custom":
@@ -1795,19 +1837,25 @@ async def create_run(
                 400,
                 "saving a new task requires " + ", ".join(missing_task_assets),
             )
+        task_suite = effective_test_suite(user_request)
+        primary = task_suite[0]
+        headline_metric = (
+            primary.metric if len(task_suite) == 1 else "suite_average"
+        )
         task_row = Task(
             name=task_name,
             task_objective=user_request.task_objective.strip(),
-            test_set=user_request.test_set.strip(),
-            test_answer_fields=[
-                str(c).strip() for c in user_request.test_answer_fields if str(c).strip()
-            ],
-            test_sample_submission=user_request.test_sample_submission.strip(),
-            metric_type=user_request.metric_type,
-            evaluation_script=user_request.evaluation_script.strip(),
-            evaluator_sha256=user_request.evaluator_sha256,
-            metric=user_request.metric.strip(),
-            metric_direction=user_request.metric_direction,
+            test_sets=[item.model_dump(mode="json") for item in task_suite],
+            test_set=primary.test_set,
+            test_answer_fields=list(primary.answer_fields),
+            test_sample_submission=primary.sample_submission,
+            metric_type="builtin",
+            evaluation_script="",
+            evaluator_sha256="",
+            metric=headline_metric,
+            metric_direction=(
+                primary.metric_direction if len(task_suite) == 1 else "max"
+            ),
         )
         db.add(task_row)
 
@@ -1822,13 +1870,18 @@ async def create_run(
     ).strip()
     if not task_objective:
         raise HTTPException(400, "task_objective is required and must describe the task.")
-    # A catalogue Task supplies Test defaults, while the submitted UserRequest
-    # is the exact scoring contract for this Run. This lets one fixed held-out
-    # dataset be reported through a different built-in metric or a frozen
-    # custom evaluator without editing the reusable Task. Historical Runs keep
-    # their effective metric and direction on the Run/holdout snapshot.
-    metric = user_request.metric
-    metric_direction = user_request.metric_direction
+    # The Test suite belongs to the Task and has already been restored above
+    # for predefined tasks. A submitted request may vary the Setting, but it
+    # cannot silently redefine what the named problem measures.
+    effective_suite = effective_test_suite(user_request)
+    metric = (
+        effective_suite[0].metric
+        if len(effective_suite) == 1 else "suite_average"
+    )
+    metric_direction = (
+        effective_suite[0].metric_direction
+        if len(effective_suite) == 1 else "max"
+    )
     validation_metric = user_request.validation_metric
     validation_metric_direction = user_request.validation_metric_direction
     # One clean objective everywhere the task problem is represented. The
@@ -1836,8 +1889,6 @@ async def create_run(
     # belong. This applies equally to catalogue and newly named custom tasks.
     user_request = user_request.model_copy(update={
         "task_objective": task_objective,
-        "metric": metric,
-        "metric_direction": metric_direction,
     })
     from zevo.api.routers.ui.tasks import compose_objective
     agent_objective = compose_objective(
@@ -2022,6 +2073,7 @@ async def create_run(
             "system_prompt": user_request.system_prompt,
             "loss_objective_config": dict(user_request.loss_objective_config or {}),
             "inference_config": dict(user_request.inference_config or {}),
+            "inference_query": effective_suite[0].inference_query,
             "decoding_config": dict(user_request.decoding_config or {}),
         }.items()
         if value not in ("", {}, None)
@@ -2909,7 +2961,19 @@ async def get_artifact_detail(
             )).scalar_one_or_none()
             holdout = dict(run_row.holdout or {}) if run_row is not None else {}
             scoring_lane = "test" if tk.lane == "held_out_test" else "validation"
-            candidate = Path(str(holdout.get(f"{scoring_lane}_set") or ""))
+            member = None
+            if scoring_lane == "test":
+                test_set_name = str((tk.payload or {}).get("test_set_name") or "")
+                member = next((
+                    item for item in (holdout.get("test_sets") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("name") or "") == test_set_name
+                ), None)
+            candidate = Path(str(
+                (member or {}).get("test_set")
+                or holdout.get(f"{scoring_lane}_set")
+                or ""
+            ))
             if not candidate.is_file():
                 try:
                     legacy_relative = candidate.relative_to("/app/data")
@@ -2922,7 +2986,10 @@ async def get_artifact_detail(
             if candidate.is_file():
                 truth_path = candidate
                 answer_fields = [
-                    str(field) for field in holdout.get(f"{scoring_lane}_answer_fields", [])
+                    str(field) for field in (
+                        (member or {}).get("answer_fields")
+                        or holdout.get(f"{scoring_lane}_answer_fields", [])
+                    )
                     if str(field)
                 ]
         try:

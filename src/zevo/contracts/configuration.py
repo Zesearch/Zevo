@@ -43,6 +43,7 @@ def inference_mapping_contract() -> dict[str, Any]:
     return {
         "allowed_keys": {
             "input_fields": "list[non-empty string]",
+            "inference_query": "non-empty string; supports {input} or {field} placeholders",
             "answer_regex": "string",
             "answer_column": "string",
             "batch_size": "integer >= 1",
@@ -531,6 +532,26 @@ class InferenceRunConfig(BaseModel):
                 "prompt_example.input_values must preserve measurement.inference_config "
                 "input_fields order"
             )
+        inference_query = str(
+            self.measurement.inference_config.get("inference_query") or ""
+        )
+        if inference_query:
+            from zevo.contracts.prompting import render_inference_query
+
+            expected_user = render_inference_query(
+                inference_query, dict(self.prompt_example.input_values),
+            )
+            if framing == "chat" or framing.startswith("chat:"):
+                user_messages = [
+                    message.content for message in self.prompt_example.messages
+                    if message.role == "user"
+                ]
+                if user_messages != [expected_user]:
+                    raise ValueError(
+                        "prompt_example user turn differs from inference_query"
+                    )
+            elif expected_user not in self.prompt_example.rendered_prompt:
+                raise ValueError("rendered_prompt omits inference_query")
         if (framing == "chat" or framing.startswith("chat:")) and not (
             self.chat_template_source and self.chat_template_hash
         ):

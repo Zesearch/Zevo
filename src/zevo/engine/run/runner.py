@@ -294,6 +294,7 @@ def _build_data_input(
             f" --scoring-source {shlex.quote(scoring_set)}"
             " --questions <absolute-questions-only-path>"
             " --sample-submission <absolute-sample-submission-path>"
+            " --profile <absolute-inference-data-profile-path>"
         )
         for answer_field in answer_fields:
             artifact_validation_command += (
@@ -310,6 +311,9 @@ def _build_data_input(
         run_context=dict(specialist_context or {}),
         operation=operation,
         run_id=str(ticket.run_id or ""),
+        test_set_name=(
+            str(payload.get("test_set_name") or "test") if held_out else ""
+        ),
         dataset_source="" if held_out else str(payload.get("dataset_source") or ""),
         dataset=dataset,
         dataset_split="" if held_out else str(payload.get("dataset_split") or ""),
@@ -775,6 +779,9 @@ async def _build_inference_input(
     scoring_set = _eval_set_of(payload, ticket)
     submission = str(payload.get("sample_submission") or "")
     device_info_path = input_path(inputs, "device_info")
+    inference_config_path = input_path(
+        inputs, "inference_config", required=False,
+    )
     return InferenceTaskInput(
         ticket_id=ticket.id,
         **_customization_kwargs(ticket.customization or {}),
@@ -782,12 +789,10 @@ async def _build_inference_input(
         operation="run_inference",
         run_id=str(ticket.run_id or ""),
         iteration=int(ticket.iteration or 0),
+        test_set_name=str(payload.get("test_set_name") or ""),
         model_source=str(payload.get("model_source") or "base_model"),
         configuration_mode=(
-            "reuse"
-            if ticket.lane == "held_out_test"
-            or payload.get("model_source") == "checkpoint"
-            else "select"
+            "reuse" if inference_config_path else "select"
         ),
         scoring_set=scoring_set,
         sample_submission=submission,
@@ -800,9 +805,7 @@ async def _build_inference_input(
         inference_data_profile_path=input_path(
             inputs, "inference_data_profile", required=False,
         ),
-        inference_config_path=input_path(
-            inputs, "inference_config", required=False,
-        ),
+        inference_config_path=inference_config_path,
         inference_config_schema=InferenceRunConfig.model_json_schema(),
         inference_mapping_contract=inference_mapping_contract(),
         config_validation_command=(
@@ -861,6 +864,7 @@ def _build_evaluation_input(
         ticket_id=ticket.id,
         **_customization_kwargs(ticket.customization or {}),
         predictions_path=input_path(inputs, "predictions"),
+        test_set_name=str(payload.get("test_set_name") or ""),
         scoring_set=scoring_set,
         evaluation_script=script,
         evaluator_sha256=str(payload.get("evaluator_sha256") or ""),
@@ -3600,12 +3604,22 @@ async def run_ticket(
             # answers, but a loop ticket reading it is still the loop touching
             # the set it is not allowed to see — and it is the half an agent
             # looking for "the test data" is most likely to find.
-            guarded = [
+            guarded = {
                 str(holdout.get(k) or "")
                 for k in ("test_set", "test_public")
                 if str(holdout.get(k) or "")
-            ]
-            heldout_access_hits = _referenced_paths(guarded, pending_events)
+            }
+            for item in holdout.get("test_sets") or []:
+                if not isinstance(item, dict):
+                    continue
+                guarded.update(
+                    str(item.get(key) or "")
+                    for key in ("test_set", "public")
+                    if str(item.get(key) or "")
+                )
+            heldout_access_hits = _referenced_paths(
+                sorted(guarded), pending_events,
+            )
             if heldout_access_hits:
                 session.add(TicketNotice(
                     ticket_id=tk.id, code="held_out_test.access", severity="error",
@@ -4623,14 +4637,35 @@ async def _record_prepared_scoring_data(
     """
     path = str(getattr(result, "scoring_public_path", "") or "")
     is_held_out_test = ticket.lane == "held_out_test"
-    key = "test_public" if is_held_out_test else "validation_public"
     holdout = dict(run.holdout or {})
     changed = False
 
-    if path and not holdout.get(key):
-        # The first prepared copy is the one the run is scored on.
-        holdout[key] = path
-        changed = True
+    if is_held_out_test:
+        test_set_name = str((ticket.payload or {}).get("test_set_name") or "test")
+        suite = _heldout_test_sets(run)
+        for item in suite:
+            if item["name"] != test_set_name:
+                continue
+            if path and not item.get("public"):
+                item["public"] = path
+                changed = True
+            profile_path = str(
+                getattr(result, "inference_data_profile_path", "") or ""
+            )
+            if profile_path and not item.get("inference_data_profile"):
+                item["inference_data_profile"] = profile_path
+                changed = True
+            break
+        if changed:
+            holdout["test_sets"] = suite
+            # The scalar projection keeps old dashboard/run readers useful.
+            if suite and suite[0]["name"] == test_set_name:
+                holdout["test_public"] = suite[0].get("public", "")
+    else:
+        if path and not holdout.get("validation_public"):
+            # The first prepared copy is the one the run is scored on.
+            holdout["validation_public"] = path
+            changed = True
 
     # The engine supplies the Validation binding after optimization Data has
     # finished. The Setting-owned evaluator remains fixed independently from
@@ -4676,21 +4711,54 @@ async def _record_prepared_scoring_data(
     await session.commit()
 
 
-async def _spawn_holdout_data(
-    session: AsyncSession, run: Run, source: Ticket, *, enqueue: bool = True,
-) -> Ticket | None:
-    """Raise the held-out lane's own data ticket: strip the test set's answers.
+def _heldout_test_sets(run: Run) -> list[dict[str, Any]]:
+    """Return mutable copies of this Run's named held-out Test contracts."""
+    holdout = dict(run.holdout or {})
+    raw = list(holdout.get("test_sets") or [])
+    if raw:
+        return [dict(item) for item in raw]
+    test_set = str(holdout.get("test_set") or "")
+    if not test_set:
+        return []
+    return [{
+        "name": "test",
+        "test_set": test_set,
+        "inference_query": str(
+            holdout.get("validation_inference_query")
+            or run.task_objective
+            or "Produce the requested prediction for this input."
+        ),
+        "sample_submission": str(holdout.get("test_sample_submission") or ""),
+        "metric": run.metric,
+        "metric_direction": run.metric_direction,
+        "answer_fields": list(_answer_fields(holdout, "test")),
+        "metric_type": str(holdout.get("test_metric_type") or "builtin"),
+        "evaluation_script": str(holdout.get("test_evaluation_script") or ""),
+        "evaluator_sha256": str(holdout.get("test_evaluator_sha256") or ""),
+        "public": str(holdout.get("test_public") or ""),
+        "inference_data_profile": "",
+    }]
 
-    The orchestrator cannot emit this one. Its payload names the test set, and
-    the whole arrangement rests on the loop never holding that path — so the
-    harness raises it, against the same data agent, and files the result where
-    only the harness reads.
-    """
+
+def _heldout_test_set(run: Run, name: str) -> dict[str, Any] | None:
+    return next(
+        (item for item in _heldout_test_sets(run) if item["name"] == name),
+        None,
+    )
+
+
+async def _spawn_holdout_data(
+    session: AsyncSession, run: Run, source: Ticket, *, test_set_name: str = "",
+    enqueue: bool = True,
+) -> Ticket | None:
+    """Create answer-stripping tickets for missing members of the Test suite."""
     from zevo.engine.run.wakeup import queue_wakeup
 
-    holdout = dict(run.holdout or {})
-    if not str(holdout.get("test_set") or "") or holdout.get("test_public"):
-        return None
+    suite = _heldout_test_sets(run)
+    selected = [
+        item for item in suite
+        if not test_set_name or item["name"] == test_set_name
+    ]
     existing = (await session.execute(
         select(Ticket).where(
             Ticket.run_id == run.id,
@@ -4698,81 +4766,71 @@ async def _spawn_holdout_data(
             Ticket.agent_id == "data",
         )
     )).scalars().all()
-    for t in existing:
-        if t.status not in ("failed", "cancelled", "skipped"):
-            return t  # already queued or done — one copy is all the run needs
-
-    tid = f"holdout-data-{run.id[:8]}-{len(existing) + 1:03d}"
-
-    payload = validate_stored_payload(
-        agent_id="data",
-        input_format="typed",
-        payload={
-            "operation": "prepare_holdout_data",
-            "dataset_source": "",
-            "dataset": "",
-            "dataset_split": "",
-            "dataset_config": "",
-            "data_query": "",
-            "training_method": "",
-            "scoring_set": str(holdout.get("test_set") or ""),
-            "answer_fields": list(_answer_fields(holdout, "test")),
-            "metric_type": str(holdout.get("test_metric_type") or "builtin"),
-            "metric": run.metric,
-            "evaluation_script": str(
-                holdout.get("test_evaluation_script") or ""
-            ),
-            "evaluator_sha256": str(
-                holdout.get("test_evaluator_sha256") or ""
-            ),
-            "sample_submission": str(
-                holdout.get("test_sample_submission") or ""
-            ),
-            "configuration_suggestions": {},
-            "configuration_pins": {},
-        },
-    )
-    ticket = Ticket(
-        id=tid, run_id=run.id, agent_id="data",
-        status="queued", input_format="typed", lane="held_out_test",
-        iteration=int(source.iteration or 0),
-        # This engine-owned operation is explicitly held-out-only; empty
-        # training-source fields cannot be interpreted as an acquisition task.
-        payload=payload,
-        customization={}, inputs={}, summary="",
-    )
-    session.add(ticket)
+    created: list[Ticket] = []
+    for item in selected:
+        if item.get("public"):
+            continue
+        active = next((
+            ticket for ticket in existing
+            if (ticket.payload or {}).get("test_set_name") == item["name"]
+            and ticket.status not in ("failed", "cancelled", "skipped")
+        ), None)
+        if active is not None:
+            created.append(active)
+            continue
+        tid = f"holdout-data-{run.id[:8]}-{len(existing) + len(created) + 1:03d}"
+        payload = validate_stored_payload(
+            agent_id="data", input_format="typed", payload={
+                "operation": "prepare_holdout_data",
+                "test_set_name": item["name"],
+                "dataset_source": "", "dataset": "",
+                "dataset_split": "", "dataset_config": "",
+                "data_query": "", "training_method": "",
+                "scoring_set": item["test_set"],
+                "answer_fields": list(item["answer_fields"]),
+                "metric_type": str(item.get("metric_type") or "builtin"),
+                "metric": item["metric"],
+                "evaluation_script": str(item.get("evaluation_script") or ""),
+                "evaluator_sha256": str(item.get("evaluator_sha256") or ""),
+                "sample_submission": item["sample_submission"],
+                "configuration_suggestions": {}, "configuration_pins": {},
+            },
+        )
+        ticket = Ticket(
+            id=tid, run_id=run.id, agent_id="data", status="queued",
+            input_format="typed", lane="held_out_test",
+            iteration=int(source.iteration or 0), payload=payload,
+            customization={}, inputs={}, summary="",
+        )
+        session.add(ticket)
+        created.append(ticket)
+    if not created:
+        return None
     await session.commit()
     if enqueue:
-        await queue_wakeup(
-            session, agent_id="data", ticket_id=tid,
-            source="handoff",
-            reason="preparing the held-out test set for measurement",
-        )
-    return ticket
+        for ticket in created:
+            if ticket.status == "queued":
+                await queue_wakeup(
+                    session, agent_id="data", ticket_id=ticket.id,
+                    source="handoff",
+                    reason=f"preparing held-out Test set {ticket.payload['test_set_name']}",
+                )
+    return created[0]
 
 
 async def _spawn_holdout_infer(
-    session: AsyncSession, run: Run, source: Ticket, *, enqueue: bool = True,
+    session: AsyncSession, run: Run, source: Ticket, *, test_set_name: str = "",
+    enqueue: bool = True,
 ) -> Ticket | None:
-    """Mirror a finished inference ticket onto the held-out test set."""
+    """Measure one candidate independently on every named Test contract."""
     from zevo.engine.run.wakeup import queue_wakeup
 
-    holdout = dict(run.holdout or {})
-    test_set = str(holdout.get("test_set") or "")
-    if not test_set:
-        return None  # nothing to hold out against — the run has no test set
-    if not str(holdout.get("test_public") or ""):
-        # Nothing to infer on yet. Raise the copy job and stop; its completion
-        # re-enters this lane and the mirror goes out then.
-        return await _spawn_holdout_data(session, run, source, enqueue=enqueue)
-
+    suite = _heldout_test_sets(run)
+    selected = [
+        item for item in suite
+        if not test_set_name or item["name"] == test_set_name
+    ]
     iteration = int(source.iteration or 0)
-    # One measurement per candidate per iteration. A newly selected base model
-    # may need both its baseline and its trained candidate measured in the same
-    # iteration; model_source distinguishes those two.
-    # inference (a retry, a second probe) would otherwise pay for the test set
-    # again and file a second point on the same iteration's curve.
     already = (await session.execute(
         select(Ticket).where(
             Ticket.run_id == run.id,
@@ -4780,55 +4838,103 @@ async def _spawn_holdout_infer(
             Ticket.agent_id == "inference",
         )
     )).scalars().all()
-    for t in already:
-        if (
-            int(t.iteration or 0) == iteration
-            and (t.payload or {}).get("model_source")
+    created: list[Ticket] = []
+    for item in selected:
+        if not item.get("public"):
+            await _spawn_holdout_data(
+                session, run, source, test_set_name=item["name"], enqueue=enqueue,
+            )
+            continue
+        duplicate = next((
+            ticket for ticket in already
+            if int(ticket.iteration or 0) == iteration
+            and (ticket.payload or {}).get("model_source")
                 == (source.payload or {}).get("model_source")
-        ):
-            return t
+            and (ticket.payload or {}).get("base_model")
+                == (source.payload or {}).get("base_model")
+            and (ticket.payload or {}).get("test_set_name") == item["name"]
+        ), None)
+        if duplicate is not None:
+            created.append(duplicate)
+            continue
 
-    payload = dict(source.payload or {})
-    # Everything about HOW the model is run carries over untouched — same base
-    # model, same checkpoint, same framing, same GPU. Only the set changes, so
-    # the two numbers differ by the data and nothing else.
-    payload.update({
-        "scoring_set": str(holdout.get("test_public") or ""),
-        "sample_submission": str(
-            holdout.get("test_sample_submission")
-            or payload.get("sample_submission", "")
-        ),
-        # Reuse is governed by the exact YAML binding below; baseline-only
-        # advice must not leak into a held-out replay.
-        "configuration_suggestions": {},
-    })
-    payload = validate_stored_payload(
-        agent_id="inference", input_format="typed", payload=payload,
-    )
-    inputs = dict(source.inputs or {})
-    # Held-out Inference must reuse the exact configuration produced by the
-    # corresponding Validation Inference, including the baseline case where
-    # model_source is still ``base_model``.
-    inputs["inference_config"] = _artifact_binding("inference_config", source)
-    inputs["predict_script"] = _artifact_binding("script", source)
+        payload = dict(source.payload or {})
+        configuration_pins = dict(payload.get("configuration_pins") or {})
+        inference_mapping = dict(configuration_pins.get("inference_config") or {})
+        inference_mapping["inference_query"] = item["inference_query"]
+        configuration_pins["inference_config"] = inference_mapping
+        payload.update({
+            "test_set_name": item["name"],
+            "scoring_set": item["public"],
+            "sample_submission": item["sample_submission"],
+            "configuration_suggestions": {},
+            "configuration_pins": configuration_pins,
+        })
+        payload = validate_stored_payload(
+            agent_id="inference", input_format="typed", payload=payload,
+        )
+        inputs = dict(source.inputs or {})
+        inputs.pop("inference_config", None)
+        inputs.pop("predict_script", None)
+        data_rows = (await session.execute(
+            select(Ticket).where(
+                Ticket.run_id == run.id,
+                Ticket.lane == "held_out_test",
+                Ticket.agent_id == "data",
+                Ticket.status.in_(("succeeded", "degraded")),
+            ).order_by(Ticket.created_at.desc())
+        )).scalars().all()
+        data_ticket = next((
+            ticket for ticket in data_rows
+            if (ticket.payload or {}).get("test_set_name") == item["name"]
+        ), None)
+        if data_ticket is None:
+            raise ValueError(f"Test set {item['name']!r} has no prepared Data ticket")
+        if item.get("inference_data_profile"):
+            inputs["inference_data_profile"] = _artifact_binding(
+                "inference_data_profile", data_ticket,
+            )
 
-    tid = f"holdout-infer-{run.id[:8]}-{len(already) + 1:03d}"
-    ticket = Ticket(
-        id=tid, run_id=run.id, agent_id="inference",
-        status="queued", input_format="typed", lane="held_out_test",
-        iteration=iteration, payload=payload,
-        customization=dict(source.customization or {}),
-        inputs=inputs, summary="",
-    )
-    session.add(ticket)
+        if payload.get("model_source") == "checkpoint":
+            baseline = next((
+                ticket for ticket in reversed(already)
+                if (ticket.payload or {}).get("model_source") == "base_model"
+                and (ticket.payload or {}).get("base_model") == payload.get("base_model")
+                and (ticket.payload or {}).get("test_set_name") == item["name"]
+                and ticket.status in ("succeeded", "degraded")
+            ), None)
+            configuration_source = baseline or source
+            inputs["inference_config"] = _artifact_binding(
+                "inference_config", configuration_source,
+            )
+            inputs["predict_script"] = _artifact_binding(
+                "script", configuration_source,
+            )
+
+        tid = f"holdout-infer-{run.id[:8]}-{len(already) + len(created) + 1:03d}"
+        ticket = Ticket(
+            id=tid, run_id=run.id, agent_id="inference", status="queued",
+            input_format="typed", lane="held_out_test", iteration=iteration,
+            payload=payload, customization=dict(source.customization or {}),
+            inputs=inputs, summary="",
+        )
+        session.add(ticket)
+        created.append(ticket)
+    if not created:
+        return None
     await session.commit()
     if enqueue:
-        await queue_wakeup(
-            session, agent_id="inference", ticket_id=tid,
-            source="handoff",
-            reason=f"held-out test measurement mirroring {source.id}",
-        )
-    return ticket
+        for ticket in created:
+            if ticket.status == "queued":
+                await queue_wakeup(
+                    session, agent_id="inference", ticket_id=ticket.id,
+                    source="handoff",
+                    reason=(
+                        f"held-out {ticket.payload['test_set_name']} measurement "
+                        f"mirroring {source.id}"
+                    ),
+                )
+    return created[0]
 
 
 async def _spawn_holdout_eval(
@@ -4837,11 +4943,9 @@ async def _spawn_holdout_eval(
     """Score held-out predictions with the Task's custom or built-in metric."""
     from zevo.engine.run.wakeup import queue_wakeup
 
-    holdout = dict(run.holdout or {})
-    test_set = str(holdout.get("test_set") or "")
-
-    evaluation_script = str(holdout.get("test_evaluation_script") or "")
-    if not test_set:
+    test_set_name = str((source.payload or {}).get("test_set_name") or "")
+    item = _heldout_test_set(run, test_set_name)
+    if item is None:
         return
 
     iteration = int(source.iteration or 0)
@@ -4858,16 +4962,13 @@ async def _spawn_holdout_eval(
         agent_id="evaluation",
         input_format="typed",
         payload={
-            "metric": run.metric, "evaluation_config": {},
-            "scoring_set": test_set,
-            "evaluation_script": evaluation_script,
-            "evaluator_sha256": str(
-                holdout.get("test_evaluator_sha256") or ""
-            ),
-            "answer_fields": list(_answer_fields(holdout, "test")),
-            "sample_submission": str(
-                holdout.get("test_sample_submission") or ""
-            ),
+            "test_set_name": test_set_name,
+            "metric": item["metric"], "evaluation_config": {},
+            "scoring_set": item["test_set"],
+            "evaluation_script": str(item.get("evaluation_script") or ""),
+            "evaluator_sha256": str(item.get("evaluator_sha256") or ""),
+            "answer_fields": list(item["answer_fields"]),
+            "sample_submission": item["sample_submission"],
         },
     )
     session.add(Ticket(
@@ -4885,14 +4986,14 @@ async def _spawn_holdout_eval(
     await queue_wakeup(
         session, agent_id="evaluation", ticket_id=tid,
         source="handoff",
-        reason=f"scoring held-out predictions from {source.id}",
+        reason=f"scoring held-out {test_set_name} predictions from {source.id}",
     )
 
 
 async def _record_holdout_score(
     session: AsyncSession, run: Run, ticket: Ticket, score: float,
 ) -> None:
-    """File a test-set number where the loop cannot read it.
+    """File one Test member, then publish the suite average once complete.
 
     `champion_test_score` deliberately tracks the iteration that wins on
     VALIDATION rather than the best test score seen. Reporting the maximum over
@@ -4910,10 +5011,61 @@ async def _record_holdout_score(
     infer_payload = dict(heldout_infer.payload or {}) if heldout_infer else {}
     source = "baseline" if infer_payload.get("model_source") == "base_model" else "trained"
     base_model = str(infer_payload.get("base_model") or "")
+    test_set_name = str((ticket.payload or {}).get("test_set_name") or "test")
+    suite = _heldout_test_sets(run)
+    suite_names = [str(item["name"]) for item in suite]
+    if test_set_name not in suite_names:
+        raise ValueError(f"Unknown held-out Test set {test_set_name!r}")
+
+    # Evaluation tickets finish independently. Keep their private component
+    # scores in the holdout snapshot and expose one factual Test point only
+    # after the entire suite for this candidate has arrived.
+    holdout = dict(run.holdout or {})
+    all_results = dict(holdout.get("suite_results") or {})
+    result_key = f"{source}|{iteration}|{base_model}"
+    candidate_results = dict(all_results.get(result_key) or {})
+    candidate_results[test_set_name] = {
+        "score": float(score),
+        "metric": str((ticket.payload or {}).get("metric") or ""),
+        "evaluation_ticket_id": ticket.id,
+    }
+    all_results[result_key] = candidate_results
+    holdout["suite_results"] = all_results
+    recorded = list(holdout.get("suite_recorded") or [])
+    run.holdout = holdout
+    if result_key in recorded:
+        await session.commit()
+        return
+    if any(name not in candidate_results for name in suite_names):
+        await session.commit()
+        return
+
+    component_scores = {
+        name: float(candidate_results[name]["score"])
+        for name in suite_names
+    }
+    component_metrics = {
+        name: str(candidate_results[name]["metric"])
+        for name in suite_names
+    }
+    score = sum(component_scores.values()) / len(component_scores)
+    recorded.append(result_key)
+    holdout["suite_recorded"] = recorded
+    run.holdout = holdout
     session.add(ScoreEvent(
         run_id=run.id, iteration=iteration, split="test", source=source,
         score=float(score), metric_name=run.metric,
-        notes=f"held-out test measurement from {ticket.id}",
+        extras={
+            "aggregation": "unweighted_mean",
+            "test_sets": {
+                name: {
+                    "score": component_scores[name],
+                    "metric": candidate_results[name]["metric"],
+                }
+                for name in suite_names
+            },
+        },
+        notes=f"held-out Test suite completed by {ticket.id}",
     ))
     # Stamp it onto the matching history entry so the run's journal can show
     # the pair side by side. The orchestrator's copy of history is stripped of
@@ -4933,6 +5085,8 @@ async def _record_holdout_score(
             and entry.get("source") == source
         ):
             entry["test_score"] = float(score)
+            entry["test_scores"] = dict(component_scores)
+            entry["test_metrics"] = dict(component_metrics)
         # The baseline gets its test score stamped but does not compete for
         # champion — same rule as run_metrics.baseline_and_best_test, or the
         # column and the boards it sorts disagree the moment training never
@@ -5152,7 +5306,12 @@ async def _advance_measurements(
                 ).order_by(Ticket.created_at.desc()).limit(1)
             )).scalar_one_or_none()
             if latest is not None:
-                await _spawn_holdout_infer(session, run, latest)
+                await _spawn_holdout_infer(
+                    session,
+                    run,
+                    latest,
+                    test_set_name=str((tk.payload or {}).get("test_set_name") or ""),
+                )
     elif score is not None and not is_held_out_test and tk.agent_id == "evaluation":
         await _record_validation_score(session, run, tk, score)
         # Strict order: Validation Evaluation finishes first. Only then does
@@ -5181,7 +5340,9 @@ def _agent_history(history: list) -> list:
         if isinstance(entry, dict):
             out.append({
                 k: v for k, v in entry.items()
-                if k not in ("test_score", "notes")
+                if k not in (
+                    "test_score", "test_scores", "test_metrics", "notes",
+                )
             })
         else:
             out.append(entry)
