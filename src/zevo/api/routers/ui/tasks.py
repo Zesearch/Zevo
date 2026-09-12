@@ -270,16 +270,46 @@ def _stored_test_sets(t: Task) -> list[TaskTestSet]:
         test_set=t.test_set or "",
         inference_query=t.task_objective or "Answer the input.",
         sample_submission=t.test_sample_submission or "",
+        metric_type=t.metric_type,
         metric=t.metric,
         answer_fields=list(t.test_answer_fields or []),
         metric_direction=t.metric_direction,
+        evaluation_script=t.evaluation_script or "",
+        evaluator_sha256=t.evaluator_sha256 or "",
     )]
 
 
 def _suite_headline(items: list[TaskTestSet]) -> tuple[str, Literal["max", "min"]]:
     if len(items) == 1:
         return items[0].metric, items[0].metric_direction
-    return "suite_average", "max"
+    return "suite_average", items[0].metric_direction
+
+
+async def _protect_test_suite(items: list[TaskTestSet]) -> list[TaskTestSet]:
+    """Freeze every Test asset, including a custom scorer when selected."""
+    from zevo.evaluator_storage import freeze_evaluator
+
+    protected: list[TaskTestSet] = []
+    for item in items:
+        test_set, sample = await run_in_threadpool(
+            protect_assets, item.test_set, item.sample_submission,
+        )
+        evaluation_script = ""
+        evaluator_sha256 = ""
+        if item.metric_type == "custom":
+            try:
+                evaluation_script, evaluator_sha256 = await run_in_threadpool(
+                    freeze_evaluator, item.evaluation_script,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        protected.append(item.model_copy(update={
+            "test_set": test_set,
+            "sample_submission": sample,
+            "evaluation_script": evaluation_script,
+            "evaluator_sha256": evaluator_sha256,
+        }))
+    return protected
 
 
 def _dto(t: Task, stats: dict | None = None) -> TaskDTO:
@@ -318,17 +348,17 @@ def task_to_user_request(t: Task) -> UserRequest:
         test_sets=test_sets,
         metric=primary.metric,
         metric_direction=primary.metric_direction,
-        metric_type="builtin",
-        evaluation_script="",
-        evaluator_sha256="",
+        metric_type=primary.metric_type,
+        evaluation_script=primary.evaluation_script,
+        evaluator_sha256=primary.evaluator_sha256,
         # A Task-only launch has no saved Setting to supply Validation. Start
         # with an explicit independent contract equal in value to Test; the UI
         # and CLI replace it when a Setting or per-Run Validation choice exists.
         validation_metric=primary.metric,
         validation_metric_direction=primary.metric_direction,
-        validation_metric_type="builtin",
-        validation_evaluation_script="",
-        validation_evaluator_sha256="",
+        validation_metric_type=primary.metric_type,
+        validation_evaluation_script=primary.evaluation_script,
+        validation_evaluator_sha256=primary.evaluator_sha256,
         training_method="",
         dataset="",
         data_query="",
@@ -385,16 +415,10 @@ async def create_task(body: TaskBody, db: AsyncSession = Depends(get_db)) -> Tas
         raise HTTPException(409, f"task {name!r} already exists — delete it first, or pick another name.")
     if not (body.task_objective or "").strip():
         raise HTTPException(400, "task_objective is required — it is what the agents are asked to achieve.")
-    protected: list[TaskTestSet] = []
-    for item in body.test_sets:
-        test_set, sample = await run_in_threadpool(
-            protect_assets, item.test_set, item.sample_submission,
-        )
-        protected.append(item.model_copy(update={
-            "test_set": test_set, "sample_submission": sample,
-        }))
+    protected = await _protect_test_suite(body.test_sets)
     primary = protected[0]
     metric, metric_direction = _suite_headline(protected)
+    single = len(protected) == 1
 
     t = Task(
         name=name,
@@ -403,9 +427,9 @@ async def create_task(body: TaskBody, db: AsyncSession = Depends(get_db)) -> Tas
         test_set=primary.test_set,
         test_answer_fields=list(primary.answer_fields),
         test_sample_submission=primary.sample_submission,
-        metric_type="builtin",
-        evaluation_script="",
-        evaluator_sha256="",
+        metric_type=primary.metric_type if single else "builtin",
+        evaluation_script=primary.evaluation_script if single else "",
+        evaluator_sha256=primary.evaluator_sha256 if single else "",
         metric=metric,
         metric_direction=metric_direction,
     )
@@ -464,23 +488,17 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
 
     if "test_sets" in changed and changed["test_sets"] is not None:
         supplied = [TaskTestSet.model_validate(item) for item in changed["test_sets"]]
-        protected = []
-        for item in supplied:
-            test_set, sample = await run_in_threadpool(
-                protect_assets, item.test_set, item.sample_submission,
-            )
-            protected.append(item.model_copy(update={
-                "test_set": test_set, "sample_submission": sample,
-            }))
+        protected = await _protect_test_suite(supplied)
         primary = protected[0]
+        single = len(protected) == 1
         t.test_sets = [item.model_dump(mode="json") for item in protected]
         t.test_set = primary.test_set
         t.test_answer_fields = list(primary.answer_fields)
         t.test_sample_submission = primary.sample_submission
         t.metric, t.metric_direction = _suite_headline(protected)
-        t.metric_type = "builtin"
-        t.evaluation_script = ""
-        t.evaluator_sha256 = ""
+        t.metric_type = primary.metric_type if single else "builtin"
+        t.evaluation_script = primary.evaluation_script if single else ""
+        t.evaluator_sha256 = primary.evaluator_sha256 if single else ""
 
     for field_name, value in changed.items():
         if field_name == "test_sets":

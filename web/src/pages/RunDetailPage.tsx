@@ -1193,6 +1193,9 @@ export function RunDetailPage() {
                       <span className="min-w-0 truncate text-slate-400" title={name}>{name}</span>
                       <span className="shrink-0 tabular-nums text-phosphor-300">
                         {fmtScore(value, championBreakdown.test_metrics?.[name] ?? "")}
+                        <span className="ml-1 text-slate-600">
+                          {championBreakdown.test_metric_directions?.[name] === "min" ? "↓" : "↑"}
+                        </span>
                       </span>
                     </div>
                   ))}

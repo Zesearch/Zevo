@@ -136,8 +136,11 @@ function TestFiles({
     {
       label: `${item.name} · metric`,
       path: "",
-      value: `${fmtMetric(item.metric)} · ${item.metric_direction}`,
+      value: `${fmtMetric(item.metric)} · ${item.metric_type === "custom" ? "custom" : "built-in"} · ${item.metric_direction}`,
     },
+    ...(item.metric_type === "custom" ? [{
+      label: `${item.name} · evaluator`, path: item.evaluation_script, value: "",
+    }] : []),
     { label: `${item.name} · submission`, path: item.sample_submission, value: "" },
   ]).filter((r) => r.path || r.value);
 

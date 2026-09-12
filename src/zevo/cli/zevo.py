@@ -2483,15 +2483,19 @@ def task_show(name: str = typer.Argument(..., help="Task name.")) -> None:
     t.add_column("data")
     t.add_column("inference query", max_width=42)
     t.add_column("metric", no_wrap=True)
+    t.add_column("target", no_wrap=True)
     t.add_column("answer fields")
+    t.add_column("evaluator")
     t.add_column("sample submission")
     for item in _stored_test_sets(row):
         t.add_row(
             item.name,
             _short_ref(item.test_set),
             item.inference_query,
-            item.metric,
+            f"{item.metric} ({item.metric_type})",
+            item.metric_direction,
             ", ".join(item.answer_fields),
+            _short_ref(item.evaluation_script),
             _short_ref(item.sample_submission),
         )
     console.print(t)
@@ -2521,6 +2525,10 @@ def _task_test_sets(raw: str) -> list[dict]:
         normalized["sample_submission"] = _resolve_data_ref(
             str(item.get("sample_submission") or "")
         )
+        if str(item.get("metric_type") or "builtin") == "custom":
+            normalized["evaluation_script"] = _resolve_data_ref(
+                str(item.get("evaluation_script") or "")
+            )
         suite.append(normalized)
     return suite
 
@@ -2534,7 +2542,8 @@ def task_add(
         "--test-sets",
         help=(
             "JSON array, or @file.json. Each item has name, test_set, "
-            "inference_query, sample_submission, metric, and answer_fields."
+            "inference_query, sample_submission, metric, metric_direction, and "
+            "answer_fields. Set metric_type=custom and evaluation_script for Other."
         ),
     ),
 ) -> None:

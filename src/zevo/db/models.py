@@ -146,8 +146,9 @@ class Task(Base):
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     task_objective: Mapped[str] = mapped_column(Text, default="")
     # One Task may measure several named Test contracts. Each item owns its
-    # data, inference query, submission shape, answer fields, and metric; the
-    # harness reports their unweighted mean as the suite headline.
+    # data, inference query, submission shape, answer fields, metric, target,
+    # and optional frozen custom evaluator; the harness reports their
+    # unweighted mean as the suite headline.
     test_sets: Mapped[list[dict[str, Any]]] = mapped_column(
         JsonCol, default=list, server_default="[]"
     )
@@ -162,8 +163,9 @@ class Task(Base):
     # stale the moment either file was edited.
     test_answer_fields: Mapped[list[str]] = mapped_column(JsonCol, default=list)
     test_sample_submission: Mapped[str] = mapped_column(Text, default="")
-    # Headline/primary projection for existing Run reporting columns. New
-    # Tasks use built-ins per suite member and leave script/hash blank.
+    # Headline/primary projection for existing Run reporting columns. Each
+    # suite member owns its scorer; these columns project a one-member suite
+    # and use the harness aggregate for a multi-member suite.
     metric_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="builtin", server_default="builtin"
     )

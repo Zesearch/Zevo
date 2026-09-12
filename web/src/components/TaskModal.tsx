@@ -11,9 +11,12 @@ export type TaskTestSetRecord = {
   test_set: string;
   inference_query: string;
   sample_submission: string;
+  metric_type: "builtin" | "custom";
   metric: string;
   answer_fields: string[];
   metric_direction: "max" | "min";
+  evaluation_script: string;
+  evaluator_sha256: string;
 };
 
 export type TaskRecord = {
@@ -40,9 +43,12 @@ const emptyTestSet = (): TestSetDraft => ({
   test_set: "",
   inference_query: "",
   sample_submission: "",
+  metric_type: "builtin",
   metric: "",
   answer_fields: "",
   metric_direction: "max",
+  evaluation_script: "",
+  evaluator_sha256: "",
 });
 
 const answerFields = (value: string) =>
@@ -71,6 +77,9 @@ export function TaskModal({
       task?.test_sets?.length
         ? task.test_sets.map((item) => ({
             ...item,
+            metric_type: item.metric_type ?? "builtin",
+            evaluation_script: item.evaluation_script ?? "",
+            evaluator_sha256: item.evaluator_sha256 ?? "",
             answer_fields: item.answer_fields.join(", "),
           }))
         : [emptyTestSet()],
@@ -86,6 +95,12 @@ export function TaskModal({
     ));
   };
 
+  const updateTestSetFields = (index: number, values: Partial<TestSetDraft>) => {
+    setTestSets((current) => current.map(
+      (item, position) => position === index ? { ...item, ...values } : item,
+    ));
+  };
+
   const complete = !!(
     name.trim()
     && objective.trim()
@@ -95,7 +110,12 @@ export function TaskModal({
       && item.test_set.trim()
       && item.inference_query.trim()
       && item.sample_submission.trim()
-      && BUILTIN_TASK_METRICS.includes(item.metric)
+      && (
+        (item.metric_type === "builtin" && BUILTIN_TASK_METRICS.includes(item.metric))
+        || (item.metric_type === "custom"
+          && item.metric.trim()
+          && item.evaluation_script.trim())
+      )
       && answerFields(item.answer_fields).length,
     )
   );
@@ -110,9 +130,14 @@ export function TaskModal({
         test_set: item.test_set.trim(),
         inference_query: item.inference_query.trim(),
         sample_submission: item.sample_submission.trim(),
-        metric: item.metric,
+        metric_type: item.metric_type,
+        metric: item.metric.trim().toLowerCase(),
         answer_fields: answerFields(item.answer_fields),
         metric_direction: item.metric_direction,
+        evaluation_script: item.metric_type === "custom"
+          ? item.evaluation_script.trim() : "",
+        evaluator_sha256: item.metric_type === "custom"
+          ? item.evaluator_sha256 : "",
       }));
       const names = normalized.map((item) => item.name.toLowerCase());
       if (new Set(names).size !== names.length) {
@@ -237,15 +262,41 @@ export function TaskModal({
                   />
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <div>
                     <div className="field-label mb-1">Metric</div>
                     <ThemedSelect
-                      value={item.metric}
-                      onChange={(value) => updateTestSet(index, "metric", value)}
-                      options={BUILTIN_TASK_METRICS.map((value) => ({ value, label: value }))}
+                      value={item.metric_type === "custom" ? "__other__" : item.metric}
+                      onChange={(value) => updateTestSetFields(index, value === "__other__"
+                        ? {
+                            metric_type: "custom", metric: "",
+                            evaluation_script: "", evaluator_sha256: "",
+                          }
+                        : {
+                            metric_type: "builtin", metric: value,
+                            evaluation_script: "", evaluator_sha256: "",
+                          })}
+                      options={[
+                        ...BUILTIN_TASK_METRICS.map((value) => ({ value, label: value })),
+                        { value: "__other__", label: "Other (custom script)" },
+                      ]}
                       placeholder="Choose metric"
                       ariaLabel={`Metric for Test set ${index + 1}`}
+                      buttonClassName={`${field} h-10 font-mono`}
+                    />
+                  </div>
+                  <div>
+                    <div className="field-label mb-1">Target</div>
+                    <ThemedSelect
+                      value={item.metric_direction}
+                      onChange={(value) => updateTestSet(
+                        index, "metric_direction", value as "max" | "min",
+                      )}
+                      options={[
+                        { value: "max", label: "Maximize" },
+                        { value: "min", label: "Minimize" },
+                      ]}
+                      ariaLabel={`Metric target for Test set ${index + 1}`}
                       buttonClassName={`${field} h-10 font-mono`}
                     />
                   </div>
@@ -259,6 +310,30 @@ export function TaskModal({
                     />
                   </div>
                 </div>
+
+                {item.metric_type === "custom" && (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <div className="field-label mb-1">Custom metric name</div>
+                      <input
+                        value={item.metric}
+                        onChange={(event) => updateTestSet(index, "metric", event.target.value)}
+                        placeholder="e.g. pass@1, loss, reward"
+                        className={`${field} h-10 font-mono`}
+                      />
+                    </div>
+                    <FileSlot
+                      label="Evaluation script"
+                      required
+                      tag={false}
+                      value={item.evaluation_script}
+                      onChange={(value) => updateTestSetFields(index, {
+                        evaluation_script: value, evaluator_sha256: "",
+                      })}
+                      hint="Python scorer (.py)"
+                    />
+                  </div>
+                )}
 
                 <FileSlot
                   label="Sample submission"

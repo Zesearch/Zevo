@@ -47,6 +47,48 @@ def test_task_body_is_exactly_a_named_test_suite() -> None:
         )
 
 
+def test_test_set_supports_custom_metric_script_and_direction() -> None:
+    from zevo.api.routers.ui.tasks import TaskBody
+
+    custom = {
+        **_member("code"),
+        "metric_type": "custom",
+        "metric": "pass@1",
+        "metric_direction": "min",
+        "evaluation_script": "/uploads/pass_at_one.py",
+    }
+    body = TaskBody(
+        name="custom-suite",
+        task_objective="Measure code generation.",
+        test_sets=[custom],
+    )
+    assert body.test_sets[0].metric_type == "custom"
+    assert body.test_sets[0].metric_direction == "min"
+    assert body.test_sets[0].evaluation_script == "/uploads/pass_at_one.py"
+
+    with pytest.raises(ValidationError, match="require an evaluation_script"):
+        TaskBody(
+            name="missing-script",
+            task_objective="Measure code generation.",
+            test_sets=[{**custom, "evaluation_script": ""}],
+        )
+    with pytest.raises(ValidationError, match="must not carry a custom evaluator"):
+        TaskBody(
+            name="builtin-with-script",
+            task_objective="Measure code generation.",
+            test_sets=[{
+                **_member("code"),
+                "evaluation_script": "/uploads/unexpected.py",
+            }],
+        )
+    with pytest.raises(ValidationError, match="share a metric direction"):
+        TaskBody(
+            name="mixed-directions",
+            task_objective="Measure two datasets.",
+            test_sets=[_member("one"), {**_member("two"), "metric_direction": "min"}],
+        )
+
+
 def test_inference_query_renders_fields_without_treating_json_as_a_placeholder() -> None:
     from zevo.contracts.prompting import render_inference_query
 
@@ -190,8 +232,12 @@ async def test_heldout_suite_publishes_one_unweighted_average() -> None:
         assert event.extras == {
             "aggregation": "unweighted_mean",
             "test_sets": {
-                "math": {"score": 0.4, "metric": "accuracy"},
-                "qa": {"score": 0.8, "metric": "exact_match"},
+                "math": {
+                    "score": 0.4, "metric": "accuracy", "metric_direction": "max",
+                },
+                "qa": {
+                    "score": 0.8, "metric": "exact_match", "metric_direction": "max",
+                },
             },
         }
         await db.refresh(run)
@@ -199,6 +245,9 @@ async def test_heldout_suite_publishes_one_unweighted_average() -> None:
         assert run.history[0]["test_scores"] == {"math": 0.4, "qa": 0.8}
         assert run.history[0]["test_metrics"] == {
             "math": "accuracy", "qa": "exact_match",
+        }
+        assert run.history[0]["test_metric_directions"] == {
+            "math": "max", "qa": "max",
         }
 
     await engine.dispose()

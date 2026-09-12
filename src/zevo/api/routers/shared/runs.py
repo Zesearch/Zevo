@@ -1690,9 +1690,9 @@ async def create_run(
             "test_sample_submission": task_request.test_sample_submission,
             "metric": task_request.metric,
             "metric_direction": task_request.metric_direction,
-            "metric_type": "builtin",
-            "evaluation_script": "",
-            "evaluator_sha256": "",
+            "metric_type": task_request.metric_type,
+            "evaluation_script": task_request.evaluation_script,
+            "evaluator_sha256": task_request.evaluator_sha256,
         })
     from zevo.contracts.training_methods import (
         method_config_errors,
@@ -1716,7 +1716,7 @@ async def create_run(
             (
                 "test_set is required"
                 if not user_request.test_set.strip()
-                else "at least one built-in Test set contract is required"
+                else "at least one Test set contract is required"
             ),
         )
     test_assets = {
@@ -1744,13 +1744,25 @@ async def create_run(
             f"shared path: {overlap[0]}",
         )
     protected_suite = []
+    from zevo.evaluator_storage import freeze_evaluator
     for item in suite:
         protected_test, protected_sample = await run_in_threadpool(
             protect_assets, item.test_set, item.sample_submission,
         )
+        frozen_evaluator = ""
+        evaluator_sha256 = ""
+        if item.metric_type == "custom":
+            try:
+                frozen_evaluator, evaluator_sha256 = await run_in_threadpool(
+                    freeze_evaluator, item.evaluation_script,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         protected_suite.append(item.model_copy(update={
             "test_set": protected_test,
             "sample_submission": protected_sample,
+            "evaluation_script": frozen_evaluator,
+            "evaluator_sha256": evaluator_sha256,
         }))
     if protected_suite:
         primary = protected_suite[0]
@@ -1761,14 +1773,13 @@ async def create_run(
             "test_sample_submission": primary.sample_submission,
             "metric": primary.metric,
             "metric_direction": primary.metric_direction,
-            "metric_type": "builtin",
-            "evaluation_script": "",
-            "evaluator_sha256": "",
+            "metric_type": primary.metric_type,
+            "evaluation_script": primary.evaluation_script,
+            "evaluator_sha256": primary.evaluator_sha256,
         })
     if derived_validation:
         user_request = inherit_test_validation_contract(user_request)
     if user_request.metric_type == "custom":
-        from zevo.evaluator_storage import freeze_evaluator
         try:
             frozen_evaluator, evaluator_sha256 = await run_in_threadpool(
                 freeze_evaluator, user_request.evaluation_script,
@@ -1839,6 +1850,7 @@ async def create_run(
             )
         task_suite = effective_test_suite(user_request)
         primary = task_suite[0]
+        single = len(task_suite) == 1
         headline_metric = (
             primary.metric if len(task_suite) == 1 else "suite_average"
         )
@@ -1849,13 +1861,11 @@ async def create_run(
             test_set=primary.test_set,
             test_answer_fields=list(primary.answer_fields),
             test_sample_submission=primary.sample_submission,
-            metric_type="builtin",
-            evaluation_script="",
-            evaluator_sha256="",
+            metric_type=primary.metric_type if single else "builtin",
+            evaluation_script=primary.evaluation_script if single else "",
+            evaluator_sha256=primary.evaluator_sha256 if single else "",
             metric=headline_metric,
-            metric_direction=(
-                primary.metric_direction if len(task_suite) == 1 else "max"
-            ),
+            metric_direction=primary.metric_direction,
         )
         db.add(task_row)
 
@@ -1878,10 +1888,7 @@ async def create_run(
         effective_suite[0].metric
         if len(effective_suite) == 1 else "suite_average"
     )
-    metric_direction = (
-        effective_suite[0].metric_direction
-        if len(effective_suite) == 1 else "max"
-    )
+    metric_direction = effective_suite[0].metric_direction
     validation_metric = user_request.validation_metric
     validation_metric_direction = user_request.validation_metric_direction
     # One clean objective everywhere the task problem is represented. The

@@ -54,9 +54,12 @@ export type TaskTestSet = {
   test_set: string;
   inference_query: string;
   sample_submission: string;
+  metric_type: MetricType;
   metric: string;
   answer_fields: string[];
   metric_direction: MetricDirection;
+  evaluation_script: string;
+  evaluator_sha256: string;
 };
 
 export type TaskDTO = {
@@ -510,6 +513,7 @@ export type IterationHistoryEntry = {
   /** Named component scores for a multi-Test Task. Kept private from Agents. */
   test_scores?: Record<string, number>;
   test_metrics?: Record<string, string>;
+  test_metric_directions?: Record<string, MetricDirection>;
   source: "baseline" | "trained";
   // The round's record, one fact per field. `analysis` is what was LEARNED, as
   // distinct from `result` which is what the score did.

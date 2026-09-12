@@ -5024,9 +5024,11 @@ async def _record_holdout_score(
     all_results = dict(holdout.get("suite_results") or {})
     result_key = f"{source}|{iteration}|{base_model}"
     candidate_results = dict(all_results.get(result_key) or {})
+    suite_item = next(item for item in suite if item["name"] == test_set_name)
     candidate_results[test_set_name] = {
         "score": float(score),
         "metric": str((ticket.payload or {}).get("metric") or ""),
+        "metric_direction": str(suite_item.get("metric_direction") or "max"),
         "evaluation_ticket_id": ticket.id,
     }
     all_results[result_key] = candidate_results
@@ -5048,6 +5050,10 @@ async def _record_holdout_score(
         name: str(candidate_results[name]["metric"])
         for name in suite_names
     }
+    component_directions = {
+        name: str(candidate_results[name]["metric_direction"])
+        for name in suite_names
+    }
     score = sum(component_scores.values()) / len(component_scores)
     recorded.append(result_key)
     holdout["suite_recorded"] = recorded
@@ -5061,6 +5067,7 @@ async def _record_holdout_score(
                 name: {
                     "score": component_scores[name],
                     "metric": candidate_results[name]["metric"],
+                    "metric_direction": component_directions[name],
                 }
                 for name in suite_names
             },
@@ -5087,6 +5094,7 @@ async def _record_holdout_score(
             entry["test_score"] = float(score)
             entry["test_scores"] = dict(component_scores)
             entry["test_metrics"] = dict(component_metrics)
+            entry["test_metric_directions"] = dict(component_directions)
         # The baseline gets its test score stamped but does not compete for
         # champion — same rule as run_metrics.baseline_and_best_test, or the
         # column and the boards it sorts disagree the moment training never
@@ -5341,7 +5349,8 @@ def _agent_history(history: list) -> list:
             out.append({
                 k: v for k, v in entry.items()
                 if k not in (
-                    "test_score", "test_scores", "test_metrics", "notes",
+                    "test_score", "test_scores", "test_metrics",
+                    "test_metric_directions", "notes",
                 )
             })
         else:
