@@ -142,7 +142,7 @@ function dataRows(s: TaskSettingDTO): {
  */
 /** Shared key column for the Validation setup facts. */
 const valKeyCls =
-  "w-[11.5rem] shrink-0 whitespace-nowrap font-mono text-2xs text-slate-100";
+  "w-28 shrink-0 whitespace-nowrap font-mono text-2xs text-slate-100";
 
 function ValidationRest({
   s, onOpenDataset,
@@ -266,6 +266,90 @@ function Fact({ label, value, title, tone = "text-slate-100", big = false }: {
         {value}
       </span>
     </span>
+  );
+}
+
+type SettingDataRow = ReturnType<typeof dataRows>[number];
+
+function SettingDatasetValue({
+  row, onOpenDataset,
+}: {
+  row: SettingDataRow;
+  onOpenDataset?: (name: string, file?: string, split?: string) => void;
+}) {
+  const value = (
+    <>
+      <span className="min-w-0 break-words">{row.value}</span>
+      {row.slice && (
+        <span className="shrink-0 rounded border border-hair px-1 py-px text-[0.58rem] text-slate-400">
+          {row.slice}
+        </span>
+      )}
+    </>
+  );
+
+  return row.packaged ? (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpenDataset?.(row.folder, row.file, row.slice ? row.split : "");
+      }}
+      title={row.title}
+      className="flex min-w-0 max-w-full items-start gap-1.5 text-left font-mono text-xs text-slate-100 transition hover:text-brass-300 hover:underline"
+    >
+      <Folder size={11} className="mt-0.5 shrink-0 text-slate-500" />
+      {value}
+    </button>
+  ) : (
+    <div
+      title={row.title}
+      className={`flex min-w-0 items-start gap-1.5 font-mono text-xs ${
+        row.folder ? "text-slate-100" : "text-brass-300"
+      }`}
+    >
+      {value}
+    </div>
+  );
+}
+
+function SettingChoice({
+  label, value, title, query, zevo = false, children,
+}: {
+  label: string;
+  value: string;
+  title?: string;
+  query?: string;
+  zevo?: boolean;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="min-w-0 rounded-md border border-hair bg-raised/55 p-3">
+      <div className="table-label">{label}</div>
+      <div
+        title={title || value}
+        className={`mt-1.5 min-w-0 break-words font-mono text-xs leading-relaxed ${
+          zevo ? "text-brass-300" : "text-slate-100"
+        }`}
+      >
+        {children ?? value}
+      </div>
+      {query !== undefined && (
+        <div className="mt-2 border-t border-hair/70 pt-2">
+          <span className="font-mono text-[0.58rem] uppercase tracking-[0.12em] text-slate-600">
+            query
+          </span>
+          <p
+            title={query || "No query set"}
+            className={`mt-0.5 line-clamp-2 break-words font-mono text-[0.64rem] leading-relaxed ${
+              query ? "text-slate-400" : "text-slate-600"
+            }`}
+          >
+            {query || "not set"}
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -397,24 +481,12 @@ export function TaskSettingHistory({
     );
   }
 
-  // The task dialog: a table. One row per setting, one column per decision,
-  // and the two things you do to a setting at the end of it. Every column is
-  // left-aligned — a table read across is read from one edge.
-  // Explicit widths, not fractions: the columns hold short values, and a
-  // fraction grid inside a dialog collapses them until the headings collide.
-  const cols = "grid grid-cols-[3rem_9rem_minmax(24.5rem,1.1fr)_minmax(16rem,1fr)_minmax(9.5rem,1fr)_minmax(7rem,0.9fr)_4.5rem_4.5rem_6.5rem_6.5rem]"
-    + " items-center justify-items-center gap-4 text-center";
-  // The rows are cards, so they carry their own padding — and take it back out
-  // of the margin, which keeps their CONTENT on the same grid as the header and
-  // the header's first column flush with the heading above it.
-  const rowBox = "px-3";
-
   // Adding is a separate form state, not another row in the saved-settings
   // table. Showing the table heading and its old rows above it made the form
   // look like an expansion of the list and left two competing page titles.
   if (!readOnly && open === "new") {
     return (
-      <div className="min-w-[90rem]">
+      <div className="min-w-0">
         <SettingForm
           task={task}
           onDone={async () => { setOpen(""); await mutate(); }}
@@ -425,39 +497,7 @@ export function TaskSettingHistory({
   }
 
   return (
-    // The minimum width covers every explicit track plus its gaps. Declaring
-    // less does not make the table narrower —
-    // the tracks overflow anyway — it makes each row's CARD narrower than its
-    // own content, so the border and background stop mid-table and the last
-    // columns sit outside them. Change this whenever `cols` changes.
-    <div className="min-w-[102rem] space-y-2">
-      <div className={`${cols} ${rowBox} table-label`}>
-        <span className="justify-self-start">Name</span>
-        <span className="flex translate-x-2 items-center justify-center gap-1 whitespace-nowrap">
-          Autonomy level
-          <Note to="/levels" size={13}>
-            Click to see details.
-          </Note>
-        </span>
-        <span className="justify-self-center text-center">Validation setup</span>
-        <span className="flex flex-col items-center text-center leading-tight">
-          <span>Data /</span>
-          <span>Query</span>
-        </span>
-        <span className="flex flex-col leading-tight">
-          <span>Model /</span>
-          <span>Query</span>
-        </span>
-        <span className="flex flex-col leading-tight">
-          <span>Method /</span>
-          <span>Query</span>
-        </span>
-        <span>Iterations</span>
-        <span>Budget</span>
-        <span>Stop threshold</span>
-        <span />
-      </div>
-
+    <div className="min-w-0 space-y-3">
       {settings.length === 0 && !open && (
         <div className="rounded-lg border border-dashed border-hair px-3 py-4 text-2xs text-slate-400">
           {readOnly
@@ -466,169 +506,117 @@ export function TaskSettingHistory({
         </div>
       )}
 
-      {settings.map((s) => (
-        s.id === open ? (
-          // The form takes the row's place rather than appearing below it, so
-          // the values you are changing stay where you were reading them.
-          <SettingForm
-            key={s.id}
-            task={task}
-            existing={s}
-            onDone={async () => { setOpen(""); await mutate(); }}
-            onCancel={() => setOpen("")}
-          />
-        ) : (
-        <div key={s.id} className={`${cols} ${rowBox} rounded-lg border border-hair bg-canvas/50 py-2`}>
-          <span className="justify-self-start font-mono text-xs text-slate-100">{s.name || "—"}</span>
-          <span className="inline-flex translate-x-2"><LevelBadge level={s.level} /></span>
-          {/* A catalogued dataset is somewhere you can go and read — including
-              one whose file is fetched from the hub at run time. `remote` says
-              the FILE is not on disk; the dataset entry still is, which is how
-              it got a name like `ifeval-train` in the first place. Excluding it
-              left capybara's training data looking like a dead label. */}
-          {/* Two columns, because they are two decisions. A single cell could
-              not say that one of them had not been made. */}
-          {dataRows(s).slice().reverse().map((r) => (
-            // `w-full`: the grid centres its items, so without it the cell is
-            // sized to its content and `truncate` has no width to truncate
-            // against, letting a long path run into the next column.
-            // `text-left` on the validation cell: the table centres its cells,
-            // which is right for one value and wrong for a key-and-value list —
-            // centred, `data` drifted to the far side of its own key column.
-            <span
-              key={r.label}
-              className={`w-full min-w-0 justify-self-center px-1 ${
-                r.label === "val"
-                  ? `mx-auto max-w-[24rem] ${s.validation_set.trim() ? "text-left" : "text-center"}`
-                  : "text-center"
-              }`}
-            >
-            <span className={`flex w-full min-w-0 items-baseline gap-1.5 ${
-              r.label === "train" || (r.label === "val" && !s.validation_set.trim())
-                ? "justify-center"
-                : ""
-            }`}>
-              {/* The validation set is `data`, the first of that block's four
-                  keys. The Data / Query column needs no inner key. */}
-              {r.label === "val" && !!s.validation_set.trim() && (
-                <span className={valKeyCls}>data</span>
-              )}
-              {r.packaged ? (
-                <button
-                  onClick={(e) => { e.stopPropagation(); onOpenDataset?.(r.folder, r.file, r.slice ? r.split : ""); }}
-                  title={r.title}
-                  className={`flex min-w-0 items-baseline gap-1 transition hover:text-brass-300 ${
-                    r.label === "val" ? "text-slate-300" : "text-slate-100"
-                  }`}
-                >
-                  <Folder size={11} className="shrink-0 translate-y-px text-slate-500" />
-                      <span className={`min-w-0 truncate font-mono hover:underline ${
-                        r.label === "train" ? "text-xs" : "text-2xs"
-                      }`}>{r.value}</span>
-                </button>
-              ) : (
-                <span title={r.title}
-                  className={`min-w-0 truncate font-mono ${r.label === "train" ? "text-xs" : "text-2xs"} ${
-                    !r.folder ? (r.label === "val" ? "text-slate-100" : "text-brass-300")
-                      // `data` is the first of four rows under a key, so it takes
-                      // the value colour the other three use — one shade down
-                      // from its key, the way the task card's test files read.
-                      // The training column has no key and no siblings: its one
-                      // value is the whole cell, and stays white.
-                      : r.label === "val" ? "text-slate-300" : "text-slate-100"
-                  }`}>
-                  {r.value}
-                </span>
-              )}
-              {r.slice && (
-                <span
-                  title={`${r.slice} slice of the repo`}
-                  className="shrink-0 rounded border border-hair px-1 py-px font-mono text-[0.58rem] text-slate-400"
-                >
-                  {r.slice}
-                </span>
-              )}
-            </span>
-            {r.label === "val" && (
-              <ValidationRest
-                s={s}
-                onOpenDataset={(name, file) => onOpenDataset?.(name, file, "")}
-              />
-            )}
-            {r.label === "train" && (
-              <span
-                title={s.data_query || "No data query set"}
-                className="mt-1 block truncate font-mono text-[0.58rem] text-slate-400"
-              >
-                {s.data_query || "query not set"}
-              </span>
-            )}
-            </span>
-          ))}
-          <span className="min-w-0 space-y-1 text-center">
-            <Cell value={shortModel(s.base_model) || "Zevo decides"} title={s.base_model} zevo={!s.base_model} />
-            <span className="block truncate font-mono text-[0.58rem] text-slate-400" title={s.model_query || "No model query set"}>
-              {s.model_query || "query not set"}
-            </span>
-          </span>
-          <span className="min-w-0 space-y-1 text-center">
-            <Cell
-              value={s.training_method || "Zevo decides"}
-              title={
-                s.training_method === "gkd"
-                  ? `${s.training_method} · teacher ${String(s.method_config?.teacher_model || "missing")}`
-                  : s.training_method === "online_dpo"
-                  ? `${s.training_method} · reward ${String(s.method_config?.reward_model || "missing")}`
-                  : s.training_method || "Zevo decides"
-              }
-              zevo={!s.training_method}
+      {settings.map((s) => {
+        if (s.id === open) {
+          return (
+            <SettingForm
+              key={s.id}
+              task={task}
+              existing={s}
+              onDone={async () => { setOpen(""); await mutate(); }}
+              onCancel={() => setOpen("")}
             />
-            <span className="block truncate font-mono text-[0.58rem] text-slate-400" title={s.method_query || "No method query set"}>
-              {s.method_query || "query not set"}
-            </span>
-          </span>
-          <Cell value={s.iteration_budget ? String(s.iteration_budget) : "∞"} big={!s.iteration_budget} />
-          <Cell value={s.max_cost_usd ? `$${s.max_cost_usd}` : "∞"} big={!s.max_cost_usd} />
-          <Cell
-            value={s.stop_threshold != null ? String(s.stop_threshold) : "not set"}
-            title={s.stop_threshold != null ? String(s.stop_threshold) : "No stop threshold set"}
-          />
-          <span className="flex items-center justify-center gap-1.5">
-            {onRun && (
-              <button
-                type="button"
-                onClick={() => onRun(s)}
-                disabled={busy}
-                title="Start a run with this setting"
-                className="rounded-md border border-phosphor-500/40 bg-phosphor-500/10 px-2 py-0.5 font-mono text-2xs text-phosphor-300 transition hover:bg-phosphor-500/20 hover:text-phosphor-200 disabled:opacity-50"
-              >
-                run
-              </button>
-            )}
-            {!readOnly && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setOpen(s.id)}
-                  title="Change this setting"
-                  className="rounded-md p-1 text-slate-500 transition hover:text-brass-300"
-                >
-                  <Pencil size={13} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void remove(s)}
-                  title="Remove this setting"
-                  className="rounded-md p-1 text-slate-500 transition hover:text-coral-300"
-                >
-                  <Trash2 size={13} />
-                </button>
-              </>
-            )}
-          </span>
-        </div>
-        )
-      ))}
+          );
+        }
+
+        const [training, validation] = dataRows(s);
+        const methodTitle = s.training_method === "gkd"
+          ? `${s.training_method} · teacher ${String(s.method_config?.teacher_model || "missing")}`
+          : s.training_method === "online_dpo"
+          ? `${s.training_method} · reward ${String(s.method_config?.reward_model || "missing")}`
+          : s.training_method || "Zevo decides";
+
+        return (
+          <div key={s.id} className="min-w-0 rounded-lg border border-hair bg-canvas/50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-hair pb-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+                <span className="font-mono text-sm text-slate-100">{s.name || "—"}</span>
+                <LevelBadge level={s.level} />
+                <Note to="/levels" size={13}>Autonomy level details.</Note>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                {onRun && (
+                  <button
+                    type="button"
+                    onClick={() => onRun(s)}
+                    disabled={busy}
+                    title="Start a run with this setting"
+                    className="rounded-md border border-phosphor-500/40 bg-phosphor-500/10 px-2.5 py-1 font-mono text-2xs text-phosphor-300 transition hover:bg-phosphor-500/20 hover:text-phosphor-200 disabled:opacity-50"
+                  >
+                    run
+                  </button>
+                )}
+                {!readOnly && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setOpen(s.id)}
+                      title="Change this setting"
+                      className="rounded-md p-1.5 text-slate-500 transition hover:bg-raised hover:text-brass-300"
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void remove(s)}
+                      title="Remove this setting"
+                      className="rounded-md p-1.5 text-slate-500 transition hover:bg-raised hover:text-coral-300"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-3 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <SettingChoice label="Data" value={training.value} title={training.title} query={s.data_query}>
+                <SettingDatasetValue row={training} onOpenDataset={onOpenDataset} />
+              </SettingChoice>
+              <SettingChoice
+                label="Model"
+                value={shortModel(s.base_model) || "Zevo decides"}
+                title={s.base_model || "Zevo decides"}
+                query={s.model_query}
+                zevo={!s.base_model}
+              />
+              <SettingChoice
+                label="Method"
+                value={s.training_method || "Zevo decides"}
+                title={methodTitle}
+                query={s.method_query}
+                zevo={!s.training_method}
+              />
+            </div>
+
+            <div className="mt-3 grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
+              <div className="min-w-0 rounded-md border border-hair bg-raised/35 p-3">
+                <div className="table-label">Validation setup</div>
+                <div className="mt-1.5">
+                  <SettingDatasetValue row={validation} onOpenDataset={onOpenDataset} />
+                  <ValidationRest
+                    s={s}
+                    onOpenDataset={(name, file) => onOpenDataset?.(name, file, "")}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 rounded-md border border-hair bg-raised/35 p-3">
+                {[
+                  ["iterations", s.iteration_budget ? String(s.iteration_budget) : "∞"],
+                  ["budget", s.max_cost_usd ? `$${s.max_cost_usd}` : "∞"],
+                  ["stop at", s.stop_threshold != null ? String(s.stop_threshold) : "not set"],
+                ].map(([label, value]) => (
+                  <div key={label} className="min-w-0 text-center">
+                    <div className="font-mono text-2xs uppercase tracking-[0.1em] text-slate-500">{label}</div>
+                    <div className="mt-1.5 truncate font-mono text-xs leading-relaxed text-slate-100" title={value}>{value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })}
 
       {readOnly ? null : open ? null : (
         <button
@@ -642,25 +630,6 @@ export function TaskSettingHistory({
     </div>
   );
 }
-
-/** One table cell. Values are white; a decision left to Zevo is brass, because
- *  that is the one thing in the row that is not a fact about this run yet. */
-function Cell({ value, title, zevo = false, big = false, icon }: {
-  value: string; title?: string; zevo?: boolean; big?: boolean; icon?: React.ReactNode;
-}) {
-  return (
-    <span
-      title={title || value}
-      className={`flex min-w-0 items-center justify-center gap-1.5 font-mono ${big ? "text-lg leading-none" : "text-xs"} ${
-        zevo ? "text-brass-300" : "text-slate-100"
-      }`}
-    >
-      {icon}
-      <span className="min-w-0 truncate">{value}</span>
-    </span>
-  );
-}
-
 /** Write a setting down before running it — the only way onto the list for a
  *  task nobody has run yet. */
 function SettingForm({ task, existing, onDone, onCancel }: {

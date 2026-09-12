@@ -88,7 +88,7 @@ function FileList({ files }: { files: { name: string; remote: RemoteFileDTO | nu
       </div>
       {/* `mb-1`: expanded, this button is the last thing before the card's
           next rule, and it sat right against it. */}
-      <div className="mb-3 h-4">
+      <div className="mb-3 mt-1 h-4">
         {rows.length > FILES_SHOWN && (
           <button
             onClick={(e) => { e.stopPropagation(); setAll((v) => !v); }}
@@ -270,14 +270,9 @@ export function FilesPage() {
                   <Kicker strong>size</Kicker>
                   <div className="readout mt-1 text-lg font-semibold text-phosphor-300">{bytes(d.size_bytes)}</div>
                 </div>
-                {/* A FIXED width, not shrink-to-fit. The block sits on the
-                    right of the card and its text runs from the left — a folder
-                    heading with files indented under it only reads as a tree
-                    from one left edge. But sized to its contents, expanding the
-                    list made it wider and its left edge slid across the card;
-                    a column that moves when you open it is a column you have to
-                    find again. Long names truncate instead. */}
-                <div className="w-60 shrink-0 text-left">
+                {/* The files get the remaining card width. A fixed 15rem column
+                    collided with the size block on narrower cards. */}
+                <div className="min-w-0 max-w-60 flex-1 text-left">
                   {/* No "training files" / "evaluation files" heading: the label
                       beside the name already says which of the two this is. */}
                   <Kicker strong>files</Kicker>
@@ -295,7 +290,12 @@ export function FilesPage() {
               {d.source?.note && (
                 <div className="mt-4">
                   <Kicker>description</Kicker>
-                  <p className="mt-1 text-sm leading-relaxed text-slate-400">{d.source.note}</p>
+                  <p
+                    title={d.source.note}
+                    className="mt-1 line-clamp-3 break-words text-sm leading-relaxed text-slate-400"
+                  >
+                    {d.source.note}
+                  </p>
                 </div>
               )}
 

@@ -248,10 +248,10 @@ export function SecretRow({
   return (
     <div className="py-3.5 first:pt-1">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-display text-sm font-semibold text-ink">{spec.label}</span>
-            <code className="rounded bg-canvas px-1.5 py-px font-mono text-2xs text-slate-400">
+            <code className="min-w-0 break-all rounded bg-canvas px-1.5 py-px font-mono text-2xs text-slate-400">
               {spec.key}
             </code>
             {present ? (
@@ -277,8 +277,8 @@ export function SecretRow({
           </p>
 
           {spec.obtain_cmd && (
-            <div className="mt-1.5 flex items-center gap-2">
-              <code className="rounded bg-canvas px-2 py-1 font-mono text-2xs text-slate-300">
+            <div className="mt-1.5 flex min-w-0 items-center gap-2">
+              <code className="min-w-0 truncate rounded bg-canvas px-2 py-1 font-mono text-2xs text-slate-300">
                 {spec.obtain_cmd}
               </code>
               <CopyBtn text={spec.obtain_cmd} />
@@ -286,14 +286,15 @@ export function SecretRow({
           )}
 
           {present && !editing && (
-            <div className="mt-2.5 flex items-center gap-2 font-mono text-xs text-slate-500">
-              <KeyRound size={11} className="text-brass-400" /> {preview || "(redacted)"}
+            <div className="mt-2.5 flex min-w-0 items-start gap-2 font-mono text-xs text-slate-500">
+              <KeyRound size={11} className="mt-0.5 shrink-0 text-brass-400" />
+              <span className="min-w-0 break-all">{preview || "(redacted)"}</span>
             </div>
           )}
 
           {editing && (
             <div className="mt-2.5">
-              <div className="flex gap-1">
+              <div className="flex min-w-0 gap-1">
                 {spec.choices ? (
                   <select
                     value={value}
@@ -605,7 +606,7 @@ export function SettingsSection({
     <section className="border-t border-hair pt-6">
       <div className="mb-4">
         <h2 className="font-display text-lg font-semibold tracking-tight text-ink">{title}</h2>
-        <p className={`mt-1 text-sm leading-relaxed text-slate-400 ${singleLineSubtitle ? "overflow-x-auto whitespace-nowrap" : "max-w-4xl"}`}>{subtitle}</p>
+        <p className={`mt-1 break-words text-sm leading-relaxed text-slate-400 ${singleLineSubtitle ? "max-w-5xl" : "max-w-4xl"}`}>{subtitle}</p>
       </div>
       {children}
     </section>
