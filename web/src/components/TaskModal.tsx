@@ -326,6 +326,7 @@ export function TaskModal({
                       label="Evaluation script"
                       required
                       tag={false}
+                      controlClassName="h-10"
                       value={item.evaluation_script}
                       onChange={(value) => updateTestSetFields(index, {
                         evaluation_script: value, evaluator_sha256: "",
