@@ -2379,7 +2379,8 @@ def _fmt_bytes(n: int) -> str:
 _PERCENTAGE_METRICS = {
     "accuracy", "exact_match", "em", "f1", "f1_micro", "f1_macro",
     "token_f1", "precision", "recall", "bleu", "rouge", "rouge_l",
-    "pass_rate", "win_rate", "pass@1", "pass_at_1",
+    "pass_rate", "win_rate", "pass@1", "pass_at_1", "mc_loglikelihood",
+    "accuracy_norm", "suite_average",
 }
 
 
@@ -2475,66 +2476,89 @@ def task_show(name: str = typer.Argument(..., help="Task name.")) -> None:
         raise typer.Exit(1)
     console.print(f"[bold]{row.name}[/bold]")
     console.print(f"\n{row.task_objective}\n")
+    from zevo.api.routers.ui.tasks import _stored_test_sets
+
     t = Table(box=None, pad_edge=False)
-    t.add_column("field", style="dim", no_wrap=True)
-    t.add_column("value")
-    for label, value in (
-        ("test metric", row.metric),
-        ("test target", row.metric_direction.capitalize()),
-        ("test set", _short_ref(row.test_set)),
-        ("answer fields", ", ".join(row.test_answer_fields or []) or "[dim]none declared[/dim]"),
-        ("test metric type", row.metric_type),
-        ("test evaluation script", _short_ref(row.evaluation_script)),
-        ("evaluator sha256", row.evaluator_sha256 or "[dim]built-in[/dim]"),
-        ("test sample submission", _short_ref(row.test_sample_submission)),
-    ):
-        t.add_row(label, value)
+    t.add_column("Test set", style="bold cyan", no_wrap=True)
+    t.add_column("data")
+    t.add_column("inference query", max_width=42)
+    t.add_column("metric", no_wrap=True)
+    t.add_column("target", no_wrap=True)
+    t.add_column("answer fields")
+    t.add_column("evaluator")
+    t.add_column("sample submission")
+    for item in _stored_test_sets(row):
+        t.add_row(
+            item.name,
+            _short_ref(item.test_set),
+            item.inference_query,
+            f"{item.metric} ({item.metric_type})",
+            item.metric_direction,
+            ", ".join(item.answer_fields),
+            _short_ref(item.evaluation_script),
+            _short_ref(item.sample_submission),
+        )
     console.print(t)
+
+
+def _task_test_sets(raw: str) -> list[dict]:
+    """Read the compact CLI suite value: JSON inline, or ``@file.json``."""
+    value = (raw or "").strip()
+    try:
+        parsed = (
+            json.loads(Path(value[1:]).expanduser().read_text(encoding="utf-8"))
+            if value.startswith("@") else json.loads(value)
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]--test-sets must be JSON or @file.json:[/] {exc}")
+        raise typer.Exit(1)
+    if not isinstance(parsed, list) or not parsed:
+        console.print("[red]--test-sets must decode to a non-empty JSON array.[/]")
+        raise typer.Exit(1)
+    suite = []
+    for index, item in enumerate(parsed, 1):
+        if not isinstance(item, dict):
+            console.print(f"[red]Test set {index} must be a JSON object.[/]")
+            raise typer.Exit(1)
+        normalized = dict(item)
+        normalized["test_set"] = _resolve_data_ref(str(item.get("test_set") or ""))
+        normalized["sample_submission"] = _resolve_data_ref(
+            str(item.get("sample_submission") or "")
+        )
+        if str(item.get("metric_type") or "builtin") == "custom":
+            normalized["evaluation_script"] = _resolve_data_ref(
+                str(item.get("evaluation_script") or "")
+            )
+        suite.append(normalized)
+    return suite
 
 
 @task_app.command("add")
 def task_add(
     name: str = typer.Argument(..., help="What to call the task."),
-    objective: str = typer.Argument(..., help="What the fine-tuned model should do, and how it is scored."),
-    test_set: str = typer.Option("", "--test-set", help="Test set WITH the answers."),
-    answer_fields: str = typer.Option(
-        "", "--answer-fields",
-        help="where the ground truth lives in the test set, comma-separated. The data agent drops these for inference."),
-    metric_type: str = typer.Option("builtin", "--metric-type", help="builtin or custom."),
-    evaluation_script: str = typer.Option("", "--evaluation-script", help="Custom held-out Test scorer."),
-    test_sample_submission: str = typer.Option("", "--test-sample-submission", help="Held-out-test submission-template CSV."),
-    metric: str = typer.Option(..., "--metric", help="Authoritative evaluator value name, e.g. accuracy, F1, loss, or pass@1."),
-    target: str = typer.Option(
-        ..., "--target",
-        help="Required evaluator direction: Max when higher is better, Min when lower is better.",
+    objective: str = typer.Argument(..., help="What the fine-tuned model should do."),
+    test_sets: str = typer.Option(
+        ...,
+        "--test-sets",
+        help=(
+            "JSON array, or @file.json. Each item has name, test_set, "
+            "inference_query, sample_submission, metric, metric_direction, and "
+            "answer_fields. Set metric_type=custom and evaluation_script for Other."
+        ),
     ),
 ) -> None:
     """Add a task. It appears in the UI immediately."""
     asyncio.run(_task_add(
-        name=name, task_objective=objective, test_set=test_set,
-        answer_fields=answer_fields, metric_type=metric_type,
-        evaluation_script=evaluation_script,
-        test_sample_submission=test_sample_submission, metric=metric,
-        metric_direction=target,
+        name=name, task_objective=objective, test_sets=test_sets,
     ))
 
 
 async def _task_add(**kw) -> None:
-    direction = str(kw["metric_direction"] or "").strip().lower()
-    if direction not in ("max", "min"):
-        console.print("[red]--target must be Max or Min.[/]")
-        raise typer.Exit(1)
     import httpx
     body = {
         "name": kw["name"],
         "task_objective": kw["task_objective"],
-        "test_set": _resolve_data_ref(kw["test_set"]),
-        "test_answer_fields": _columns(kw["answer_fields"]),
-        "metric_type": str(kw["metric_type"] or "builtin").strip().lower(),
-        "evaluation_script": _resolve_data_ref(kw["evaluation_script"]),
-        "test_sample_submission": _resolve_data_ref(kw["test_sample_submission"]),
-        "metric": str(kw["metric"]).strip(),
-        "metric_direction": direction,
+        "test_sets": _task_test_sets(kw["test_sets"]),
     }
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(f"{_api_base()}/api/tasks", json=body)
@@ -2549,30 +2573,14 @@ async def _task_add(**kw) -> None:
 def task_edit(
     name: str = typer.Argument(..., help="Task name."),
     objective: Optional[str] = typer.Option(None, "--objective"),
-    metric: Optional[str] = typer.Option(None, "--metric"),
-    target: Optional[str] = typer.Option(None, "--target"),
-    test_set: Optional[str] = typer.Option(None, "--test-set"),
-    answer_fields: Optional[str] = typer.Option(None, "--answer-fields"),
-    metric_type: Optional[str] = typer.Option(None, "--metric-type"),
-    evaluation_script: Optional[str] = typer.Option(None, "--evaluation-script"),
-    test_sample_submission: Optional[str] = typer.Option(None, "--test-sample-submission"),
+    test_sets: Optional[str] = typer.Option(
+        None, "--test-sets", help="Replacement JSON array, or @file.json.",
+    ),
 ) -> None:
-    """Edit the same Task-owned evaluator fields as the UI."""
+    """Edit the same Task-owned Test suite as the UI."""
     body: dict = {}
     if objective is not None: body["task_objective"] = objective
-    if metric is not None: body["metric"] = metric.strip()
-    if target is not None:
-        direction = target.strip().lower()
-        if direction not in ("max", "min"):
-            console.print("[red]--target must be Max or Min.[/]")
-            raise typer.Exit(1)
-        body["metric_direction"] = direction
-    if test_set is not None: body["test_set"] = _resolve_data_ref(test_set)
-    if answer_fields is not None: body["test_answer_fields"] = _columns(answer_fields)
-    if metric_type is not None: body["metric_type"] = metric_type.strip().lower()
-    if evaluation_script is not None: body["evaluation_script"] = _resolve_data_ref(evaluation_script)
-    if test_sample_submission is not None:
-        body["test_sample_submission"] = _resolve_data_ref(test_sample_submission)
+    if test_sets is not None: body["test_sets"] = _task_test_sets(test_sets)
     if not body:
         console.print("[yellow]nothing to update[/]")
         raise typer.Exit(1)
@@ -2817,11 +2825,17 @@ async def _dataset_users(name: str) -> None:
     Session = get_session_factory()
     async with Session() as s:
         tasks = (await s.execute(select(Task).order_by(Task.name))).scalars().all()
-        users = [
-            t.name for t in tasks
-            if any((getattr(t, c, "") or "").startswith(prefix)
-                   for c in ("test_set", "evaluation_script", "test_sample_submission"))
-        ]
+        users = []
+        for task in tasks:
+            refs = [task.test_set, task.test_sample_submission]
+            refs.extend(
+                str(item.get(key) or "")
+                for item in (task.test_sets or [])
+                if isinstance(item, dict)
+                for key in ("test_set", "sample_submission")
+            )
+            if any((ref or "").startswith(prefix) for ref in refs):
+                users.append(task.name)
     console.print(f"\n[dim]used by:[/dim] {', '.join(users) if users else '(no task)'}")
 
 

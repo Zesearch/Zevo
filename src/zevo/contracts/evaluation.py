@@ -27,6 +27,7 @@ class EvaluationTaskInput(AgentTaskInput):
     """Mirror of orchestrator.EvaluatePayload."""
 
     predictions_path: str = Field(..., description="Path to predictions CSV produced by inference.")
+    test_set_name: str = ""
     scoring_set: str = Field(
         ...,
         description=(

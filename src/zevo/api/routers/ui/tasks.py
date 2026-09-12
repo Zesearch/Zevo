@@ -24,7 +24,11 @@ from zevo.engine.observe.run_metrics import was_measured_on_heldout
 from zevo.engine.method.score_direction import is_better
 from zevo.db import Task, TaskSetting
 from zevo.db.models import Run
-from zevo.contracts.orchestrator import BUILTIN_METRICS, UserRequest
+from zevo.contracts.orchestrator import (
+    TaskTestSet,
+    UserRequest,
+    validate_test_suite,
+)
 from zevo.contracts.training_methods import (
     method_config_errors,
     normalize_method_config,
@@ -203,21 +207,12 @@ class TaskBody(BaseModel):
 
     name: str = Field(min_length=1, max_length=64)
     task_objective: str = ""
-    test_set: str = ""
-    test_answer_fields: list[str] = Field(default_factory=list)
-    test_sample_submission: str = ""
-    metric_type: Literal["builtin", "custom"] = "builtin"
-    evaluation_script: str = ""
-    metric: str = Field(min_length=1, max_length=64)
-    metric_direction: Literal["max", "min"]
+    test_sets: list[TaskTestSet] = Field(min_length=1)
 
-    @field_validator("metric")
+    @field_validator("test_sets")
     @classmethod
-    def normalize_metric(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("metric must not be blank")
-        return normalized
+    def unique_test_set_names(cls, value: list[TaskTestSet]) -> list[TaskTestSet]:
+        return validate_test_suite(value)
 
 
 class TaskPatch(BaseModel):
@@ -232,28 +227,22 @@ class TaskPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_objective: str | None = None
-    test_set: str | None = None
-    test_answer_fields: list[str] | None = None
-    test_sample_submission: str | None = None
-    metric_type: Literal["builtin", "custom"] | None = None
-    evaluation_script: str | None = None
-    metric: str | None = Field(None, min_length=1, max_length=64)
-    metric_direction: Literal["max", "min"] | None = None
+    test_sets: list[TaskTestSet] | None = Field(None, min_length=1)
 
-    @field_validator("metric")
+    @field_validator("test_sets")
     @classmethod
-    def normalize_optional_metric(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("metric must not be blank")
-        return normalized
+    def unique_optional_test_set_names(
+        cls, value: list[TaskTestSet] | None,
+    ) -> list[TaskTestSet] | None:
+        return None if value is None else validate_test_suite(value)
 
 
 class TaskDTO(BaseModel):
     name: str
     task_objective: str
+    test_sets: list[TaskTestSet]
+    # Primary projection retained on the API while Run/Setting clients move to
+    # the suite contract. The Tasks UI renders ``test_sets`` directly.
     test_set: str
     test_answer_fields: list[str]
     test_sample_submission: str
@@ -268,34 +257,64 @@ class TaskDTO(BaseModel):
     created_at: str = ""
 
 
-def _task_asset_error(
-    *, test_set: str, answer_fields: list[str], sample: str,
-    metric_type: str, metric: str, eval_script: str,
-) -> str:
-    missing = []
-    if not test_set.strip():
-        missing.append("test_set")
-    if not answer_fields:
-        missing.append("test_answer_fields")
-    if not sample.strip():
-        missing.append("test_sample_submission")
-    if missing:
-        return "task requires " + ", ".join(missing)
-    if metric_type == "builtin":
-        if metric.strip().lower() not in BUILTIN_METRICS:
-            return (
-                f"unknown built-in metric {metric!r}; built-ins are "
-                + ", ".join(sorted(BUILTIN_METRICS))
-            )
-        if eval_script.strip():
-            return "built-in metrics must not include evaluation_script"
-    elif not eval_script.strip():
-        return "custom metrics require evaluation_script"
-    return ""
+def _stored_test_sets(t: Task) -> list[TaskTestSet]:
+    values = list(t.test_sets or [])
+    if values:
+        return validate_test_suite([
+            TaskTestSet.model_validate(value) for value in values
+        ])
+    # Shipped catalogue rows predate suites. Treat their one Test contract as
+    # a one-item suite until they are edited; no Run ever receives two shapes.
+    return [TaskTestSet(
+        name=t.name,
+        test_set=t.test_set or "",
+        inference_query=t.task_objective or "Answer the input.",
+        sample_submission=t.test_sample_submission or "",
+        metric_type=t.metric_type,
+        metric=t.metric,
+        answer_fields=list(t.test_answer_fields or []),
+        metric_direction=t.metric_direction,
+        evaluation_script=t.evaluation_script or "",
+        evaluator_sha256=t.evaluator_sha256 or "",
+    )]
+
+
+def _suite_headline(items: list[TaskTestSet]) -> tuple[str, Literal["max", "min"]]:
+    if len(items) == 1:
+        return items[0].metric, items[0].metric_direction
+    return "suite_average", items[0].metric_direction
+
+
+async def _protect_test_suite(items: list[TaskTestSet]) -> list[TaskTestSet]:
+    """Freeze every Test asset, including a custom scorer when selected."""
+    from zevo.evaluator_storage import freeze_evaluator
+
+    protected: list[TaskTestSet] = []
+    for item in items:
+        test_set, sample = await run_in_threadpool(
+            protect_assets, item.test_set, item.sample_submission,
+        )
+        evaluation_script = ""
+        evaluator_sha256 = ""
+        if item.metric_type == "custom":
+            try:
+                evaluation_script, evaluator_sha256 = await run_in_threadpool(
+                    freeze_evaluator, item.evaluation_script,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        protected.append(item.model_copy(update={
+            "test_set": test_set,
+            "sample_submission": sample,
+            "evaluation_script": evaluation_script,
+            "evaluator_sha256": evaluator_sha256,
+        }))
+    return protected
 
 
 def _dto(t: Task, stats: dict | None = None) -> TaskDTO:
     st = stats or {}
+    test_sets = _stored_test_sets(t)
     best_key = "best_min" if t.metric_direction == "min" else "best_max"
     return TaskDTO(
         name=t.name,
@@ -308,6 +327,7 @@ def _dto(t: Task, stats: dict | None = None) -> TaskDTO:
         # defined months ago and never run has one and not the other.
         created_at=t.created_at.isoformat() if t.created_at else "",
         task_objective=t.task_objective or "",
+        test_sets=test_sets,
         test_set=t.test_set or "",
         test_answer_fields=list(t.test_answer_fields or []),
         test_sample_submission=t.test_sample_submission or "",
@@ -321,28 +341,31 @@ def _dto(t: Task, stats: dict | None = None) -> TaskDTO:
 
 def task_to_user_request(t: Task) -> UserRequest:
     """The row as the orchestrator's input contract."""
+    test_sets = _stored_test_sets(t)
+    primary = test_sets[0]
     return UserRequest(
         task_objective=t.task_objective or "",
-        metric=t.metric,
-        metric_direction=t.metric_direction,
-        metric_type=t.metric_type,
-        evaluation_script=t.evaluation_script or "",
-        evaluator_sha256=t.evaluator_sha256 or "",
+        test_sets=test_sets,
+        metric=primary.metric,
+        metric_direction=primary.metric_direction,
+        metric_type=primary.metric_type,
+        evaluation_script=primary.evaluation_script,
+        evaluator_sha256=primary.evaluator_sha256,
         # A Task-only launch has no saved Setting to supply Validation. Start
         # with an explicit independent contract equal in value to Test; the UI
         # and CLI replace it when a Setting or per-Run Validation choice exists.
-        validation_metric=t.metric,
-        validation_metric_direction=t.metric_direction,
-        validation_metric_type=t.metric_type,
-        validation_evaluation_script=t.evaluation_script or "",
-        validation_evaluator_sha256=t.evaluator_sha256 or "",
+        validation_metric=primary.metric,
+        validation_metric_direction=primary.metric_direction,
+        validation_metric_type=primary.metric_type,
+        validation_evaluation_script=primary.evaluation_script,
+        validation_evaluator_sha256=primary.evaluator_sha256,
         training_method="",
         dataset="",
         data_query="",
         base_model="",
-        test_set=t.test_set or "",
-        test_answer_fields=list(t.test_answer_fields or []),
-        test_sample_submission=t.test_sample_submission or "",
+        test_set=primary.test_set,
+        test_answer_fields=list(primary.answer_fields),
+        test_sample_submission=primary.sample_submission,
         constraints=[],
     )
 
@@ -392,44 +415,23 @@ async def create_task(body: TaskBody, db: AsyncSession = Depends(get_db)) -> Tas
         raise HTTPException(409, f"task {name!r} already exists — delete it first, or pick another name.")
     if not (body.task_objective or "").strip():
         raise HTTPException(400, "task_objective is required — it is what the agents are asked to achieve.")
-    asset_error = _task_asset_error(
-        test_set=body.test_set,
-        answer_fields=body.test_answer_fields,
-        sample=body.test_sample_submission,
-        metric_type=body.metric_type,
-        metric=body.metric,
-        eval_script=body.evaluation_script,
-    )
-    if asset_error:
-        raise HTTPException(400, asset_error)
-
-    test_set, test_sample = await run_in_threadpool(
-        protect_assets,
-        body.test_set.strip(),
-        body.test_sample_submission.strip(),
-    )
-    evaluation_script = ""
-    evaluator_sha256 = ""
-    if body.metric_type == "custom":
-        from zevo.evaluator_storage import freeze_evaluator
-        try:
-            evaluation_script, evaluator_sha256 = await run_in_threadpool(
-                freeze_evaluator, body.evaluation_script.strip(),
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+    protected = await _protect_test_suite(body.test_sets)
+    primary = protected[0]
+    metric, metric_direction = _suite_headline(protected)
+    single = len(protected) == 1
 
     t = Task(
         name=name,
         task_objective=body.task_objective.strip(),
-        test_set=test_set,
-        test_answer_fields=[c.strip() for c in (body.test_answer_fields or []) if c.strip()],
-        test_sample_submission=test_sample,
-        metric_type=body.metric_type,
-        evaluation_script=evaluation_script,
-        evaluator_sha256=evaluator_sha256,
-        metric=body.metric.strip(),
-        metric_direction=body.metric_direction,
+        test_sets=[item.model_dump(mode="json") for item in protected],
+        test_set=primary.test_set,
+        test_answer_fields=list(primary.answer_fields),
+        test_sample_submission=primary.sample_submission,
+        metric_type=primary.metric_type if single else "builtin",
+        evaluation_script=primary.evaluation_script if single else "",
+        evaluator_sha256=primary.evaluator_sha256 if single else "",
+        metric=metric,
+        metric_direction=metric_direction,
     )
     db.add(t)
     await db.commit()
@@ -451,24 +453,17 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
     changed = body.model_dump(exclude_unset=True)
     if "task_objective" in changed and not (changed["task_objective"] or "").strip():
         raise HTTPException(400, "task_objective cannot be emptied.")
-    if "metric" in changed and not (changed["metric"] or "").strip():
-        raise HTTPException(400, "metric cannot be emptied.")
     if not changed:
         return _dto(t)
 
-    evaluation_fields = (
-        "test_set",
-        "test_answer_fields",
-        "test_sample_submission",
-        "metric_type",
-        "evaluation_script",
-        "metric",
-        "metric_direction",
-    )
+    evaluation_fields = ("test_sets",)
 
     def normalized(field_name: str, value: Any) -> Any:
-        if field_name == "test_answer_fields":
-            return tuple(str(item).strip() for item in (value or []) if str(item).strip())
+        if field_name == "test_sets":
+            return tuple(
+                tuple(sorted(TaskTestSet.model_validate(item).model_dump().items()))
+                for item in (value or [])
+            )
         return value.strip() if isinstance(value, str) else value
 
     changed_evaluation_fields = [
@@ -491,7 +486,23 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
                 "a new task for a different test setup, metric, or target.",
             )
 
+    if "test_sets" in changed and changed["test_sets"] is not None:
+        supplied = [TaskTestSet.model_validate(item) for item in changed["test_sets"]]
+        protected = await _protect_test_suite(supplied)
+        primary = protected[0]
+        single = len(protected) == 1
+        t.test_sets = [item.model_dump(mode="json") for item in protected]
+        t.test_set = primary.test_set
+        t.test_answer_fields = list(primary.answer_fields)
+        t.test_sample_submission = primary.sample_submission
+        t.metric, t.metric_direction = _suite_headline(protected)
+        t.metric_type = primary.metric_type if single else "builtin"
+        t.evaluation_script = primary.evaluation_script if single else ""
+        t.evaluator_sha256 = primary.evaluator_sha256 if single else ""
+
     for field_name, value in changed.items():
+        if field_name == "test_sets":
+            continue
         if value is None:
             continue  # sent as null = "leave it alone", same as omitting it
         if isinstance(value, list):
@@ -499,38 +510,6 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
         elif isinstance(value, str):
             value = value.strip()
         setattr(t, field_name, value)
-    # Selecting the built-in engine is itself a complete replacement of any
-    # prior custom implementation; callers do not also need to clear its path.
-    if t.metric_type == "builtin":
-        t.evaluation_script = ""
-        t.evaluator_sha256 = ""
-    asset_error = _task_asset_error(
-        test_set=t.test_set,
-        answer_fields=list(t.test_answer_fields or []),
-        sample=t.test_sample_submission,
-        metric_type=t.metric_type,
-        metric=t.metric,
-        eval_script=t.evaluation_script,
-    )
-    if asset_error:
-        raise HTTPException(400, asset_error)
-
-    if changed_evaluation_fields:
-        t.test_set, t.test_sample_submission = await run_in_threadpool(
-            protect_assets, t.test_set, t.test_sample_submission,
-        )
-        if t.metric_type == "custom":
-            from zevo.evaluator_storage import freeze_evaluator
-            try:
-                t.evaluation_script, t.evaluator_sha256 = await run_in_threadpool(
-                    freeze_evaluator, t.evaluation_script,
-                )
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
-        else:
-            t.evaluation_script = ""
-            t.evaluator_sha256 = ""
-
     await db.commit()
     await db.refresh(t)
     return _dto(t)

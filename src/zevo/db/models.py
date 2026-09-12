@@ -145,6 +145,16 @@ class Task(Base):
 
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     task_objective: Mapped[str] = mapped_column(Text, default="")
+    # One Task may measure several named Test contracts. Each item owns its
+    # data, inference query, submission shape, answer fields, metric, target,
+    # and optional frozen custom evaluator; the harness reports their
+    # unweighted mean as the suite headline.
+    test_sets: Mapped[list[dict[str, Any]]] = mapped_column(
+        JsonCol, default=list, server_default="[]"
+    )
+    # The scalar columns below are the primary (first) Test projection used by
+    # the existing optimization/Validation lane. The held-out harness reads
+    # every item from ``test_sets``.
     test_set: Mapped[str] = mapped_column(Text, default="")
     # Which of `test_set`'s columns hold the answers. The data agent drops
     # exactly these to produce the questions-only copy inference is given, so a
@@ -153,9 +163,9 @@ class Task(Base):
     # stale the moment either file was edited.
     test_answer_fields: Mapped[list[str]] = mapped_column(JsonCol, default=list)
     test_sample_submission: Mapped[str] = mapped_column(Text, default="")
-    # Reusable held-out Test metric defaults. Each Run snapshots these values
-    # and may override them without mutating the Task. Built-ins leave
-    # script/hash blank; custom metrics pin exact managed evaluator bytes.
+    # Headline/primary projection for existing Run reporting columns. Each
+    # suite member owns its scorer; these columns project a one-member suite
+    # and use the harness aggregate for a multi-member suite.
     metric_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="builtin", server_default="builtin"
     )

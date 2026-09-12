@@ -19,7 +19,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from zevo.contracts.orchestrator import UserRequest, inherit_test_validation_contract
+from zevo.contracts.orchestrator import (
+    UserRequest,
+    effective_test_suite,
+    inherit_test_validation_contract,
+)
 from zevo.db import Run
 
 
@@ -70,6 +74,47 @@ async def settle_splits(
     root = work_dir_root or default_work_dir_root()
     out_dir = str(Path(root) / run.id / "_splits")
     private_out_dir = str(Path(holdout_root()) / "runs" / run.id / "_splits")
+
+    # A hub id is a direct Test-set reference, not an instruction for the user
+    # to download and upload it. Materialize every suite member behind the
+    # held-out boundary before splitting the primary member for Validation.
+    suite = effective_test_suite(user_request)
+    materialized_suite = []
+    for index, item in enumerate(suite):
+        test_set = item.test_set
+        if looks_like_hub_id(test_set):
+            declared = lookup(test_set, role="test")
+            split = declared.split if declared is not None else ""
+            config = declared.config if declared is not None else ""
+            try:
+                test_set, _columns, _rows, fetched_note = await materialize(
+                    hub_id=test_set,
+                    split=split,
+                    config=config,
+                    out_dir=str(Path(private_out_dir) / f"suite-{index:03d}"),
+                )
+            except MaterializeError as exc:
+                raise SplitSettlementError(
+                    f"cannot fetch Test set {item.name!r}: {exc}"
+                ) from exc
+            item = item.model_copy(update={"test_set": test_set})
+            # Keep the note engine-side; it contains no rows or answers.
+            materialized_note = f"{item.name}: {fetched_note}"
+        else:
+            materialized_note = ""
+        materialized_suite.append((item, materialized_note))
+    if not materialized_suite:
+        raise SplitSettlementError("at least one Test set is required")
+    suite = [item for item, _note in materialized_suite]
+    primary = suite[0]
+    user_request = user_request.model_copy(update={
+        "test_sets": suite,
+        "test_set": primary.test_set,
+        "test_answer_fields": list(primary.answer_fields),
+        "test_sample_submission": primary.sample_submission,
+        "metric": primary.metric,
+        "metric_direction": primary.metric_direction,
+    })
 
     # Explicit remote Validation is materialized during Run creation. Training
     # sources remain Data-stage inputs and are never consumed by split setup.
@@ -139,6 +184,13 @@ async def settle_splits(
         notes = list(carved.notes)
     if validation_fetched_note:
         notes.insert(0, validation_fetched_note)
+    notes[:0] = [note for _item, note in materialized_suite if note]
+
+    if validation_source == "test_split":
+        suite[0] = suite[0].model_copy(update={
+            "test_set": carved.test_set,
+            "sample_submission": remaining_sample,
+        })
 
     # Store opaque semantic identities rather than Test rows in the ordinary
     # Run snapshot. The post-Data engine transform can remove accidental
@@ -146,14 +198,16 @@ async def settle_splits(
     try:
         from zevo.engine.artifact_validation import semantic_record_fingerprints
 
-        test_fingerprint_source = (
-            carved.test_set
-            if validation_source == "test_split"
-            else resolve_asset(user_request.test_set)
-        )
-        test_semantic_fingerprints = sorted(
-            semantic_record_fingerprints(test_fingerprint_source)
-        )
+        # Decontaminate Training against every Test member, not only the
+        # primary member that supplies Validation. Extra benchmark members are
+        # equally held out even though the optimization loop never sees them.
+        test_semantic_fingerprints = sorted({
+            fingerprint
+            for item in suite
+            for fingerprint in semantic_record_fingerprints(
+                resolve_asset(item.test_set)
+            )
+        })
     except (OSError, ValueError) as exc:
         raise SplitSettlementError(
             f"cannot fingerprint the held-out Test population: {exc}"
@@ -173,6 +227,19 @@ async def settle_splits(
         validation_rows = 0
 
     holdout = {
+        "test_sets": [
+            {
+                **item.model_dump(mode="json"),
+                "public": "",
+                "inference_data_profile": "",
+            }
+            for item in suite
+        ],
+        "suite_results": {},
+        "suite_recorded": [],
+        # Validation is one optimization signal. When it is derived, the first
+        # suite member is the primary contract from which it is carved.
+        "validation_inference_query": suite[0].inference_query,
         # Only the remaining 80% is the final private Test population.
         "test_set": carved.test_set if validation_source == "test_split" else user_request.test_set,
         "test_answer_fields": list(user_request.test_answer_fields or []),
@@ -231,6 +298,7 @@ async def settle_splits(
         "validation_set": "",
         "validation_answer_fields": [],
         "test_set": "",
+        "test_sets": [],
         "test_answer_fields": [],
         "test_sample_submission": "",
         "evaluation_script": "",

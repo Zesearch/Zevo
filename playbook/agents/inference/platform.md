@@ -184,6 +184,13 @@ for multiple-choice option scoring — `scoring_mode` and `option_fields`.
 Use `inference_mapping_contract` as the machine-readable authority for which are
 required and for their value types.
 
+`inference_query` is the Task Test contract's exact user-turn instruction. It
+is binding. If it contains `{input}` or `{field_name}` placeholders, render
+them from the answer-free row. If it has no placeholders, append the rendered
+row after a blank line. Record the same query in `measurement.inference_config`
+and make `prompt_example` prove the exact rendered user turn. A sample
+submission specifies prediction columns only; never use it as a prompt.
+
 ### Multiple-choice option scoring (opt-in)
 
 By default `scoring_mode` is absent and Inference generates a free completion

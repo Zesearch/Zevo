@@ -49,9 +49,23 @@ export type GpuProvider = "cluster" | "cloud" | "instance";
 export type MetricDirection = "max" | "min";
 export type MetricType = "builtin" | "custom";
 
+export type TaskTestSet = {
+  name: string;
+  test_set: string;
+  inference_query: string;
+  sample_submission: string;
+  metric_type: MetricType;
+  metric: string;
+  answer_fields: string[];
+  metric_direction: MetricDirection;
+  evaluation_script: string;
+  evaluator_sha256: string;
+};
+
 export type TaskDTO = {
   name: string;
   task_objective: string;
+  test_sets: TaskTestSet[];
   test_set: string;
   test_answer_fields: string[];
   test_sample_submission: string;
@@ -68,6 +82,7 @@ export type TaskDTO = {
 
 export type UserRequest = {
   task_objective: string;
+  test_sets?: TaskTestSet[];
   /** Effective held-out Test scoring values for this Run. */
   metric: string;
   metric_direction: MetricDirection;
@@ -495,6 +510,10 @@ export type IterationHistoryEntry = {
    * stripped entirely from the copy the orchestrator is handed.
    */
   test_score?: number;
+  /** Named component scores for a multi-Test Task. Kept private from Agents. */
+  test_scores?: Record<string, number>;
+  test_metrics?: Record<string, string>;
+  test_metric_directions?: Record<string, MetricDirection>;
   source: "baseline" | "trained";
   // The round's record, one fact per field. `analysis` is what was LEARNED, as
   // distinct from `result` which is what the score did.
@@ -520,6 +539,7 @@ export type RunDetail = RunSummary & {
     iteration: number;
     operation: string;
     model_source: "" | "base_model" | "checkpoint";
+    test_set_name: string;
     status: TicketStatus;
     summary: string;
     error_message: string;

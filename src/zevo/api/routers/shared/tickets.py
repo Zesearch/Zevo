@@ -254,13 +254,32 @@ def _stamp_pipeline_payload(
         return stamped
     if agent_id == "inference":
         stamp_exact("base_model", pins.get("base_model"))
+        inference_mapping = dict(pins.get("inference_config") or {})
+        inference_query = str(
+            pins.get("inference_query")
+            or spec.get("validation_inference_query")
+            or ""
+        ).strip()
+        if inference_query:
+            supplied_query = inference_mapping.get("inference_query")
+            if supplied_query not in (None, "") and supplied_query != inference_query:
+                raise ValueError(
+                    "Run inference_config.inference_query conflicts with the "
+                    "Task's primary Test query"
+                )
+            inference_mapping["inference_query"] = inference_query
         run_configuration_pins = {
-            key: pins[key]
-            for key in (
-                "prompt_framing", "system_prompt",
-                "inference_config", "decoding_config",
-            )
-            if pins.get(key) not in (None, "", {})
+            **{
+                key: pins[key]
+                for key in (
+                    "prompt_framing", "system_prompt", "decoding_config",
+                )
+                if pins.get(key) not in (None, "", {})
+            },
+            **(
+                {"inference_config": inference_mapping}
+                if inference_mapping else {}
+            ),
         }
         supplied = dict(stamped.get("configuration_pins") or {})
         conflicts = sorted(

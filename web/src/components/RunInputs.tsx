@@ -189,10 +189,12 @@ function catalogueOptions(datasets: FileSetDTO[]): Option[] {
  *  `medqa-usmle-eval/test.csv` without having to guess the order.
  */
 function FilePicker({
-  datasets, value, split = "", config = "", onPick, className = "", placeholder = "from Files",
+  datasets, value, split = "", config = "", onPick, className = "", inputClassName = "",
+  placeholder = "from Files",
 }: {
   datasets: FileSetDTO[]; value: string; split?: string; config?: string;
-  onPick: (p: PickedFile) => void; className?: string; placeholder?: string;
+  onPick: (p: PickedFile) => void; className?: string; inputClassName?: string;
+  placeholder?: string;
 }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
@@ -236,7 +238,7 @@ function FilePicker({
         }}
         placeholder={placeholder}
         spellCheck={false}
-        className={`${fieldCls} font-mono`}
+        className={`${fieldCls} font-mono ${inputClassName}`}
       />
       {open && (
         <div className="absolute z-30 mt-1 max-h-56 w-full overflow-auto rounded-md border border-hair bg-raised p-1 shadow-lg">
@@ -300,9 +302,10 @@ function HubInput({
 /** The upload route, as a box beside the picker rather than a bare button —
  *  the two ways in should look like two ways in. Shows what was uploaded. */
 function UploadBox({
-  onChange, className = "", label = "Upload files",
+  onChange, className = "", buttonClassName = "", label = "Upload files",
 }: {
-  onChange: (v: string) => void; className?: string; label?: string;
+  onChange: (v: string) => void; className?: string; buttonClassName?: string;
+  label?: string;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -333,7 +336,7 @@ function UploadBox({
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={busy}
-        className="btn !text-[13px] disabled:opacity-50"
+        className={`btn !text-[13px] disabled:opacity-50 ${buttonClassName}`}
       >
         <Upload size={12} /> {busy ? "Uploading…" : label}
       </button>
@@ -389,11 +392,11 @@ function UploadBox({
  *  filled one reads as three more things to fill, and the whole reason these
  *  fields have three routes is that any one of them is enough. */
 function Chosen({
-  value, onChange, note = "",
-}: { value: string; onChange: (v: string) => void; note?: string }) {
+  value, onChange, note = "", className = "",
+}: { value: string; onChange: (v: string) => void; note?: string; className?: string }) {
   const inCatalogue = splitDatasetPath(value);
   return (
-    <div className="flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2">
+    <div className={`flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2 ${className}`}>
       <span className="min-w-0 flex-1 truncate font-mono text-sm text-slate-100" title={value}>
         {inCatalogue ? inCatalogue.label : short(value)}
       </span>
@@ -415,6 +418,7 @@ function Chosen({
  *  from neither (an older task, a hand-edited row) is still visible. */
 export function FileSlot({
   label, value, onChange, required = false, hint = "", tag = true,
+  controlClassName = "",
 }: {
   label: string;
   value: string;
@@ -422,6 +426,7 @@ export function FileSlot({
   required?: boolean;
   hint?: string;
   tag?: boolean;
+  controlClassName?: string;
 }) {
   const { data: datasets = [] } = useSWR<FileSetDTO[]>("/api/files");
 
@@ -432,16 +437,21 @@ export function FileSlot({
           file made the row read as several things still to answer, when any one
           of them was the whole answer. */}
       {value ? (
-        <Chosen value={value} onChange={onChange} />
+        <Chosen value={value} onChange={onChange} className={controlClassName} />
       ) : (
         <div className="flex flex-wrap items-start gap-2">
           <FilePicker
             datasets={datasets} value=""
             onPick={(o) => onChange(o.value)}
             className="min-w-0 flex-1"
+            inputClassName={controlClassName}
             placeholder={hint || "from Files"}
           />
-          <UploadBox onChange={onChange} className="shrink-0" />
+          <UploadBox
+            onChange={onChange}
+            className="shrink-0"
+            buttonClassName={controlClassName}
+          />
         </div>
       )}
     </div>

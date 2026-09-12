@@ -441,6 +441,7 @@ SCOPING_ONLY_FIELDS = ("task_objective", "test_query", "constraints")
 class DataTaskInput(AgentTaskInput):
     operation: DataOperation
     run_id: str = Field(min_length=1)
+    test_set_name: str = ""
 
     # ── scope_problem (Auto mode) only ───────────────────────────────────────
     task_objective: str = Field(
@@ -555,6 +556,7 @@ class DataTaskInput(AgentTaskInput):
             if (
                 self.dataset or self.dataset_source or self.dataset_split
                 or self.dataset_config or self.data_query or self.training_method
+                or self.test_set_name
                 or self.scoring_set or self.answer_fields or self.metric
                 or self.evaluation_script or self.evaluator_sha256
                 or self.sample_submission or self.configuration_suggestions
@@ -603,6 +605,7 @@ class DataTaskInput(AgentTaskInput):
             if not self.expected_source_identity.strip():
                 raise ValueError("prepare_run_data requires expected_source_identity")
             leaked = {
+                "test_set_name": self.test_set_name,
                 "scoring_set": self.scoring_set,
                 "answer_fields": self.answer_fields,
                 "metric": self.metric,
@@ -657,9 +660,11 @@ class DataTaskInput(AgentTaskInput):
             self.validation_policy != "supplied"
             or not self.scoring_set
             or not self.answer_fields
+            or not self.test_set_name.strip()
         ):
             raise ValueError(
-                "held-out Data requires a supplied scoring set and answer fields"
+                "held-out Data requires test_set_name, a supplied scoring set, "
+                "and answer fields"
             )
         self.training_method = self.training_method.strip().lower()
         return self

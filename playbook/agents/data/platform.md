@@ -125,9 +125,11 @@ the finished Training artifact before it enters downstream lineage.
 
 This is a private harness operation. Read only the supplied Test scoring set,
 drop exactly its declared answer fields, preserve every remaining value and row
-order, and write the questions-only copy. Do not collect, render, profile,
-sample, filter, deduplicate, or produce any trainable Test view. Return empty
-training and Validation paths.
+order, and write the questions-only copy. Do not collect, render, sample,
+filter, deduplicate, or produce any trainable Test view. Also write the same
+closed, answer-free `InferenceDataProfile` used for Validation so Inference can
+select the input fields for this named Test set; it contains schema/statistics,
+never rows or answer values. Return empty training and Validation paths.
 
 ### `scope_problem` (Auto mode)
 

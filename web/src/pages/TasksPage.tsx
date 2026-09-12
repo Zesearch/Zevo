@@ -17,8 +17,7 @@ import { fireCommand } from "../lib/commands";
 /**
  * Tasks — one card per task: what the problem IS.
  *
- * A task is an objective plus its held-out set, answer fields, submission
- * shape, and optional scorer, and
+ * A task is an objective plus one or more named held-out Test contracts, and
  * that is the whole card. Everything a run DECIDES — training data, model,
  * method, iterations, budget — is a setting, and lives behind the card with
  * the settings this task has actually been run with.
@@ -130,20 +129,20 @@ function TestFiles({
     return { file, folder, packaged: false, label: folder ? `${folder}/${file}` : file };
   };
 
-  const rows = [
-    // The keys are the same words on the validation side (see
-    // TaskSettings.ValidationRest). What KIND of set this is belongs to the
-    // heading above, not repeated onto every row underneath it.
-    { label: "data", path: t.test_set, value: "" },
-    { label: "answer fields", path: "", value: (t.test_answer_fields ?? []).join(", ") },
+  const rows = (t.test_sets ?? []).flatMap((item) => [
+    { label: item.name, path: item.test_set, value: "" },
+    { label: `${item.name} · inference`, path: "", value: item.inference_query },
+    { label: `${item.name} · answers`, path: "", value: item.answer_fields.join(", ") },
     {
-      label: "metric",
+      label: `${item.name} · metric`,
       path: "",
-      value: `${t.metric_type} · ${fmtMetric(t.metric)} · ${t.metric_direction}`,
+      value: `${fmtMetric(item.metric)} · ${item.metric_type === "custom" ? "custom" : "built-in"} · ${item.metric_direction}`,
     },
-    { label: "evaluation script", path: t.evaluation_script, value: "" },
-    { label: "sample submission", path: t.test_sample_submission, value: "" },
-  ].filter((r) => r.path || r.value);
+    ...(item.metric_type === "custom" ? [{
+      label: `${item.name} · evaluator`, path: item.evaluation_script, value: "",
+    }] : []),
+    { label: `${item.name} · submission`, path: item.sample_submission, value: "" },
+  ]).filter((r) => r.path || r.value);
 
   if (!rows.length) return <span className="font-mono text-xs text-slate-600">none given</span>;
   const [first, ...rest] = rows;

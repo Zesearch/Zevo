@@ -46,6 +46,7 @@ class InferenceTaskInput(AgentTaskInput):
     operation: Literal["run_inference"] = "run_inference"
     run_id: str = Field(min_length=1)
     iteration: int = Field(ge=0)
+    test_set_name: str = ""
     model_source: Literal["base_model", "checkpoint"]
     configuration_mode: Literal["select", "reuse"]
     base_model: str = Field(min_length=1)

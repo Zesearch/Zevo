@@ -6,6 +6,7 @@ searchable decisions.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -348,7 +349,8 @@ def validate_inference_config(
     """Validate the small task-dependent inference namespace once."""
     config = dict(value or {})
     supported = {
-        "input_fields", "answer_regex", "answer_column", "batch_size", "stop",
+        "input_fields", "inference_query", "answer_regex", "answer_column",
+        "batch_size", "stop",
         # Opt-in multiple-choice option-scoring mode. Default (key absent) is
         # unchanged free generation. When set to "option_loglikelihood",
         # Inference scores each answer option under the frozen prompt and writes
@@ -360,9 +362,11 @@ def validate_inference_config(
     unknown = sorted(set(config) - supported)
     if unknown:
         raise ValueError("unsupported inference_config keys: " + ", ".join(unknown))
-    for key in ("answer_regex", "answer_column"):
+    for key in ("inference_query", "answer_regex", "answer_column"):
         if key in config and not isinstance(config[key], str):
             raise ValueError(f"inference_config.{key} must be a string")
+    if "inference_query" in config and not config["inference_query"].strip():
+        raise ValueError("inference_config.inference_query must not be blank")
     for key in ("input_fields", "stop", "option_fields"):
         if key in config and (
             not isinstance(config[key], list)
@@ -408,3 +412,36 @@ def validate_inference_config(
                 f"realized keys: {missing}"
             )
     return config
+
+
+def render_inference_query(
+    query: str, input_values: dict[str, object],
+) -> str:
+    """Render one Test contract's query against an answer-free row.
+
+    A query with placeholders owns the whole user turn. Without placeholders,
+    the row is appended after a blank line. ``{input}`` means the sole value,
+    or newline-separated ``field: value`` pairs for a multi-field row.
+    """
+    instruction = str(query or "").strip()
+    if not instruction:
+        raise ValueError("inference_query must not be blank")
+    if len(input_values) == 1:
+        joined = str(next(iter(input_values.values())))
+    else:
+        joined = "\n".join(
+            f"{field}: {value}" for field, value in input_values.items()
+        )
+    values = {field: str(value) for field, value in input_values.items()}
+    values["input"] = joined
+    placeholder = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    fields = placeholder.findall(instruction)
+    if fields:
+        unknown = sorted(set(fields) - set(values))
+        if unknown:
+            raise ValueError(
+                "inference_query references fields absent from the Test set: "
+                + ", ".join(unknown)
+            )
+        return placeholder.sub(lambda match: values[match.group(1)], instruction).strip()
+    return f"{instruction}\n\n{joined}".strip()
