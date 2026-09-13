@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from zevo.contracts.data import DataResult
 from zevo.contracts.orchestrator import (
     AutoUserRequest,
+    TaskTestSet,
     UserRequest,
     inherit_test_validation_contract,
     scoring_asset_errors,
@@ -128,8 +129,7 @@ def _move_private(source: str, dest_dir: Path) -> str:
 
 def user_request_from_scoping(
     run: Run, *, result: ScopingResult, payload: dict[str, Any],
-    test_set: str, test_sample_submission: str,
-    evaluation_script: str = "", evaluator_sha256: str = "",
+    test_sets: list[TaskTestSet],
 ) -> UserRequest:
     """The full_pipeline-shaped request settlement feeds to the split logic.
 
@@ -139,13 +139,17 @@ def user_request_from_scoping(
     scoping work order.
     """
     pins = dict(run.decision_pins or {})
+    if not test_sets:
+        raise ValueError("Auto scoping produced no Test sets")
+    primary = test_sets[0]
     return UserRequest(
         task_objective=run.task_objective,
-        metric=result.metric,
-        metric_direction=result.metric_direction,
-        metric_type=result.metric_type,
-        evaluation_script=evaluation_script,
-        evaluator_sha256=evaluator_sha256,
+        test_sets=test_sets,
+        metric=primary.metric,
+        metric_direction=primary.metric_direction,
+        metric_type=primary.metric_type,
+        evaluation_script=primary.evaluation_script,
+        evaluator_sha256=primary.evaluator_sha256,
         training_method=str(pins.get("training_method") or ""),
         method_query=str(pins.get("method_query") or ""),
         method_config=dict(pins.get("method_config") or {}),
@@ -155,9 +159,9 @@ def user_request_from_scoping(
         data_query=str(pins.get("data_query") or ""),
         base_model=str(pins.get("base_model") or ""),
         model_query=str(pins.get("model_query") or ""),
-        test_set=test_set,
-        test_answer_fields=list(result.test_answer_fields),
-        test_sample_submission=test_sample_submission,
+        test_set=primary.test_set,
+        test_answer_fields=list(primary.answer_fields),
+        test_sample_submission=primary.sample_submission,
         constraints=[str(c) for c in (payload.get("constraints") or [])],
     )
 
@@ -213,21 +217,38 @@ async def settle_scoping(
 
     payload = dict(ticket.payload or {})
     private_dir = _private_scoping_dir(run)
-    test_set = _move_private(result.test_set_path, private_dir)
-    sample_submission = _move_private(result.test_sample_submission_path, private_dir)
-
-    evaluation_script, evaluator_sha256 = "", ""
-    if result.metric_type == "custom":
-        from zevo.evaluator_storage import freeze_evaluator
-        try:
-            evaluation_script, evaluator_sha256 = freeze_evaluator(result.evaluation_script)
-        except ValueError as exc:
-            raise ScopingSettlementError(str(exc)) from exc
+    scoped = result.effective_test_sets(task_objective=run.task_objective)
+    test_sets: list[TaskTestSet] = []
+    for index, item in enumerate(scoped):
+        member_dir = private_dir / f"suite-{index:03d}"
+        test_set = _move_private(item.test_set_path, member_dir)
+        sample_submission = _move_private(
+            item.test_sample_submission_path, member_dir,
+        )
+        evaluation_script, evaluator_sha256 = "", ""
+        if item.metric_type == "custom":
+            from zevo.evaluator_storage import freeze_evaluator
+            try:
+                evaluation_script, evaluator_sha256 = freeze_evaluator(
+                    item.evaluation_script
+                )
+            except ValueError as exc:
+                raise ScopingSettlementError(str(exc)) from exc
+        test_sets.append(TaskTestSet(
+            name=item.name,
+            test_set=test_set,
+            inference_query=item.inference_query,
+            sample_submission=sample_submission,
+            metric_type=item.metric_type,
+            metric=item.metric,
+            answer_fields=list(item.test_answer_fields),
+            metric_direction=item.metric_direction,
+            evaluation_script=evaluation_script,
+            evaluator_sha256=evaluator_sha256,
+        ))
 
     user_request = user_request_from_scoping(
-        run, result=result, payload=payload,
-        test_set=test_set, test_sample_submission=sample_submission,
-        evaluation_script=evaluation_script, evaluator_sha256=evaluator_sha256,
+        run, result=result, payload=payload, test_sets=test_sets,
     )
     # Validation is carved from the held-out population, so it inherits the Test
     # contract exactly -- the same rule Run creation applies.
@@ -247,10 +268,12 @@ async def settle_scoping(
     holdout["scoping_ticket_id"] = ticket.id
     holdout["scoping"] = result.provenance_summary()
 
-    run.metric = user_request.metric
+    run.metric = (
+        user_request.metric if len(user_request.test_sets) == 1 else "suite_average"
+    )
     run.metric_direction = user_request.metric_direction
-    run.validation_metric = user_request.validation_metric
-    run.validation_metric_direction = user_request.validation_metric_direction
+    run.validation_metric = agent_request.validation_metric
+    run.validation_metric_direction = agent_request.validation_metric_direction
     run.holdout = holdout
     run.scoring_settled = True
     # decision_pins already holds the immutable optimization-side Auto request;

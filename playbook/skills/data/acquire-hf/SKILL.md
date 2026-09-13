@@ -18,11 +18,16 @@ training shape.
    without guessing.
 3. Inspect the dataset card/configs/splits and sample records before selecting
    it. Do not select a merely adjacent dataset to avoid returning empty work.
-4. Load a training split locally with `datasets.load_dataset`. Never run this
-   acquisition on a remote GPU machine.
-5. Record the exact dataset id, config, split/slice, and parsed row count.
-6. Pass the loaded records through the Data Agent's required target renderer and
-   optional training-only filter. Write final output under `DEST_DIR`.
+4. Resolve an immutable Hub revision, then load the training split on the
+   assigned remote data plane with `datasets.load_dataset`. Never download the
+   full dataset into the Zevo scheduler/container.
+5. Run schema detection and bounded sample analysis remotely; return only the
+   compact profile/receipt, never source rows.
+6. Record the exact dataset id, revision, config, split/slice, and parsed row
+   count in the remote spec/profile.
+7. Pass the remote records through the Data Agent's required target renderer
+   and optional training-only filter. Keep final output in the persistent remote
+   cache named by `device_info_path`.
 
 An empty ticket `dataset_split` does not authorize validation or test data. Use
 the selected dataset's training split. If the acquisition instruction explicitly

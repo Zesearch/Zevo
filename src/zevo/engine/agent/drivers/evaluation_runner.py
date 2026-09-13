@@ -13,6 +13,7 @@ import json
 import math
 import os
 import shlex
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -61,8 +62,12 @@ def _validated_score(metrics_path: Path) -> tuple[dict[str, Any], float]:
     return value, score
 
 
-def _timeout_seconds() -> float:
-    raw = os.environ.get("ZEVO_EVALUATION_TIMEOUT_SECONDS", "3600")
+def _timeout_seconds(*, code_execution: bool = False) -> float:
+    key = (
+        "ZEVO_CODE_EVALUATION_TIMEOUT_SECONDS"
+        if code_execution else "ZEVO_EVALUATION_TIMEOUT_SECONDS"
+    )
+    raw = os.environ.get(key, "14400" if code_execution else "3600")
     try:
         return max(1.0, float(raw))
     except (TypeError, ValueError):
@@ -147,6 +152,24 @@ class EvaluationRunnerDriver:
                 inp.ticket_id, "built-in evaluation must not carry evaluator_sha256",
             )
             return DriverRunResult(output=output, exit_code=1, driver=self.name)
+        if script_path is not None and inp.code_execution_adapter:
+            output = _failed(
+                inp.ticket_id,
+                "code execution evaluation cannot carry a custom evaluator",
+            )
+            return DriverRunResult(output=output, exit_code=1, driver=self.name)
+        if inp.code_execution_adapter and inp.metric != "pass_at_1":
+            output = _failed(
+                inp.ticket_id,
+                "a code execution adapter requires the pass_at_1 metric",
+            )
+            return DriverRunResult(output=output, exit_code=1, driver=self.name)
+        if inp.metric == "pass_at_1" and not inp.code_execution_adapter:
+            output = _failed(
+                inp.ticket_id,
+                "pass_at_1 requires a registered code execution adapter",
+            )
+            return DriverRunResult(output=output, exit_code=1, driver=self.name)
 
         try:
             metrics_path.unlink(missing_ok=True)
@@ -154,13 +177,45 @@ class EvaluationRunnerDriver:
             output = _failed(inp.ticket_id, f"cannot clear stale metrics.json: {exc}")
             return DriverRunResult(output=output, exit_code=1, driver=self.name)
 
-        if script_path is not None:
-            route = "custom_script"
+        if script_path is not None or inp.code_execution_adapter:
             wrapper = work_dir / "evaluate.sh"
-            command = [
-                "python3", str(script_path), str(predictions), str(scoring_set),
-                str(metrics_path),
-            ]
+            if script_path is not None:
+                route = "custom_script"
+                command = [
+                    "python3", str(script_path), str(predictions), str(scoring_set),
+                    str(metrics_path),
+                ]
+            else:
+                route = "code_execution"
+                code_columns = [
+                    column for column in binding.prediction_columns
+                    if column.casefold() in {
+                        "prediction", "code", "completion", "solution",
+                    }
+                ]
+                if len(code_columns) == 1:
+                    prediction_column = code_columns[0]
+                elif len(binding.prediction_columns) == 1:
+                    prediction_column = binding.prediction_columns[0]
+                else:
+                    output = _failed(
+                        inp.ticket_id,
+                        "pass_at_1 requires sample_submission to identify "
+                        "one generated-code column named prediction, code, "
+                        "completion, or solution",
+                        f"route={route}",
+                    )
+                    return DriverRunResult(
+                        output=output, exit_code=1, driver=self.name,
+                    )
+                command = [
+                    sys.executable, "-m", "zevo.engine.code_execution",
+                    "--adapter", inp.code_execution_adapter,
+                    "--predictions", str(predictions),
+                    "--scoring-set", str(scoring_set),
+                    "--prediction-column", prediction_column,
+                    "--metrics-out", str(metrics_path),
+                ]
             wrapper.write_text(
                 "#!/usr/bin/env bash\nset -euo pipefail\nexec "
                 + " ".join(shlex.quote(part) for part in command)
@@ -175,7 +230,8 @@ class EvaluationRunnerDriver:
                         "owner": inp.ticket_id,
                         "route": route,
                         "metric": inp.metric,
-                        "evaluation_script": str(script_path),
+                        "evaluation_script": str(script_path or ""),
+                        "code_execution_adapter": inp.code_execution_adapter,
                     },
                 })
                 event_sink({
@@ -204,14 +260,17 @@ class EvaluationRunnerDriver:
             process_registry.register(inp.ticket_id, proc)
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
-                    proc.communicate(), timeout=_timeout_seconds(),
+                    proc.communicate(), timeout=_timeout_seconds(
+                        code_execution=bool(inp.code_execution_adapter),
+                    ),
                 )
             except asyncio.TimeoutError:
                 process_registry.cancel(inp.ticket_id)
                 await proc.wait()
                 message = (
                     "evaluation script timed out after "
-                    f"{_timeout_seconds():g} seconds"
+                    f"{_timeout_seconds(code_execution=bool(inp.code_execution_adapter)):g} "
+                    "seconds"
                 )
                 log_path.write_text(message + "\n", encoding="utf-8")
                 output = _failed(inp.ticket_id, message, f"route={route}")

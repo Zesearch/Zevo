@@ -35,6 +35,7 @@ import type {
   UserRequest,
 } from "../lib/api";
 import { ThemedSelect } from "./ThemedSelect";
+import { RunSetupProgressView, useRunSetupProgress } from "./RunSetupProgress";
 
 export type RunLaunchMode = "auto" | "full_pipeline" | "customized_pipeline" | "single_stage";
 type Mode = RunLaunchMode;
@@ -80,6 +81,7 @@ function buildUserRequest(
   const columns = (v: string) => v.split(",").map((c) => c.trim()).filter(Boolean);
   return {
     task_objective: nl,
+    validation_sets: inputs.validationSets,
     metric: inputs.metric.trim(),
     metric_direction: inputs.metricDirection as "max" | "min",
     metric_type: inputs.metricType,
@@ -235,9 +237,21 @@ export function NewRunModal({
   // lets the button use the same disabled state as the other forms.
   const [customizedResetKey, setCustomizedResetKey] = useState(0);
   const [customizedDirty, setCustomizedDirty] = useState(false);
+  const [customizedSeed, setCustomizedSeed] = useState<{
+    taskName: string;
+    settingId: string;
+    runName: string;
+    inputs?: Partial<RunInputValues>;
+  }>({
+    taskName: initialTaskName || "",
+    settingId: initialSettingId || "",
+    runName: "",
+    inputs: initialInputs as Partial<RunInputValues> | undefined,
+  });
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const runSetup = useRunSetupProgress();
 
   /** Put every field back to empty. Filling this dialog in is fiddly and
    *  a wrong predefined task leaves nine fields populated from it, so
@@ -267,6 +281,7 @@ export function NewRunModal({
 
   function clearCurrentForm() {
     if (mode === "customized_pipeline") {
+      setCustomizedSeed({ taskName: "", settingId: "", runName: "" });
       setCustomizedResetKey((value) => value + 1);
       setCustomizedDirty(false);
       return;
@@ -289,19 +304,6 @@ export function NewRunModal({
    *  belong to the task and are already filled in, and re-applying an old run's
    *  paths would undo a file the user has just swapped for this run. */
   function applySetting(s: TaskSettingDTO) {
-    const customizedContract = [
-      s.prompt_framing,
-      s.system_prompt,
-      Object.keys(s.loss_objective_config || {}).length,
-      Object.keys(s.inference_config || {}).length,
-      Object.keys(s.decoding_config || {}).length,
-    ].some(Boolean);
-    if (customizedContract) {
-      setError(
-        "This Setting contains prompt, loss, or inference pins. Launch it in Customized Pipeline.",
-      );
-      return;
-    }
     setPickedSetting(s.id);
     setError(null);
     setTouched(true);
@@ -313,6 +315,7 @@ export function NewRunModal({
       dataQuery: s.data_query || "",
       modelQuery: s.model_query || "",
       methodQuery: s.method_query || "",
+      validationSets: s.validation_sets ?? [],
       validationSet: s.validation_set || "",
       validationSplit: s.validation_split || "",
       validationConfig: s.validation_config || "",
@@ -377,10 +380,12 @@ export function NewRunModal({
     !trimmedTask && "Task name",
     !(predefined?.task_objective || nl).trim() && "Objective",
     !effectiveComputeTarget && "GPU backend",
-    !inputs.metricType && "Test metric type",
-    !inputs.metric.trim() && "Metric",
-    inputs.metricType === "custom" && !inputs.evaluationScript.trim() && "Evaluation script",
-    !inputs.metricDirection && "Target",
+    ...(!predefined?.test_sets?.length ? [
+      !inputs.metricType && "Test metric type",
+      !inputs.metric.trim() && "Metric",
+      inputs.metricType === "custom" && !inputs.evaluationScript.trim() && "Evaluation script",
+      !inputs.metricDirection && "Target",
+    ] : []),
     validationContract.independent
       && !validationContract.metricType
       && "Validation metric type",
@@ -394,9 +399,11 @@ export function NewRunModal({
     validationContract.independent
       && !validationContract.metricDirection
       && "Validation target",
-    !inputs.testSet.trim() && "Test set",
-    requiredColumns(inputs.answerFields).length === 0 && "Test answer fields",
-    !inputs.testSampleSubmission.trim() && "Sample submission",
+    ...(!predefined?.test_sets?.length ? [
+      !inputs.testSet.trim() && "Test set",
+      requiredColumns(inputs.answerFields).length === 0 && "Test answer fields",
+      !inputs.testSampleSubmission.trim() && "Sample submission",
+    ] : []),
     !!inputs.validationSet.trim()
       && requiredColumns(inputs.validationAnswerFields).length === 0
       && "Validation answer fields",
@@ -458,7 +465,7 @@ export function NewRunModal({
     }] : []),
   ];
   const autoOptionalValues: Array<{ name: string; value: string; overridden: boolean }> = [
-    { name: "Test query", value: autoTestQuery.trim() || "not set", overridden: !!autoTestQuery.trim() },
+    { name: "Evaluation guidance", value: autoTestQuery.trim() || "not set", overridden: !!autoTestQuery.trim() },
     { name: "Training data", value: inputs.dataset.trim() || "Prepared by Zevo", overridden: !!inputs.dataset.trim() },
     { name: "Data query", value: inputs.dataQuery.trim() || "not set", overridden: !!inputs.dataQuery.trim() },
     { name: "Base model", value: inputs.baseModel.trim() || "Selected by Zevo", overridden: !!inputs.baseModel.trim() },
@@ -550,6 +557,7 @@ export function NewRunModal({
     model_query: inputs.modelQuery.trim(),
     method_query: inputs.methodQuery.trim(),
     validation_set: inputs.validationSet.trim(),
+    validation_sets: JSON.stringify(inputs.validationSets),
     validation_split: inputs.validationSplit.trim(),
     validation_config: inputs.validationConfig.trim(),
     validation_answer_fields: validationContract.answerFields.trim(),
@@ -593,21 +601,22 @@ export function NewRunModal({
     setTouched(false);
     setPickedSetting("");
     setNl("");
+    const primaryTest = predefined.test_sets?.[0];
     setInputs((v) => ({
       ...v,
-      testSet: predefined.test_set || "",
-      answerFields: (predefined.test_answer_fields ?? []).join(", "),
-      metricType: predefined.metric_type,
-      evaluationScript: predefined.evaluation_script || "",
-      testSampleSubmission: predefined.test_sample_submission || "",
+      testSet: primaryTest?.test_set || predefined.test_set || "",
+      answerFields: (primaryTest?.answer_fields ?? predefined.test_answer_fields ?? []).join(", "),
+      metricType: primaryTest?.metric_type ?? predefined.metric_type,
+      evaluationScript: primaryTest?.evaluation_script || predefined.evaluation_script || "",
+      testSampleSubmission: primaryTest?.sample_submission || predefined.test_sample_submission || "",
       // A page may open this canonical launch form with suggested experiment
       // already selected. These values are still editable; Run name remains
       // blank and required, so the shortcut cannot silently start work.
       ...(initialTaskName === predefined.name ? initialInputs : {}),
-      // A predefined Task supplies Launch defaults. The user may adjust this
-      // Run's Test metric without changing the saved Task.
-      metric: predefined.metric,
-      metricDirection: predefined.metric_direction,
+      // Scalar fields remain the primary projection required by UserRequest.
+      // The visible, immutable launch contract is the full Task suite.
+      metric: primaryTest?.metric ?? predefined.metric,
+      metricDirection: primaryTest?.metric_direction ?? predefined.metric_direction,
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, predefinedName, mode]);
@@ -630,19 +639,21 @@ export function NewRunModal({
     || Object.values(inputs).some((v) => String(v || "").trim())
   );
 
-  async function submitFull() {
+  async function submitFull(setupId: string) {
     // A predefined name executes that package; anything else ships the task the
     // user described, under the name they gave it.
     // Blank stays blank: omitted limits resolve to 0 (no hard cap).
     const columns = (v: string) => v.split(",").map((c) => c.trim()).filter(Boolean);
     const validation = validationContractFromInputs(inputs);
-    if (!inputs.metricType) throw new Error("Choose the Test metric type.");
-    if (!inputs.metric.trim()) throw new Error("Name the evaluation metric.");
-    if (inputs.metricType === "custom" && !inputs.evaluationScript.trim()) {
-      throw new Error("Choose the custom evaluation script.");
+    if (!predefined?.test_sets?.length) {
+      if (!inputs.metricType) throw new Error("Choose the Test metric type.");
+      if (!inputs.metric.trim()) throw new Error("Name the evaluation metric.");
+      if (inputs.metricType === "custom" && !inputs.evaluationScript.trim()) {
+        throw new Error("Choose the custom evaluation script.");
+      }
+      if (!inputs.testSet.trim()) throw new Error("Choose the held-out test set.");
+      if (!inputs.metricDirection) throw new Error("Choose whether the evaluation target is Max or Min.");
     }
-    if (!inputs.testSet.trim()) throw new Error("Choose the held-out test set.");
-    if (!inputs.metricDirection) throw new Error("Choose whether the evaluation target is Max or Min.");
     if (validation.independent) {
       if (!validation.metricType) throw new Error("Choose the Validation metric type.");
       if (!validation.metric) throw new Error("Choose the Validation metric.");
@@ -651,8 +662,10 @@ export function NewRunModal({
       }
       if (!validation.metricDirection) throw new Error("Choose the Validation target.");
     }
-    if (!columns(inputs.answerFields).length) throw new Error("Name at least one test answer field.");
-    if (!inputs.testSampleSubmission.trim()) throw new Error("Choose the test sample submission.");
+    if (!predefined?.test_sets?.length) {
+      if (!columns(inputs.answerFields).length) throw new Error("Name at least one test answer field.");
+      if (!inputs.testSampleSubmission.trim()) throw new Error("Choose the test sample submission.");
+    }
     if (inputs.validationSet.trim()) {
       if (!columns(inputs.validationAnswerFields).length) {
         throw new Error("A named validation set requires validation answer fields.");
@@ -669,19 +682,23 @@ export function NewRunModal({
     const limits = limitsFromInputs(inputs);
     let body: CreateRunRequest;
     if (predefined) {
+      const primaryTest = predefined.test_sets[0];
+      if (!primaryTest) throw new Error("The selected Task has no Test suite.");
       // Build the complete canonical request from what the form shows.
       const edited = {
         dataset: inputs.dataset,
         dataset_split: inputs.datasetSplit.trim(),
         dataset_config: inputs.datasetConfig.trim(),
-        test_set: inputs.testSet,
-        test_answer_fields: columns(inputs.answerFields),
+        test_sets: predefined.test_sets,
+        test_set: primaryTest.test_set,
+        test_answer_fields: primaryTest.answer_fields,
+        validation_sets: inputs.validationSets,
         validation_set: inputs.validationSet,
         validation_split: inputs.validationSplit.trim(),
         validation_config: inputs.validationConfig.trim(),
         validation_answer_fields: columns(validation.answerFields),
         validation_sample_submission: validation.sampleSubmission,
-        test_sample_submission: inputs.testSampleSubmission,
+        test_sample_submission: primaryTest.sample_submission,
         base_model: inputs.baseModel,
         model_query: inputs.modelQuery.trim(),
         // Part of the setting, so an edit to it has to count as a change.
@@ -700,20 +717,20 @@ export function NewRunModal({
       // blank. What the form says is what the run gets: blank is blank, and
       // blank is Zevo's to decide.
       //
-      // The task still supplies what a task IS — its objective and four test
-      // fields (prefilled above, so they travel in `edited`).
+      // The task still supplies what a task IS — its objective and complete
+      // Test suite. The scalar values are only the suite's primary projection.
       body = {
         task_name: trimmedTask,
         run_name: runName.trim(),
         user_request: {
           task_objective: predefined.task_objective,
-          metric: inputs.metric.trim(),
-          metric_direction: inputs.metricDirection as "max" | "min",
-          metric_type: inputs.metricType as "builtin" | "custom",
-          evaluation_script: inputs.metricType === "custom"
-            ? inputs.evaluationScript.trim()
+          metric: primaryTest.metric,
+          metric_direction: primaryTest.metric_direction,
+          metric_type: primaryTest.metric_type,
+          evaluation_script: primaryTest.metric_type === "custom"
+            ? primaryTest.evaluation_script
             : "",
-          evaluator_sha256: "",
+          evaluator_sha256: primaryTest.evaluator_sha256,
           validation_metric: validation.metric,
           validation_metric_direction: validation.metricDirection,
           validation_metric_type: validation.metricType,
@@ -739,6 +756,7 @@ export function NewRunModal({
         ...saveFields,
       };
     }
+    body = { ...body, setup_id: setupId };
     const out = await api<{ run_id: string }>("/runs", {
       method: "POST",
       body: JSON.stringify(body),
@@ -831,7 +849,7 @@ export function NewRunModal({
             `"${trimmedTask}" is not a predefined task, so describe what you want to achieve.`,
           );
         }
-        await submitFull();
+        await submitFull(runSetup.begin());
       } else {
         if (!runName.trim()) {
           throw new Error("Give the run a name.");
@@ -848,6 +866,7 @@ export function NewRunModal({
     } catch (e) {
       setError(String((e as Error).message || e));
     } finally {
+      runSetup.stop();
       setBusy(false);
     }
   }
@@ -882,7 +901,9 @@ export function NewRunModal({
               (It was not wrong — this task row carries `trl-lib/Capybara` and
               the rest, which IS s2 — but a true statement about invisible
               values reads as a bug.) */}
-          {mode === "full_pipeline" && trimmedTask && touched && (
+          {busy && mode === "full_pipeline" && runSetup.progress ? (
+            <RunSetupProgressView progress={runSetup.progress} />
+          ) : mode === "full_pipeline" && trimmedTask && touched && (
             <div className="mr-auto min-w-0 flex-1">
               {alreadySaved ? (
                 <p className="font-mono text-2xs text-slate-500">
@@ -973,7 +994,7 @@ export function NewRunModal({
           >
             <div className="font-display text-sm font-semibold">Auto</div>
             <p className="mt-1 text-xs leading-snug text-slate-400">
-              Zevo defines the Test contract; choose or delegate data, model, and method.
+              Describe the goal; Zevo chooses the Test suite, then runs Standard.
             </p>
           </button>
           <ModeInfo
@@ -993,7 +1014,7 @@ export function NewRunModal({
           >
             <div className="font-display text-sm font-semibold">Standard</div>
             <p className="mt-1 text-xs leading-snug text-slate-400">
-              Let Zevo configure and run the complete agent workflow.
+              Choose the Task and basic Setting; Zevo owns execution details.
             </p>
           </button>
           <ModeInfo
@@ -1004,7 +1025,17 @@ export function NewRunModal({
           </div>
           <div className="relative">
           <button
-            onClick={() => { setMode("customized_pipeline"); setOpenModeInfo(null); }}
+            onClick={() => {
+              setCustomizedSeed({
+                taskName: trimmedTask,
+                settingId: pickedSetting,
+                runName,
+                inputs,
+              });
+              setCustomizedResetKey((value) => value + 1);
+              setMode("customized_pipeline");
+              setOpenModeInfo(null);
+            }}
             className={`w-full rounded-bezel border p-3 pr-9 text-left transition ${
               mode === "customized_pipeline"
                 ? "border-brass-500/50 bg-brass-500/10 text-brass-200 shadow-glow-brass"
@@ -1013,7 +1044,7 @@ export function NewRunModal({
           >
             <div className="font-display text-sm font-semibold">Customized</div>
             <p className="mt-1 text-xs leading-snug text-slate-400">
-              Run the full workflow with configuration for each agent.
+              Standard plus hyperparameter, inference, or per-agent overrides.
             </p>
           </button>
           <ModeInfo
@@ -1111,15 +1142,15 @@ export function NewRunModal({
                   size={12}
                   className={`shrink-0 text-slate-400 transition-transform ${showAutoTest ? "rotate-90" : ""}`}
                 />
-                <span className="field-label !text-slate-100">Test</span>
+                <span className="field-label !text-slate-100">Evaluation</span>
               </button>
               {showAutoTest && (
                 <TextField
-                  label="Test query"
+                  label="Evaluation guidance"
                   value={autoTestQuery}
                   onChange={setAutoTestQuery}
                   placeholder=""
-                  hint="Describe requirements for the Test set Zevo should select or create."
+                  hint="Optional coverage or format guidance; Zevo decides the Test suite and each scoring contract."
                 />
               )}
             </section>
@@ -1231,10 +1262,15 @@ export function NewRunModal({
             key={customizedResetKey}
             onDone={onClose}
             onDirtyChange={setCustomizedDirty}
+            initialTaskName={customizedSeed.taskName || initialTaskName}
+            initialSettingId={customizedSeed.settingId || initialSettingId}
+            initialRunName={customizedSeed.runName}
+            initialInputs={customizedSeed.inputs}
           />
         ) : mode === "full_pipeline" ? (
           <RunInputs
             {...inputs}
+            taskTestSuite={predefined?.test_sets}
             requiredMissing={fullMissing}
             requiredPrefixValues={[
               { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },

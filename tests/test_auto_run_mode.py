@@ -613,7 +613,8 @@ async def test_scoping_with_too_few_rows_fails_the_run_with_the_reason(
         await db.refresh(run)
         assert run.status == "failed"
         assert run.scoring_settled is False
-        assert "derived Validation requires at least" in run.halted_reason
+        assert "none of the Task's Test sets is large enough" in run.halted_reason
+        assert "official development set" in run.halted_reason
         assert run.supervisor_ticket_id == ""
         assert (await db.execute(select(AgentWakeupRequest).where(
             AgentWakeupRequest.agent_id == "orchestrator",

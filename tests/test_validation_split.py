@@ -139,6 +139,40 @@ def test_carve_takes_validation_rows_out_of_test_only(task_dir: Path, tmp_path: 
     assert not {r["question"] for r in val} & {r["question"] for r in rest}
 
 
+def test_carve_accepts_a_csv_cell_larger_than_the_stdlib_default(
+    tmp_path: Path,
+) -> None:
+    """HF CSV projections may put a long prompt or test payload in one cell."""
+    source = tmp_path / "large-cell.csv"
+    large_answer = "x" * 150_000  # csv's unconfigured limit is 128 KiB.
+    _write_csv(
+        source,
+        ["id", "prompt", "answer"],
+        [
+            {
+                "id": str(index),
+                "prompt": f"problem {index}",
+                "answer": large_answer if index == 0 else str(index),
+            }
+            for index in range(1_000)
+        ],
+    )
+
+    out = carve(
+        dataset="",
+        test_set=str(source),
+        test_answer_fields=["answer"],
+        out_dir=str(tmp_path / "validation"),
+        remaining_out_dir=str(tmp_path / "test"),
+    )
+
+    rows = list(csv.DictReader(open(out.validation_set))) + list(
+        csv.DictReader(open(out.test_set))
+    )
+    assert len(rows) == 1_000
+    assert next(row for row in rows if row["id"] == "0")["answer"] == large_answer
+
+
 def test_prediction_preview_joins_questions_by_id(tmp_path: Path) -> None:
     from zevo.api.routers.shared.runs import (
         _prediction_with_questions_preview,
@@ -868,7 +902,8 @@ def test_declared_split_reaches_the_data_ticket(tmp_path: Path, monkeypatch) -> 
         "note": "", "kind": "training",
         "remote": [
             {"role": "train", "kind": "huggingface", "id": "trl-lib/Capybara",
-             "url": "", "split": "train[:2000]", "config": "default"},
+             "url": "", "split": "train[:2000]", "config": "default",
+             "n_rows": 12_000},
             {"role": "validation", "kind": "huggingface", "id": "trl-lib/Capybara",
              "url": "", "split": "validation", "config": "default"},
         ],
@@ -882,6 +917,7 @@ def test_declared_split_reaches_the_data_ticket(tmp_path: Path, monkeypatch) -> 
     # repo's validation split is a different row under the same id.
     assert built["dataset_split"] == "train[:2000]"
     assert built["dataset_config"] == "default"
+    assert rd.lookup("trl-lib/Capybara", role="train").n_rows == 12_000
 
 
 def test_an_undeclared_hub_id_resolves_to_train_before_data_runs(tmp_path: Path, monkeypatch) -> None:
@@ -915,8 +951,8 @@ async def test_a_hub_validation_set_is_fetched_before_the_run_starts(
         fetched.update(hub_id=hub_id, split=split, config=config, limit=limit)
         path = Path(out_dir) / "validation.csv"
         _write_csv(path, ["question", "gold"],
-                   [{"question": f"h{i}", "gold": str(i)} for i in range(30)])
-        return str(path), ["question", "gold"], 30, f"fetched 30 rows from {hub_id} ({split})"
+                   [{"question": f"h{i}", "gold": str(i)} for i in range(200)])
+        return str(path), ["question", "gold"], 200, f"fetched 200 rows from {hub_id} ({split})"
 
     monkeypatch.setattr(rd, "materialize", fake_materialize)
     monkeypatch.setattr(
@@ -952,7 +988,7 @@ async def test_a_hub_validation_set_is_fetched_before_the_run_starts(
     assert holdout["validation_set"].endswith("validation.csv")
     assert Path(holdout["validation_set"]).is_file()
     assert holdout["validation_source"] == "huggingface"
-    assert "fetched 30 rows" in holdout["note"]
+    assert "fetched 200 rows" in holdout["note"]
     # Nothing was carved, so the training data is untouched.
     assert agent_request.dataset == str(task_dir / "train.csv")
 
@@ -1106,14 +1142,15 @@ async def test_an_ambiguous_config_is_refused_rather_than_guessed(tmp_path: Path
 def test_the_carved_fraction_holds_at_every_size(tmp_path: Path) -> None:
     """Every eligible Test gives exactly 20%; smaller Tests require Validation."""
     from zevo.engine.method.validation_split import (
-        FRACTION, MIN_VALIDATION_ROWS, _n_validation,
+        FRACTION, InsufficientValidationRows, MIN_VALIDATION_ROWS,
+        _n_validation,
     )
 
-    for total in (1_000, 20_000, 200_000):
+    for total in (1_000, 2_000, 20_000, 200_000):
         assert _n_validation(total) == round(total * FRACTION)
     assert _n_validation(1_000) == MIN_VALIDATION_ROWS
-    for total in (1, 2, 999):
-        with pytest.raises(SplitError, match="Validation|validation"):
+    for total in (1, 2, 30, 199, 999):
+        with pytest.raises(InsufficientValidationRows, match="Validation|validation"):
             _n_validation(total)
 
 
@@ -1164,7 +1201,12 @@ def test_the_complete_stored_data_payload_is_the_only_runner_authority(tmp_path:
                    "data_query": "", "training_method": "full_sft",
                    "data_intent_signature": "a" * 64}
 
-    built = _build_data_input(ticket, payload, {}, str(tmp_path), run)
+    device_info = tmp_path / "device_info.json"
+    _write_instance_device(device_info, run_id="r")
+    built = _build_data_input(
+        ticket, payload, {"device_info": {"path": str(device_info)}},
+        str(tmp_path), run,
+    )
     assert built.dataset_split == "train[:500]"
     assert built.dataset_config == "other"
     assert built.expected_source_identity == "trl-lib/Capybara"
@@ -1174,6 +1216,193 @@ def test_the_complete_stored_data_payload_is_the_only_runner_authority(tmp_path:
     assert built.sample_submission == ""
     assert "--scoring-source" not in built.artifacts_validation_command
     assert "validate-training-data" in built.artifacts_validation_command
+    assert built.remote_hf_cache_path == "/work/hf"
+    assert built.remote_data_output_dir == f"/work/data/runs/r/prepared/{'a' * 64}"
+    assert built.remote_preparation_receipt_path == (
+        f"/work/data/runs/r/prepared/{'a' * 64}/preparation_receipt.json"
+    )
+
+
+@pytest.mark.asyncio
+async def test_engine_accepts_only_the_assigned_durable_remote_data_root(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from zevo.contracts.data import DataResult
+    from zevo.engine.remote_training_data import RemoteDatasetReceipt
+    from zevo.engine.run.runner import (
+        _build_data_input,
+        _finalize_remote_data_artifact,
+    )
+
+    device_info = tmp_path / "device_info.json"
+    _write_instance_device(device_info, run_id="durable-run")
+    run = Run(
+        id="durable-run", task_name="durable", metric="accuracy",
+        started_at=datetime.now(timezone.utc), holdout={},
+    )
+    ticket = Ticket(id="data-direct", run_id=run.id, agent_id="data", payload={})
+    payload = {
+        "operation": "prepare_run_data",
+        "dataset_source": "owner/data", "dataset": "owner/data",
+        "dataset_split": "train", "dataset_config": "",
+        "data_query": "", "training_method": "full_sft",
+        "data_intent_signature": "f" * 64,
+    }
+    inp = _build_data_input(
+        ticket, payload, {"device_info": {"path": str(device_info)}},
+        str(tmp_path), run,
+    )
+    package = tmp_path / "remote_training_package.json"
+    package.write_text("{}\n", encoding="utf-8")
+    helper = Path(inp.remote_data_helper_path)
+    assert helper.is_file()
+    final_path = f"/work/data/runs/{run.id}/verified/{'1' * 64}/dataset.jsonl"
+
+    async def remote_command(command: list[str], **_kwargs) -> tuple[int, str]:
+        if any("remote_data_receipt.json" in part for part in command):
+            receipt = RemoteDatasetReceipt(
+                data_signature="1" * 64,
+                dataset_path=final_path,
+                dataset_sha256="2" * 64,
+                profile_path=f"{inp.remote_data_output_dir}/data_profile.json",
+                n_rows_before_decontamination=10,
+                n_rows=10,
+                decontamination_removed_rows=0,
+                record_fields=["question", "answer"],
+                materialization_mode="hardlink",
+            )
+            (tmp_path / "remote_data_receipt.json").write_text(
+                receipt.model_dump_json(), encoding="utf-8",
+            )
+        return 1, ""
+
+    monkeypatch.setattr(
+        "zevo.engine.run.runner._run_remote_control_command", remote_command,
+    )
+    direct = DataResult(
+        status="failed", operation="prepare_run_data", ticket_id=ticket.id,
+        error_message="fixture", notes="fixture",
+        remote_dataset_path=f"{inp.remote_data_output_dir}/dataset.jsonl",
+        remote_data_profile_path=f"{inp.remote_data_output_dir}/data_profile.json",
+    )
+    finalized = await _finalize_remote_data_artifact(
+        result=direct,
+        inp=inp,
+        package_path=str(package),
+        package_signature="1" * 64,
+        work_dir=str(tmp_path),
+    )
+    assert finalized[0] == final_path
+
+    old_workdir_copy = direct.model_copy(update={
+        "remote_dataset_path": "/work/durable-run/data/data-direct/dataset.jsonl",
+        "remote_data_profile_path": (
+            "/work/durable-run/data/data-direct/data_profile.json"
+        ),
+    })
+    with pytest.raises(ValueError, match="outside assigned"):
+        await _finalize_remote_data_artifact(
+            result=old_workdir_copy,
+            inp=inp,
+            package_path=str(package),
+            package_signature="1" * 64,
+            work_dir=str(tmp_path),
+        )
+
+
+@pytest.mark.asyncio
+async def test_remote_cleanup_trashes_only_unreferenced_failed_ticket_data(
+    session_factory, tmp_path: Path, monkeypatch,
+) -> None:
+    from zevo.db import HeartbeatResult, TicketNotice, WorkProduct
+    from zevo.engine.run.runner import (
+        _build_data_input,
+        _trash_unreferenced_failed_remote_data,
+    )
+
+    device_info = tmp_path / "device_info.json"
+    _write_instance_device(device_info, run_id="cleanup-run")
+    run = Run(
+        id="cleanup-run", task_name="cleanup", metric="accuracy",
+        started_at=datetime.now(timezone.utc), holdout={},
+    )
+    current = Ticket(
+        id="data-current", run_id=run.id, agent_id="data", status="running",
+        payload={}, inputs={},
+    )
+    unreferenced = Ticket(
+        id="data-old-free", run_id=run.id, agent_id="data", status="failed",
+        payload={}, inputs={},
+    )
+    referenced = Ticket(
+        id="data-old-used", run_id=run.id, agent_id="data", status="failed",
+        payload={}, inputs={},
+    )
+    payload = {
+        "operation": "prepare_run_data",
+        "dataset_source": "owner/data", "dataset": "owner/data",
+        "dataset_split": "train", "dataset_config": "",
+        "data_query": "", "training_method": "full_sft",
+        "data_intent_signature": "e" * 64,
+    }
+    inp = _build_data_input(
+        current, payload, {"device_info": {"path": str(device_info)}},
+        str(tmp_path), run,
+    )
+    free_dir = "/work/data/runs/cleanup-run/data-old-free"
+    used_dir = "/work/data/runs/cleanup-run/data-old-used"
+    commands: list[list[str]] = []
+
+    async def remote_command(command: list[str], **_kwargs) -> tuple[int, str]:
+        commands.append(command)
+        return 1, "ZEVO_TRASHED\n"
+
+    monkeypatch.setattr(
+        "zevo.engine.run.runner._run_remote_control_command", remote_command,
+    )
+    async with session_factory() as session:
+        session.add_all([run, current, unreferenced, referenced])
+        session.add_all([
+            HeartbeatResult(
+                ticket_id=unreferenced.id, heartbeat_id="h-free", agent_id="data",
+                status="failed", output={
+                    "remote_dataset_path": f"{free_dir}/dataset.jsonl",
+                    "remote_data_profile_path": f"{free_dir}/data_profile.json",
+                },
+            ),
+            HeartbeatResult(
+                ticket_id=referenced.id, heartbeat_id="h-used", agent_id="data",
+                status="failed", output={
+                    "remote_dataset_path": f"{used_dir}/dataset.jsonl",
+                    "remote_data_profile_path": f"{used_dir}/data_profile.json",
+                },
+            ),
+            WorkProduct(
+                ticket_id=referenced.id, role="training_dataset",
+                path=f"{used_dir}/dataset.jsonl", meta={"location": "remote"},
+            ),
+        ])
+        await session.commit()
+
+        trashed = await _trash_unreferenced_failed_remote_data(
+            run=run,
+            ticket=current,
+            inp=inp,
+            current_dataset_path=(
+                "/work/data/runs/cleanup-run/verified/current/dataset.jsonl"
+            ),
+            session=session,
+        )
+        await session.flush()
+        notices = (await session.execute(
+            select(TicketNotice).where(TicketNotice.ticket_id == unreferenced.id)
+        )).scalars().all()
+
+    assert len(commands) == 1
+    assert free_dir in " ".join(commands[0])
+    assert all(used_dir not in " ".join(command) for command in commands)
+    assert len(trashed) == 1
+    assert notices[0].code == "data.remote_artifacts_trashed"
 
 
 def test_local_data_input_supplies_the_exact_source_fingerprint(tmp_path: Path) -> None:
@@ -1197,7 +1426,10 @@ def test_local_data_input_supplies_the_exact_source_fingerprint(tmp_path: Path) 
         "data_intent_signature": "a" * 64,
     }
 
-    built = _build_data_input(ticket, payload, {}, str(tmp_path), run)
+    built = _build_data_input(
+        ticket, payload, {"device_info": {"path": "/remote/device.json"}},
+        str(tmp_path), run,
+    )
     assert built.expected_source_identity == str(source)
     assert built.expected_source_fingerprint == file_sha256(source)
     assert "--source-file" in built.data_recipe_validation_command
@@ -1269,6 +1501,44 @@ def test_pipeline_data_payload_does_not_receive_unsettled_validation() -> None:
     )
     assert "scoring_set" not in stamped
     assert "answer_fields" not in stamped
+
+
+def test_pipeline_inference_uses_primary_benchmark_query_not_run_global_query() -> None:
+    from zevo.api.routers.shared.tickets import _stamp_pipeline_payload
+
+    run = Run(
+        metric="suite_average", validation_metric="suite_average",
+        validation_metric_direction="max",
+        id="r", task_name="t", mode="full_pipeline",
+        started_at=datetime.now(timezone.utc),
+        decision_pins={
+            # Existing Runs and old Settings may still contain either legacy
+            # location. Neither may override a named Benchmark contract.
+            "inference_query": "legacy global query",
+            "inference_config": {
+                "inference_query": "another global query",
+                "batch_size": 8,
+            },
+        },
+        holdout={
+            "validation_public": "/work/math-questions.csv",
+            "validation_sample_submission": "/work/math-submission.csv",
+            "validation_sets": [{
+                "name": "math",
+                "inference_query": r"Solve {question}; finish with \boxed{answer}.",
+            }],
+        },
+    )
+
+    stamped = _stamp_pipeline_payload(
+        run=run,
+        agent_id="inference",
+        payload={"operation": "run_inference"},
+    )
+    assert stamped["configuration_pins"]["inference_config"] == {
+        "inference_query": r"Solve {question}; finish with \boxed{answer}.",
+        "batch_size": 8,
+    }
 
 
 @pytest.mark.asyncio
@@ -1599,7 +1869,10 @@ def test_optimization_data_is_blind_while_heldout_data_gets_its_contract() -> No
             "dataset": "/training.jsonl", "training_method": "full_sft",
             "data_intent_signature": "a" * 64,
     }
-    built = _build_data_input(loop, data_payload, {}, "/work", run)
+    built = _build_data_input(
+        loop, data_payload, {"device_info": {"path": "/remote/device.json"}},
+        "/work", run,
+    )
     assert built.scoring_set == ""
     assert built.answer_fields == []
     assert built.evaluation_script == "" and built.sample_submission == ""

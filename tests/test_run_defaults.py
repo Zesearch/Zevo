@@ -335,10 +335,18 @@ def test_setting_contract_has_no_target_override() -> None:
     from zevo.api.routers.ui.tasks import SettingBody
 
     assert "metric_direction" not in SettingBody.model_fields
+    customized_fields = {
+        "prompt_framing", "system_prompt", "loss_objective_config",
+        "inference_config", "decoding_config",
+    }
+    assert customized_fields.isdisjoint(SettingBody.model_fields)
     with pytest.raises(ValidationError):
         SettingBody(metric_direction="max")
     with pytest.raises(ValidationError, match="model_reasoning_type"):
         SettingBody(model_reasoning_type="thinking")
+    for field in customized_fields:
+        with pytest.raises(ValidationError):
+            SettingBody.model_validate({"name": "s", field: "not a Setting field"})
 
 
 def test_user_request_accepts_structured_experiment_preferences() -> None:
@@ -512,7 +520,11 @@ async def test_predefined_task_test_suite_cannot_be_overridden_for_one_run(tmp_p
     validation_sample = tmp_path / "validation_sample.csv"
     test_set.write_text("question,answer\nq,a\n", encoding="utf-8")
     test_sample.write_text("prediction\na\n", encoding="utf-8")
-    validation_set.write_text("question,answer\nv,a\n", encoding="utf-8")
+    validation_set.write_text(
+        "question,answer\n"
+        + "".join(f"v{i},a{i}\n" for i in range(200)),
+        encoding="utf-8",
+    )
     validation_sample.write_text("prediction\na\n", encoding="utf-8")
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:

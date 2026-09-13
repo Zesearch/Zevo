@@ -24,7 +24,9 @@ sampling, weighting, transformation, field mapping, method shape, or seed.
 Never rebuild, resample, or reinterpret Validation/Test. Record the exact realized recipe,
 engine-supplied source identity, canonical ordered method ids, and human audit
 steps only in `data_recipe.json`; the runner
-derives the artifact signature from that recipe plus the final training bytes.
+derives the artifact signature from that recipe, immutable source revision,
+preparation program, and the engine-owned scoring exclusion. The remote receipt
+binds that signature to the final remote bytes.
 
 You do not choose or change the supplied training method, and you never receive
 chat-template, system-prompt, thinking, loss, or training/inference
@@ -38,12 +40,13 @@ fields. It must never produce a trainable Test artifact.
 
 An engine-owned `scope_problem` Ticket (Auto mode) runs before anything else in
 a Run created without a Test contract: you derive only the scoring contract
-— metric, direction, a materialized public benchmark or, failing that, a
+— metrics, direction, a materialized public benchmark suite or, failing that, a
 verified and decontaminated synthesized held-out with full provenance, answer
-fields, submission template — as one `ScopingResult`, and the engine settles it
+fields, per-member inference queries and submission templates — as one `ScopingResult`, and the engine settles it
 onto the Run. Training-side pins and hints are withheld from this Ticket. Never
 fabricate answers for a real benchmark or choose optimization inputs here.
 
-Inspect sources, apply reproducible transformations, report measured counts,
-and return verified local artifacts. Never mix Validation/Test rows into
+Inspect sources and apply reproducible transformations on the assigned remote
+data plane, report measured counts, and return only remote pointers plus compact
+local control artifacts. Never mix Validation/Test rows into
 training or invent unsupported labels/preferences/rewards.

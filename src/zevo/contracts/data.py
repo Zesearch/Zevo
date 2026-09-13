@@ -20,7 +20,7 @@ import json
 import re
 import sys
 from argparse import ArgumentParser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -541,6 +541,46 @@ class DataTaskInput(AgentTaskInput):
     configuration_suggestions: dict[str, Any] = Field(default_factory=dict)
     configuration_pins: dict[str, Any] = Field(default_factory=dict)
     work_dir: str = Field(min_length=1)
+    device_info_path: str = Field(
+        "",
+        description=(
+            "For optimization Data, the exact purpose=train remote route shared "
+            "with Train. Empty for held-out/scoping operations."
+        ),
+    )
+    remote_data_helper_path: str = Field(
+        "",
+        description=(
+            "System helper uploaded to the remote data plane. It finalizes and "
+            "receipts data without copying dataset rows back to Zevo."
+        ),
+    )
+    remote_dataset_spec_schema: dict[str, Any] = Field(default_factory=dict)
+    remote_dataset_spec_validation_command: str = ""
+    remote_hf_cache_path: str = Field(
+        "",
+        description=(
+            "Absolute remote cache used only for reusable Hugging Face source "
+            "downloads. Prepared Training artifacts must not be stored here."
+        ),
+    )
+    remote_data_output_dir: str = Field(
+        "",
+        description=(
+            "Absolute durable remote directory for this Run/data-intent's "
+            "prepared Training dataset and profile, separate from the source cache."
+        ),
+    )
+    remote_preparation_receipt_path: str = Field(
+        "",
+        description=(
+            "Absolute compact receipt written immediately after remote "
+            "preparation. A retry may reuse data only when this receipt validates."
+        ),
+    )
+    remote_timeout_seconds: Literal[14400] = 14400
+    remote_required_environment: dict[str, str] = Field(default_factory=dict)
+    secret_environment_names: list[Literal["HF_TOKEN"]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_lane_scope(self) -> "DataTaskInput":
@@ -563,6 +603,12 @@ class DataTaskInput(AgentTaskInput):
                 or self.configuration_pins or self.expected_source_identity
                 or self.data_intent_signature or self.expected_source_fingerprint
                 or self.recipe_intent != DataRecipeIntent()
+                or self.device_info_path or self.remote_data_helper_path
+                or self.remote_dataset_spec_schema
+                or self.remote_dataset_spec_validation_command
+                or self.remote_hf_cache_path or self.remote_data_output_dir
+                or self.remote_preparation_receipt_path
+                or self.remote_required_environment or self.secret_environment_names
             ):
                 raise ValueError(
                     "scope_problem derives the scoring contract itself and must "
@@ -604,6 +650,53 @@ class DataTaskInput(AgentTaskInput):
                 )
             if not self.expected_source_identity.strip():
                 raise ValueError("prepare_run_data requires expected_source_identity")
+            if self.remote_dataset_spec_schema:
+                if not self.device_info_path.strip():
+                    raise ValueError("remote Data requires device_info_path")
+                if not self.remote_data_helper_path.strip():
+                    raise ValueError("remote Data requires remote_data_helper_path")
+                if not self.remote_dataset_spec_schema:
+                    raise ValueError("remote Data requires remote_dataset_spec_schema")
+                if not self.remote_dataset_spec_validation_command.strip():
+                    raise ValueError(
+                        "remote Data requires remote_dataset_spec_validation_command"
+                    )
+                if not self.remote_required_environment:
+                    raise ValueError("remote Data requires cancellation environment markers")
+                remote_paths = {
+                    "remote_hf_cache_path": self.remote_hf_cache_path,
+                    "remote_data_output_dir": self.remote_data_output_dir,
+                    "remote_preparation_receipt_path": (
+                        self.remote_preparation_receipt_path
+                    ),
+                }
+                for name, value in remote_paths.items():
+                    if not value or not PurePosixPath(value).is_absolute():
+                        raise ValueError(f"remote Data requires absolute {name}")
+                cache = PurePosixPath(self.remote_hf_cache_path)
+                output = PurePosixPath(self.remote_data_output_dir)
+                if output == cache or cache in output.parents:
+                    raise ValueError(
+                        "prepared remote Data must be stored outside the Hugging "
+                        "Face source cache"
+                    )
+                if PurePosixPath(self.remote_preparation_receipt_path).parent != output:
+                    raise ValueError(
+                        "remote preparation receipt must be stored directly in "
+                        "remote_data_output_dir"
+                    )
+            elif (
+                self.remote_data_helper_path
+                or self.remote_dataset_spec_validation_command
+                or self.remote_hf_cache_path
+                or self.remote_data_output_dir
+                or self.remote_preparation_receipt_path
+                or self.remote_required_environment
+                or self.secret_environment_names
+            ):
+                raise ValueError(
+                    "local Data must not carry remote Hugging Face execution fields"
+                )
             leaked = {
                 "test_set_name": self.test_set_name,
                 "scoring_set": self.scoring_set,
@@ -686,6 +779,34 @@ class DataResult(AgentResult):
     )
 
     training_dataset_path: str = ""
+    remote_dataset_path: str = Field(
+        "",
+        description=(
+            "Absolute dataset path on the assigned remote host. Training rows "
+            "remain there and are never copied back to the scheduler."
+        ),
+    )
+    remote_dataset_spec_path: str = ""
+    remote_data_profile_path: str = Field(
+        "",
+        description="Absolute remote path of detect/analyze output; rows stay remote.",
+    )
+    remote_data_receipt_path: str = Field(
+        "",
+        description="Local compact receipt copied back after engine finalization.",
+    )
+    remote_training_package_path: str = Field(
+        "",
+        description="Engine-owned local control package; Data must return it empty.",
+    )
+    remote_materialization_mode: Literal["", "rewrite", "hardlink", "reflink", "copy"] = Field(
+        "",
+        description="Engine-owned record of how the immutable verified path was created.",
+    )
+    remote_control_retries: int = Field(
+        0, ge=0,
+        description="Engine-owned count of recovered transient SSH control failures.",
+    )
     validation_source_path: str = ""
     validation_answer_fields: list[str] = Field(default_factory=list)
     validation_dataset_path: str = ""
@@ -746,6 +867,10 @@ class DataResult(AgentResult):
                 or self.validation_answer_fields or self.validation_dataset_path
                 or self.scoring_public_path or self.inference_data_profile_path
                 or self.data_recipe_path or self.synthesis_generated_rows
+                or self.remote_dataset_path or self.remote_dataset_spec_path
+                or self.remote_data_profile_path or self.remote_data_receipt_path
+                or self.remote_training_package_path
+                or self.remote_materialization_mode or self.remote_control_retries
                 or self.synthesis_teacher_model or self.decontamination_checked
                 or self.decontamination_removed_rows
                 or self.system_scoring_duplicates_removed
@@ -764,16 +889,27 @@ class DataResult(AgentResult):
                 self.system_scoring_duplicates_removed
                 or self.decontamination_checked
                 or self.decontamination_removed_rows
+                or self.remote_materialization_mode
+                or self.remote_control_retries
             ):
                 raise ValueError(
                     "Data cannot report engine-owned decontamination results"
                 )
-            missing = [
-                name for name, value in (
-                    ("training_dataset_path", self.training_dataset_path),
-                    ("data_recipe_path", self.data_recipe_path),
-                ) if not value
-            ]
+            local_data = bool(self.training_dataset_path)
+            remote_data = bool(self.remote_dataset_path)
+            if local_data == remote_data:
+                raise ValueError(
+                    "successful prepare_run_data requires exactly one of "
+                    "training_dataset_path or remote_dataset_path"
+                )
+            missing = [("data_recipe_path", self.data_recipe_path)]
+            if remote_data:
+                missing.extend([
+                    ("remote_dataset_spec_path", self.remote_dataset_spec_path),
+                    ("remote_data_profile_path", self.remote_data_profile_path),
+                    ("prepare_script_path", self.prepare_script_path),
+                ])
+            missing = [name for name, value in missing if not value]
             if missing:
                 raise ValueError(
                     "successful prepare_run_data requires " + ", ".join(missing)
@@ -797,6 +933,13 @@ class DataResult(AgentResult):
             raise ValueError("successful held-out Data requires questions-only scoring data")
         elif (
             self.training_dataset_path
+            or self.remote_dataset_path
+            or self.remote_dataset_spec_path
+            or self.remote_data_profile_path
+            or self.remote_data_receipt_path
+            or self.remote_training_package_path
+            or self.remote_materialization_mode
+            or self.remote_control_retries
             or self.validation_source_path
             or self.validation_answer_fields
             or self.validation_dataset_path

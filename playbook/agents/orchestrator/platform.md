@@ -16,9 +16,9 @@ hierarchy as a `full_pipeline` Run.
 
 ```text
 Orchestrator
-  -> Data 0 (training data; engine binds hidden Validation afterward)
+  -> Infrastructure purpose=train (one reusable remote data/model plane)
   -> Orchestrator
-  -> Infrastructure (cluster: reusable access route; instance: reusable lease)
+  -> Data 0 on that remote plane (engine binds hidden Validation afterward)
   -> Orchestrator
   -> Baseline Inference (select + write the current model lineage's inference_config.yaml)
   -> Orchestrator
@@ -29,12 +29,10 @@ Orchestrator
 Iteration N >= 1
   -> Orchestrator continues the active model/method/data branch
      or crosses exactly one evidenced exhausted-search boundary
-  -> Data N only if the training-data recipe changes; otherwise reuse latest Data
-  -> Orchestrator
-  -> Infrastructure (cluster: validate/reuse access; instance: reuse/reacquire lease)
+  -> Infrastructure purpose=train only when the prior remote plane is unavailable
+  -> Data N on that plane only if the recipe changes; otherwise reuse latest Data
   -> Train N (bind exact data_signature; parent selected from Run history)
   -> Orchestrator
-  -> Infrastructure (cluster: validate/reuse access; instance: verify/reuse lease)
   -> Inference N (reuse baseline inference_config.yaml exactly)
   -> Orchestrator
   -> Evaluation runner (Setting Validation metric -> Validation)
@@ -112,7 +110,7 @@ through `api_routes.openapi` instead of testing guessed keys or endpoints.
 {
   "agent_id": "infrastructure",
   "iteration": 0,
-  "payload": {"operation": "provision", "purpose": "inference"},
+  "payload": {"operation": "provision", "purpose": "train"},
   "inputs": {},
   "run_id": "<run-id>"
 }
@@ -121,11 +119,14 @@ through `api_routes.openapi` instead of testing guessed keys or endpoints.
 Infrastructure resolves concrete resources from Run context. Provider and the
 user-supplied GPU maximum remain fixed; zero means unlimited. Infrastructure
 selects a concrete positive count and must not exceed a positive limit.
-Use `purpose="train"` before Train and `purpose="inference"` before either
-Baseline or candidate Inference.
+Use one `purpose="train"` route before initial Data. A train-sized route is also
+valid for Baseline/candidate Inference, so keep and reuse that exact device
+artifact through Data, Train, and Inference. Do not provision another host just
+to change the purpose label. If the route is no longer healthy, provision a new
+train route and create a new Data ticket on it; a remote dataset pointer must
+never be attached to a different host.
 
-Run Data before the first cluster route validation so no stage job is queued
-while CPU-side data preparation is still pending. For a cloud release, read the
+For a cloud release, read the
 exact `instance_id` from the successful Infrastructure result/device artifact
 that served the just-finished GPU stage and emit:
 
@@ -196,7 +197,9 @@ once. A child caller cannot add or replace customization after Run creation.
     },
     "configuration_suggestions": {}
   },
-  "inputs": {},
+  "inputs": {
+    "device_info": {"artifact_role": "device_info", "source_ticket_id": "infra-..."}
+  },
   "run_id": "<run-id>"
 }
 ```
@@ -227,8 +230,10 @@ from the objective; do not leave both `dataset` and `data_query` empty.
 Run setup settles Validation before any Agent runs, but the API keeps its path,
 answers, schema, evaluator, examples, and statistics out of both your input and
 the Data work order. The engine attaches the scoring artifacts only after Data
-has returned. When the user omitted Validation, the engine moved 20% of Test
-into Validation (at least 200 rows) and retained the remaining 80% privately.
+has returned. When the user omitted Validation, the engine derives a member
+from 20% of every sufficiently large Test-suite benchmark and aggregates their
+scores. Small benchmarks remain final-test-only; all retained Test rows stay
+private.
 
 Before every later Train N, continue the active Data branch while credible
 Train-only or recipe-level refinements remain. Learning rate, epochs, batch
@@ -243,7 +248,11 @@ but only after all credible Data branches under the old Method are exhausted.
 Empty/zero detailed fields delegate them to Data. The API rejects an unchanged
 intent signature and permits only one coherent Data recipe per iteration.
 
-After Data N succeeds, bind both Train data inputs from Data N. The Validation
+Data downloads or uploads the source once to the remote plane, performs detect,
+analysis, transformation and preparation there, and returns only a remote
+dataset pointer plus compact local receipts. Never ask it to copy the dataset
+back. After Data N succeeds, bind both Train data inputs from Data N and bind
+the same Infrastructure ticket Data used. The Validation
 artifact was attached to that Ticket by the engine after Data finished and
 remains byte-identical to iteration 0. Never change Validation/Test,
 their evaluator, answer fields, population/order, submission schema, or the

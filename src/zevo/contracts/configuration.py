@@ -43,7 +43,10 @@ def inference_mapping_contract() -> dict[str, Any]:
     return {
         "allowed_keys": {
             "input_fields": "list[non-empty string]",
-            "inference_query": "non-empty string; supports {input} or {field} placeholders",
+            "inference_query": (
+                "non-empty string; supports {input} or recognised {field} "
+                "placeholders; other braces remain literal text"
+            ),
             "answer_regex": "string",
             "answer_column": "string",
             "batch_size": "integer >= 1",
@@ -1403,6 +1406,14 @@ def validate_adaptive_vllm_memory_config(config: InferenceRunConfig) -> None:
     llm_kwargs = implementation.get("llm_kwargs")
     if not isinstance(llm_kwargs, dict):
         raise ValueError("vLLM inference requires implementation_config.llm_kwargs")
+    # vLLM 0.27 removed this legacy EngineArgs option. Rejecting it in the
+    # deterministic config check is intentionally earlier than a multi-hour
+    # Slurm queue wait followed by engine-construction failure.
+    if "swap_space" in llm_kwargs:
+        raise ValueError(
+            "implementation_config.llm_kwargs.swap_space is not supported by "
+            "the Zevo vLLM runtime; omit it"
+        )
     if "gpu_memory_utilization" in llm_kwargs:
         raise ValueError(
             "gpu_memory_utilization is device-derived; record memory_plan "

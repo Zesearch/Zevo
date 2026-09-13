@@ -88,6 +88,44 @@ def test_builtin_evaluator_is_deterministic_and_writes_metrics(tmp_path: Path) -
     assert json.loads(Path(result.output.metrics_path).read_text())["score"] == 0.5
 
 
+def test_pass_at_one_uses_shared_code_execution_route(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions.csv"
+    gold = tmp_path / "gold.csv"
+    sample = tmp_path / "sample.csv"
+    _write_csv(predictions, [{
+        "task_id": "HumanEval/0",
+        "benchmark": "humanevalplus",
+        "prediction": "def add(a, b):\n    return a + b",
+    }])
+    _write_csv(gold, [{
+        "task_id": "HumanEval/0",
+        "prompt": "def add(a, b):\n",
+        "entry_point": "add",
+        "test": "def check(candidate):\n    assert candidate(20, 22) == 42\n",
+    }])
+    _write_csv(sample, [{
+        "task_id": "fake", "benchmark": "humanevalplus", "prediction": "<code>",
+    }])
+
+    result, events = _run(EvaluationTaskInput(
+        ticket_id="eval-code-001",
+        predictions_path=str(predictions),
+        scoring_set=str(gold),
+        sample_submission=str(sample),
+        evaluation_script="",
+        answer_fields=["test"],
+        metric="pass_at_1",
+        code_execution_adapter="humaneval_plus",
+    ), tmp_path / "work-code")
+
+    assert result.output.status == "succeeded"
+    metrics = json.loads(Path(result.output.metrics_path).read_text())
+    assert metrics["score"] == 1.0
+    assert metrics["adapter"] == "humaneval_plus"
+    config = next(event for event in events if event["type"] == "config")
+    assert config["payload"]["route"] == "code_execution"
+
+
 def test_custom_evaluator_must_write_finite_numeric_score(tmp_path: Path) -> None:
     predictions = tmp_path / "predictions.csv"
     gold = tmp_path / "gold.csv"

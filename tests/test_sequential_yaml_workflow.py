@@ -746,6 +746,17 @@ def test_adaptive_vllm_memory_plan_replaces_fixed_gpu_fraction(
     ]) == 1
     assert "device-derived" in capsys.readouterr().err
 
+    body["implementation_config"]["llm_kwargs"].pop(
+        "gpu_memory_utilization"
+    )
+    body["implementation_config"]["llm_kwargs"]["swap_space"] = 4
+    config_path.write_text(yaml.safe_dump(body), encoding="utf-8")
+    assert configuration_main([
+        "validate", "inference", str(config_path),
+        "--adaptive-vllm-memory",
+    ]) == 1
+    assert "swap_space" in capsys.readouterr().err
+
 
 def test_host_ram_plan_scales_with_stage_working_set_and_keeps_headroom() -> None:
     contract = HostMemoryPlanningContract()

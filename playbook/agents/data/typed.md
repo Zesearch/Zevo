@@ -22,6 +22,14 @@
 | `data_recipe_schema` | Exact artifact-level realized-recipe schema for `data_recipe.json`. |
 | `data_recipe_validation_command` | Exact side-effect-free recipe/artifact/source validator. Replace only the placeholders present; the engine already inserts a shell-quoted local source path. Use its printed signature. |
 | `artifacts_validation_command` | Exact side-effect-free validator for the training artifact only. |
+| `device_info_path` | The purpose=train remote route shared with Train. HF download, detect, analysis, transformation, and prepared rows stay there. |
+| `remote_data_helper_path` | Small system helper to upload; it receipts/finalizes remote data without returning rows. |
+| `remote_dataset_spec_schema` / `remote_dataset_spec_validation_command` | Exact remote HF source contract and validator. Pin an immutable revision. |
+| `remote_hf_cache_path` | Remote cache for reusable raw Hugging Face downloads only. |
+| `remote_data_output_dir` | Durable Run/data-intent directory for the prepared dataset and profile; validated retries share it. |
+| `remote_preparation_receipt_path` | Exact compact receipt path. Validate it with the system helper before reuse and record it immediately after preparation. |
+| `remote_required_environment` / `remote_timeout_seconds` | Exact cancellation markers and foreground execution deadline for remote Data. |
+| `secret_environment_names` | Secret names that may be forwarded without printing values, currently `HF_TOKEN`. |
 | Validation/scoring fields | Empty for `prepare_run_data` by contract. They are populated only for the private `prepare_holdout_data` operation, which cannot receive training-source fields. |
 | `configuration_suggestions` | Advisory Data-only acquisition/curation guidance; no Train/Inference hyperparameters. |
 | `configuration_pins` | Binding Data-only acquisition/curation values; no Train/Inference hyperparameters. |
@@ -29,10 +37,13 @@
 
 ## Output
 
-Successful `prepare_run_data` requires absolute paths for
-`training_dataset_path`, `data_recipe_path`, and `prepare_script_path`. Return
-all Validation/scoring paths and answer fields empty; the engine attaches its
-frozen scoring package only after validating this result.
+For a Hugging Face source, successful `prepare_run_data` requires absolute
+`remote_dataset_path`, `remote_data_profile_path`, local
+`remote_dataset_spec_path`, `data_recipe_path`, and `prepare_script_path`; keep
+`training_dataset_path` empty. The dataset/profile stay remote. Local-source
+legacy preparation may still return `training_dataset_path`. Return all
+Validation/scoring paths and answer fields empty; the engine attaches its frozen
+scoring package only after validating this result.
 
 Successful `prepare_holdout_data` requires only questions-only
 `scoring_public_path` and preparation evidence; training/Validation paths must
@@ -51,7 +62,8 @@ content-quality assertions that are absent from this command.
 Return measured `n_rows_in`, `n_rows_out`, artifact paths, and exactly one
 `DataResult`. `data_recipe.json` is the sole authority for source provenance,
 ordered methods, and the realized recipe; the runner verifies it and derives
-`data_signature` from that file plus the training artifact bytes.
+`data_signature`. For remote Data, the compact receipt binds that signature to
+the exact final bytes and measured row count without copying rows back.
 
 `data_recipe.dataset_name` is required display provenance. Use the stable
 human-readable source name: the Hub repository for an acquired dataset or the

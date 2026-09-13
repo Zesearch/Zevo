@@ -7,11 +7,12 @@ import {
   BUILTIN_METRICS,
   FileSlot,
   MODEL_ID_HINT,
+  ScoringSuiteManifest,
   TrainingDataField,
   ValidationSetField,
 } from "./RunInputs";
 import { api } from "../lib/api";
-import type { TaskSettingDTO } from "../lib/api";
+import type { TaskSettingDTO, TaskTestSet } from "../lib/api";
 import { toast } from "../lib/toast";
 import { ThemedSelect } from "./ThemedSelect";
 
@@ -118,13 +119,26 @@ function dataRows(s: TaskSettingDTO): {
       title: raw + (slice ? ` (${slice})` : ""),
     };
   };
+  const validationSuite = s.validation_sets ?? [];
+  const validation = validationSuite.length ? {
+    label: "val" as const,
+    value: `${validationSuite.length} independent datasets`,
+    slice: "",
+    split: "",
+    folder: "",
+    packaged: false,
+    file: "",
+    title: validationSuite.map((item) => `${item.name}: ${item.test_set}`).join("\n"),
+  } : of(
+    "val", s.validation_set, s.validation_split, s.validation_config,
+    s.validation_data_source,
+    // Kept in step with zevo.engine.method.validation_split constants.
+    "From Test suite · 20% per eligible set · minimum 200 Validation rows",
+  );
   return [
     of("train", s.dataset, s.dataset_split, s.dataset_config, s.data_source,
        "Zevo decides"),
-    of("val", s.validation_set, s.validation_split, s.validation_config,
-       s.validation_data_source,
-       // Kept in step with zevo.engine.method.validation_split constants.
-       "Inherited from Test · 20% · min 200 rows"),
+    validation,
   ];
 }
 
@@ -151,10 +165,24 @@ function ValidationRest({
   onOpenDataset?: (name: string, file?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const carved = !s.validation_set.trim();
-  // A derived Validation lane is one Test-owned contract, not four separately
+  const validationSuite = s.validation_sets ?? [];
+  const carved = !validationSuite.length && !s.validation_set.trim();
+  // A derived Validation lane is a Test-suite-owned contract, not four separately
   // configured values. The table states that contract on its data row above.
   if (carved) return null;
+  if (validationSuite.length) {
+    return (
+      <div className="mt-3">
+        <ScoringSuiteManifest
+          items={validationSuite}
+          title={`${validationSuite.length} ${validationSuite.length === 1 ? "dataset" : "datasets"}`}
+          note="independent Validation · Test remains 100%"
+          setLabel="Validation set"
+          summaryLayout="inline"
+        />
+      </div>
+    );
+  }
   // The same four keys the task card lists its test files under, so the two
   // blocks can be read against each other. Which set this is comes from the
   // column heading; `data` is the first row there and the set itself here.
@@ -347,6 +375,54 @@ function SettingChoice({
           >
             {query || "not set"}
           </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The Validation decision occupies the same two columns as Data + Model.
+ * Its body can be much taller than the neighbouring budget facts, so keep it
+ * folded until the user asks for the per-dataset scoring contracts. */
+function SettingValidationCard({
+  setting,
+  row,
+  onOpenDataset,
+}: {
+  setting: TaskSettingDTO;
+  row: SettingDataRow;
+  onOpenDataset?: (name: string, file?: string, split?: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const count = setting.validation_sets?.length ?? 0;
+  return (
+    <div className="min-w-0 rounded-md border border-hair bg-raised/35 p-3 xl:col-span-2">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full min-w-0 items-center justify-between gap-3 text-left"
+        aria-expanded={open}
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          <ChevronRight
+            size={12}
+            className={`shrink-0 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`}
+          />
+          <span className="table-label">Validation setup</span>
+        </span>
+        {!open && (
+          <span className="min-w-0 truncate font-mono text-xs text-brass-300" title={row.title}>
+            {count ? `${count} ${count === 1 ? "dataset" : "datasets"}` : row.value}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="mt-3 border-t border-hair/70 pt-3">
+          {!count && <SettingDatasetValue row={row} onOpenDataset={onOpenDataset} />}
+          <ValidationRest
+            s={setting}
+            onOpenDataset={(name, file) => onOpenDataset?.(name, file, "")}
+          />
         </div>
       )}
     </div>
@@ -589,19 +665,14 @@ export function TaskSettingHistory({
               />
             </div>
 
-            <div className="mt-3 grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
-              <div className="min-w-0 rounded-md border border-hair bg-raised/35 p-3">
-                <div className="table-label">Validation setup</div>
-                <div className="mt-1.5">
-                  <SettingDatasetValue row={validation} onOpenDataset={onOpenDataset} />
-                  <ValidationRest
-                    s={s}
-                    onOpenDataset={(name, file) => onOpenDataset?.(name, file, "")}
-                  />
-                </div>
-              </div>
+            <div className="mt-3 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <SettingValidationCard
+                setting={s}
+                row={validation}
+                onOpenDataset={onOpenDataset}
+              />
 
-              <div className="grid grid-cols-3 gap-2 rounded-md border border-hair bg-raised/35 p-3">
+              <div className="grid self-start grid-cols-3 gap-2 rounded-md border border-hair bg-raised/35 p-3">
                 {[
                   ["iterations", s.iteration_budget ? String(s.iteration_budget) : "∞"],
                   ["budget", s.max_cost_usd ? `$${s.max_cost_usd}` : "∞"],
@@ -609,7 +680,14 @@ export function TaskSettingHistory({
                 ].map(([label, value]) => (
                   <div key={label} className="min-w-0 text-center">
                     <div className="font-mono text-2xs uppercase tracking-[0.1em] text-slate-500">{label}</div>
-                    <div className="mt-1.5 truncate font-mono text-xs leading-relaxed text-slate-100" title={value}>{value}</div>
+                    <div
+                      className={`mt-1.5 truncate font-mono text-slate-100 ${
+                        value === "∞" ? "text-base leading-none" : "text-xs leading-relaxed"
+                      }`}
+                      title={value}
+                    >
+                      {value}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -648,6 +726,7 @@ function SettingForm({ task, existing, onDone, onCancel }: {
     data_query: existing?.data_query ?? "",
     model_query: existing?.model_query ?? "",
     method_query: existing?.method_query ?? "",
+    validation_sets: (existing?.validation_sets ?? []) as TaskTestSet[],
     validation_set: existing?.validation_set ?? "",
     validation_split: existing?.validation_split ?? "",
     validation_config: existing?.validation_config ?? "",
@@ -662,11 +741,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
     teacher_model: String(existing?.method_config?.teacher_model ?? ""),
     reward_model: String(existing?.method_config?.reward_model ?? ""),
     use_peft: typeof existing?.method_config?.use_peft === "boolean" ? String(existing.method_config.use_peft) : "",
-    prompt_framing: existing?.prompt_framing ?? "",
-    system_prompt: existing?.system_prompt ?? "",
-    loss_objective_config: Object.keys(existing?.loss_objective_config ?? {}).length ? JSON.stringify(existing?.loss_objective_config) : "",
-    inference_config: Object.keys(existing?.inference_config ?? {}).length ? JSON.stringify(existing?.inference_config) : "",
-    decoding_config: Object.keys(existing?.decoding_config ?? {}).length ? JSON.stringify(existing?.decoding_config) : "",
     iteration_budget: existing?.iteration_budget ? String(existing.iteration_budget) : "",
     max_cost_usd: existing?.max_cost_usd ? String(existing.max_cost_usd) : "",
     stop_threshold: existing?.stop_threshold != null ? String(existing.stop_threshold) : "",
@@ -677,6 +751,11 @@ function SettingForm({ task, existing, onDone, onCancel }: {
   const set = (k: keyof typeof v) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setV((x) => ({ ...x, [k]: e.target.value }));
   const cls = "w-full min-w-0 rounded border border-hair bg-canvas px-2 py-1 font-mono text-2xs text-slate-200 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none";
+  const updateValidationSet = (value: string) => setV((x) => ({
+    ...x,
+    validation_set: value,
+    ...(value.trim() ? { validation_sets: [] } : {}),
+  }));
 
   // A named validation set must declare its answer fields and submission
   // shape. Its metric contract is independent from the Run's Test scoring
@@ -713,14 +792,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
         throw new Error("Stop threshold must be a finite number.");
       }
       const base = `/tasks/${encodeURIComponent(task)}/settings`;
-      const parseObject = (raw: string, label: string) => {
-        if (!raw.trim()) return {};
-        const parsed: unknown = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          throw new Error(`${label} must be a JSON object.`);
-        }
-        return parsed;
-      };
       const method_config: Record<string, unknown> = v.training_method === "gkd"
         ? { teacher_model: v.teacher_model.trim() }
         : v.training_method === "online_dpo"
@@ -737,6 +808,7 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           data_query: v.data_query.trim(),
           model_query: v.model_query.trim(),
           method_query: v.method_query.trim(),
+          validation_sets: v.validation_sets,
           validation_set: v.validation_set.trim(),
           validation_split: v.validation_split.trim(),
           validation_config: v.validation_config.trim(),
@@ -752,11 +824,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           base_model: v.base_model.trim(),
           training_method: v.training_method.trim(),
           method_config,
-          prompt_framing: v.prompt_framing.trim(),
-          system_prompt: v.system_prompt.trim(),
-          loss_objective_config: parseObject(v.loss_objective_config, "Loss objective config"),
-          inference_config: parseObject(v.inference_config, "Inference config"),
-          decoding_config: parseObject(v.decoding_config, "Decoding config"),
           iteration_budget: Math.max(0, Number(v.iteration_budget) || 0),
           max_cost_usd: Math.max(0, Number(v.max_cost_usd) || 0),
           stop_threshold: threshold,
@@ -798,10 +865,42 @@ function SettingForm({ task, existing, onDone, onCancel }: {
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {v.validation_set.trim() ? (
+        {v.validation_sets.length ? (
+          <div className="min-w-0 self-start">
+            <ScoringSuiteManifest
+              items={v.validation_sets}
+              title={`${v.validation_sets.length} ${v.validation_sets.length === 1 ? "dataset" : "datasets"}`}
+              note="independent Validation · Test remains 100%"
+              setLabel="Validation set"
+              summaryLayout="inline"
+            />
+            <details className="group mt-3 border-t border-hair pt-2">
+              <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
+                <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
+                Replace with one uploaded Validation set
+              </summary>
+              <div className="mt-3">
+                <ValidationSetField
+                  value={v.validation_set}
+                  onChange={updateValidationSet}
+                  split={v.validation_split}
+                  onSplit={put("validation_split")}
+                  config={v.validation_config}
+                  onConfig={put("validation_config")}
+                  answerFields={v.validation_answer_fields}
+                  onAnswerFields={put("validation_answer_fields")}
+                  sampleSubmission={v.validation_sample_submission}
+                  onSampleSubmission={put("validation_sample_submission")}
+                  tag={false}
+                  note="This replaces the complete suite for future runs using this setting."
+                />
+              </div>
+            </details>
+          </div>
+        ) : v.validation_set.trim() ? (
           <ValidationSetField
             value={v.validation_set}
-            onChange={put("validation_set")}
+            onChange={updateValidationSet}
             split={v.validation_split}
             onSplit={put("validation_split")}
             config={v.validation_config}
@@ -816,9 +915,11 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           />
         ) : (
           <div className="self-start rounded-md border border-brass-500/25 bg-brass-500/[0.04] px-4 py-3">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <span className="field-label !text-brass-200">Inherited from Test</span>
-              <span className="font-mono text-xs text-slate-400">20% of Test · min 200 rows</span>
+            <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+              <span className="field-label !text-brass-200">Constructed from Test suite</span>
+              <span className="font-mono text-xs leading-relaxed text-slate-400 sm:text-right">
+                20% per eligible set · minimum 200 rows
+              </span>
             </div>
             <details className="group mt-3 border-t border-hair pt-2">
               <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
@@ -828,7 +929,7 @@ function SettingForm({ task, existing, onDone, onCancel }: {
               <div className="mt-3">
                 <ValidationSetField
                   value={v.validation_set}
-                  onChange={put("validation_set")}
+                  onChange={updateValidationSet}
                   split={v.validation_split}
                   onSplit={put("validation_split")}
                   config={v.validation_config}
@@ -866,7 +967,7 @@ function SettingForm({ task, existing, onDone, onCancel }: {
         </div>
       </div>
 
-      {v.validation_set.trim() && (<section className="space-y-3">
+      {!v.validation_sets.length && v.validation_set.trim() && (<section className="space-y-3">
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
           <label className="block">
             <span className="field-label mb-1 block">Metric type</span>
@@ -891,7 +992,10 @@ function SettingForm({ task, existing, onDone, onCancel }: {
               <ThemedSelect
                 value={v.validation_metric}
                 onChange={put("validation_metric")}
-                options={BUILTIN_METRICS.map((value) => ({ value, label: value }))}
+                options={BUILTIN_METRICS.map((value) => ({
+                  value,
+                  label: value === "pass_at_1" ? "pass@1 · code execution" : value,
+                }))}
                 placeholder="Choose metric"
                 ariaLabel="Built-in Validation metric"
                 buttonClassName={cls}

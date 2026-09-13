@@ -159,6 +159,45 @@ def test_engine_materializes_validation_without_data_agent_logic(tmp_path: Path)
     assert prepared.validation_dataset_path == str(Path(source).resolve())
 
 
+def test_engine_materializes_csv_with_field_above_legacy_limit(tmp_path: Path) -> None:
+    long_test = "assert solution() == 1\n" * 12_000
+    source = _csv(
+        tmp_path / "validation.csv",
+        ["task_id", "prompt", "test", "answer"],
+        [{
+            "task_id": "large-code-test",
+            "prompt": "Implement solution",
+            "test": long_test,
+            "answer": "def solution(): return 1",
+        }],
+    )
+    submission = _csv(
+        tmp_path / "sample.csv",
+        ["task_id", "prediction"],
+        [{"task_id": "example", "prediction": ""}],
+    )
+
+    previous_limit = csv.field_size_limit()
+    csv.field_size_limit(131_072)
+    try:
+        prepared = materialize_system_scoring_artifacts(
+            scoring_source=source,
+            answer_fields=["answer"],
+            sample_submission=submission,
+            out_dir=str(tmp_path / "system-large-csv"),
+        )
+        with Path(prepared.questions_path).open(
+            "r", encoding="utf-8-sig", newline="",
+        ) as handle:
+            questions = list(csv.DictReader(handle))
+    finally:
+        csv.field_size_limit(previous_limit)
+
+    assert questions[0]["test"] == long_test
+    assert "answer" not in questions[0]
+    assert len(long_test) > 131_072
+
+
 def test_engine_removes_cross_schema_validation_duplicates_after_data(
     tmp_path: Path,
 ) -> None:
@@ -176,7 +215,7 @@ def test_engine_removes_cross_schema_validation_duplicates_after_data(
         {
             "id": "v1",
             "instruction": {"1": "same question"},
-            "response": {"1": "same answer"},
+            "response": {"1": "different held-out answer"},
             "num_turns": 1,
         },
     ])

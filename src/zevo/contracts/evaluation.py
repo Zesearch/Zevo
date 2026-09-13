@@ -19,6 +19,7 @@ from typing import Literal
 from pydantic import Field
 
 from zevo.contracts._base import AgentResult, AgentTaskInput
+from zevo.code_benchmarks import CodeExecutionAdapter
 
 
 # ---------- Input ----------
@@ -28,6 +29,7 @@ class EvaluationTaskInput(AgentTaskInput):
 
     predictions_path: str = Field(..., description="Path to predictions CSV produced by inference.")
     test_set_name: str = ""
+    code_execution_adapter: CodeExecutionAdapter = ""
     scoring_set: str = Field(
         ...,
         description=(
@@ -74,7 +76,7 @@ class EvaluationTaskInput(AgentTaskInput):
         description=(
             "Name of the Task's authoritative metric. With the built-in scorer "
             "it must be one of accuracy, exact_match, f1, token_f1, bleu, "
-            "rouge_l, or mc_loglikelihood (alias accuracy_norm — length-"
+            "rouge_l, pass_at_1, or mc_loglikelihood (alias accuracy_norm — length-"
             "normalized log-likelihood option scoring for multiple-choice QA, "
             "which reads per-option log-likelihoods Inference emits into the "
             "prediction column and argmaxes them). With a custom scorer it names "

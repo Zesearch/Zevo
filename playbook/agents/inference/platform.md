@@ -284,6 +284,10 @@ free memory, absolute target, and derived fraction. The Slurm preflight must use
 the same helper's `required_free_memory_gib` result when selecting among the
 allocated GPUs, so preflight and engine initialization have one standard.
 
+Do not pass the removed legacy `swap_space` argument to `vllm.LLM`. The
+deterministic adaptive-memory validator rejects it before submission; use only
+arguments supported by the installed vLLM `EngineArgs` contract.
+
 If the target exceeds the allowed fraction, increase tensor parallelism or
 reduce a non-semantic concurrency limit such as `max_num_seqs`; do not hide an
 unfit plan by clamping it. A small model on a B200 should ordinarily reserve a

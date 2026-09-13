@@ -29,7 +29,7 @@
    optimizer/offload state when applicable. Fail before submission when the
    Infrastructure plan is undersized rather than risking an OOM during save.
 8. Copy `telemetry_helper_path` beside `train.py`, import its
-   `ZevoTrainerTelemetryCallback`, upload inputs through the `remote_transfer`
+   `ZevoTrainerTelemetryCallback`, upload local inputs through the `remote_transfer`
    helper or correctly constructed direct SCP, export every exact
    `execution_contract.required_environment` entry remotely, and run training
    on the assigned GPU. For cloud/instance, ensure the real trainer and its
@@ -45,6 +45,11 @@
    in `secret_environment_names` without printing its value, initialize W&B
    with the fixed run id/name/entity/project, and configure the real Trainer
    with `report_to=["wandb"]`.
+   When `dataset_is_remote=true`, validate `remote_data_receipt_path`, use the
+   exact remote `dataset_path` in place, and NEVER upload/download/copy that
+   dataset. Data and Train are bound to the same device ticket, so the path is
+   already on the assigned host. When false, retain the ordinary one-time input
+   upload behavior.
 9. Verify the remote checkpoint, copy back script/log/config through the helper
    or correctly constructed direct SCP, and return one `TrainResult`. Direct
    cloud/instance execution uses `train.log`; cluster execution preserves the
@@ -93,7 +98,7 @@ status path. It emits `RUNNING` when the allocation begins and `EXITED` when
 the script exits, allowing Zevo's persistent status stream to observe lifecycle
 changes without repeatedly querying Slurm.
 
-Validate the local script with `bash -n`, upload it and all inputs to the
+Validate the local script with `bash -n`, upload it and all local inputs to the
 ticket-specific remote directory, verify its checksum, then run only
 `sbatch --parsable <remote-train.sbatch>`. Parse only the first
 semicolon-delimited component as the JOBID, then immediately POST it to
@@ -375,7 +380,9 @@ framework.
 
 ## Data isolation
 
-Train only on `dataset_path`. The engine binds raw scoring records at
+Train only on `dataset_path`. If `dataset_is_remote=true`, it is an already
+verified path in the remote persistent data cache, not a scheduler-local file;
+do not transfer it in either direction. The engine binds raw scoring records at
 `validation_dataset_path`; after every training choice is fixed, use
 `validation_answer_fields` to render a temporary eval dataset with the exact
 same method/prompt/template function as Training. Pass it only as an evaluation

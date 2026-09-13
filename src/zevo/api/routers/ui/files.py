@@ -131,6 +131,10 @@ class RemoteFile(BaseModel):
     # "mnli")`). "" = the repo's default config. Not the same axis as `split`:
     # one repo, many configs, each with its own splits.
     config: str = ""
+    # Optional known size of this exact config/split. This is catalogue
+    # metadata shown before download, not a cap and not a substitute for the
+    # materializer's authoritative row count.
+    n_rows: int = Field(0, ge=0)
 
 
 class FileSetSource(BaseModel):

@@ -8,6 +8,7 @@ export type RunLaunchPreset = {
   taskName?: string;
   settingId?: string;
   inputs?: Record<string, string>;
+  mode?: "full_pipeline" | "customized_pipeline";
 };
 
 const target = new EventTarget();

@@ -1,9 +1,14 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { ChevronRight, Upload, X } from "lucide-react";
-import { FILES_ROOT, splitDatasetPath } from "../lib/format";
+import { FILES_ROOT, fmtScoringRows, splitDatasetPath } from "../lib/format";
 import { api } from "../lib/api";
-import type { FileSetDTO, GenerationBackend, GpuProvider } from "../lib/api";
+import type {
+  FileSetDTO,
+  GenerationBackend,
+  GpuProvider,
+  TaskTestSet,
+} from "../lib/api";
 import { ThemedSelect } from "./ThemedSelect";
 
 /**
@@ -48,6 +53,140 @@ async function uploadFile(f: File): Promise<string> {
 function short(p: string): string {
   if (p.startsWith(FILES_ROOT + "/")) return p.slice(FILES_ROOT.length + 1);
   return p.startsWith("/app/") ? p.slice(5) : p;
+}
+
+/** Task names may retain an old grouping prefix ("Math · MATH-500") for
+ * stable storage.  The grouping is not part of the benchmark's identity in
+ * the launch form, so show only the useful name. */
+function benchmarkName(name: string): string {
+  const parts = name.split("·");
+  return parts.length > 1 ? parts.slice(1).join("·").trim() : name;
+}
+
+/** One visual language for every independently scored suite.
+ *
+ * Test and Validation used to describe the same contract with two unrelated
+ * layouts: Test had expandable rows, while Validation sat inside an extra
+ * green box and reduced each dataset to one line. A suite member is the same
+ * object on both lanes, so render it as the same small expandable card. */
+export function ScoringSuiteManifest({
+  items,
+  title,
+  note,
+  setLabel = "Test set",
+  showHeader = true,
+  summaryLayout = "stacked",
+}: {
+  items: TaskTestSet[];
+  title?: string;
+  note?: string;
+  setLabel?: string;
+  showHeader?: boolean;
+  summaryLayout?: "stacked" | "inline";
+}) {
+  return (
+    <div className="space-y-2">
+      {showHeader && <div className="flex flex-wrap items-baseline justify-between gap-2 px-0.5">
+        <span className="font-mono text-xs text-slate-200">
+          {title ?? `${items.length} ${items.length === 1 ? "benchmark" : "benchmarks"}`}
+        </span>
+        {note && <span className="font-mono text-2xs text-slate-500">{note}</span>}
+      </div>}
+      <div className="max-h-80 space-y-1.5 overflow-y-auto pr-1">
+        {items.map((item, index) => (
+          <details
+            key={`${item.name}-${index}`}
+            className="group overflow-hidden rounded-md border border-hair bg-canvas/45"
+          >
+            <summary className="grid cursor-pointer list-none grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-2 px-3 py-2.5 transition hover:bg-white/[0.025] sm:grid-cols-[1.5rem_minmax(8rem,1fr)_auto]">
+              <span className="pt-0.5 font-mono text-2xs tabular-nums text-slate-600">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <span className="min-w-0">
+                <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-slate-200">
+                  <ChevronRight
+                    size={11}
+                    className="shrink-0 text-slate-500 transition-transform group-open:rotate-90"
+                  />
+                  <span className="truncate" title={item.name}>{benchmarkName(item.name)}</span>
+                </span>
+              </span>
+              <span className={`col-start-2 flex items-start sm:col-start-auto sm:items-end ${
+                summaryLayout === "inline"
+                  ? "flex-wrap gap-1.5 sm:justify-end"
+                  : "flex-col gap-1"
+              }`}>
+                <span className="whitespace-nowrap rounded border border-brass-500/25 bg-brass-500/[0.05] px-1.5 py-0.5 font-mono text-2xs tabular-nums text-brass-200">
+                  {fmtScoringRows(item.source_rows, item.max_rows)}
+                </span>
+                <span className="whitespace-nowrap font-mono text-2xs text-brass-300">
+                  {item.metric} · {item.metric_direction === "min" ? "min" : "max"}
+                </span>
+              </span>
+            </summary>
+            <div className="grid gap-3 bg-white/[0.012] px-10 pb-3 pt-1 text-2xs sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <div className="field-label mb-1 !text-slate-500">{setLabel}</div>
+                <p className="break-all font-mono text-slate-300" title={item.test_set}>
+                  {short(item.test_set)}
+                </p>
+              </div>
+              <div className="sm:col-span-2">
+                <div className="field-label mb-1 !text-slate-500">Inference query</div>
+                <p className="whitespace-pre-wrap break-words font-mono leading-relaxed text-slate-300">
+                  {item.inference_query}
+                </p>
+              </div>
+              <div>
+                <div className="field-label mb-1 !text-slate-500">Metric</div>
+                <p className="break-words font-mono text-slate-300">
+                  {item.metric} · {item.metric_type === "custom" ? "custom" : "built-in"}
+                </p>
+              </div>
+              <div>
+                <div className="field-label mb-1 !text-slate-500">Target</div>
+                <p className="font-mono text-slate-300">
+                  {item.metric_direction === "min" ? "Minimize ↓" : "Maximize ↑"}
+                </p>
+              </div>
+              <div>
+                <div className="field-label mb-1 !text-slate-500">Answer fields</div>
+                <p className="break-words font-mono text-slate-300">
+                  {item.answer_fields.join(", ")}
+                </p>
+              </div>
+              <div>
+                <div className="field-label mb-1 !text-slate-500">Sample submission</div>
+                <p className="break-all font-mono text-slate-300" title={item.sample_submission}>
+                  {short(item.sample_submission)}
+                </p>
+              </div>
+              {item.metric_type === "custom" && (
+                <div className="sm:col-span-2">
+                  <div className="field-label mb-1 !text-slate-500">Evaluation script</div>
+                  <p className="break-all font-mono text-slate-300" title={item.evaluation_script}>
+                    {short(item.evaluation_script)}
+                  </p>
+                </div>
+              )}
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** A predefined Task owns its complete held-out suite. Launching chooses a
+ * Setting, not a different evaluation contract, so the suite is presented as
+ * a readable manifest instead of editable scalar fields that the API ignores. */
+function TaskTestSuite({ items }: { items: TaskTestSet[] }) {
+  return (
+    <ScoringSuiteManifest
+      items={items}
+      note="defined by Task · unweighted average"
+    />
+  );
 }
 
 /** Label + a required/optional tag. Under a "Required"/"Optional" heading the
@@ -570,6 +709,9 @@ export type RunInputValues = {
   validationMetric: string;
   validationEvaluationScript: string;
   validationMetricDirection: "" | "max" | "min";
+  /** Saved independent Validation suite. Launch shows it compactly; replacing
+   * it with one uploaded set clears this list. */
+  validationSets: TaskTestSet[];
   dataset: string;
   testSet: string;
   /** Comma-separated ground-truth column names of the test set. */
@@ -632,6 +774,7 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   metricDirection: "",
   validationMetricType: "", validationMetric: "",
   validationEvaluationScript: "", validationMetricDirection: "",
+  validationSets: [],
   dataset: "", testSet: "", answerFields: "", validationSet: "", validationAnswerFields: "",
   validationSplit: "", validationConfig: "",
   validationSampleSubmission: "",
@@ -658,7 +801,7 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
 
 /** The effective Validation scorer shown and sent by both launch modes. */
 export function validationContractFromInputs(inputs: RunInputValues) {
-  const independent = !!inputs.validationSet.trim();
+  const independent = inputs.validationSets.length > 0 || !!inputs.validationSet.trim();
   const metricType = independent ? inputs.validationMetricType : "";
   return {
     independent,
@@ -704,6 +847,7 @@ export const MODEL_ID_HINT =
 
 export const BUILTIN_METRICS = [
   "accuracy", "exact_match", "f1", "token_f1", "bleu", "rouge_l",
+  "pass_at_1",
 ];
 
 export function methodConfigFromInputs(inputs: RunInputValues): Record<string, unknown> {
@@ -809,14 +953,14 @@ export function ValidationSetField({
         onConfig={onConfig}
         // Blank derives Validation from Test before the run starts.
         splitPlaceholder="validation"
-        note={note || "empty = 20% of Test (at least 200 rows); otherwise upload Validation"}
+        note={note || "empty = 20% from each eligible Test set when that yields at least 200 Validation rows"}
         showHints={showHints}
       />
       {/* The other three sit beside the set they describe rather than at the
           far end of the form: they are facts ABOUT that file. Which is why
           they wait for one to be named — with the field still blank there is
           no file for them to be about, and what the run does instead (move
-          20% of Test to Validation and hold out the remaining 80%) is one
+          20% of each eligible Test set to Validation and hold out the remaining 80%) is one
               sentence, said once, above.
 
           One hint under the three rather than one each: they fall back the
@@ -1308,6 +1452,7 @@ export function RunInputs({
   metricType, metric, evaluationScript, metricDirection,
   validationMetricType, validationMetric, validationEvaluationScript,
   validationMetricDirection,
+  validationSets,
   dataset, testSet, answerFields, validationSet, validationAnswerFields,
   validationSplit, validationConfig, validationSampleSubmission,
   datasetSplit, datasetConfig, dataQuery,
@@ -1317,7 +1462,7 @@ export function RunInputs({
   gpuProvider, cloudBackend, sshHostId, numGpus, generation_backend,
   iterations, budget, timeLimitHours, queueWaitHours, stopThreshold,
   onChange, extra, requiredPrefix, optionalPrefix, beforeChecklist,
-  requiredMissing = [], requiredPrefixValues = [],
+  requiredMissing = [], requiredPrefixValues = [], taskTestSuite,
 }: RunInputValues & {
   onChange: (patch: Partial<RunInputValues>) => void;
   /** Slot for anything the named fields don't cover — rendered under Optional,
@@ -1329,6 +1474,9 @@ export function RunInputs({
   beforeChecklist?: React.ReactNode;
   requiredMissing?: string[];
   requiredPrefixValues?: RunSummaryValue[];
+  /** Present for a predefined Task. Its Test suite is immutable at launch;
+   *  edit it from Tasks instead. */
+  taskTestSuite?: TaskTestSet[];
 }) {
   // Collapsed by default so the form leads with the actual inputs, not a wall
   // of status. The header still shows the "N missing / ready" badge, so the
@@ -1344,9 +1492,12 @@ export function RunInputs({
     compute.targets.find((target) => target.value === explicitComputeValue)
     ?? (!explicitComputeValue ? compute.defaultTarget : undefined)
   );
-  const validationIsIndependent = !!validationSet.trim();
+  const hasValidationSuite = validationSets.length > 0;
+  const validationIsIndependent = hasValidationSuite || !!validationSet.trim();
+  const hasTaskTestSuite = !!taskTestSuite?.length;
   const updateValidationSet = (value: string) => onChange({
     validationSet: value,
+    ...(value.trim() ? { validationSets: [] } : {}),
     ...(!value.trim() ? {
       validationMetricType: "",
       validationMetric: "",
@@ -1363,21 +1514,27 @@ export function RunInputs({
       value: effectiveComputeTarget?.label || "Not set",
       complete: Boolean(effectiveComputeTarget),
     },
-    { name: "Test metric type", value: metricType || "Not set", complete: Boolean(metricType) },
-    { name: "Test metric", value: metric.trim() || "Not set", complete: Boolean(metric.trim()) },
-    ...(metricType === "custom" ? [{
-      name: "Test evaluation script",
-      value: evaluationScript.trim() ? short(evaluationScript) : "Not set",
-      complete: Boolean(evaluationScript.trim()),
-    }] : []),
-    { name: "Test target", value: metricDirection || "Not set", complete: Boolean(metricDirection) },
-    { name: "Test set", value: testSet.trim() ? short(testSet) : "Not set", complete: Boolean(testSet.trim()) },
-    { name: "Test answer fields", value: answerFields.trim() || "Not set", complete: Boolean(answerFields.trim()) },
-    {
-      name: "Test sample submission",
-      value: testSampleSubmission.trim() ? short(testSampleSubmission) : "Not set",
-      complete: Boolean(testSampleSubmission.trim()),
-    },
+    ...(hasTaskTestSuite ? [{
+      name: "Test suite",
+      value: `${taskTestSuite!.length} ${taskTestSuite!.length === 1 ? "benchmark" : "benchmarks"}`,
+      complete: true,
+    }] : [
+      { name: "Test metric type", value: metricType || "Not set", complete: Boolean(metricType) },
+      { name: "Test metric", value: metric.trim() || "Not set", complete: Boolean(metric.trim()) },
+      ...(metricType === "custom" ? [{
+        name: "Test evaluation script",
+        value: evaluationScript.trim() ? short(evaluationScript) : "Not set",
+        complete: Boolean(evaluationScript.trim()),
+      }] : []),
+      { name: "Test target", value: metricDirection || "Not set", complete: Boolean(metricDirection) },
+      { name: "Test set", value: testSet.trim() ? short(testSet) : "Not set", complete: Boolean(testSet.trim()) },
+      { name: "Test answer fields", value: answerFields.trim() || "Not set", complete: Boolean(answerFields.trim()) },
+      {
+        name: "Test sample submission",
+        value: testSampleSubmission.trim() ? short(testSampleSubmission) : "Not set",
+        complete: Boolean(testSampleSubmission.trim()),
+      },
+    ]),
     ...(validationIsIndependent ? [
       {
         name: "Validation metric type",
@@ -1419,11 +1576,19 @@ export function RunInputs({
   ];
   const optionalValues: RunSummaryValue[] = [
     ...(validationIsIndependent ? [
-      { name: "Validation set", value: short(validationSet), overridden: true },
+      {
+        name: hasValidationSuite ? "Validation suite" : "Validation set",
+        value: hasValidationSuite
+          ? `${validationSets.length} independent datasets`
+          : short(validationSet),
+        overridden: true,
+      },
     ] : [
       {
         name: "Validation",
-        value: "Inherited from Test · 20% · min 200 rows",
+        value: hasTaskTestSuite
+          ? `From Test suite · 20% per eligible set · minimum 200 rows`
+          : "From Test · 20% when it yields at least 200 rows",
         overridden: false,
       },
     ]),
@@ -1477,9 +1642,14 @@ export function RunInputs({
               size={12}
               className={`shrink-0 text-slate-400 transition-transform ${showTestSetup ? "rotate-90" : ""}`}
             />
-            <span className="field-label !text-slate-100">Test Setup</span>
+            <span className="field-label !text-slate-100">
+              {hasTaskTestSuite ? "Test Suite" : "Test Setup"}
+            </span>
           </button>
           {showTestSetup && (
+            hasTaskTestSuite ? (
+              <TaskTestSuite items={taskTestSuite!} />
+            ) : (
             <div className="space-y-3">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <ChoiceField
@@ -1499,7 +1669,10 @@ export function RunInputs({
                     <ThemedSelect
                       value={metric}
                       onChange={(value) => onChange({ metric: value })}
-                      options={BUILTIN_METRICS.map((value) => ({ value, label: value }))}
+                      options={BUILTIN_METRICS.map((value) => ({
+                        value,
+                        label: value === "pass_at_1" ? "pass@1 · code execution" : value,
+                      }))}
                       placeholder="Choose metric"
                       ariaLabel="Built-in Test metric"
                       buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(Boolean(metric.trim()))}`}
@@ -1567,6 +1740,7 @@ export function RunInputs({
                 hint="Defines prediction columns, order, and example formatting; its row count need not match Test."
               />
             </div>
+            )
           )}
         </div>
       </section>
@@ -1589,14 +1763,18 @@ export function RunInputs({
             <span className="field-label !text-slate-100">Validation Setup</span>
           </button>
           {showValidationSetup && (
-            /* Empty delegates one deterministic 20% split of Test to the engine
-               before optimization begins and inherits Test's scoring contract. */
+            /* Empty delegates deterministic per-benchmark Validation settlement
+               to the engine before optimization begins. */
             <div className="space-y-3">
               {!validationIsIndependent ? (
                 <div className="rounded-md border border-brass-500/25 bg-brass-500/[0.04] px-4 py-3">
-                  <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <span className="field-label !text-brass-200">Inherited from Test</span>
-                    <span className="font-mono text-xs text-slate-400">20% of Test · min 200 rows</span>
+                  <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+                    <span className="field-label !text-brass-200">
+                      {hasTaskTestSuite ? "Constructed from Test suite" : "Constructed from Test"}
+                    </span>
+                    <span className="font-mono text-xs leading-relaxed text-slate-400 sm:text-right">
+                      20% per eligible set · minimum 200 rows
+                    </span>
                   </div>
                   <details className="group mt-3 border-t border-hair pt-2">
                     <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
@@ -1617,6 +1795,38 @@ export function RunInputs({
                         onSampleSubmission={(v) => onChange({ validationSampleSubmission: v })}
                         tag={false}
                         note="Choose a fixed Validation set with its own scoring contract."
+                        showHints={false}
+                      />
+                    </div>
+                  </details>
+                </div>
+              ) : hasValidationSuite ? (
+                <div className="space-y-3">
+                  <ScoringSuiteManifest
+                    items={validationSets}
+                    title={`${validationSets.length} ${validationSets.length === 1 ? "dataset" : "datasets"}`}
+                    note="independent Validation · Test remains 100%"
+                    setLabel="Validation set"
+                  />
+                  <details className="group mt-3 border-t border-hair pt-2">
+                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
+                      <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
+                      Replace with one uploaded Validation set
+                    </summary>
+                    <div className="mt-3">
+                      <ValidationSetField
+                        value={validationSet}
+                        onChange={updateValidationSet}
+                        split={validationSplit}
+                        onSplit={(v) => onChange({ validationSplit: v })}
+                        config={validationConfig}
+                        onConfig={(v) => onChange({ validationConfig: v })}
+                        answerFields={validationAnswerFields}
+                        onAnswerFields={(v) => onChange({ validationAnswerFields: v })}
+                        sampleSubmission={validationSampleSubmission}
+                        onSampleSubmission={(v) => onChange({ validationSampleSubmission: v })}
+                        tag={false}
+                        note="This replaces the complete independent Validation suite for this run."
                         showHints={false}
                       />
                     </div>
@@ -1656,7 +1866,10 @@ export function RunInputs({
                     <ThemedSelect
                       value={validationMetric}
                       onChange={(value) => onChange({ validationMetric: value })}
-                      options={BUILTIN_METRICS.map((value) => ({ value, label: value }))}
+                      options={BUILTIN_METRICS.map((value) => ({
+                        value,
+                        label: value === "pass_at_1" ? "pass@1 · code execution" : value,
+                      }))}
                       placeholder="Choose metric"
                       ariaLabel="Built-in Validation metric"
                       buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(Boolean(validationMetric.trim()))}`}

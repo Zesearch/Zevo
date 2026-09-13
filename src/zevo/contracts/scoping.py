@@ -144,6 +144,89 @@ class DecontaminationEvidence(BaseModel):
         return self
 
 
+class ScopedTestSet(BaseModel):
+    """One independently prompted, scored and evidenced Auto-selected Test."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=64)
+    metric: str = Field(min_length=1)
+    metric_direction: Literal["max", "min"]
+    metric_type: Literal["builtin", "custom"] = "builtin"
+    evaluation_script: str = ""
+    inference_query: str = Field(min_length=1)
+    eval_source: EvalSource
+    test_set_path: str = Field(min_length=1)
+    test_answer_fields: list[str] = Field(min_length=1)
+    test_sample_submission_path: str = Field(min_length=1)
+    test_rows: int = Field(ge=1)
+    rationale: str = Field(min_length=1)
+    candidates_considered: list[str] = Field(default_factory=list)
+    benchmark: BenchmarkProvenance | None = None
+    synthesis: SynthesisProvenance | None = None
+    decontamination: DecontaminationEvidence | None = None
+
+    @model_validator(mode="after")
+    def validate_member(self) -> "ScopedTestSet":
+        from zevo.contracts.orchestrator import BUILTIN_METRICS
+
+        self.name = self.name.strip()
+        self.metric = self.metric.strip().lower()
+        self.inference_query = self.inference_query.strip()
+        self.evaluation_script = self.evaluation_script.strip()
+        if self.metric_type == "builtin":
+            if self.metric not in BUILTIN_METRICS:
+                raise ValueError(f"unknown built-in Test metric {self.metric!r}")
+            if self.evaluation_script:
+                raise ValueError("built-in metrics must not carry a custom evaluator")
+        elif not self.evaluation_script:
+            raise ValueError("custom Test metrics require evaluation_script")
+        self.test_answer_fields = _clean_fields(
+            self.test_answer_fields, name="test_answer_fields",
+        )
+        for name in ("test_set_path", "test_sample_submission_path"):
+            value = str(getattr(self, name)).strip()
+            if not Path(value).is_absolute():
+                raise ValueError(f"{name} must be an absolute local path")
+            setattr(self, name, value)
+        if self.test_set_path == self.test_sample_submission_path:
+            raise ValueError("test_set_path and test_sample_submission_path must differ")
+        if any(not str(value).strip() for value in self.candidates_considered):
+            raise ValueError("candidates_considered must contain non-empty strings")
+        if self.eval_source == "public_benchmark":
+            if self.benchmark is None:
+                raise ValueError("public_benchmark requires benchmark provenance")
+            if self.synthesis is not None:
+                raise ValueError("a public benchmark carries no synthesis provenance")
+            if self.benchmark.rows != self.test_rows:
+                raise ValueError("benchmark.rows must equal test_rows; answers are never fabricated")
+        else:
+            if self.synthesis is None:
+                raise ValueError("synthesized held-out requires synthesis provenance")
+            if self.decontamination is None:
+                raise ValueError("synthesized held-out requires decontamination evidence")
+            if self.benchmark is not None:
+                raise ValueError("a synthesized held-out carries no benchmark provenance")
+            if self.synthesis.rows_kept != self.test_rows:
+                raise ValueError("synthesis.rows_kept must equal test_rows")
+        return self
+
+    def provenance_summary(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "name": self.name,
+            "eval_source": self.eval_source,
+            "rationale": self.rationale,
+            "candidates_considered": list(self.candidates_considered),
+            "test_rows": self.test_rows,
+        }
+        if self.benchmark is not None:
+            out["benchmark"] = self.benchmark.model_dump()
+        if self.synthesis is not None:
+            out["synthesis"] = self.synthesis.model_dump()
+        if self.decontamination is not None:
+            out["decontamination"] = self.decontamination.model_dump()
+        return out
+
+
 class ScopingResult(BaseModel):
     """The complete scoring contract derived by ``scope_problem``.
 
@@ -155,6 +238,24 @@ class ScopingResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1] = 1
+    test_name: str = Field(
+        "test", min_length=1, max_length=64,
+        description="Stable display name for the primary Auto-selected Test.",
+    )
+    test_sets: list[ScopedTestSet] = Field(
+        default_factory=list,
+        description=(
+            "Additional independently prompted/scored benchmarks. Leave empty "
+            "only when one Test adequately covers the objective."
+        ),
+    )
+    inference_query: str = Field(
+        "",
+        description=(
+            "How inference should answer the primary Test. Blank derives the "
+            "instruction from task_objective for the single-Test legacy shape."
+        ),
+    )
 
     # ── the Test (held-out) metric contract ──────────────────────────────────
     metric: str = Field(min_length=1, description="Held-out Test metric name.")
@@ -178,8 +279,10 @@ class ScopingResult(BaseModel):
     test_set_path: str = Field(
         min_length=1,
         description=(
-            "Absolute path of the FULL held-out set WITH ground truth. At least "
-            "1,000 rows: settlement carves 20% (>= 200 rows) into Validation."
+            "Absolute path of the FULL held-out set WITH ground truth. Zevo "
+            "uses 20% for Validation when the set can retain at least 40 final "
+            "Test rows and provide at least 200 Validation rows; smaller sets "
+            "remain final-test-only."
         ),
     )
     test_answer_fields: list[str] = Field(
@@ -210,6 +313,8 @@ class ScopingResult(BaseModel):
         from zevo.contracts.orchestrator import BUILTIN_METRICS
 
         self.metric = self.metric.strip()
+        self.test_name = self.test_name.strip()
+        self.inference_query = self.inference_query.strip()
         self.validation_metric = self.validation_metric.strip()
         if not self.metric:
             raise ValueError("metric must not be blank")
@@ -307,7 +412,46 @@ class ScopingResult(BaseModel):
                 raise ValueError("a synthesized held-out carries no benchmark provenance")
             if self.synthesis.rows_kept != self.test_rows:
                 raise ValueError("synthesis.rows_kept must equal test_rows")
+        names = [self.test_name.casefold()] + [
+            item.name.casefold() for item in self.test_sets
+        ]
+        if len(names) != len(set(names)):
+            raise ValueError("Auto-selected Test set names must be unique")
+        directions = {self.metric_direction} | {
+            item.metric_direction for item in self.test_sets
+        }
+        if len(directions) > 1:
+            raise ValueError(
+                "Auto-selected Test sets must share one metric direction for "
+                "suite-average aggregation"
+            )
         return self
+
+    def effective_test_sets(self, *, task_objective: str = "") -> list[ScopedTestSet]:
+        """Return the primary projection plus every additional selected Test."""
+        primary = ScopedTestSet(
+            name=self.test_name,
+            metric=self.metric,
+            metric_direction=self.metric_direction,
+            metric_type=self.metric_type,
+            evaluation_script=self.evaluation_script,
+            inference_query=(
+                self.inference_query.strip()
+                or task_objective.strip()
+                or "Produce the requested prediction for this input."
+            ),
+            eval_source=self.eval_source,
+            test_set_path=self.test_set_path,
+            test_answer_fields=list(self.test_answer_fields),
+            test_sample_submission_path=self.test_sample_submission_path,
+            test_rows=self.test_rows,
+            rationale=self.rationale,
+            candidates_considered=list(self.candidates_considered),
+            benchmark=self.benchmark,
+            synthesis=self.synthesis,
+            decontamination=self.decontamination,
+        )
+        return [primary, *self.test_sets]
 
     # ── convenience for the engine ─────────────────────────────────────────
     def effective_validation_contract(self) -> tuple[str, str, str, str]:
@@ -328,6 +472,10 @@ class ScopingResult(BaseModel):
             "rationale": self.rationale,
             "candidates_considered": list(self.candidates_considered),
             "test_rows": self.test_rows,
+            "test_sets": [
+                item.provenance_summary()
+                for item in self.effective_test_sets()
+            ],
         }
         if self.benchmark is not None:
             out["benchmark"] = self.benchmark.model_dump()
@@ -354,17 +502,19 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = load_scoping_result(args.scoping_result_path)
-        for name in ("test_set_path", "test_sample_submission_path"):
-            if not Path(getattr(result, name)).is_file():
-                raise ValueError(f"{name} does not exist: {getattr(result, name)}")
-        if result.metric_type == "custom" and not Path(result.evaluation_script).is_file():
-            raise ValueError(f"evaluation_script does not exist: {result.evaluation_script}")
+        for item in result.effective_test_sets():
+            for name in ("test_set_path", "test_sample_submission_path"):
+                if not Path(getattr(item, name)).is_file():
+                    raise ValueError(f"{name} does not exist: {getattr(item, name)}")
+            if item.metric_type == "custom" and not Path(item.evaluation_script).is_file():
+                raise ValueError(f"evaluation_script does not exist: {item.evaluation_script}")
     except (OSError, ValueError) as exc:
         print(f"INVALID ScopingResult: {exc}", file=sys.stderr)
         return 1
     print(
         f"VALID ScopingResult eval_source={result.eval_source} metric={result.metric} "
-        f"rows={result.test_rows}"
+        f"tests={len(result.effective_test_sets())} rows="
+        f"{sum(item.test_rows for item in result.effective_test_sets())}"
     )
     return 0
 

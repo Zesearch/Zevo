@@ -39,6 +39,27 @@ export function fmtMetric(value: string | null | undefined): string {
     .join(" ");
 }
 
+/** Planned scoring population, with the cap and source size kept distinct.
+ *
+ * `sourceRows` is catalogue/display metadata; Run setup still verifies the
+ * downloaded table. Showing both numbers prevents "All rows" and "500 max"
+ * from hiding how much data either phrase actually represents.
+ */
+export function fmtScoringRows(
+  sourceRows: number | null | undefined,
+  maxRows: number | null | undefined = 0,
+): string {
+  const total = Math.max(0, Number(sourceRows) || 0);
+  const cap = Math.max(0, Number(maxRows) || 0);
+  const n = (value: number) => Math.floor(value).toLocaleString("en-US");
+  if (total > 0 && cap > 0 && cap < total) {
+    return `${n(cap)} of ${n(total)} rows`;
+  }
+  if (total > 0) return `${n(total)} rows · all`;
+  if (cap > 0) return `up to ${n(cap)} rows`;
+  return "row count checked at fetch";
+}
+
 /** Where an Auto run's held-out eval came from, in words. "" while unsettled. */
 export function fmtEvalSource(value: string | null | undefined): string {
   switch (value) {

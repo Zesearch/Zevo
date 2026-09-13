@@ -5,9 +5,13 @@
 The first invocation runs at iteration 0, after Infrastructure and before
 baseline Inference. A later invocation is permitted only for an explicit changed
 `recipe_intent`; unchanged intent is reused by the DAG and never dispatched.
-Require the declared `training_method`. Resolve `DEST_DIR` from strict
-customization output or `work_dir`, inspect the source, choose only
-source-appropriate Data Skills, and write one reproducible `prepare_data.py`.
+Require the declared `training_method` and `device_info_path`. Resolve
+`DEST_DIR` from strict customization output or `work_dir`, load the exact
+remote route, choose only source-appropriate Data Skills, and write one
+reproducible `prepare_data.py`. The assigned host is the Training-data plane:
+source inspection, detect/analyze commands, download, transformation, and the
+prepared JSONL all run there. Never download the full source into `work_dir`
+and never copy training rows back to Zevo.
 
 A non-empty `dataset` is the entire allowed training source. It may be loaded,
 parsed, normalized, filtered, or deterministically subset, but unrelated rows
@@ -75,11 +79,64 @@ guardrails are inviolable and MUST be preserved:
 
 If the flag is absent or `false`, do not synthesize — behave exactly as before.
 
-At every optimization invocation produce only:
+For a Hugging Face source, resolve and pin its immutable Hub revision before
+execution. Write `remote_dataset_spec.json` from
+`remote_dataset_spec_schema`, with the exact id/config/split/revision, method,
+and output family. `prepare_data.py` MUST implement the
+`zevo_remote_data_v1` CLI interface:
 
-1. `dataset.jsonl`: training-only rows;
-2. `data_recipe.json`: exact training source/selection/transformation lineage;
-3. one reproducible preparation script.
+```text
+--dataset-id --dataset-split --dataset-revision [--dataset-config]
+--cache-dir --output --profile
+```
+
+It loads through `datasets.load_dataset(..., cache_dir=..., revision=...)`,
+writes canonical non-empty JSONL to `--output`, and writes compact schema/count
+analysis to `--profile`. Pass `remote_hf_cache_path` only to `--cache-dir`.
+Write `dataset.jsonl` and `data_profile.json` beneath the exact
+`remote_data_output_dir`; that directory is the durable prepared-data store,
+not a source-download cache. Forward `HF_TOKEN` only when its name appears in
+`secret_environment_names`; never print its value. Upload the script and any
+single local source once with `remote_transfer`; do not SCP a Hub dataset.
+Export every value in `remote_required_environment` for the remote preparation
+process and run it in the foreground with `remote_timeout_seconds`; these exact
+markers make cancellation target only this Data Ticket.
+Keep reusable Hugging Face source downloads under `remote_hf_cache_path` and
+prepared outputs under `remote_data_output_dir` (the system assigns it as
+`zevo/data/runs/<run>/prepared/<data-intent-signature>/`). Reuse an already verified source cache
+instead of downloading it again. Never place prepared Training artifacts
+inside the Hugging Face cache.
+
+Before downloading or transforming rows, upload `remote_data_helper_path` and
+run its `check-prepared` command against the exact spec, recipe, preparation
+script, dataset, profile, `data_intent_signature`, and
+`remote_preparation_receipt_path`. Reuse the existing dataset only when that
+command succeeds. A missing or rejected receipt means preparation must run.
+Immediately after a successful preparation, run the helper's
+`record-prepared` command with the same arguments. Do this before any later
+result upload or engine finalization: the small receipt is the recovery point
+for an SSH control failure. Never create, edit, or waive the receipt manually.
+
+Run `remote_dataset_spec_validation_command` locally, upload the script/spec,
+then execute preparation on the assigned host. For cluster, submit a finite
+CPU/data job using the matched site Skill rather than loading a login node; for
+cloud/instance use direct SSH. Return the absolute remote dataset and profile
+paths. The engine subsequently applies the private scoring-exclusion step on
+that host and copies back only a compact receipt; do not attempt that comparison
+yourself.
+Copy the validator's printed `source_fingerprint` exactly into
+`data_recipe.source_fingerprint`; it binds the immutable Hub revision and is
+not a hash of a locally downloaded dataset.
+
+At every optimization invocation produce only control-plane artifacts plus
+remote pointers:
+
+1. remote `dataset.jsonl`: training-only rows that never return to Zevo;
+2. local `remote_dataset_spec.json` for a Hugging Face source;
+3. local `data_recipe.json`: exact source/selection/transformation lineage;
+4. one reproducible local preparation script;
+5. remote `data_profile.json` containing only detect/analyze metadata.
+6. remote `preparation_receipt.json` proving exact reusable preparation bytes.
 
 Validation is an engine-owned capability boundary. You receive no Validation
 path, answers, sample submission, evaluator, profile, examples, or statistics.
@@ -90,7 +147,7 @@ desired domain; scalar scores from completed experiments may show whether a
 fixed training recipe helped, but never reveal which Validation examples to
 target.
 
-For a later Data revision, change only `dataset.jsonl` according to the exact
+For a later Data revision, change only the remote `dataset.jsonl` according to the exact
 `recipe_intent`. Selection/subsetting, filtering, sampling, weighting, transformations,
 field mapping, method format, and seed are all recipe identity. A change to any
 of them requires a new Data Ticket; a change only to Train hyperparameters does
@@ -110,16 +167,16 @@ use `inline_transform` for an additional deterministic operation that is not a
 Skill. Put concise human-readable details in `audit_steps`; audit text never
 controls configuration or artifact identity. Use the
 Ticket's `data_intent_signature` to confirm the work order, but do not copy it
-into `DataResult`. Write the realized object to `data_recipe_path`, then run
-`data_recipe_validation_command`, replacing its recipe/output path placeholders;
-the engine has already inserted and shell-quoted the local source path when one
-exists. Confirm the printed `data_signature`; the runner independently derives
-and stores it as artifact metadata. Do not invent either signature.
+into `DataResult`. Write the realized object to `data_recipe_path`. For a local
+source, use `data_recipe_validation_command`; for a Hugging Face source, use
+`remote_dataset_spec_validation_command`. The final `data_signature` is stamped
+by the engine only after private remote decontamination. Do not invent it and do
+not claim a local `training_dataset_path`.
 
 Do not split Training, Validation, or Test. Run setup and the post-Data system
 transform own scoring populations; return no scoring artifacts.
-The engine, not this Agent, removes exact cross-schema semantic duplicates from
-the finished Training artifact before it enters downstream lineage.
+The engine, not this Agent, removes exact cross-schema semantic duplicates on
+the same remote host before the dataset enters downstream lineage.
 
 ### `prepare_holdout_data`
 
@@ -158,14 +215,17 @@ policy in order:
    `test_query` as advisory requirements for the evaluation population,
    provenance, coverage, or format; never reinterpret it as training-data
    guidance. Choose the built-in the task
-   community reports for this kind of problem (`accuracy`/`mc_loglikelihood`
+   community reports for each relevant task shape (`accuracy`/`mc_loglikelihood`
    for multiple choice, `exact_match` for short-answer, `f1`/`token_f1` for
    extractive/overlap, `bleu`/`rouge_l` for generation), and its direction.
    Prefer a built-in; a `custom` evaluator (a `.py` scorer you write into
    `work_dir`) is allowed only when no built-in measures the objective, and
-   its path goes in `evaluation_script`. Leave the `validation_*` fields blank:
-   Validation is carved from the held-out population and mirrors Test.
-2. **PREFER a real public benchmark.** Search the Hub using the objective and
+   its path goes in `evaluation_script`. Select multiple complementary Test
+   members when one benchmark does not cover the objective; give every member
+   its own `inference_query`, metric, answer fields, and submission template.
+   Leave the `validation_*` fields blank: the engine constructs Validation from
+   eligible benchmark members and mirrors each member's Test contract.
+2. **PREFER a real public benchmark suite.** Search the Hub using the objective and
    `test_query`, the way you do for a `data_query` (the `acquire-hf` Skill: the datasets-server `search`/`splits`
    APIs, `hub_repo_search`, dataset cards) for an established evaluation set
    suited to the objective — e.g. an MMLU subject config, `reglab/barexam_qa`,
@@ -178,9 +238,10 @@ policy in order:
    `license`, `url` when known). Set `eval_source="public_benchmark"`.
    **Never fabricate, edit, relabel, or "fill in" answers of a real
    benchmark**: `benchmark.rows` must equal the rows you wrote. Prefer a
-   held-out of at least 1,000 rows (settlement carves 20%, minimum 200, into
-   Validation; below that it fails), or the largest suitable split when the
-   benchmark is smaller — say so in `rationale`.
+   population of at least 200 rows when possible. Settlement deterministically
+   carves 20% from every member that can provide at least 200 Validation and keep 40
+   final-Test rows. Smaller benchmarks (for example AIME-sized sets) remain
+   intact as final-test-only measurements; do not pad or fabricate them.
 3. **ONLY IF no suitable public benchmark exists, synthesize a private
    held-out** with the teacher-distillation capability (`distill-augment`
    Skill, applied here to held-out items rather than training rows): a named
@@ -195,12 +256,11 @@ policy in order:
    optionally `report_path`). A synthesized result without both blocks is
    rejected by the contract. Never seed synthesis from another Run's
    Validation/Test population.
-4. **Build the submission template**: a CSV `test_sample_submission_path` with
+4. **Build each submission template**: a CSV `test_sample_submission_path` with
    the id/prediction columns Inference must emit for the metric to read; its
    example rows need not cover the population. Name `test_answer_fields`
    exactly (a CSV column or JSON key present in the file).
-5. **State the rationale** (why this metric and this population measure the
-   objective). Do not recommend or select training data, a base model, or a
+5. **State the rationale** for every member and for the suite's coverage. Do not recommend or select training data, a base model, or a
    training method; those belong to the later optimization pipeline.
 6. **Validate before success**: run the exact `scoping_result_validation_command`
    on the written file and fix every reported problem. Report `n_rows_in` /
@@ -241,9 +301,10 @@ file and verify:
 - the training artifact contains no rows acquired from a scoring source;
 - record semantics satisfy the declared method and any claimed compatible
   downstream method without inventing signal;
-- artifact paths are absolute, local, persistent, and non-empty;
+- local control-artifact paths and remote data/profile paths are absolute,
+  persistent, and non-empty in their respective data planes;
 - the realized recipe equals `recipe_intent`, the source fingerprint is real,
-  and the validation command confirms the final training bytes.
+  and the validation/receipt confirms the final training bytes.
 
 Emit `reading_source`, `transforming_data`, `validating_data_artifacts`, and
 `writing_artifacts` phases. During validation, name the concrete checks in the

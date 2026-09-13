@@ -73,10 +73,28 @@ def _normalise_cell(value: Any) -> Any:
     return value
 
 
+def _allow_large_csv_fields() -> None:
+    """Remove ``csv``'s legacy 128 KiB per-cell ceiling.
+
+    Benchmark CSVs can legitimately store an entire program, test suite, or
+    conversation in one field.  CPython's default rejects those rows even
+    though the same payload is valid in JSON or Parquet.  Raise the process-wide
+    limit to the largest value supported by the current platform.
+    """
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
+
+
 def _read_records(value: str | Path, *, label: str) -> tuple[list[str], list[dict[str, Any]]]:
     path = _absolute_file(value, label=label)
     suffix = path.suffix.lower()
     if suffix == ".csv":
+        _allow_large_csv_fields()
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             columns = list(reader.fieldnames or [])
@@ -247,10 +265,13 @@ def materialize_system_scoring_artifacts(
     submission_columns = _csv_columns(
         sample_submission, label="Validation sample submission",
     )
-    id_names = {"id", "row_id", "example_id", "index"}
+    id_names = {
+        "id", "row_id", "example_id", "index", "task_id", "question_id",
+        "unique_id", "zevo_id", "key",
+    }
     semantic_names = {
         "messages", "conversation", "conversations", "instruction", "prompt",
-        "question", "input", "text", "context",
+        "question", "question_content", "problem", "input", "text", "context",
     }
     semantic_inputs = [
         column for column in question_columns if column.lower() in semantic_names
@@ -312,6 +333,17 @@ _SEMANTIC_METADATA_KEYS = {
     "num_turns", "role",
 }
 
+_QUESTION_FIELD_KEYS = {
+    "question", "question_content", "prompt", "problem", "query", "input",
+    "instruction", "context", "passage", "text", "choices", "options",
+}
+
+_ANSWER_FIELD_KEYS = {
+    "answer", "answers", "response", "responses", "output", "completion",
+    "target", "label", "labels", "solution", "rationale", "reference",
+    "reference_answer", "expected", "gold", "ground_truth",
+}
+
 
 def _semantic_text(value: Any, *, key: str = "") -> list[str]:
     if key.lower() in _SEMANTIC_METADATA_KEYS:
@@ -332,42 +364,72 @@ def _semantic_text(value: Any, *, key: str = "") -> list[str]:
 
 
 def _semantic_fingerprint(record: dict[str, Any]) -> str:
+    """Fingerprint only model inputs, never supervised targets.
+
+    Held-out rows normally have their answer columns removed before reaching
+    this function, while SFT rows keep assistant targets inside ``messages``.
+    Including those targets made the same question hash differently across the
+    two schemas.  Input-only identity is the stable comparison boundary.
+    """
     parts: list[str]
     messages = record.get("messages")
     if isinstance(messages, list):
         parts = []
         for message in messages:
             if isinstance(message, dict):
-                parts.extend(_semantic_text(message.get("content")))
-            else:
-                parts.extend(_semantic_text(message))
-    elif isinstance(record.get("instruction"), dict) and isinstance(
-        record.get("response"), dict,
-    ):
+                role = str(message.get("role") or "").strip().casefold()
+                if role in {"user", "human"}:
+                    parts.extend(_semantic_text(message.get("content")))
+    elif isinstance(record.get("instruction"), dict):
         # Capybara-style multi-turn records store all user turns and all
-        # assistant turns in separate keyed objects, while canonical SFT rows
-        # interleave them as messages. Compare their semantic turn order.
+        # assistant turns in separate keyed objects. Only the instructions are
+        # inputs; responses are supervised targets and must not affect overlap.
         instructions = record["instruction"]
-        responses = record["response"]
         parts = []
-        ordered_turns = list(instructions)
-        ordered_turns.extend(key for key in responses if key not in instructions)
-        for turn in ordered_turns:
+        for turn in instructions:
             parts.extend(_semantic_text(instructions.get(turn)))
-            parts.extend(_semantic_text(responses.get(turn)))
     else:
-        parts = _semantic_text(record)
+        selected = {
+            key: value for key, value in record.items()
+            if key.casefold() in _QUESTION_FIELD_KEYS
+        }
+        if not selected:
+            selected = {
+                key: value for key, value in record.items()
+                if key.casefold() not in _ANSWER_FIELD_KEYS
+            }
+        parts = _semantic_text(selected)
     text = "\n".join(parts)
     return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
 
 
-def semantic_record_fingerprints(source: str) -> set[str]:
+def semantic_record_fingerprints(
+    source: str, *, excluded_fields: Sequence[str] = (),
+) -> set[str]:
     """Return opaque exact semantic identities for one tabular population."""
-    _, rows = _read_records(source, label="scoring source")
-    return {
-        fingerprint for row in rows
-        if (fingerprint := _semantic_fingerprint(row))
-    }
+    path = _absolute_file(source, label="scoring source")
+    excluded = set(excluded_fields)
+    fingerprints: set[str] = set()
+    if path.suffix.lower() == ".csv":
+        # Stream large held-out sets instead of retaining every row (or every
+        # private test vector) during Run setup.
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                semantic = {
+                    key: value for key, value in row.items() if key not in excluded
+                }
+                fingerprint = _semantic_fingerprint(semantic)
+                if fingerprint:
+                    fingerprints.add(fingerprint)
+        return fingerprints
+    _, rows = _read_records(path, label="scoring source")
+    for row in rows:
+        fingerprint = _semantic_fingerprint({
+            key: value for key, value in row.items() if key not in excluded
+        })
+        if fingerprint:
+            fingerprints.add(fingerprint)
+    return fingerprints
 
 
 def sanitize_training_against_scoring(
@@ -462,6 +524,7 @@ def validate_data_artifacts(
     sample_submission: str,
     answer_fields: Sequence[str],
     training_dataset: str = "",
+    remote_training_rows: int | None = None,
     validation_dataset: str = "",
     profile_path: str = "",
 ) -> DataArtifactReport:
@@ -490,9 +553,18 @@ def validate_data_artifacts(
         training_rows: list[dict[str, object]] = []
         validation_rows: list[dict[str, object]] = []
     else:
-        _, training_rows = _read_records(
-            training_dataset, label="training dataset",
-        )
+        if remote_training_rows is None:
+            _, training_rows = _read_records(
+                training_dataset, label="training dataset",
+            )
+            training_row_count = len(training_rows)
+        else:
+            if remote_training_rows < 1:
+                raise ValueError("remote training receipt reports zero rows")
+            # Rows intentionally remain on the data plane; only the verified
+            # receipt count enters this scheduler-side validation.
+            training_rows = []
+            training_row_count = remote_training_rows
         _, validation_rows = _read_records(
             validation_dataset, label="validation dataset",
         )
@@ -532,7 +604,9 @@ def validate_data_artifacts(
     # The canonical normalized outputs retain `id` when the source provides it.
     # Check disjointness only when both artifacts explicitly carry that field;
     # never guess a task-specific identity key.
-    if all("id" in row for row in training_rows + validation_rows):
+    if remote_training_rows is None and all(
+        "id" in row for row in training_rows + validation_rows
+    ):
         training_ids = {str(row["id"]) for row in training_rows}
         validation_ids = {str(row["id"]) for row in validation_rows}
         overlap = training_ids & validation_ids
@@ -542,7 +616,8 @@ def validate_data_artifacts(
                 f"{sorted(overlap)[0]!r}"
             )
     return DataArtifactReport(
-        len(training_rows), len(validation_rows), len(question_rows),
+        training_row_count if operation != "prepare_holdout_data" else 0,
+        len(validation_rows), len(question_rows),
     )
 
 

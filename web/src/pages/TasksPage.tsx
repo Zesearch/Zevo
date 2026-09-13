@@ -1,9 +1,10 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
-import { ChevronRight, Folder, ListChecks, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { Folder, ListChecks, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { TaskModal } from "../components/TaskModal";
 import { TaskSettingHistory } from "../components/TaskSettings";
+import { ScoringSuiteManifest } from "../components/RunInputs";
 import { FileSetView } from "../components/FileSetView";
 import { Modal } from "../components/Modal";
 import { Bezel, Detail, Kicker, PageHead } from "../components/zevo/primitives";
@@ -104,7 +105,6 @@ function TestFiles({
   t, onPeek,
 }: { t: TaskSummary; onPeek: (name: string, file: string) => void }) {
   const [open, setOpen] = useState(false);
-  const [selectedBenchmark, setSelectedBenchmark] = useState<number | null>(null);
   const suite = t.test_sets ?? [];
 
   const fileRow = (path: string) => {
@@ -124,43 +124,6 @@ function TestFiles({
     return { file, folder, packaged: false, label: folder ? `${folder}/${file}` : file };
   };
 
-  const benchmarkName = (name: string) => {
-    const parts = name.split("·");
-    return parts.length > 1 ? parts.slice(1).join("·").trim() : name;
-  };
-
-  const PathValue = ({
-    path, peek = false, display,
-  }: {
-    path: string;
-    peek?: boolean;
-    display?: string;
-  }) => {
-    const f = fileRow(path);
-    if (!f) return <span className="text-slate-600">—</span>;
-    const managedFile = path.startsWith("/app/data/uploads/")
-      || path.startsWith("/app/data/evaluators/");
-    const shown = display || (managedFile ? path.split("/").pop() || f.label : f.label);
-    if (peek && f.packaged) {
-      return (
-        <button
-          type="button"
-          onClick={(event) => { event.stopPropagation(); onPeek(f.folder, f.file); }}
-          title={path}
-          className="flex min-w-0 max-w-full items-start gap-1 text-left text-slate-300 transition hover:text-brass-300 hover:underline"
-        >
-          <Folder size={10} className="mt-0.5 shrink-0 text-slate-500" />
-          <span className="min-w-0 break-all font-mono text-2xs">{shown}</span>
-        </button>
-      );
-    }
-    return (
-      <span title={path} className="break-all font-mono text-2xs text-slate-300">
-        {shown}
-      </span>
-    );
-  };
-
   if (!suite.length) {
     return <span className="font-mono text-xs text-slate-600">none given</span>;
   }
@@ -176,100 +139,8 @@ function TestFiles({
         </div>
 
         {open && (
-          <div className="mt-2 max-h-[28rem] space-y-1 overflow-y-auto pr-1">
-            {suite.map((member, index) => {
-              const f = fileRow(member.test_set);
-              const selected = selectedBenchmark === index;
-              return (
-                <div key={`${member.name}:${index}`} className="min-w-0 rounded border border-hair/70 bg-raised/35">
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelectedBenchmark(selected ? null : index);
-                    }}
-                    className="grid w-full min-w-0 grid-cols-[1.25rem_minmax(0,1fr)_auto] items-start gap-1.5 px-2 py-1.5 text-left transition hover:bg-raised"
-                  >
-                    <span className="pt-px text-right font-mono text-[0.6rem] text-slate-600">
-                      {index + 1}
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block truncate font-mono text-2xs text-slate-200" title={benchmarkName(member.name)}>
-                        {benchmarkName(member.name)}
-                      </span>
-                      <span className="block truncate font-mono text-[0.6rem] text-slate-500" title={member.test_set}>
-                        {f?.label ?? member.test_set}
-                      </span>
-                    </span>
-                    <ChevronRight
-                      size={12}
-                      className={`mt-1 shrink-0 text-slate-500 transition-transform ${selected ? "rotate-90" : ""}`}
-                    />
-                  </button>
-
-                  {selected && (
-                    <div className="space-y-3 border-t border-hair px-2.5 py-2.5">
-                      <div>
-                        <div className="table-label">Test set</div>
-                        <div className="mt-1"><PathValue path={member.test_set} peek /></div>
-                      </div>
-
-                      <div>
-                        <div className="table-label">Inference query</div>
-                        <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-slate-300">
-                          {member.inference_query || "not set"}
-                        </p>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="min-w-0 rounded border border-hair bg-canvas/60 p-2">
-                          <div className="table-label">Metric</div>
-                          <div className="mt-1 break-words font-mono text-2xs text-slate-200">
-                            {fmtMetric(member.metric)} · {member.metric_type === "custom" ? "custom" : "built-in"}
-                          </div>
-                        </div>
-                        <div className="min-w-0 rounded border border-hair bg-canvas/60 p-2">
-                          <div className="table-label">Target</div>
-                          <div className="mt-1 font-mono text-2xs text-slate-200">
-                            {member.metric_direction === "min" ? "Minimize ↓" : "Maximize ↑"}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="table-label">Answer fields</div>
-                        <div className="mt-1 flex flex-wrap gap-1">
-                          {member.answer_fields.map((field) => (
-                            <span key={field} className="rounded border border-hair bg-canvas/60 px-1.5 py-0.5 font-mono text-[0.62rem] text-slate-300">
-                              {field}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-
-                      {member.metric_type === "custom" && member.evaluation_script && (
-                        <div>
-                          <div className="table-label">Evaluation script</div>
-                          <div className="mt-1">
-                            <PathValue path={member.evaluation_script} display="Python scorer (.py)" />
-                          </div>
-                          {member.evaluator_sha256 && (
-                            <div className="mt-1 truncate font-mono text-[0.58rem] text-slate-600" title={member.evaluator_sha256}>
-                              sha256 {member.evaluator_sha256}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      <div>
-                        <div className="table-label">Sample submission</div>
-                        <div className="mt-1"><PathValue path={member.sample_submission} /></div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+          <div className="mt-2">
+            <ScoringSuiteManifest items={suite} showHeader={false} />
           </div>
         )}
 
@@ -278,7 +149,6 @@ function TestFiles({
           onClick={(event) => {
             event.stopPropagation();
             setOpen((value) => !value);
-            setSelectedBenchmark(null);
           }}
           className="mt-2 font-mono text-2xs text-slate-500 transition hover:text-brass-300"
         >
@@ -388,6 +258,7 @@ export function TasksPage() {
     fireCommand("open-new-run", undefined, {
       taskName: t.name,
       settingId: s.id,
+      mode: "full_pipeline",
     });
   }
 

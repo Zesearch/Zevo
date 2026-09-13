@@ -16,6 +16,7 @@ import asyncio
 import os
 from datetime import datetime, timezone
 from typing import Any, Literal, cast
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -225,6 +226,10 @@ class RunSummary(BaseModel):
 
 class RunDetail(RunSummary):
     tickets: list[dict[str, Any]]
+    # Sanitized live progress for a named multi-Benchmark scoring suite. It
+    # contains names/counts only; held-out members follow the same trusted-UI
+    # visibility boundary as held-out Tickets.
+    benchmark_progress: dict[str, Any] = Field(default_factory=dict)
     # Per-iteration facts from Evaluation, enriched with orchestrator decisions.
     history: list[dict[str, Any]] = Field(default_factory=list)
     # The same total, split by what spent it. Agent cost scales with how much
@@ -236,6 +241,184 @@ class RunDetail(RunSummary):
     # trained. Same definition the harness leaderboard ranks by, so the strip
     # and the board cannot name a run's harness differently.
     harness_model: str = ""
+
+
+_BENCHMARK_LIVE_STATUSES = {
+    "queued", "running", "repairing", "awaiting_input", "waiting_external",
+}
+_BENCHMARK_SUCCESS_STATUSES = {"succeeded", "degraded"}
+_BENCHMARK_STAGE_ORDER = {"data": 0, "inference": 1, "evaluation": 2}
+
+
+def _benchmark_progress(
+    run: Run, tickets: list[Ticket], *, reveal_holdout: bool,
+) -> dict[str, Any]:
+    """Describe the candidate's current per-Benchmark measurement progress.
+
+    A Benchmark is complete only after its deterministic Evaluation ticket is
+    complete. Inference and Evaluation tickets are grouped by candidate so a
+    prior iteration cannot make a new candidate's progress appear finished.
+    """
+    holdout = dict(run.holdout or {})
+    validation_members = list(holdout.get("validation_sets") or [])
+    validation_names = [
+        str(item.get("name") or f"Validation {index + 1}")
+        for index, item in enumerate(validation_members)
+    ]
+    if not validation_names and holdout.get("validation_set"):
+        validation_names = ["Validation"]
+
+    test_members = list(holdout.get("test_sets") or []) if reveal_holdout else []
+    test_names = [
+        str(item.get("name") or f"Test {index + 1}")
+        for index, item in enumerate(test_members)
+    ]
+    if reveal_holdout and not test_names and holdout.get("test_set"):
+        test_names = ["Test"]
+
+    by_id = {ticket.id: ticket for ticket in tickets}
+
+    def source_inference(ticket: Ticket) -> Ticket | None:
+        if ticket.agent_id == "inference":
+            return ticket
+        binding = dict((ticket.inputs or {}).get("predictions") or {})
+        source = by_id.get(str(binding.get("source_ticket_id") or ""))
+        return source if source is not None and source.agent_id == "inference" else None
+
+    def candidate_key(ticket: Ticket) -> tuple[int, str, str] | None:
+        source = source_inference(ticket)
+        if source is None:
+            return None
+        payload = dict(source.payload or {})
+        return (
+            int(source.iteration or 0),
+            str(payload.get("model_source") or ""),
+            str(payload.get("base_model") or ""),
+        )
+
+    def benchmark_name(ticket: Ticket, suite: str, names: list[str]) -> str:
+        raw = str((ticket.payload or {}).get("test_set_name") or "")
+        if suite == "validation":
+            prefix = "validation:"
+            if raw.startswith(prefix):
+                return raw[len(prefix):]
+            if ticket.lane == "optimization" and ticket.agent_id in {
+                "inference", "evaluation",
+            }:
+                return names[0] if names else ""
+            return ""
+        if ticket.lane == "held_out_test" and ticket.agent_id in {
+            "data", "inference", "evaluation",
+        }:
+            return raw or (names[0] if len(names) == 1 else "")
+        return ""
+
+    def suite_progress(suite: str, names: list[str]) -> dict[str, Any]:
+        relevant = [
+            ticket for ticket in tickets
+            if benchmark_name(ticket, suite, names)
+        ]
+        candidate_tickets = [
+            ticket for ticket in relevant
+            if ticket.agent_id in {"inference", "evaluation"}
+            and candidate_key(ticket) is not None
+        ]
+        live_candidates = [
+            ticket for ticket in candidate_tickets
+            if ticket.status in _BENCHMARK_LIVE_STATUSES
+        ]
+        focus_source = max(
+            live_candidates or candidate_tickets,
+            key=lambda ticket: ticket.created_at,
+            default=None,
+        )
+        focus_key = candidate_key(focus_source) if focus_source is not None else None
+        focused = [
+            ticket for ticket in candidate_tickets
+            if candidate_key(ticket) == focus_key
+        ] if focus_key is not None else []
+
+        # Held-out questions may be preparing before candidate-specific
+        # Inference exists. Keep those visible without treating preparation as
+        # a completed benchmark.
+        if suite == "test" and not focused:
+            focused = [ticket for ticket in relevant if ticket.agent_id == "data"]
+
+        latest_by_name: dict[str, Ticket] = {}
+        for ticket in focused:
+            name = benchmark_name(ticket, suite, names)
+            current = latest_by_name.get(name)
+            if current is None or (
+                _BENCHMARK_STAGE_ORDER.get(ticket.agent_id, -1),
+                ticket.created_at,
+            ) > (
+                _BENCHMARK_STAGE_ORDER.get(current.agent_id, -1),
+                current.created_at,
+            ):
+                latest_by_name[name] = ticket
+
+        completed = sum(
+            ticket.agent_id == "evaluation"
+            and ticket.status in _BENCHMARK_SUCCESS_STATUSES
+            for ticket in latest_by_name.values()
+        )
+        failed = sum(
+            ticket.status == "failed" for ticket in latest_by_name.values()
+        )
+
+        visible = [
+            ticket for ticket in latest_by_name.values()
+            if ticket.status in _BENCHMARK_LIVE_STATUSES
+        ]
+        # A terminal failure should remain legible in Overview after its lamp
+        # stops animating; otherwise the page would fall back to "waiting".
+        if not visible:
+            failed_rows = [
+                ticket for ticket in latest_by_name.values()
+                if ticket.status == "failed"
+            ]
+            if failed_rows:
+                visible = [max(failed_rows, key=lambda ticket: ticket.updated_at)]
+
+        priority = {
+            "running": 0, "repairing": 0, "waiting_external": 1,
+            "awaiting_input": 1, "queued": 2, "failed": 3,
+        }
+        current = [
+            {
+                "suite": suite,
+                "name": benchmark_name(ticket, suite, names),
+                "stage": {
+                    "data": "preparing",
+                    "inference": "inference",
+                    "evaluation": "evaluation",
+                }.get(ticket.agent_id, ticket.agent_id),
+                "status": ticket.status,
+                "iteration": int(ticket.iteration or 0),
+            }
+            for ticket in sorted(
+                visible,
+                key=lambda ticket: (
+                    priority.get(ticket.status, 9), ticket.created_at,
+                ),
+            )
+        ]
+        return {
+            "completed": int(completed),
+            "total": len(names),
+            "failed": int(failed),
+            "iteration": int(focus_key[0]) if focus_key is not None else 0,
+            "model_source": str(focus_key[1]) if focus_key is not None else "",
+            "current": current,
+        }
+
+    validation = suite_progress("validation", validation_names)
+    test = suite_progress("test", test_names)
+    return {
+        "validation": validation,
+        "test": test,
+        "current": [*validation["current"], *test["current"]],
+    }
 
 
 async def _settle_splits(
@@ -684,6 +867,9 @@ async def get_run(
         gpu_cost_usd=round(snap.gpu_cost_usd, 6),
         harness_model=(await _harness_by_run(db, [run_id])).get(run_id, ""),
         history=history,
+        benchmark_progress=_benchmark_progress(
+            r, tickets, reveal_holdout=reveal_holdout,
+        ),
         tickets=[
             {
                 "id": t.id,
@@ -776,6 +962,9 @@ class CreateRunRequest(BaseModel):
     save_setting: bool = False
     setting_name: str = Field("", max_length=32)
     setting_id: str = ""
+    # Browser-generated correlation id for the synchronous pre-Run setup
+    # interval. It is UI telemetry only and is never stored on the Run.
+    setup_id: UUID | None = None
 
     @model_validator(mode="after")
     def request_shape_matches_mode(self) -> "CreateRunRequest":
@@ -839,6 +1028,25 @@ class CreateRunRequest(BaseModel):
 class CreateRunResponse(BaseModel):
     run_id: str
     status: Literal["running"]
+
+
+class RunSetupProgressResponse(BaseModel):
+    status: Literal["waiting", "active", "complete"]
+    phase: str = "checking"
+    completed: int = 0
+    total: int = 0
+    label: str = ""
+
+
+@router.get("/run-setups/{setup_id}", response_model=RunSetupProgressResponse)
+async def get_run_setup_progress(setup_id: UUID) -> RunSetupProgressResponse:
+    """Read ephemeral pre-Run progress while the launch POST is still open."""
+    from zevo.engine.run.setup_progress import read
+
+    state = read(str(setup_id))
+    if state is None:
+        return RunSetupProgressResponse(status="waiting")
+    return RunSetupProgressResponse(**state)
 
 
 @router.patch("/runs/{run_id}", response_model=RunSummary)
@@ -1645,6 +1853,16 @@ async def create_run(
     from zevo.engine.run.wakeup import queue_wakeup
     from zevo.holdout_storage import protect_assets
     from fastapi.concurrency import run_in_threadpool
+    from zevo.engine.run.setup_progress import update as setup_progress
+
+    setup_id = str(body.setup_id or "")
+    setup_progress(
+        setup_id,
+        phase="checking",
+        completed=0,
+        total=0,
+        label="Checking run configuration",
+    )
 
     # Every run is named. A predefined task_name executes that package as-is; an
     # unrecognised one is a custom task and must carry its own user_request.
@@ -1666,9 +1884,18 @@ async def create_run(
         # The Data agent's scoping Ticket derives it and the engine settles it
         # afterwards (zevo.engine.run.scoping); everything below this line is
         # the full/customized pipeline creation path, unchanged.
-        return await _create_auto_run(
+        result = await _create_auto_run(
             db, body, task_name=task_name, run_name=run_name, task_row=task_row,
         )
+        setup_progress(
+            setup_id,
+            phase="complete",
+            completed=1,
+            total=1,
+            label="Run started",
+            status="complete",
+        )
+        return result
     user_request = body.user_request
     if user_request is None:
         if task_row is None:
@@ -1701,7 +1928,9 @@ async def create_run(
     user_request = user_request.model_copy(update={
         "method_config": normalize_method_config(user_request.method_config),
     })
-    derived_validation = not user_request.validation_set.strip()
+    derived_validation = not (
+        user_request.validation_sets or user_request.validation_set.strip()
+    )
     user_request = inherit_test_validation_contract(user_request)
 
     # Test bytes must not share a path with anything on the optimization lane.
@@ -1735,6 +1964,14 @@ async def create_run(
                 user_request.validation_sample_submission,
                 user_request.validation_evaluation_script,
             ) if str(v).strip()
+        })
+        optimization_assets.update({
+            str(value).strip()
+            for item in user_request.validation_sets
+            for value in (
+                item.test_set, item.sample_submission, item.evaluation_script,
+            )
+            if str(value).strip()
         })
     overlap = sorted(test_assets & optimization_assets)
     if overlap:
@@ -1798,6 +2035,42 @@ async def create_run(
         # Re-resolve after Test's custom evaluator has been frozen so both
         # lanes point at exactly the same immutable bytes and digest.
         user_request = inherit_test_validation_contract(user_request)
+    elif user_request.validation_sets:
+        frozen_validation_suite = []
+        for item in user_request.validation_sets:
+            if item.metric_type == "custom":
+                try:
+                    script, digest = await run_in_threadpool(
+                        freeze_evaluator, item.evaluation_script,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                item = item.model_copy(update={
+                    "evaluation_script": script,
+                    "evaluator_sha256": digest,
+                })
+            frozen_validation_suite.append(item)
+        primary_validation = frozen_validation_suite[0]
+        user_request = user_request.model_copy(update={
+            "validation_sets": frozen_validation_suite,
+            "validation_metric_type": (
+                "builtin" if len(frozen_validation_suite) > 1
+                else primary_validation.metric_type
+            ),
+            "validation_metric": (
+                "suite_average" if len(frozen_validation_suite) > 1
+                else primary_validation.metric
+            ),
+            "validation_metric_direction": primary_validation.metric_direction,
+            "validation_evaluation_script": (
+                "" if len(frozen_validation_suite) > 1
+                else primary_validation.evaluation_script
+            ),
+            "validation_evaluator_sha256": (
+                "" if len(frozen_validation_suite) > 1
+                else primary_validation.evaluator_sha256
+            ),
+        })
     elif user_request.validation_metric_type == "custom":
         from zevo.evaluator_storage import freeze_evaluator
         try:
@@ -1985,6 +2258,10 @@ async def create_run(
                 dataset=user_request.dataset or "",
                 dataset_split=user_request.dataset_split or "",
                 dataset_config=user_request.dataset_config or "",
+                validation_sets=[
+                    item.model_dump(mode="json")
+                    for item in user_request.validation_sets
+                ],
                 validation_set=user_request.validation_set or "",
                 validation_split=user_request.validation_split or "",
                 validation_config=user_request.validation_config or "",
@@ -2002,11 +2279,6 @@ async def create_run(
                 base_model=user_request.base_model or "",
                 training_method=user_request.training_method or "",
                 method_config=dict(user_request.method_config or {}),
-                prompt_framing=user_request.prompt_framing or "",
-                system_prompt=user_request.system_prompt or "",
-                loss_objective_config=dict(user_request.loss_objective_config or {}),
-                inference_config=dict(user_request.inference_config or {}),
-                decoding_config=dict(user_request.decoding_config or {}),
                 data_query=getattr(user_request, "data_query", "") or "",
                 model_query=user_request.model_query or "",
                 method_query=user_request.method_query or "",
@@ -2080,7 +2352,6 @@ async def create_run(
             "system_prompt": user_request.system_prompt,
             "loss_objective_config": dict(user_request.loss_objective_config or {}),
             "inference_config": dict(user_request.inference_config or {}),
-            "inference_query": effective_suite[0].inference_query,
             "decoding_config": dict(user_request.decoding_config or {}),
         }.items()
         if value not in ("", {}, None)
@@ -2105,8 +2376,27 @@ async def create_run(
     # Settle the three-way split before the orchestrator sees anything. The
     # run tunes on validation and is judged on the remaining Test rows. When
     # Validation is absent, both are settled together by carving 20% from Test.
-    agent_request, holdout, _split_note = await _settle_splits(run, user_request)
+    from zevo.engine.run.setup_progress import bind as bind_setup_progress
+    from zevo.engine.run.setup_progress import reset as reset_setup_progress
+
+    progress_token = bind_setup_progress(setup_id)
+    try:
+        agent_request, holdout, _split_note = await _settle_splits(run, user_request)
+    finally:
+        reset_setup_progress(progress_token)
+    setup_progress(
+        setup_id,
+        phase="finalizing",
+        completed=0,
+        total=1,
+        label="Creating Run",
+    )
     run.holdout = holdout
+    # Split settlement may promote per-benchmark Validation contracts to one
+    # suite-average optimization signal. Persist the signal the loop will
+    # actually record, not the primary scalar projection used to enter setup.
+    run.validation_metric = agent_request.validation_metric
+    run.validation_metric_direction = agent_request.validation_metric_direction
     if user_request.dataset:
         # The user owns the source, while split settlement owns the exact file
         # workers may train on.  Preserve both meanings instead of comparing a
@@ -2166,6 +2456,14 @@ async def create_run(
         },
     )
 
+    setup_progress(
+        setup_id,
+        phase="complete",
+        completed=1,
+        total=1,
+        label="Run started",
+        status="complete",
+    )
     return CreateRunResponse(run_id=run.id, status="running")
 
 

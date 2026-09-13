@@ -30,6 +30,7 @@ from zevo.contracts.customizations import RunCustomizations
 from zevo.contracts.orchestrator import (
     BUILTIN_METRICS,
     UserRequest,
+    effective_test_suite,
     inherit_test_validation_contract,
     scoring_asset_errors,
 )
@@ -118,7 +119,18 @@ def _check_objective(req: UserRequest, items: list[PreflightItem]) -> None:
 
 def _check_dataset(req: UserRequest, items: list[PreflightItem]) -> None:
     if req.dataset:
-        if not _exists(req.dataset):
+        from zevo.engine.remote_datasets import looks_like_hub_id
+
+        if looks_like_hub_id(req.dataset):
+            detail = "/".join(filter(None, (
+                req.dataset_config, req.dataset_split or "train",
+            )))
+            _ok(
+                items, "dataset_remote",
+                f"Training data will stay remote and be fetched from "
+                f"{req.dataset}{f' ({detail})' if detail else ''} on the training machine.",
+            )
+        elif not _exists(req.dataset):
             _block(items, "dataset_missing",
                    f"Dataset path {req.dataset!r} does not exist (checked from backend container).",
                    "Check the path or re-upload via /files.")
@@ -142,16 +154,30 @@ def _check_dataset(req: UserRequest, items: list[PreflightItem]) -> None:
 
 
 def _check_eval(req: UserRequest, items: list[PreflightItem]) -> None:
-    contracts = (
+    suite = effective_test_suite(req)
+    contracts = [
         (
-            "test", "Test", req.metric_type, req.metric,
-            req.evaluation_script,
-        ),
-        (
+            f"test_{index + 1}", f"Test {member.name!r}", member.metric_type,
+            member.metric, member.evaluation_script,
+        )
+        for index, member in enumerate(suite)
+    ]
+    if req.validation_sets:
+        contracts.extend([
+            (
+                f"validation_{index + 1}",
+                f"Validation {member.name!r}",
+                member.metric_type,
+                member.metric,
+                member.evaluation_script,
+            )
+            for index, member in enumerate(req.validation_sets)
+        ])
+    elif req.validation_set:
+        contracts.append((
             "validation", "Validation", req.validation_metric_type,
             req.validation_metric, req.validation_evaluation_script,
-        ),
-    )
+        ))
     for code, label, metric_type, metric, eval_script in contracts:
         if not metric_type:
             _block(
@@ -218,23 +244,37 @@ def _check_eval(req: UserRequest, items: list[PreflightItem]) -> None:
 
 
 def _check_test_set(req: UserRequest, items: list[PreflightItem]) -> None:
-    if not req.test_set:
+    suite = effective_test_suite(req)
+    if not suite:
         # scoring_asset_errors emits the canonical required-field blocker. This
         # helper owns path validation only, so do not duplicate that message.
         return
-    resolved = resolve_asset(req.test_set)
-    if not _exists(resolved):
-        _block(items, "test_set_missing",
-               f"test_set path {req.test_set!r} does not exist.")
-        return
-    if not req.validation_set:
-        try:
-            from zevo.engine.method.validation_split import (
-                MIN_VALIDATION_ROWS, _n_validation, _read_raw,
+
+    from zevo.engine.method.validation_split import (
+        InsufficientValidationRows,
+        _n_validation,
+        _read_raw,
+    )
+    from zevo.engine.remote_datasets import looks_like_hub_id
+
+    has_independent_validation = bool(
+        req.validation_sets or req.validation_set.strip()
+    )
+    eligible = 0
+    unknown_remote_sizes = 0
+    for index, member in enumerate(suite):
+        code = "test_set" if len(suite) == 1 else f"test_set_{index + 1}"
+        resolved = resolve_asset(member.test_set)
+        is_remote = looks_like_hub_id(member.test_set)
+        if not is_remote and not _exists(resolved):
+            _block(
+                items, f"{code}_missing",
+                f"Test {member.name!r} path {member.test_set!r} does not exist.",
             )
-            _columns, rows = _read_raw(Path(resolved))
-            selected = _n_validation(len(rows))
-            sample_path = Path(resolve_asset(req.test_sample_submission))
+            continue
+
+        try:
+            sample_path = Path(resolve_asset(member.sample_submission))
             with sample_path.open("r", encoding="utf-8-sig", newline="") as handle:
                 sample = csv.DictReader(handle)
                 sample_columns = list(sample.fieldnames or [])
@@ -246,17 +286,64 @@ def _check_test_set(req: UserRequest, items: list[PreflightItem]) -> None:
                 )
             if len(sample_columns) != len(set(sample_columns)):
                 raise ValueError("Test sample submission contains duplicate columns")
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             _block(
-                items, "validation_split_too_small",
-                f"Validation cannot be derived from this Test set: {exc}",
-                "Upload a separate Validation set with its answer fields and sample submission.",
+                items, f"{code}_sample_submission_invalid",
+                f"Test {member.name!r} sample submission is invalid: {exc}",
+            )
+            continue
+
+        if has_independent_validation:
+            _ok(
+                items, f"{code}_ready",
+                f"Test {member.name!r} scoring assets are ready.",
+            )
+            continue
+        if is_remote:
+            unknown_remote_sizes += 1
+            _ok(
+                items, f"{code}_remote",
+                f"Test {member.name!r} will be fetched from Hugging Face; "
+                "Zevo will decide whether it can contribute Validation after materialization.",
+            )
+            continue
+
+        try:
+            _columns, rows = _read_raw(Path(resolved))
+            selected = _n_validation(len(rows))
+        except InsufficientValidationRows:
+            _ok(
+                items, f"{code}_final_only",
+                f"Test {member.name!r} is small ({len(rows)} rows), so it will "
+                "remain final-test-only.",
+            )
+        except (OSError, ValueError) as exc:
+            _block(
+                items, f"{code}_unreadable",
+                f"Test {member.name!r} cannot be prepared: {exc}",
             )
         else:
+            eligible += 1
             _ok(
-                items, "validation_split_ready",
-                f"Zevo will derive {selected} Validation rows (20% of Test; minimum {MIN_VALIDATION_ROWS}).",
+                items,
+                "validation_split_ready" if len(suite) == 1
+                else f"{code}_validation_ready",
+                f"Zevo will derive {selected} Validation rows from Test "
+                f"{member.name!r} and keep the rest for final evaluation.",
             )
+
+    if (
+        not has_independent_validation
+        and eligible == 0
+        and unknown_remote_sizes == 0
+    ):
+        _block(
+            items, "validation_suite_empty",
+            "Every Test-suite member is too small to construct a reliable "
+            "Validation signal.",
+            "Add one larger benchmark, an official development set, or an "
+            "independent Validation set.",
+        )
 
 
 def _check_scoring_assets(req: UserRequest, items: list[PreflightItem]) -> None:

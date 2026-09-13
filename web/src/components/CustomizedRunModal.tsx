@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { useNavigate } from "react-router-dom";
 import { ChevronRight, RotateCw } from "lucide-react";
@@ -22,6 +22,7 @@ import { api } from "../lib/api";
 import { ThemedSelect } from "./ThemedSelect";
 import { TaskSettingHistory } from "./TaskSettings";
 import type { AgentCustomization, TaskDTO, TaskSettingDTO, UserRequest } from "../lib/api";
+import { RunSetupProgressView, useRunSetupProgress } from "./RunSetupProgress";
 
 const columns = (s: string) =>
   s.split(",").map((c) => c.trim()).filter(Boolean);
@@ -102,18 +103,29 @@ const labelCls = "field-label mb-1.5 block";
 export function CustomizedRunForm({
   onDone,
   onDirtyChange,
+  initialTaskName = "",
+  initialSettingId = "",
+  initialRunName = "",
+  initialInputs,
 }: {
   onDone: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  initialTaskName?: string;
+  initialSettingId?: string;
+  initialRunName?: string;
+  initialInputs?: Partial<RunInputValues>;
 }) {
   const nav = useNavigate();
   const { data: tasks = [] } = useSWR<TaskDTO[]>("/api/tasks");
   // Run-level fields
-  const [taskName, setTaskName] = useState("");
+  const [taskName, setTaskName] = useState(initialTaskName);
   // What to call this particular execution, as opposed to the task it runs.
-  const [runName, setRunName] = useState("");
+  const [runName, setRunName] = useState(initialRunName);
   const [objective, setObjective] = useState("");
-  const [inputs, setInputs] = useState<RunInputValues>(EMPTY_RUN_INPUTS);
+  const [inputs, setInputs] = useState<RunInputValues>({
+    ...EMPTY_RUN_INPUTS,
+    ...(initialInputs || {}),
+  });
   const compute = useComputeTargets();
   const [pickedSetting, setPickedSetting] = useState("");
   // Matches Full Pipeline: the save-reuse prompt appears only after the user
@@ -128,6 +140,8 @@ export function CustomizedRunForm({
   const [showAgentConfiguration, setShowAgentConfiguration] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const runSetup = useRunSetupProgress();
+  const initialSettingApplied = useRef(false);
 
   const dirtyForm = !!(
     taskName.trim() || runName.trim() || objective.trim()
@@ -161,15 +175,16 @@ export function CustomizedRunForm({
     if (!predefined) return;
     setObjective(predefined.task_objective || "");
     setPickedSetting("");
+    const primaryTest = predefined.test_sets?.[0];
     setInputs((v) => ({
       ...v,
-      testSet: predefined.test_set || "",
-      answerFields: (predefined.test_answer_fields ?? []).join(", "),
-      metricType: predefined.metric_type,
-      evaluationScript: predefined.evaluation_script || "",
-      testSampleSubmission: predefined.test_sample_submission || "",
-      metric: predefined.metric,
-      metricDirection: predefined.metric_direction,
+      testSet: primaryTest?.test_set || predefined.test_set || "",
+      answerFields: (primaryTest?.answer_fields ?? predefined.test_answer_fields ?? []).join(", "),
+      metricType: primaryTest?.metric_type ?? predefined.metric_type,
+      evaluationScript: primaryTest?.evaluation_script || predefined.evaluation_script || "",
+      testSampleSubmission: primaryTest?.sample_submission || predefined.test_sample_submission || "",
+      metric: primaryTest?.metric ?? predefined.metric,
+      metricDirection: primaryTest?.metric_direction ?? predefined.metric_direction,
     }));
   }, [predefined?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -184,6 +199,7 @@ export function CustomizedRunForm({
       dataQuery: s.data_query || "",
       modelQuery: s.model_query || "",
       methodQuery: s.method_query || "",
+      validationSets: s.validation_sets ?? [],
       validationSet: s.validation_set || "",
       validationSplit: s.validation_split || "",
       validationConfig: s.validation_config || "",
@@ -198,22 +214,25 @@ export function CustomizedRunForm({
       teacherModel: String(s.method_config?.teacher_model || ""),
       rewardModel: String(s.method_config?.reward_model || ""),
       usePeft: typeof s.method_config?.use_peft === "boolean" ? String(s.method_config.use_peft) as "true" | "false" : "",
-      promptFraming: s.prompt_framing || "",
-      systemPrompt: s.system_prompt || "",
-      lossObjectiveConfig: Object.keys(s.loss_objective_config || {}).length ? JSON.stringify(s.loss_objective_config) : "",
-      inferenceConfig: Object.keys(s.inference_config || {}).length ? JSON.stringify(s.inference_config) : "",
-      decodingStrategy: (s.decoding_config?.decoding_strategy || "") as "" | "greedy" | "sampling",
-      maxNewTokens: s.decoding_config?.max_new_tokens != null ? String(s.decoding_config.max_new_tokens) : "",
-      temperature: s.decoding_config?.temperature != null ? String(s.decoding_config.temperature) : "",
-      topP: s.decoding_config?.top_p != null ? String(s.decoding_config.top_p) : "",
-      topK: s.decoding_config?.top_k != null ? String(s.decoding_config.top_k) : "",
-      repetitionPenalty: s.decoding_config?.repetition_penalty != null ? String(s.decoding_config.repetition_penalty) : "",
-      seed: s.decoding_config?.seed != null ? String(s.decoding_config.seed) : "",
+      // Settings are Standard inputs. Customized details remain whatever the
+      // user entered in this dialog; a legacy Setting must never inject hidden
+      // prompt/loss/inference pins here.
       iterations: s.iteration_budget ? String(s.iteration_budget) : "",
       budget: s.max_cost_usd ? String(s.max_cost_usd) : "",
       stopThreshold: s.stop_threshold != null ? String(s.stop_threshold) : "",
     }));
   }
+
+  useEffect(() => {
+    if (initialSettingApplied.current || !initialSettingId) return;
+    const setting = savedSettings.find((candidate) => candidate.id === initialSettingId);
+    if (!setting) return;
+    initialSettingApplied.current = true;
+    applySetting(setting);
+    // applySetting is a declaration and this effect is intentionally keyed to
+    // the asynchronous settings result, not every state value it fills.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSettingId, savedSettings.length]);
 
   function changeTaskName(next: string) {
     if (next.trim() !== taskName.trim()) {
@@ -239,8 +258,15 @@ export function CustomizedRunForm({
   }
 
   function setDetailedInput(patch: Partial<RunInputValues>) {
-    const runOnly = Object.keys(patch).every(
-      (key) => key === "timeLimitHours" || key === "queueWaitHours",
+    const runOnlyKeys = new Set<keyof RunInputValues>([
+      "gpuProvider", "cloudBackend", "sshHostId", "numGpus", "generation_backend",
+      "timeLimitHours", "queueWaitHours",
+      "promptFraming", "systemPrompt", "lossObjectiveConfig", "inferenceConfig",
+      "decodingStrategy", "maxNewTokens", "temperature", "topP", "topK",
+      "repetitionPenalty", "seed",
+    ]);
+    const runOnly = (Object.keys(patch) as Array<keyof RunInputValues>).every(
+      (key) => runOnlyKeys.has(key),
     );
     if (!runOnly) {
       setPickedSetting("");
@@ -259,10 +285,12 @@ export function CustomizedRunForm({
     !taskName.trim() && "Task name",
     !objective.trim() && "Objective",
     !effectiveComputeTarget && "GPU backend",
-    !inputs.metricType && "Test metric type",
-    !inputs.metric.trim() && "Metric",
-    inputs.metricType === "custom" && !inputs.evaluationScript.trim() && "Evaluation script",
-    !inputs.metricDirection && "Target",
+    ...(!predefined?.test_sets?.length ? [
+      !inputs.metricType && "Test metric type",
+      !inputs.metric.trim() && "Metric",
+      inputs.metricType === "custom" && !inputs.evaluationScript.trim() && "Evaluation script",
+      !inputs.metricDirection && "Target",
+    ] : []),
     !!inputs.validationSet.trim()
       && !inputs.validationMetricType
       && "Validation metric type",
@@ -276,9 +304,11 @@ export function CustomizedRunForm({
     !!inputs.validationSet.trim()
       && !inputs.validationMetricDirection
       && "Validation target",
-    !inputs.testSet.trim() && "Test set",
-    columns(inputs.answerFields).length === 0 && "Test answer fields",
-    !inputs.testSampleSubmission.trim() && "Sample submission",
+    ...(!predefined?.test_sets?.length ? [
+      !inputs.testSet.trim() && "Test set",
+      columns(inputs.answerFields).length === 0 && "Test answer fields",
+      !inputs.testSampleSubmission.trim() && "Sample submission",
+    ] : []),
     !!inputs.validationSet.trim()
       && columns(inputs.validationAnswerFields).length === 0
       && "Validation answer fields",
@@ -347,15 +377,23 @@ export function CustomizedRunForm({
 
   const validationContract = validationContractFromInputs(inputs);
 
+  const primaryTest = predefined?.test_sets?.[0];
+
   const userRequest: UserRequest = {
     task_objective: objective.trim(),
-    metric: inputs.metric.trim(),
-    metric_direction: inputs.metricDirection as "max" | "min",
-    metric_type: inputs.metricType as "builtin" | "custom",
-    evaluation_script: inputs.metricType === "custom"
-      ? inputs.evaluationScript.trim()
+    ...(predefined?.test_sets?.length ? { test_sets: predefined.test_sets } : {}),
+    validation_sets: inputs.validationSets,
+    metric: primaryTest?.metric ?? inputs.metric.trim(),
+    metric_direction: primaryTest?.metric_direction
+      ?? inputs.metricDirection as "max" | "min",
+    metric_type: primaryTest?.metric_type
+      ?? inputs.metricType as "builtin" | "custom",
+    evaluation_script: primaryTest
+      ? (primaryTest.metric_type === "custom" ? primaryTest.evaluation_script : "")
+      : inputs.metricType === "custom"
+        ? inputs.evaluationScript.trim()
       : "",
-    evaluator_sha256: "",
+    evaluator_sha256: primaryTest?.evaluator_sha256 ?? "",
     validation_metric: validationContract.metric,
     validation_metric_direction: validationContract.metricDirection,
     validation_metric_type: validationContract.metricType,
@@ -371,14 +409,14 @@ export function CustomizedRunForm({
     model_query: inputs.modelQuery.trim(),
     method_query: inputs.methodQuery.trim(),
     base_model: inputs.baseModel.trim(),
-    test_set: inputs.testSet.trim(),
-    test_answer_fields: columns(inputs.answerFields),
+    test_set: primaryTest?.test_set ?? inputs.testSet.trim(),
+    test_answer_fields: primaryTest?.answer_fields ?? columns(inputs.answerFields),
     validation_set: inputs.validationSet.trim(),
     validation_split: inputs.validationSplit.trim(),
     validation_config: inputs.validationConfig.trim(),
     validation_answer_fields: columns(validationContract.answerFields),
     validation_sample_submission: validationContract.sampleSubmission,
-    test_sample_submission: inputs.testSampleSubmission.trim(),
+    test_sample_submission: primaryTest?.sample_submission ?? inputs.testSampleSubmission.trim(),
     constraints: [],
   };
 
@@ -389,12 +427,14 @@ export function CustomizedRunForm({
       if (!runName.trim()) throw new Error("Give the run a name.");
       if (!taskName.trim()) throw new Error("Give the run a task name.");
       if (!objective.trim()) throw new Error("Describe the objective.");
-      if (!inputs.metricType) throw new Error("Choose the Test metric type.");
-      if (!inputs.metric.trim()) throw new Error("Name the evaluation metric.");
-      if (inputs.metricType === "custom" && !inputs.evaluationScript.trim()) {
-        throw new Error("Choose the custom evaluation script.");
+      if (!predefined?.test_sets?.length) {
+        if (!inputs.metricType) throw new Error("Choose the Test metric type.");
+        if (!inputs.metric.trim()) throw new Error("Name the evaluation metric.");
+        if (inputs.metricType === "custom" && !inputs.evaluationScript.trim()) {
+          throw new Error("Choose the custom evaluation script.");
+        }
+        if (!inputs.metricDirection) throw new Error("Choose whether the evaluation target is Max or Min.");
       }
-      if (!inputs.metricDirection) throw new Error("Choose whether the evaluation target is Max or Min.");
       if (validationContract.independent) {
         if (!validationContract.metricType) throw new Error("Choose the Validation metric type.");
         if (!validationContract.metric) throw new Error("Choose the Validation metric.");
@@ -403,9 +443,11 @@ export function CustomizedRunForm({
         }
         if (!validationContract.metricDirection) throw new Error("Choose the Validation target.");
       }
-      if (!inputs.testSet.trim()) throw new Error("Choose the held-out test set.");
-      if (!columns(inputs.answerFields).length) throw new Error("Name at least one test answer field.");
-      if (!inputs.testSampleSubmission.trim()) throw new Error("Choose the test sample submission.");
+      if (!predefined?.test_sets?.length) {
+        if (!inputs.testSet.trim()) throw new Error("Choose the held-out test set.");
+        if (!columns(inputs.answerFields).length) throw new Error("Name at least one test answer field.");
+        if (!inputs.testSampleSubmission.trim()) throw new Error("Choose the test sample submission.");
+      }
       if (inputs.validationSet.trim()) {
         if (!columns(inputs.validationAnswerFields).length) throw new Error("A named validation set requires validation answer fields.");
         if (!inputs.validationSampleSubmission.trim()) throw new Error("A named validation set requires a validation sample submission.");
@@ -436,6 +478,7 @@ export function CustomizedRunForm({
         throw new Error("Max queue wait must be greater than 0 and at most 168 hours.");
       }
       const body = {
+        setup_id: runSetup.begin(),
         mode: "customized_pipeline",
         task_name: taskName.trim(),
         run_name: runName.trim(),
@@ -466,6 +509,7 @@ export function CustomizedRunForm({
     } catch (e) {
       setError(String((e as Error).message || e));
     } finally {
+      runSetup.stop();
       setBusy(false);
     }
   }
@@ -473,7 +517,7 @@ export function CustomizedRunForm({
   return (
     <>
       <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
-        <RunInputs {...inputs} requiredMissing={requiredMissing}
+        <RunInputs {...inputs} taskTestSuite={predefined?.test_sets} requiredMissing={requiredMissing}
           requiredPrefixValues={[
             { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
             { name: "Task name", value: taskName.trim() || "Not set", complete: Boolean(taskName.trim()) },
@@ -687,7 +731,9 @@ export function CustomizedRunForm({
       </div>
 
       <div className="mt-4 flex items-center justify-end gap-2 border-t border-hair pt-4">
-        {taskName.trim() && touched && (
+        {busy && runSetup.progress ? (
+          <RunSetupProgressView progress={runSetup.progress} />
+        ) : taskName.trim() && touched && (
           <div className="mr-auto min-w-0 flex-1">
             {picked ? (
               <p className="font-mono text-2xs text-slate-500">

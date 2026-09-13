@@ -228,7 +228,9 @@ def _stamp_pipeline_payload(
     if run.mode == "single_stage":
         return payload
     spec = dict(run.holdout or {})
-    from zevo.engine.run.runner import _validation_files
+    from zevo.engine.run.runner import _validation_files, _validation_sets
+    validation_suite = _validation_sets(spec)
+    primary_validation = validation_suite[0] if validation_suite else {}
     evaluation_script, sample_submission = _validation_files(spec)
     stamped = dict(payload)
     pins = dict(run.decision_pins or {})
@@ -255,18 +257,16 @@ def _stamp_pipeline_payload(
     if agent_id == "inference":
         stamp_exact("base_model", pins.get("base_model"))
         inference_mapping = dict(pins.get("inference_config") or {})
+        # The named Benchmark member owns its query. A Run-level inference
+        # configuration may pin reusable execution details, but cannot turn
+        # one member's prompt into a global prompt for a heterogeneous suite.
+        inference_mapping.pop("inference_query", None)
         inference_query = str(
-            pins.get("inference_query")
+            primary_validation.get("inference_query")
             or spec.get("validation_inference_query")
             or ""
         ).strip()
         if inference_query:
-            supplied_query = inference_mapping.get("inference_query")
-            if supplied_query not in (None, "") and supplied_query != inference_query:
-                raise ValueError(
-                    "Run inference_config.inference_query conflicts with the "
-                    "Task's primary Test query"
-                )
             inference_mapping["inference_query"] = inference_query
         run_configuration_pins = {
             **{
@@ -335,17 +335,33 @@ def _stamp_pipeline_payload(
         stamped["scoring_set"] = scoring_set
         stamped["sample_submission"] = sample_submission
     elif agent_id == "evaluation":
-        scoring_set = str(spec.get("validation_set") or "")
+        scoring_set = str(
+            primary_validation.get("validation_set")
+            or spec.get("validation_set")
+            or ""
+        )
         if not scoring_set:
             raise ValueError("pipeline Evaluation requires a validation_set")
         stamped["scoring_set"] = scoring_set
-        stamped["evaluation_script"] = evaluation_script
-        stamped["evaluator_sha256"] = str(
-            spec.get("validation_evaluator_sha256") or ""
+        stamped["evaluation_script"] = str(
+            primary_validation.get("evaluation_script") or evaluation_script
         )
-        stamped["answer_fields"] = list(spec.get("validation_answer_fields") or [])
-        stamped["sample_submission"] = sample_submission
-        stamped["metric"] = run.validation_metric
+        stamped["evaluator_sha256"] = str(
+            primary_validation.get("evaluator_sha256")
+            or spec.get("validation_evaluator_sha256")
+            or ""
+        )
+        stamped["answer_fields"] = list(
+            primary_validation.get("answer_fields")
+            or spec.get("validation_answer_fields")
+            or []
+        )
+        stamped["sample_submission"] = str(
+            primary_validation.get("sample_submission") or sample_submission
+        )
+        stamped["metric"] = str(
+            primary_validation.get("metric") or run.validation_metric
+        )
     return stamped
 
 
@@ -853,6 +869,15 @@ async def create_ticket(
         inputs = validate_bindings(
             agent_id=body.agent_id, payload=payload, inputs=body.inputs or {}
         ) if body.input_format == "typed" else {}
+        if body.agent_id == "data" and payload.get("operation") == "prepare_run_data":
+            from zevo.engine.remote_datasets import looks_like_hub_id
+            if looks_like_hub_id(str(payload.get("dataset") or "")) and not (
+                (inputs or {}).get("device_info")
+            ):
+                raise ValueError(
+                    "Hugging Face Data requires a purpose=train device_info binding; "
+                    "download and preparation run on that remote data plane"
+                )
         if inputs:
             from zevo.engine.run.scheduler.bindings import resolve_input_bindings
             inputs = await resolve_input_bindings(db, run_id=run_id, inputs=inputs)
@@ -882,13 +907,20 @@ async def create_ticket(
                     )
                 return source
 
-            if body.agent_id in {"train", "inference"}:
+            if body.agent_id in {"train", "inference"} or (
+                body.agent_id == "data" and "device_info" in (inputs or {})
+            ):
                 infra_ticket = await source_ticket("device_info", "infrastructure")
                 purpose = str((infra_ticket.payload or {}).get("purpose") or "")
-                if purpose != body.agent_id:
+                allowed_purposes = (
+                    {"train"}
+                    if body.agent_id in {"data", "train"}
+                    else {"train", "inference"}
+                )
+                if purpose not in allowed_purposes:
                     raise ValueError(
                         f"{body.agent_id} requires an Infrastructure plan with "
-                        f"purpose={body.agent_id!r}, got {purpose!r}"
+                        f"purpose in {sorted(allowed_purposes)!r}, got {purpose!r}"
                     )
 
             if body.agent_id == "train" and payload.get("operation") == "train":
@@ -930,6 +962,17 @@ async def create_ticket(
                         "Train requires a verified data_signature from its Data ticket"
                     )
                 payload["data_signature"] = data_signature
+                data_device = dict((data_ticket.inputs or {}).get("device_info") or {})
+                train_device = dict((inputs or {}).get("device_info") or {})
+                if (
+                    data_device.get("source_ticket_id")
+                    and data_device.get("source_ticket_id")
+                    != train_device.get("source_ticket_id")
+                ):
+                    raise ValueError(
+                        "Train must reuse the same remote data plane that prepared "
+                        "its Data artifact; create a new Data ticket after changing host"
+                    )
                 payload = TrainPayload.model_validate(payload).model_dump()
                 baseline_config = await source_ticket("inference_config", "inference")
                 if (

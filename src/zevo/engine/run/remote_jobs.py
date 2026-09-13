@@ -165,7 +165,7 @@ async def cancel_ticket_remote_job(
     db: AsyncSession, ticket: Ticket,
 ) -> dict[str, Any]:
     """Stop remote work for one Ticket, never an unrelated device or job."""
-    if ticket.agent_id not in {"train", "inference"}:
+    if ticket.agent_id not in {"data", "train", "inference"}:
         return {"ticket_id": ticket.id, "attempted": False, "reason": "no remote execution"}
     info = await _device_info_for_ticket(db, ticket)
     if info is None:

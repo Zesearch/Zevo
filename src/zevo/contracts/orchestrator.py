@@ -52,6 +52,10 @@ BUILTIN_METRICS = frozenset({
     # QA. Inference emits per-option log-likelihoods; Evaluation argmaxes them
     # deterministically. `accuracy_norm` is an alias for the same scorer.
     "mc_loglikelihood", "accuracy_norm",
+    # Shared execution-based scoring for registered coding benchmarks.  The
+    # dataset reference selects only a thin row adapter; all adapters use the
+    # same isolated worker and aggregation path.
+    "pass_at_1",
 })
 
 # The built-in metrics whose scoring contract implies a deterministic +1/0
@@ -69,7 +73,11 @@ VERIFIABLE_REWARD_METRICS = frozenset({
 
 
 class TaskTestSet(BaseModel):
-    """One independently prompted and scored member of a Task's Test suite."""
+    """One independently prompted and scored member of a scoring suite.
+
+    ``test_set`` retains its wire name because Test was the first suite. The
+    same closed contract is also used by Setting-owned Validation suites.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -85,6 +93,17 @@ class TaskTestSet(BaseModel):
     metric_direction: Literal["max", "min"] = "max"
     evaluation_script: str = ""
     evaluator_sha256: str = Field("", pattern=r"^(?:|[0-9a-f]{64})$")
+    # An explicit Hub member may pin its exact table. Test catalogue entries
+    # usually resolve these centrally; independent Validation must be portable
+    # even when it is not registered there.
+    split: str = ""
+    config: str = ""
+    max_rows: int = Field(0, ge=0)
+    # Read-only planning metadata for the UI. ``max_rows`` remains the actual
+    # cap and materialization reports the authoritative count at Run setup;
+    # this value only lets a saved Task/Setting say how large its declared Hub
+    # split (or local table) is before a Run starts.
+    source_rows: int = Field(0, ge=0)
 
     @model_validator(mode="after")
     def normalize_and_validate(self) -> "TaskTestSet":
@@ -94,6 +113,8 @@ class TaskTestSet(BaseModel):
         self.sample_submission = self.sample_submission.strip()
         self.metric = self.metric.strip().lower()
         self.evaluation_script = self.evaluation_script.strip()
+        self.split = self.split.strip()
+        self.config = self.config.strip()
         self.answer_fields = [str(value).strip() for value in self.answer_fields]
         if not all((self.name, self.test_set, self.inference_query, self.metric)):
             raise ValueError("Test set fields must not be blank")
@@ -109,6 +130,14 @@ class TaskTestSet(BaseModel):
                 )
             if self.evaluation_script or self.evaluator_sha256:
                 raise ValueError("built-in metrics must not carry a custom evaluator")
+            if self.metric == "pass_at_1":
+                from zevo.code_benchmarks import code_execution_adapter_for
+
+                if not code_execution_adapter_for(self.test_set):
+                    raise ValueError(
+                        "pass_at_1 requires a registered coding benchmark "
+                        "(HumanEval+, MBPP+, LiveCodeBench, or CodeContests)"
+                    )
         elif not self.evaluation_script:
             raise ValueError("custom metrics require an evaluation_script")
         return self
@@ -127,6 +156,24 @@ def validate_test_suite(items: list[TaskTestSet]) -> list[TaskTestSet]:
         raise ValueError(
             "Test sets in one suite must share a metric direction because the "
             "headline score is their unweighted average"
+        )
+    return items
+
+
+def validate_validation_suite(items: list[TaskTestSet]) -> list[TaskTestSet]:
+    """Apply the same identity and aggregation invariants to Validation."""
+    if not items:
+        return items
+    names = [item.name.casefold() for item in items]
+    if len(names) != len(set(names)):
+        raise ValueError("Validation set names must be unique within a suite")
+    if any(not item.sample_submission for item in items):
+        raise ValueError("each Validation set requires a sample submission")
+    directions = {item.metric_direction for item in items}
+    if len(directions) > 1:
+        raise ValueError(
+            "Validation sets in one suite must share a metric direction because "
+            "the model-selection score is their unweighted average"
         )
     return items
 
@@ -292,6 +339,16 @@ class UserRequest(BaseModel):
         description=(
             "Named held-out Test contracts. A one-dataset task contains one "
             "item; a benchmark-like task contains several."
+        ),
+    )
+    validation_sets: list[TaskTestSet] = Field(
+        default_factory=list,
+        description=(
+            "Optional independent Validation contracts. When present, every "
+            "Test member remains 100% held out. When absent, validation_set may "
+            "supply one legacy/user-uploaded contract; if both are absent Zevo "
+            "derives 20% from eligible Test members, with at least 200 rows "
+            "per Validation member."
         ),
     )
     metric: str = Field(
@@ -490,10 +547,12 @@ class UserRequest(BaseModel):
             "Path to the FULL validation set — WITH the ground-truth columns. "
             "This is what every iteration is scored on. It is kept in the "
             "engine scoring boundary and is not exposed to Orchestrator or Data; "
-            "they receive only measured scores after evaluation. Leave '' and Zevo deterministically "
-            "takes 20% of Test before the Run begins. The derived Validation set "
-            "must contain at least 200 rows; otherwise upload Validation. Those "
-            "rows are removed from the final held-out Test population."
+            "they receive only measured scores after evaluation. Leave '' and "
+            "Zevo deterministically takes 20% from each sufficiently large "
+            "Test-suite member before the Run begins, requiring at least 200 "
+            "Validation rows per eligible member. Small benchmarks remain "
+            "final-test-only. Derived rows are removed from their final held-out "
+            "Test populations."
         ),
     )
     validation_split: str = Field(
@@ -546,6 +605,8 @@ class UserRequest(BaseModel):
     def validate_experiment_preferences(self) -> "UserRequest":
         if self.test_sets:
             self.test_sets = validate_test_suite(self.test_sets)
+        if self.validation_sets:
+            self.validation_sets = validate_validation_suite(self.validation_sets)
         self.training_method = self.training_method.strip().lower()
         if self.prompt_framing:
             self.prompt_framing = normalize_prompt_framing(self.prompt_framing)
@@ -647,7 +708,7 @@ def inherit_test_validation_contract(request: UserRequest) -> UserRequest:
     instead of accepting a second, potentially contradictory metric contract.
     A separately supplied Validation set remains fully independent.
     """
-    if request.validation_set.strip():
+    if request.validation_sets or request.validation_set.strip():
         return request
     return request.model_copy(update={
         "validation_metric_type": request.metric_type,
@@ -694,6 +755,11 @@ def scoring_asset_errors(request: UserRequest) -> list[str]:
     else:
         if not request.evaluation_script.strip():
             errors.append("custom Test metrics require evaluation_script")
+    if request.validation_sets:
+        # Each member is already a complete TaskTestSet contract. The scalar
+        # suite_average fields are an engine compatibility projection, not an
+        # evaluator users can select, so they must not be checked as one.
+        return errors
     if not request.validation_metric_type:
         errors.append("validation_set requires validation_metric_type")
     elif not validation_metric:

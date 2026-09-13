@@ -45,7 +45,18 @@ class TrainTaskInput(AgentTaskInput):
     run_id: str = Field(min_length=1)
     iteration: int = Field(ge=1)
 
-    dataset_path: str = Field(min_length=1)
+    dataset_path: str = Field(
+        min_length=1,
+        description=(
+            "Exact prepared dataset path. It is a remote path when "
+            "dataset_is_remote=true and must not be copied through Zevo."
+        ),
+    )
+    dataset_is_remote: bool = False
+    remote_data_receipt_path: str = Field(
+        "",
+        description="Compact local receipt proving the remote dataset identity and row count.",
+    )
     validation_dataset_path: str = Field(
         min_length=1,
         description=(
@@ -187,6 +198,14 @@ class TrainTaskInput(AgentTaskInput):
 
     @model_validator(mode="after")
     def require_selected_parent(self) -> "TrainTaskInput":
+        if self.dataset_is_remote and not self.remote_data_receipt_path:
+            raise ValueError(
+                "a remote training dataset requires remote_data_receipt_path"
+            )
+        if not self.dataset_is_remote and self.remote_data_receipt_path:
+            raise ValueError(
+                "remote_data_receipt_path is valid only for a remote dataset"
+            )
         if self.iteration == 1 and self.model_source != "base_model":
             raise ValueError("iteration 1 must start from the baseline model")
         if self.model_source == "base_model":

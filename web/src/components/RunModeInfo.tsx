@@ -17,33 +17,33 @@ type Way = { title: string; when: string; steps: string[]; note?: string };
 const WAYS: Record<RunLaunchMode, Way> = {
   auto: {
     title: "Auto",
-    when: "You want Zevo to define the evaluation contract.",
+    when: "You provide the objective; Zevo defines its evaluation suite.",
     steps: [
       "Name the run and give the task a new name. Auto always starts a fresh task, so a predefined task name is refused.",
       "Write the objective in plain language: what the model should get better at and what a correct answer looks like.",
       "Optionally pin the training data, base model, or training method. Leaving them blank gives Zevo the same L1–L4 ownership ladder as Standard.",
       "Optionally set a spend cap, an iteration budget, and the GPU backend.",
-      "Launch. Zevo chooses the metric and a public or synthesized held-out Test contract, then runs the normal optimization pipeline with your training-side choices.",
+      "Launch. Zevo chooses one or more public benchmarks (or synthesizes evaluation data when none fits), defines each scoring contract, and then runs the normal optimization pipeline.",
     ],
   },
   full_pipeline: {
     title: "Standard",
-    when: "You know how success is measured and can supply the examples.",
+    when: "You choose what to optimize; Zevo owns how the complete pipeline executes.",
     steps: [
       "Name the run and the task, and write the objective.",
-      "Choose the test metric type, the metric, and the target direction. A custom metric needs an evaluation script.",
-      "Upload the test set, name its answer fields, and give a sample submission that shows the expected output columns.",
-      "Optionally add a validation set with its own answer fields and sample submission. Without one, Zevo reserves 20% of the test set for validation, which needs at least 1,000 test rows.",
+      "Choose a predefined Task with its complete Test suite, or define the Test contract for a new Task.",
+      "Without independent Validation, Zevo deterministically reserves 20% per eligible Test set only when that yields at least 200 Validation rows; smaller benchmarks remain 100% final Test.",
       "Optionally pin the training data, base model or training method, then pick the GPU backend and the budgets.",
-      "Review the checklist until it reads ready, then launch.",
+      "Launch. Zevo selects prompt, loss, training hyperparameters, inference details, and agent execution plans.",
     ],
   },
   customized_pipeline: {
     title: "Customized",
-    when: "You want the full pipeline but with marching orders for each agent.",
+    when: "You want Standard plus explicit execution overrides.",
     steps: [
-      "Fill the same contract as Standard: names, objective, test metric and target, test set with answer fields and sample submission.",
-      "For each agent, write its instructions and set its inputs: files, output location and hyperparameters.",
+      "Start with the same Task, Test suite, Setting and automatic Validation policy as Standard.",
+      "Optionally pin prompt/loss/inference details or training hyperparameters.",
+      "Optionally give individual agents special instructions, files, or output locations.",
       "Mark each block strict, so the agent rejects any deviation, or advisory, so it may fall back only in the documented ways.",
       "Launch. The orchestrator runs the pipeline inside the blocks you set.",
     ],

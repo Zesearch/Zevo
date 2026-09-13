@@ -4,7 +4,8 @@ hyperparameter decisions.
 
 For `prepare_run_data`:
 
-1. Load exactly the supplied local/Hugging Face source, or, when no dataset was
+1. Load exactly the supplied local/Hugging Face source on the assigned remote
+   data plane, or, when no dataset was
    supplied, interpret `data_query` together with the task objective in
    `run_context` to discover and prepare a suitable source.
 2. Inspect schema and preserve source provenance.
@@ -17,19 +18,21 @@ For `prepare_run_data`:
    record family, without applying a tokenizer chat template or choosing any
    training/inference hyperparameter.
 5. Materialize the exact realized recipe described by `data_recipe_schema`,
-   verify the source fingerprint and output bytes, then return one `DataResult`
-   containing only Training artifact paths and measured row counts. After this
-   result is final, the engine independently removes exact semantic overlap
-   with hidden Validation and prepares the frozen scoring package.
+   verify the source fingerprint and remote output, then return one `DataResult`
+   containing remote Training pointers plus small local control artifacts. Do
+   not copy rows back. After this result is final, the engine independently
+   removes exact semantic overlap on the same host and prepares the frozen
+   scoring package.
 
 For `prepare_holdout_data`, create only the assigned questions-only Test view
 and return no training or Validation dataset.
 
 For `scope_problem` (Auto mode), derive only the Run's scoring contract from
-the objective and optional `test_query`: choose the metric and direction, acquire a real public
-benchmark as the held-out (or, only when none fits, synthesize a verified,
+the objective and optional `test_query`: choose metrics and a shared direction,
+acquire one or more complementary public benchmarks as the held-out suite (or,
+only when none fits, synthesize a verified,
 decontaminated private one with full provenance), build the submission
-template, and return one validated `scoping_result.json`. Produce no training,
+template for each member, and return one validated `scoping_result.json`. Produce no training,
 Validation, or questions-only artifacts, and do not infer training data, model,
 or method choices; the settled Run's later pipeline does that.
 

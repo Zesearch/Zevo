@@ -52,6 +52,11 @@ export type MetricType = "builtin" | "custom";
 export type TaskTestSet = {
   name: string;
   test_set: string;
+  split?: string;
+  config?: string;
+  max_rows?: number;
+  /** Known size of the source split; actual Run setup verifies it again. */
+  source_rows?: number;
   inference_query: string;
   sample_submission: string;
   metric_type: MetricType;
@@ -83,6 +88,8 @@ export type TaskDTO = {
 export type UserRequest = {
   task_objective: string;
   test_sets?: TaskTestSet[];
+  /** Independent optimization-only scoring suite. When present, Test stays whole. */
+  validation_sets?: TaskTestSet[];
   /** Effective held-out Test scoring values for this Run. */
   metric: string;
   metric_direction: MetricDirection;
@@ -151,6 +158,8 @@ export type AgentCustomization = {
 type RunEnvelope = {
   task_name: string;
   run_name: string;
+  /** Ephemeral correlation id used only while POST /runs prepares Test data. */
+  setup_id?: string;
   iteration_budget?: number;
   stop_threshold?: number;
   max_cost_usd?: number;
@@ -191,14 +200,10 @@ export type TaskSettingDTO = {
   base_model: string;
   training_method: string;
   method_config: Record<string, unknown>;
-  prompt_framing: string;
-  system_prompt: string;
-  loss_objective_config: Record<string, unknown>;
-  inference_config: Record<string, unknown>;
-  decoding_config: Record<string, unknown>;
   dataset: string;
   dataset_split: string;
   dataset_config: string;
+  validation_sets: TaskTestSet[];
   validation_set: string;
   validation_split: string;
   validation_config: string;
@@ -293,6 +298,8 @@ export type RemoteFileDTO = {
   split: string;
   /** The named subset, for repos that ship several. "" = the default config. */
   config: string;
+  /** Known size of this exact config/split, when catalogued. */
+  n_rows: number;
 };
 
 export type FileSetSourceDTO = {
@@ -523,6 +530,29 @@ export type IterationHistoryEntry = {
   next: string;
 };
 
+export type BenchmarkActivity = {
+  suite: "validation" | "test";
+  name: string;
+  stage: "preparing" | "inference" | "evaluation";
+  status: TicketStatus;
+  iteration: number;
+};
+
+export type BenchmarkSuiteProgress = {
+  completed: number;
+  total: number;
+  failed: number;
+  iteration: number;
+  model_source: "" | "base_model" | "checkpoint";
+  current: BenchmarkActivity[];
+};
+
+export type BenchmarkProgress = {
+  validation: BenchmarkSuiteProgress;
+  test: BenchmarkSuiteProgress;
+  current: BenchmarkActivity[];
+};
+
 export type RunDetail = RunSummary & {
   // The total split by what spent it: agent tokens vs RENTED GPU time. GPU is
   // legitimately 0 on a run that used the user's own hardware.
@@ -531,6 +561,8 @@ export type RunDetail = RunSummary & {
   /** The model that DROVE the agents, not the one they trained. Empty until the
    *  first heartbeat lands. */
   harness_model: string;
+  /** Current candidate's named Validation/Test suite progress. */
+  benchmark_progress?: BenchmarkProgress;
   tickets: Array<{
     id: string;
     agent_id: string;

@@ -157,6 +157,10 @@ def test_where_a_run_executes_is_not_part_of_the_setting(monkeypatch) -> None:
     assert setting_identity({**base, "data_query": "prefer curated data"}) != same
     assert setting_identity({**base, "model_query": "prefer a compact model"}) != same
     assert setting_identity({**base, "method_query": "prefer supervised methods"}) != same
+    # Customized details are Run-only overlays on the same Standard Setting.
+    assert setting_identity({**base, "prompt_framing": "chat"}) == same
+    assert setting_identity({**base, "loss_objective_config": {"loss_type": "nll"}}) == same
+    assert setting_identity({**base, "inference_config": {"input_fields": ["q"]}}) == same
 
     # And a setting cannot carry them at all, so nothing can write a blank one
     # into a form that has no way to show it.
@@ -262,3 +266,38 @@ def test_test_derived_validation_details_do_not_create_duplicate_settings() -> N
     independent = {**legacy, "validation_set": "/data/validation.json"}
     changed_metric = {**independent, "validation_metric": "accuracy"}
     assert setting_identity(independent) != setting_identity(changed_metric)
+
+
+def test_validation_suite_has_the_same_identity_as_its_json_query_value() -> None:
+    """The launch form sends the suite through URLSearchParams as JSON."""
+    import json
+
+    from zevo.api.routers.ui.tasks import setting_identity
+
+    suite = [{
+        "name": "Math · GSM8K",
+        "test_set": "openai/gsm8k",
+        "split": "test",
+        "config": "main",
+        "max_rows": 200,
+        "inference_query": "Solve {question}.",
+        "sample_submission": "/data/gsm8k.csv",
+        "metric_type": "custom",
+        "metric": "answer_accuracy",
+        "answer_fields": ["answer"],
+        "metric_direction": "max",
+        "evaluation_script": "/data/evaluator.py",
+        "evaluator_sha256": "",
+    }]
+    stored = {
+        "base_model": "Q", "validation_sets": suite,
+        "validation_metric": "answer_accuracy",
+    }
+    query = {**stored, "validation_sets": json.dumps(suite)}
+    assert setting_identity(stored) == setting_identity(query)
+    with_refreshed_row_metadata = {
+        **stored,
+        "validation_sets": [{**suite[0], "source_rows": 1_319}],
+    }
+    assert setting_identity(stored) == setting_identity(with_refreshed_row_metadata)
+    assert setting_identity({"validation_sets": "[]"}) == setting_identity({})

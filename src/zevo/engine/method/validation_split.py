@@ -6,10 +6,11 @@ orchestrator is tuning on the set it is judged by: after a dozen iterations of
 number, not a measured one. So the loop optimizes a VALIDATION set and the test
 set is scored behind its back (zevo.engine.run.runner, the held-out lane).
 
-When a task does not ship Validation, Zevo deterministically takes 20% of its
-Test rows before the Run starts.  At least 200 Validation rows are required; a
-smaller Test contract is rejected and the user must upload Validation.  The
-remaining 80% stays in the private held-out lane.
+When a task does not ship Validation, Zevo deterministically takes 20% of every
+Test-suite member that is large enough to support a useful split. Small
+benchmarks are kept intact as final-Test-only measurements instead of turning a
+handful of examples into a noisy optimization signal. The remaining 80% of an
+eligible member stays in the private held-out lane.
 
   * **The scoring binding stays aligned.** The Test answer fields are split by
     the same row indices. The sample submission is a schema/example contract,
@@ -30,16 +31,47 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 # How much of Test becomes Validation when none is supplied.
 FRACTION = 0.20
+# An automatically-created optimization signal needs enough observations to
+# be stable across iterations. At 20%, this makes 1,000 rows the smallest
+# eligible Test population; smaller benchmarks remain completely held out.
 MIN_VALIDATION_ROWS = 200
+MIN_FINAL_TEST_ROWS = 40
 
 
 class SplitError(RuntimeError):
     """The supplied Test population cannot produce a valid Validation set."""
+
+
+class InsufficientValidationRows(SplitError):
+    """A valid Test is too small to donate rows to iterative model selection."""
+
+
+def _allow_large_csv_fields() -> None:
+    """Remove ``csv``'s legacy 128 KiB per-cell ceiling.
+
+    Benchmark rows routinely keep long prompts, conversations, reference
+    solutions, or compressed test payloads in one cell.  JSON/Parquet readers
+    do not impose an equivalent limit, so rejecting only their CSV projection
+    is both surprising and format-dependent.  CPython's accepted maximum is
+    platform-sized; reduce it only on platforms whose C ``long`` is narrower.
+
+    ``csv.field_size_limit`` is process-global.  We only ever raise it, which
+    also protects the later fingerprint/evaluation readers in the same setup
+    request from failing on the file that was successfully split here.
+    """
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
 
 
 @dataclass
@@ -94,9 +126,13 @@ def _read_raw(path: Path) -> tuple[list[str], list[dict]]:
     """
     fmt = _fmt(path)
     if fmt == "csv":
-        with path.open(newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            return list(reader.fieldnames or []), [dict(r) for r in reader]
+        _allow_large_csv_fields()
+        try:
+            with path.open(newline="", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                return list(reader.fieldnames or []), [dict(r) for r in reader]
+        except csv.Error as exc:
+            raise SplitError(f"{path}: cannot read CSV: {exc}") from exc
 
     if fmt == "json":
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -186,17 +222,22 @@ def _order_key(row: dict[str, str], index: int) -> tuple[str, int]:
 
 
 def _n_validation(total: int) -> int:
-    """Exactly 20% of Test, subject to the minimum useful population."""
+    """Exactly 20% of Test, subject to useful Validation and Test floors."""
     if total < 2:
-        raise SplitError(f"cannot carve a validation set from {total} Test row(s)")
-    # Floor makes the minimum unambiguous: a 999-row Test has only 199 whole
-    # rows in its 20% allocation and therefore cannot qualify by rounding up.
+        raise InsufficientValidationRows(
+            f"{total} Test row(s) are too few for Validation; keep this "
+            "benchmark final-test-only"
+        )
+    # Floor makes the threshold unambiguous and preserves the exact 20/80
+    # policy for every eligible benchmark.
     selected = min(int(total * FRACTION), total - 1)
-    if selected < MIN_VALIDATION_ROWS:
-        raise SplitError(
+    remaining = total - selected
+    if selected < MIN_VALIDATION_ROWS or remaining < MIN_FINAL_TEST_ROWS:
+        raise InsufficientValidationRows(
             f"20% of the Test set is only {selected} row(s); derived Validation "
-            f"requires at least {MIN_VALIDATION_ROWS}. Upload a separate "
-            "Validation set instead (or provide a Test set with at least 1,000 rows)."
+            f"requires at least {MIN_VALIDATION_ROWS} while final Test keeps at "
+            f"least {MIN_FINAL_TEST_ROWS}. Keep this benchmark final-test-only "
+            "or supply an independent Validation set."
         )
     return selected
 
@@ -297,10 +338,14 @@ def copy_sample_submission(
     for row count and identity later, at the Inference/Evaluation boundaries.
     """
     src = Path(source)
-    with src.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        columns = list(reader.fieldnames or [])
-        rows = [dict(row) for row in reader]
+    _allow_large_csv_fields()
+    try:
+        with src.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            columns = list(reader.fieldnames or [])
+            rows = [dict(row) for row in reader]
+    except csv.Error as exc:
+        raise SplitError(f"{src}: cannot read CSV: {exc}") from exc
     if not columns or not rows:
         raise SplitError("Test sample submission must be a non-empty CSV")
     if len(columns) != len(set(columns)):

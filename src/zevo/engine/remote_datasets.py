@@ -21,11 +21,24 @@ on the Data Ticket before a worker runs.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import logging
+import os
+import shutil
+import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import AsyncIterator
+from uuid import uuid4
 
 from zevo.paths import files_root as _files_root
+
+
+log = logging.getLogger(__name__)
 
 # Same location the files router serves from (zevo.paths.files_root, so the
 # ZEVO_FILES_DIR override applies here exactly like it does in the API).
@@ -41,6 +54,7 @@ class RemoteSpec:
     config: str = ""
     role: str = ""
     dataset: str = ""   # the catalogue dataset that declares it
+    n_rows: int = 0      # known size of the declared source split, if recorded
 
     def as_payload(self) -> dict[str, str]:
         """The subset worth putting on a ticket — omitting what was not declared,
@@ -81,9 +95,25 @@ class MaterializeError(RuntimeError):
     still a fixable input rather than a stage failing an hour in."""
 
 
-# The datasets-server REST API rather than the `datasets` library: the backend
-# needs a few hundred rows of a public split, not a dependency that pulls in
-# torch.
+class _ParquetUnavailable(RuntimeError):
+    """The converted Parquet route is unavailable; the rows API may be used."""
+
+
+class _IncompleteDownload(RuntimeError):
+    """A shard response ended before its declared byte size."""
+
+
+@dataclass(frozen=True)
+class _ParquetShard:
+    url: str
+    filename: str
+    size: int
+
+
+# Dataset Viewer resolves the exact config/split and publishes converted
+# Parquet files. Reading those files takes one request per shard instead of one
+# request per 100 rows. The rows endpoint remains a compatibility fallback for
+# datasets whose Parquet conversion is pending or unavailable.
 _SERVER = "https://datasets-server.huggingface.co"
 _PAGE = 100
 # Not a policy on validation-set size — that is the user's call, and a cap here
@@ -92,6 +122,241 @@ _PAGE = 100
 # sequential HTTP calls inside run creation. Past this the run is refused with
 # the count, which is a thing you can act on; a truncated set is not.
 _MAX_FETCH = 200_000
+
+# Dataset Viewer enforces request quotas, and a benchmark suite can require
+# dozens of 100-row calls. Authenticated requests receive the account's quota;
+# bounded retries absorb a short shared-service throttle instead of making the
+# whole Run fail on the first 429.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0)
+_MAX_RETRY_DELAY = 30.0
+
+# Materialized held-out rows are reusable Run inputs, not ordinary user files.
+# Keep them behind the same private boundary as Test data. A one-day default
+# prevents every launch from redownloading a 17-member suite while still
+# allowing an unpinned Hub dataset to refresh. Set the TTL to 0 to disable.
+_CACHE_VERSION = 1
+_DEFAULT_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+def _hf_token() -> str:
+    """Return the latest Hub token without requiring a container restart.
+
+    Settings writes ``/app/.env`` after the backend has started, so consulting
+    only ``os.environ`` makes a freshly saved token look configured in the UI
+    while Dataset Viewer calls remain anonymous. The env file wins so token
+    replacement and clearing also take effect immediately.
+    """
+    env_path = Path(os.environ.get("ZEVO_ENV_FILE", "/app/.env"))
+    try:
+        if env_path.is_file():
+            for raw in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                if key.strip() != "HF_TOKEN":
+                    continue
+                value = value.strip()
+                if (
+                    len(value) >= 2
+                    and value[0] == value[-1]
+                    and value[0] in {"'", '"'}
+                ):
+                    value = value[1:-1]
+                return value.strip()
+    except OSError as exc:
+        # A transient bind-mount/read error must not hide the token Compose
+        # already injected into the process.
+        log.warning("cannot read HF_TOKEN from %s: %s", env_path, exc)
+    return os.environ.get("HF_TOKEN", "").strip()
+
+
+def _hf_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _retry_delay(response, fallback: float) -> float:
+    """Honor Retry-After (seconds or HTTP date), with a finite UI wait."""
+    raw = (response.headers.get("Retry-After") or "").strip()
+    if raw:
+        try:
+            delay = float(raw)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(raw)
+                delay = retry_at.timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                delay = fallback
+        return min(_MAX_RETRY_DELAY, max(0.0, delay))
+    return min(_MAX_RETRY_DELAY, fallback)
+
+
+async def _get_json(client, url: str, *, params: dict[str, object]) -> dict:
+    """GET one Dataset Viewer document with bounded transient retries."""
+    import httpx
+
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            if (
+                exc.response.status_code not in _RETRYABLE_STATUS
+                or attempt >= len(_RETRY_DELAYS)
+            ):
+                raise
+            delay = _retry_delay(exc.response, _RETRY_DELAYS[attempt])
+            log.warning(
+                "Hugging Face Dataset Viewer returned %s; retrying in %.1fs "
+                "(%d/%d)",
+                exc.response.status_code,
+                delay,
+                attempt + 1,
+                len(_RETRY_DELAYS),
+            )
+            await asyncio.sleep(delay)
+        except httpx.TransportError:
+            if attempt >= len(_RETRY_DELAYS):
+                raise
+            delay = _RETRY_DELAYS[attempt]
+            log.warning(
+                "Hugging Face Dataset Viewer request failed; retrying in %.1fs "
+                "(%d/%d)",
+                delay,
+                attempt + 1,
+                len(_RETRY_DELAYS),
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
+
+
+def _cache_root() -> Path:
+    from zevo.paths import holdout_root
+
+    return Path(holdout_root()) / "huggingface-datasets"
+
+
+def _cache_ttl_seconds() -> int:
+    raw = os.environ.get(
+        "ZEVO_HF_DATASET_CACHE_TTL_SECONDS",
+        str(_DEFAULT_CACHE_TTL_SECONDS),
+    )
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_CACHE_TTL_SECONDS
+
+
+def _cache_identity(
+    *, hub_id: str, split: str, config: str, limit: int, token: str,
+) -> tuple[Path, dict[str, object]]:
+    # The token itself is never persisted. Its digest prevents a private/gated
+    # snapshot fetched with one credential from being silently reused after the
+    # installation switches credentials.
+    identity: dict[str, object] = {
+        "version": _CACHE_VERSION,
+        "hub_id": hub_id,
+        "requested_split": split,
+        "requested_config": config,
+        "limit": limit,
+        "credential": hashlib.sha256(token.encode()).hexdigest() if token else "anonymous",
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return _cache_root() / digest, identity
+
+
+def _cached_materialization(
+    *, entry: Path, identity: dict[str, object], out_dir: str,
+) -> tuple[str, list[str], int, str] | None:
+    ttl = _cache_ttl_seconds()
+    data_path = entry / "dataset.csv"
+    meta_path = entry / "metadata.json"
+    if ttl <= 0 or not data_path.is_file() or not meta_path.is_file():
+        return None
+    try:
+        if time.time() - meta_path.stat().st_mtime > ttl:
+            # The completed snapshot expired. Its copied Run artifacts remain
+            # intact, but neither the CSV nor its converted shards should pin
+            # an unversioned Hub dataset beyond the configured TTL.
+            data_path.unlink(missing_ok=True)
+            meta_path.unlink(missing_ok=True)
+            shutil.rmtree(entry / "parquet", ignore_errors=True)
+            return None
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("identity") != identity:
+            return None
+        from zevo.code_benchmarks import code_execution_adapter_for
+
+        if (
+            code_execution_adapter_for(str(identity.get("hub_id") or ""))
+            in {"livecodebench", "code_contests"}
+            and meta.get("code_answer_projection") != "content_addressed_v1"
+        ):
+            # Older caches embed multi-gigabyte private tests in CSV cells and
+            # cannot be streamed by the normal tabular pipeline. Re-project
+            # from retained Parquet shards without another Hub download.
+            return None
+        columns = meta.get("columns")
+        n_rows = meta.get("n_rows")
+        if (
+            not isinstance(columns, list)
+            or not all(isinstance(c, str) for c in columns)
+            or not isinstance(n_rows, int)
+            or n_rows <= 0
+            or data_path.stat().st_size <= 0
+        ):
+            return None
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / "validation.csv"
+        shutil.copy2(data_path, path)
+        cfg = str(meta.get("resolved_config") or "")
+        spl = str(meta.get("resolved_split") or "")
+        scope = "all" if int(identity["limit"]) <= 0 else "the first"
+        note = f"reused cached {scope} {n_rows} rows of {identity['hub_id']} ({cfg}/{spl})"
+        return str(path), columns, n_rows, note
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        log.warning("ignoring invalid Hugging Face dataset cache %s: %s", entry, exc)
+        return None
+
+
+def _store_materialization(
+    *, entry: Path, identity: dict[str, object], source: Path,
+    columns: list[str], n_rows: int, config: str, split: str,
+) -> None:
+    if _cache_ttl_seconds() <= 0:
+        return
+    try:
+        entry.mkdir(parents=True, exist_ok=True)
+        nonce = uuid4().hex
+        data_tmp = entry / f"dataset.{nonce}.tmp"
+        meta_tmp = entry / f"metadata.{nonce}.tmp"
+        shutil.copy2(source, data_tmp)
+        from zevo.code_benchmarks import code_execution_adapter_for
+
+        adapter = code_execution_adapter_for(str(identity.get("hub_id") or ""))
+        meta_tmp.write_text(json.dumps({
+            "identity": identity,
+            "resolved_config": config,
+            "resolved_split": split,
+            "columns": columns,
+            "n_rows": n_rows,
+            "code_answer_projection": (
+                "content_addressed_v1"
+                if adapter in {"livecodebench", "code_contests"} else ""
+            ),
+        }, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        os.replace(data_tmp, entry / "dataset.csv")
+        # Metadata is the commit marker and is therefore replaced last.
+        os.replace(meta_tmp, entry / "metadata.json")
+    except OSError as exc:
+        # Caching is an optimization. A successfully fetched Run must remain
+        # launchable when its cache volume is temporarily unwritable.
+        log.warning("cannot cache Hugging Face dataset %s: %s", identity["hub_id"], exc)
 
 
 async def _resolve_split(
@@ -104,9 +369,11 @@ async def _resolve_split(
     other split, which nothing downstream can detect.
     """
     try:
-        r = await client.get(f"{_SERVER}/splits", params={"dataset": hub_id})
-        r.raise_for_status()
-        available = r.json().get("splits") or []
+        available = (await _get_json(
+            client,
+            f"{_SERVER}/splits",
+            params={"dataset": hub_id},
+        )).get("splits") or []
     except Exception as e:  # network, 404, gated repo, malformed JSON
         raise MaterializeError(f"cannot read the splits of {hub_id!r}: {e}")
     if not available:
@@ -173,6 +440,333 @@ def _cell(v: object) -> str:
     return "" if v is None else str(v)
 
 
+async def _parquet_shards(
+    client, hub_id: str, config: str, split: str,
+) -> list[_ParquetShard]:
+    """Return the complete converted-Parquet manifest for one resolved split."""
+    try:
+        document = await _get_json(
+            client,
+            f"{_SERVER}/parquet",
+            params={"dataset": hub_id},
+        )
+    except Exception as exc:
+        raise _ParquetUnavailable(f"cannot list converted Parquet files: {exc}") from exc
+
+    # A partial manifest is not a smaller equivalent dataset. Falling back is
+    # preferable to silently evaluating on only the shards converted so far.
+    if document.get("partial"):
+        raise _ParquetUnavailable("converted Parquet manifest is partial")
+
+    shards: list[_ParquetShard] = []
+    for raw in document.get("parquet_files") or []:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("config") or "") != config:
+            continue
+        if str(raw.get("split") or "") != split:
+            continue
+        url = str(raw.get("url") or "").strip()
+        if not url.startswith(("https://", "http://")):
+            continue
+        try:
+            size = max(0, int(raw.get("size") or 0))
+        except (TypeError, ValueError):
+            size = 0
+        shards.append(_ParquetShard(
+            url=url,
+            filename=str(raw.get("filename") or Path(url).name or "shard.parquet"),
+            size=size,
+        ))
+    if not shards:
+        raise _ParquetUnavailable(
+            f"no converted Parquet files for {config}/{split}"
+        )
+    return shards
+
+
+@asynccontextmanager
+async def _exclusive_file_lock(path: Path) -> AsyncIterator[None]:
+    """Serialize writers of a persistent shard cache across API requests."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - Zevo containers are POSIX
+            yield
+            return
+        await asyncio.to_thread(fcntl.flock, handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(fcntl.flock, handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+async def _download_parquet_shard(
+    client, shard: _ParquetShard, target: Path,
+) -> Path:
+    """Download one shard atomically, resuming a retained `.part` file."""
+    import httpx
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(target.suffix + ".part")
+    lock = target.with_suffix(target.suffix + ".lock")
+    async with _exclusive_file_lock(lock):
+        if target.is_file():
+            size = target.stat().st_size
+            if size > 0 and (shard.size <= 0 or size == shard.size):
+                return target
+            if shard.size > 0 and 0 < size < shard.size:
+                os.replace(target, partial)
+            else:
+                target.unlink(missing_ok=True)
+
+        last_error: Exception | None = None
+        for attempt in range(len(_RETRY_DELAYS) + 1):
+            try:
+                offset = partial.stat().st_size if partial.is_file() else 0
+                if shard.size > 0 and offset > shard.size:
+                    partial.unlink(missing_ok=True)
+                    offset = 0
+                headers = {"Range": f"bytes={offset}-"} if offset else {}
+                async with client.stream("GET", shard.url, headers=headers) as response:
+                    # Some object stores answer a completed Range request with
+                    # 416. If the retained bytes equal the manifest size, the
+                    # file is already complete and only needs committing.
+                    if (
+                        response.status_code == 416
+                        and shard.size > 0
+                        and offset == shard.size
+                    ):
+                        os.replace(partial, target)
+                        return target
+                    response.raise_for_status()
+                    append = offset > 0 and response.status_code == 206
+                    mode = "ab" if append else "wb"
+                    with partial.open(mode) as handle:
+                        async for chunk in response.aiter_bytes():
+                            if chunk:
+                                handle.write(chunk)
+
+                downloaded = partial.stat().st_size
+                if downloaded <= 0:
+                    raise _IncompleteDownload("downloaded shard is empty")
+                if shard.size > 0 and downloaded != shard.size:
+                    if downloaded > shard.size:
+                        partial.unlink(missing_ok=True)
+                    raise _IncompleteDownload(
+                        f"expected {shard.size} bytes, received {downloaded}"
+                    )
+                os.replace(partial, target)
+                return target
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if (
+                    exc.response.status_code not in _RETRYABLE_STATUS
+                    or attempt >= len(_RETRY_DELAYS)
+                ):
+                    break
+                delay = _retry_delay(exc.response, _RETRY_DELAYS[attempt])
+            except (httpx.TransportError, _IncompleteDownload) as exc:
+                last_error = exc
+                if attempt >= len(_RETRY_DELAYS):
+                    break
+                delay = _RETRY_DELAYS[attempt]
+            except OSError as exc:
+                raise _ParquetUnavailable(
+                    f"cannot cache Parquet shard {shard.filename!r}: {exc}"
+                ) from exc
+            log.warning(
+                "Hugging Face Parquet shard download failed; retrying in %.1fs "
+                "(%d/%d): %s",
+                delay,
+                attempt + 1,
+                len(_RETRY_DELAYS),
+                last_error,
+            )
+            await asyncio.sleep(delay)
+
+    raise _ParquetUnavailable(
+        f"cannot download Parquet shard {shard.filename!r}: {last_error}"
+    )
+
+
+def _write_parquet_csv(
+    *, shard_paths: list[Path], out_dir: str, limit: int, hub_id: str,
+) -> tuple[str, list[str], int]:
+    """Stream downloaded Parquet shards into Zevo's existing CSV contract."""
+    import csv as _csv
+
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:  # pragma: no cover - required project dependency
+        raise _ParquetUnavailable("pyarrow is unavailable") from exc
+
+    readers = []
+    columns: list[str] = []
+    total_rows = 0
+    try:
+        for path in shard_paths:
+            reader = pq.ParquetFile(path)
+            readers.append(reader)
+            total_rows += int(reader.metadata.num_rows)
+            for name in reader.schema_arrow.names:
+                if name not in columns:
+                    columns.append(name)
+    except Exception as exc:
+        raise _ParquetUnavailable(f"cannot read converted Parquet: {exc}") from exc
+
+    if total_rows <= 0 or not columns:
+        raise _ParquetUnavailable("converted Parquet contains no rows")
+    if limit <= 0 and total_rows > _MAX_FETCH:
+        raise MaterializeError(
+            f"converted split has {total_rows:,} rows, which is too many to pull "
+            "into a validation set at run creation. Point at a smaller split, "
+            "or upload the rows you want as a file."
+        )
+
+    requested = min(total_rows, limit) if limit > 0 else total_rows
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "validation.csv"
+    temporary = out / f"validation.{uuid4().hex}.tmp"
+    written = 0
+    from zevo.code_benchmarks import (
+        code_execution_adapter_for,
+        externalize_code_answers,
+    )
+    adapter = code_execution_adapter_for(hub_id)
+    try:
+        with temporary.open("w", newline="", encoding="utf-8") as handle:
+            writer = _csv.DictWriter(
+                handle, fieldnames=columns, extrasaction="ignore",
+            )
+            writer.writeheader()
+            for reader in readers:
+                for batch in reader.iter_batches(
+                    batch_size=1
+                    if adapter in {"livecodebench", "code_contests"} else 1024,
+                ):
+                    for row in batch.to_pylist():
+                        row = externalize_code_answers(adapter, row)
+                        writer.writerow({c: _cell(row.get(c)) for c in columns})
+                        written += 1
+                        if written >= requested:
+                            break
+                    if written >= requested:
+                        break
+                if written >= requested:
+                    break
+        os.replace(temporary, path)
+    except Exception as exc:
+        temporary.unlink(missing_ok=True)
+        if isinstance(exc, MaterializeError):
+            raise
+        raise _ParquetUnavailable(f"cannot convert Parquet to CSV: {exc}") from exc
+    return str(path), columns, written
+
+
+async def _materialize_parquet(
+    *, client, hub_id: str, config: str, split: str, out_dir: str,
+    cache_entry: Path, limit: int,
+) -> tuple[str, list[str], int]:
+    shards = await _parquet_shards(client, hub_id, config, split)
+    persistent = _cache_ttl_seconds() > 0
+    shard_root = (
+        cache_entry / "parquet"
+        if persistent
+        else Path(out_dir) / ".parquet-shards"
+    )
+    paths: list[Path] = []
+    for index, shard in enumerate(shards):
+        identity = hashlib.sha256(
+            f"{shard.url}\0{shard.size}".encode()
+        ).hexdigest()[:20]
+        target = shard_root / f"{index:05d}-{identity}.parquet"
+        paths.append(await _download_parquet_shard(client, shard, target))
+    completed = False
+    try:
+        result = _write_parquet_csv(
+            shard_paths=paths,
+            out_dir=out_dir,
+            limit=limit,
+            hub_id=hub_id,
+        )
+        completed = True
+        return result
+    finally:
+        from zevo.code_benchmarks import code_execution_adapter_for
+
+        if not persistent or (
+            completed and code_execution_adapter_for(hub_id)
+            in {"livecodebench", "code_contests"}
+        ):
+            # Large private tests have been moved to compressed, deduplicated
+            # answer sidecars. Retaining the converted Parquet would duplicate
+            # several gigabytes without helping resume after completion.
+            shutil.rmtree(shard_root, ignore_errors=True)
+
+
+async def _materialize_rows(
+    *, client, hub_id: str, config: str, split: str, out_dir: str,
+    limit: int,
+) -> tuple[str, list[str], int]:
+    """Compatibility path for datasets without a complete Parquet export."""
+    import csv as _csv
+
+    rows: list[dict] = []
+    ceiling = limit if limit > 0 else _MAX_FETCH
+    offset = 0
+    while len(rows) < ceiling:
+        n = min(_PAGE, ceiling - len(rows))
+        try:
+            document = await _get_json(client, f"{_SERVER}/rows", params={
+                "dataset": hub_id, "config": config, "split": split,
+                "offset": offset, "length": n,
+            })
+            batch = [x.get("row") or {} for x in (document.get("rows") or [])]
+        except Exception as exc:
+            raise MaterializeError(
+                f"cannot read rows of {hub_id!r} ({config}/{split}): {exc}"
+            ) from exc
+        if not batch:
+            break
+        rows.extend(batch)
+        offset += len(batch)
+    if limit <= 0 and len(rows) >= _MAX_FETCH:
+        raise MaterializeError(
+            f"{hub_id!r} ({config}/{split}) has at least {_MAX_FETCH:,} rows, "
+            "which is too many to pull into a validation set at run creation. "
+            "Point at a smaller split, or upload the rows you want as a file."
+        )
+    if not rows:
+        raise MaterializeError(f"{hub_id!r} ({config}/{split}) returned no rows")
+
+    columns: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "validation.csv"
+    from zevo.code_benchmarks import (
+        code_execution_adapter_for,
+        externalize_code_answers,
+    )
+    adapter = code_execution_adapter_for(hub_id)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = _csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            row = externalize_code_answers(adapter, row)
+            writer.writerow({c: _cell(row.get(c)) for c in columns})
+    return str(path), columns, len(rows)
+
+
 async def materialize(
     *, hub_id: str, split: str = "", config: str = "", out_dir: str,
     limit: int = 0,
@@ -189,63 +783,83 @@ async def materialize(
     did not choose: a split ordered by difficulty, category or source has a
     prefix that is not a sample of it.
     """
-    import csv as _csv
-
     import httpx
 
     ident = (hub_id or "").strip()
     if not ident:
         raise MaterializeError("no hub id given")
-    rows: list[dict] = []
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        cfg, spl = await _resolve_split(client, ident, split.strip(), config.strip())
-        ceiling = limit if limit > 0 else _MAX_FETCH
-        offset = 0
-        while len(rows) < ceiling:
-            n = min(_PAGE, ceiling - len(rows))
-            try:
-                r = await client.get(f"{_SERVER}/rows", params={
-                    "dataset": ident, "config": cfg, "split": spl,
-                    "offset": offset, "length": n,
-                })
-                r.raise_for_status()
-                batch = [x.get("row") or {} for x in (r.json().get("rows") or [])]
-            except Exception as e:
-                raise MaterializeError(f"cannot read rows of {ident!r} ({cfg}/{spl}): {e}")
-            if not batch:
-                break
-            rows.extend(batch)
-            offset += len(batch)
-        if limit <= 0 and len(rows) >= _MAX_FETCH:
-            raise MaterializeError(
-                f"{ident!r} ({cfg}/{spl}) has at least {_MAX_FETCH:,} rows, which is "
-                "too many to pull into a validation set at run creation. Point at a "
-                "smaller split, or upload the rows you want as a file."
+    requested_split = split.strip()
+    requested_config = config.strip()
+    token = _hf_token()
+    cache_entry, cache_identity = _cache_identity(
+        hub_id=ident,
+        split=requested_split,
+        config=requested_config,
+        limit=limit,
+        token=token,
+    )
+    cached = _cached_materialization(
+        entry=cache_entry,
+        identity=cache_identity,
+        out_dir=out_dir,
+    )
+    if cached is not None:
+        return cached
+
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        follow_redirects=True,
+        headers=_hf_headers(token),
+    ) as client:
+        cfg, spl = await _resolve_split(client, ident, requested_split, requested_config)
+        try:
+            path, columns, n_rows = await _materialize_parquet(
+                client=client,
+                hub_id=ident,
+                config=cfg,
+                split=spl,
+                out_dir=out_dir,
+                cache_entry=cache_entry,
+                limit=limit,
             )
-    if not rows:
-        raise MaterializeError(f"{ident!r} ({cfg}/{spl}) returned no rows")
+            route = "Parquet"
+        except _ParquetUnavailable as exc:
+            log.warning(
+                "Hugging Face Parquet unavailable for %s (%s/%s); falling "
+                "back to rows API: %s",
+                ident,
+                cfg,
+                spl,
+                exc,
+            )
+            path, columns, n_rows = await _materialize_rows(
+                client=client,
+                hub_id=ident,
+                config=cfg,
+                split=spl,
+                out_dir=out_dir,
+                limit=limit,
+            )
+            route = "rows API"
 
-    columns: list[str] = []
-    for row in rows:
-        for k in row:
-            if k not in columns:
-                columns.append(k)
+    _store_materialization(
+        entry=cache_entry,
+        identity=cache_identity,
+        source=Path(path),
+        columns=columns,
+        n_rows=n_rows,
+        config=cfg,
+        split=spl,
+    )
 
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    path = out / "validation.csv"
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = _csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
-        w.writeheader()
-        for row in rows:
-            w.writerow({c: _cell(row.get(c)) for c in columns})
-
-    note = f"fetched all {len(rows)} rows of {ident} ({cfg}/{spl})"
-    if 0 < limit <= len(rows):
+    note = f"fetched all {n_rows} rows of {ident} ({cfg}/{spl}) via {route}"
+    if 0 < limit <= n_rows:
         # Said out loud: the run is validating on a prefix, not on the split.
-        note = (f"fetched the first {len(rows)} rows of {ident} ({cfg}/{spl}), "
-                f"capped at {limit}")
-    return str(path), columns, len(rows), note
+        note = (
+            f"fetched the first {n_rows} rows of {ident} ({cfg}/{spl}) via "
+            f"{route}, capped at {limit}"
+        )
+    return str(path), columns, n_rows, note
 
 
 def lookup(hub_id: str, *, role: str = "") -> RemoteSpec | None:
@@ -273,12 +887,17 @@ def lookup(hub_id: str, *, role: str = "") -> RemoteSpec | None:
         for e in entries:
             if not isinstance(e, dict) or str(e.get("id") or "") != ident:
                 continue
+            try:
+                n_rows = max(0, int(e.get("n_rows") or 0))
+            except (TypeError, ValueError):
+                n_rows = 0
             spec = RemoteSpec(
                 id=ident,
                 split=str(e.get("split") or ""),
                 config=str(e.get("config") or ""),
                 role=str(e.get("role") or ""),
                 dataset=d.name,
+                n_rows=n_rows,
             )
             # Matched on what the entry IS, which the split states directly.
             # An older source.json may carry a `role` that disagrees with its

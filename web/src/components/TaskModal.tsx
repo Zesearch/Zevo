@@ -32,6 +32,7 @@ type TestSetDraft = Omit<TaskTestSetRecord, "answer_fields"> & {
 const BUILTIN_TASK_METRICS = [
   "accuracy", "exact_match", "f1", "token_f1", "bleu", "rouge_l",
   "mc_loglikelihood", "accuracy_norm",
+  "pass_at_1",
 ];
 
 const field =
@@ -277,7 +278,10 @@ export function TaskModal({
                             evaluation_script: "", evaluator_sha256: "",
                           })}
                       options={[
-                        ...BUILTIN_TASK_METRICS.map((value) => ({ value, label: value })),
+                        ...BUILTIN_TASK_METRICS.map((value) => ({
+                          value,
+                          label: value === "pass_at_1" ? "pass@1 · code execution" : value,
+                        })),
                         { value: "__other__", label: "Other (custom script)" },
                       ]}
                       placeholder="Choose metric"

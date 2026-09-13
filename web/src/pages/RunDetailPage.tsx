@@ -6,7 +6,7 @@ import { TrainingMonitor } from "../components/TrainingMonitor";
 import { StepTimeline } from "../components/StepTimeline";
 import type { EventEnvelope } from "../components/LiveTranscript";
 
-import type { CostBreakdown, HeartbeatDTO, InfraInstanceDTO, RunDetail, TicketDetail } from "../lib/api";
+import type { BenchmarkProgress, CostBreakdown, HeartbeatDTO, InfraInstanceDTO, RunDetail, TicketDetail } from "../lib/api";
 import { StatusBadge, statusToneFor } from "../components/StatusBadge";
 import { LiveTranscript } from "../components/LiveTranscript";
 import { IterationChart, RunJournal } from "../components/IterationHistoryPanel";
@@ -18,6 +18,11 @@ import { useRunWebsocket } from "../lib/ws";
 import { agentIdOf, assignIterations, iterationOrder, liveIterationKey } from "../lib/iterations";
 import { Bezel, Gauge, Kicker, Note, PageHead, Readout } from "../components/zevo/primitives";
 import { LOOP_STATIONS, PipelineRing, ticketAtStation, type Station, type StationState } from "../components/zevo/PipelineRing";
+
+function shortBenchmarkName(name: string): string {
+  const pieces = name.split("·");
+  return (pieces.length > 1 ? pieces.slice(1).join("·") : name).trim();
+}
 
 // Aggregate a run's tickets into the six loop stations by Ticket.agent_id.
 function stationsFrom(
@@ -154,12 +159,15 @@ function operationCaption(t: {
   operation?: string;
   model_source?: string;
   test_set_name?: string;
+  payload?: Record<string, unknown>;
 }, heartbeatOperation = "", activationPhase = ""): string {
-  const op = heartbeatOperation || t.operation || "";
+  const op = heartbeatOperation || t.operation || String(t.payload?.operation || "");
+  const modelSource = t.model_source || String(t.payload?.model_source || "");
+  const testSetName = t.test_set_name || String(t.payload?.test_set_name || "");
   const phase = activationPhase.trim().toLowerCase();
   const inferenceName = t.lane === "held_out_test"
-    ? `Held-Out Inference${t.test_set_name ? ` · ${t.test_set_name}` : ""}`
-    : t.model_source === "base_model"
+    ? `Held-Out Inference${testSetName ? ` · ${testSetName}` : ""}`
+    : modelSource === "base_model"
       ? "Baseline Inference"
       : "Candidate Inference";
   const stageName = ({
@@ -193,12 +201,12 @@ function operationCaption(t: {
     provision: "Provision compute",
     prepare_run_data: "Prepare Run data and Validation setup",
     prepare_holdout_data: `Prepare questions-only held-out data${
-      t.test_set_name ? ` · ${t.test_set_name}` : ""
+      testSetName ? ` · ${testSetName}` : ""
     }`,
     train: "Select config and train candidate",
     run_inference: t.lane === "held_out_test"
-      ? `Run held-out inference${t.test_set_name ? ` · ${t.test_set_name}` : ""}`
-      : t.model_source === "base_model"
+      ? `Run held-out inference${testSetName ? ` · ${testSetName}` : ""}`
+      : modelSource === "base_model"
         ? "Run Baseline Inference"
         : "Run Candidate Inference",
     release: "Release resources",
@@ -206,7 +214,7 @@ function operationCaption(t: {
   if (labels[op]) return labels[op];
   if (agentIdOf(t) === "evaluation") {
     return t.lane === "held_out_test"
-      ? `Run held-out evaluator via Bash${t.test_set_name ? ` · ${t.test_set_name}` : ""}`
+      ? `Run held-out evaluator via Bash${testSetName ? ` · ${testSetName}` : ""}`
       : "Run validation evaluator via Bash";
   }
   if (agentIdOf(t) === "registry") return "Select and save the best model";
@@ -768,14 +776,16 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
       <StageDetail
         ticketId={selectedId.split("#")[0]}
         wake={selectedId.includes("#") ? Number(selectedId.split("#")[1]) : undefined}
+        benchmarkProgress={run.benchmark_progress}
       />
     </div>
   );
 }
 
-function StageDetail({ ticketId, wake }: {
+function StageDetail({ ticketId, wake, benchmarkProgress }: {
   ticketId: string;
   wake?: number;
+  benchmarkProgress?: BenchmarkProgress;
 }) {
   const { data: t } = useSWR<TicketDetail>(
     ticketId ? `/api/tickets/${ticketId}` : null, {
@@ -917,6 +927,7 @@ function StageDetail({ ticketId, wake }: {
       <div className="space-y-4 p-4">
         <div className="rounded-bezel border border-hair bg-canvas/40 p-3">
           <div className="mb-2"><Kicker strong>Overview</Kicker></div>
+          <BenchmarkStageProgress ticket={t} progress={benchmarkProgress} />
           {pendingSlurmJob && <SlurmQueueWait instance={pendingSlurmJob} />}
           {/* What it did, in order, read off the feed below — so a step appears
               because it happened, not because a script remembered to say so. */}
@@ -952,6 +963,63 @@ function StageDetail({ ticketId, wake }: {
         )}
       </div>
     </Bezel>
+  );
+}
+
+/** Put suite progress beside the work it describes. A run-level banner made
+ * the counter look like general run telemetry; here it identifies the exact
+ * Benchmark whose Inference/Evaluation transcript the reader opened. */
+function BenchmarkStageProgress({
+  ticket,
+  progress,
+}: {
+  ticket: TicketDetail;
+  progress?: BenchmarkProgress;
+}) {
+  if (!progress || !["inference", "evaluation"].includes(ticket.agent_id)) return null;
+
+  const rawName = String(ticket.payload.test_set_name || "");
+  const validation = ticket.lane === "optimization";
+  const heldOut = ticket.lane === "held_out_test";
+  if (!validation && !heldOut) return null;
+
+  const suite = validation ? progress.validation : progress.test;
+  if (suite.total < 1) return null;
+  const name = validation && rawName.startsWith("validation:")
+    ? rawName.slice("validation:".length)
+    : rawName;
+  const current = progress.current.find((item) => (
+    item.suite === (validation ? "validation" : "test")
+    && (!name || item.name === name)
+    && item.iteration === ticket.iteration
+  ));
+  const displayName = name || current?.name || (validation ? "Validation" : "Final Test");
+  const stage = ticket.agent_id === "inference" ? "Inference" : "Evaluation";
+  const ratio = Math.min(100, (suite.completed / suite.total) * 100);
+
+  return (
+    <div className="mb-3 rounded-bezel border border-brass-500/25 bg-brass-500/[0.05] px-3 py-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
+        <span className="min-w-0 font-mono text-xs text-slate-200">
+          <span className="text-brass-300">{stage}</span>
+          <span className="text-dim"> · </span>
+          <span>{shortBenchmarkName(displayName)}</span>
+        </span>
+        <span className="font-mono text-xs tabular-nums text-brass-300">
+          {validation ? "Validation" : "Final Test"} {suite.completed} / {suite.total}
+          <span className="ml-1.5 text-dim">evaluated</span>
+          {suite.failed > 0 && (
+            <span className="ml-2 text-coral-300">· {suite.failed} failed</span>
+          )}
+        </span>
+      </div>
+      <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-800">
+        <div
+          className="h-full rounded-full bg-brass-400 transition-[width] duration-500"
+          style={{ width: `${ratio}%` }}
+        />
+      </div>
+    </div>
   );
 }
 

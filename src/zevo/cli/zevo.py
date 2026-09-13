@@ -834,8 +834,9 @@ def run_create(
     validation_set: str = typer.Option(
         "", "--validation-set",
         help="validation set WITH the answers — what the run TUNES on. When "
-             "empty, Zevo moves 20% of Test into Validation before the Run; "
-             "the split must contain at least 200 rows.",
+             "empty, Zevo derives 20% from each sufficiently large Test-suite "
+             "member only when that yields at least 200 Validation rows; "
+             "smaller benchmarks remain final-test-only.",
     ),
     validation_split: str = typer.Option(
         "", "--validation-split", help="HuggingFace validation-like split.",
@@ -1343,21 +1344,6 @@ async def _run_create(
                     uploaded_paths.append(uploaded.json()["path"])
                 ur["dataset"] = uploaded_paths[0]
             if selected_setting is not None:
-                setting_pins = {
-                    "prompt_framing": selected_setting.prompt_framing or "",
-                    "system_prompt": selected_setting.system_prompt or "",
-                    "loss_objective_config": dict(selected_setting.loss_objective_config or {}),
-                    "inference_config": dict(selected_setting.inference_config or {}),
-                    "decoding_config": dict(selected_setting.decoding_config or {}),
-                }
-                if mode == "full_pipeline" and any(
-                    value not in ("", {}) for value in setting_pins.values()
-                ):
-                    console.print(
-                        "[red]This Setting pins detailed Specialist choices and "
-                        "can only be launched with --mode customized_pipeline.[/]"
-                    )
-                    raise typer.Exit(1)
                 ur.update({
                     "dataset": selected_setting.dataset or "",
                     "dataset_split": selected_setting.dataset_split or "",
@@ -1378,7 +1364,6 @@ async def _run_create(
                     "base_model": selected_setting.base_model or "",
                     "training_method": selected_setting.training_method or "",
                     "method_config": dict(selected_setting.method_config or {}),
-                    **setting_pins,
                 })
                 if iterations is None:
                     run_opts["iteration_budget"] = selected_setting.iteration_budget
@@ -2641,8 +2626,7 @@ def _setting_json(path: str) -> dict:
         "validation_evaluation_script", "base_model", "training_method",
         "method_config", "data_query", "model_query", "method_query",
         "iteration_budget", "max_cost_usd",
-        "stop_threshold", "prompt_framing", "system_prompt",
-        "loss_objective_config", "inference_config", "decoding_config",
+        "stop_threshold",
     }
     return {key: item for key, item in value.items() if key in editable}
 

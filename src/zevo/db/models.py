@@ -232,9 +232,10 @@ class TaskSetting(Base):
     # ids, not local artifacts; validation lives at every API boundary that
     # writes this column.
     method_config: Mapped[dict[str, Any]] = mapped_column(JsonCol, default=dict)
-    # User-pinned portions of Specialist-owned choices. Empty values are
-    # declared in Intents; supplied values remain Setting-owned because
-    # changing one changes what is being compared, not merely where it runs.
+    # Legacy storage for rows created before detailed Specialist choices moved
+    # from reusable Standard Settings to Customized Run snapshots. The Setting
+    # API no longer exposes these columns and clears them whenever a row is
+    # edited; keeping the physical columns avoids a destructive data migration.
     prompt_framing: Mapped[str] = mapped_column(String(256), default="", server_default="")
     system_prompt: Mapped[str] = mapped_column(Text, default="", server_default="")
     loss_objective_config: Mapped[dict[str, Any]] = mapped_column(JsonCol, default=dict)
@@ -244,8 +245,13 @@ class TaskSetting(Base):
     # for the same reason `dataset` does: the task is the PROBLEM, and the
     # problem is defined by what a run is judged on — the held-out test set.
     # Which rows you tune against on the way there is part of how you attack it.
-    # Empty means "carve 20% from Test at run creation"; Test must be large
-    # enough to leave at least 200 Validation rows.
+    # Empty means "derive Validation from the Test suite at run creation": 20%
+    # of each sufficiently large member, while small members stay final-only.
+    validation_sets: Mapped[list[dict[str, Any]]] = mapped_column(
+        JsonCol, default=list, server_default="[]"
+    )
+    # Scalar fields remain the primary projection for old clients and the
+    # one-upload form. A non-empty validation_sets suite takes precedence.
     validation_set: Mapped[str] = mapped_column(Text, default="", server_default="")
     # When `validation_set` is a HuggingFace id rather than a path: which slice
     # of the repo, and which named subset. A hub repo is not one table, and the

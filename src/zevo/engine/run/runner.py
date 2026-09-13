@@ -83,6 +83,11 @@ from zevo.engine.observe.live_markers import LiveMarkerReader
 from zevo.engine.observe.markers import scan_text
 from zevo.engine.cost.pricing import accumulate_usage, estimate_cost
 from zevo.engine.run.scheduler.bindings import input_path, resolve_input_bindings
+from zevo.engine.remote_transfer import (
+    build_download_command,
+    build_upload_commands,
+    ssh_base_args,
+)
 from zevo.engine.observe.score_monitor import extract_score, materialize_metrics_artifact
 from zevo.engine.observe.run_metrics import (
     baseline_and_best_test,
@@ -101,8 +106,18 @@ from zevo.engine.observe import transcript_bus
 from zevo.engine.artifact_validation import (
     materialize_system_scoring_artifacts,
     sanitize_training_against_scoring,
+    semantic_record_fingerprints,
     validate_data_artifacts,
     validate_prediction_artifacts,
+)
+from zevo.engine.remote_datasets import looks_like_hub_id
+from zevo.engine.remote_training_data import (
+    RemoteDatasetSpec,
+    build_remote_training_package,
+    load_remote_dataset_receipt,
+    load_remote_dataset_spec,
+    load_remote_training_package,
+    remote_source_fingerprint,
 )
 
 # Schema imports + per-task-type adapters live here so the runner can
@@ -260,6 +275,44 @@ def _build_data_input(
             f"expected {expected_operation!r}"
         )
     dataset = "" if held_out else str(payload.get("dataset") or "")
+    remote_huggingface = bool(not held_out and looks_like_hub_id(dataset))
+    device_info_path = (
+        ""
+        if held_out
+        else input_path(inputs, "device_info", required=remote_huggingface)
+    )
+    remote_hf_cache_path = ""
+    remote_data_output_dir = ""
+    remote_preparation_receipt_path = ""
+    if remote_huggingface:
+        try:
+            device_info = InfrastructureDeviceInfo.model_validate_json(
+                Path(device_info_path).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"cannot resolve remote Data directories from {device_info_path!r}: {exc}"
+            ) from exc
+        route = device_info.cluster or device_info.instance
+        if route is None:
+            raise ValueError(
+                "remote Hugging Face Data requires a cluster or fixed-instance route"
+            )
+        remote_hf_cache_path = str(PurePosixPath(route.hf_cache))
+        remote_workdir = PurePosixPath(route.workdir)
+        remote_root = (
+            remote_workdir.parent
+            if remote_workdir.name == str(ticket.run_id or "")
+            else remote_workdir
+        )
+        data_intent_signature = str(payload.get("data_intent_signature") or "")
+        remote_data_output_dir = str(
+            remote_root / "data" / "runs" / str(ticket.run_id or "")
+            / "prepared" / data_intent_signature
+        )
+        remote_preparation_receipt_path = str(
+            PurePosixPath(remote_data_output_dir) / "preparation_receipt.json"
+        )
     local_dataset = Path(dataset) if dataset else None
     expected_source_fingerprint = (
         file_sha256(local_dataset)
@@ -304,6 +357,16 @@ def _build_data_input(
         artifact_validation_command = (
             "python -m zevo.engine.artifact_validation validate-training-data"
             " --training-dataset <absolute-training-dataset-path>"
+        )
+    remote_spec_validation_command = ""
+    if remote_huggingface:
+        remote_spec_validation_command = (
+            "python -m zevo.engine.remote_training_data validate-spec "
+            "<absolute-remote-dataset-spec-json-path>"
+            " --dataset-id " + shlex.quote(dataset)
+            + " --dataset-split " + shlex.quote(str(payload.get("dataset_split") or "train"))
+            + " --dataset-config " + shlex.quote(str(payload.get("dataset_config") or ""))
+            + " --training-method " + shlex.quote(str(payload.get("training_method") or ""))
         )
     return DataTaskInput(
         ticket_id=ticket.id,
@@ -360,6 +423,34 @@ def _build_data_input(
             {} if held_out else dict(payload.get("configuration_pins") or {})
         ),
         work_dir=work_dir,
+        device_info_path=device_info_path,
+        remote_data_helper_path=(
+            "" if not remote_huggingface else str(
+                Path(__file__).resolve().parents[1] / "remote_training_data.py"
+            )
+        ),
+        remote_dataset_spec_schema=(
+            {} if not remote_huggingface else RemoteDatasetSpec.model_json_schema()
+        ),
+        remote_dataset_spec_validation_command=remote_spec_validation_command,
+        remote_hf_cache_path=remote_hf_cache_path,
+        remote_data_output_dir=remote_data_output_dir,
+        remote_preparation_receipt_path=remote_preparation_receipt_path,
+        remote_required_environment=(
+            {
+                "ZEVO_RUN_ID": str(ticket.run_id or ""),
+                "ZEVO_TICKET_ID": ticket.id,
+                "RUN_ID": str(ticket.run_id or ""),
+                "TICKET_ID": ticket.id,
+            }
+            if remote_huggingface else {}
+        ),
+        secret_environment_names=(
+            ["HF_TOKEN"]
+            if remote_huggingface
+            and os.environ.get("HF_TOKEN", "").strip()
+            else []
+        ),
     )
 
 
@@ -411,6 +502,43 @@ def _validation_files(holdout: dict) -> tuple[str, str]:
     script = str(holdout.get("validation_evaluation_script") or "")
     submission = str(holdout.get("validation_sample_submission") or "")
     return script, submission
+
+
+def _validation_sets(run_or_holdout: Run | dict) -> list[dict[str, Any]]:
+    """Return mutable copies of the Run's Validation contracts.
+
+    New Runs carry one member for every benchmark that could safely donate a
+    deterministic 20% split. The scalar fallback keeps explicit Validation and
+    already-created Runs usable without letting new code invent a second
+    interpretation of those fields.
+    """
+    holdout = (
+        dict(run_or_holdout.holdout or {})
+        if isinstance(run_or_holdout, Run)
+        else dict(run_or_holdout or {})
+    )
+    raw = list(holdout.get("validation_sets") or [])
+    if raw:
+        return [dict(item) for item in raw]
+    validation_set = str(holdout.get("validation_set") or "")
+    if not validation_set:
+        return []
+    return [{
+        "name": "validation",
+        "validation_set": validation_set,
+        "inference_query": str(holdout.get("validation_inference_query") or ""),
+        "sample_submission": str(holdout.get("validation_sample_submission") or ""),
+        "metric_type": str(holdout.get("validation_metric_type") or "builtin"),
+        "metric": "",
+        "metric_direction": "max",
+        "answer_fields": list(holdout.get("validation_answer_fields") or []),
+        "evaluation_script": str(holdout.get("validation_evaluation_script") or ""),
+        "evaluator_sha256": str(holdout.get("validation_evaluator_sha256") or ""),
+        "public": str(holdout.get("validation_public") or ""),
+        "inference_data_profile": str(holdout.get("inference_data_profile") or ""),
+        "source": str(holdout.get("validation_source") or "supplied"),
+        "n_rows": int(holdout.get("validation_rows") or 0),
+    }]
 
 
 def _num_gpus(run: Run) -> int:
@@ -701,6 +829,17 @@ async def _build_train_input(
             "WANDB_MODE": "online",
         })
     device_info_path = input_path(inputs, "device_info")
+    dataset_binding = dict(inputs.get("training_dataset") or {})
+    dataset_product = None
+    if dataset_binding.get("work_product_id"):
+        dataset_product = await session.get(
+            WorkProduct, str(dataset_binding["work_product_id"])
+        )
+    dataset_meta = dict(dataset_product.meta or {}) if dataset_product else {}
+    dataset_is_remote = str(dataset_meta.get("location") or "") == "remote"
+    remote_data_receipt_path = str(
+        dataset_meta.get("remote_data_receipt_path") or ""
+    )
     slurm_job = await _slurm_stage_job_contract(
         run=run, ticket=ticket, work_dir=work_dir, filename="train.sbatch",
         device_info_path=device_info_path, session=session,
@@ -713,6 +852,8 @@ async def _build_train_input(
         run_id=str(ticket.run_id or ""),
         iteration=iteration,
         dataset_path=input_path(inputs, "training_dataset"),
+        dataset_is_remote=dataset_is_remote,
+        remote_data_receipt_path=remote_data_receipt_path,
         validation_dataset_path=input_path(inputs, "validation_dataset"),
         validation_answer_fields=_answer_fields(
             dict(run.holdout or {}), "validation",
@@ -865,6 +1006,7 @@ def _build_evaluation_input(
         **_customization_kwargs(ticket.customization or {}),
         predictions_path=input_path(inputs, "predictions"),
         test_set_name=str(payload.get("test_set_name") or ""),
+        code_execution_adapter=str(payload.get("code_execution_adapter") or ""),
         scoring_set=scoring_set,
         evaluation_script=script,
         evaluator_sha256=str(payload.get("evaluator_sha256") or ""),
@@ -1390,6 +1532,16 @@ def _validate_specialist_yaml(
             raise ValueError("train_config.yaml iteration differs from Ticket iteration")
         if config.data_signature != inp.data_signature:
             raise ValueError("train_config.yaml data_signature differs from bound Data")
+        if inp.dataset_is_remote:
+            receipt = load_remote_dataset_receipt(inp.remote_data_receipt_path)
+            if receipt.data_signature != inp.data_signature:
+                raise ValueError(
+                    "remote Data receipt signature differs from bound Data"
+                )
+            if receipt.dataset_path != inp.dataset_path:
+                raise ValueError(
+                    "remote Data receipt path differs from Train dataset_path"
+                )
         if config.prompt != inference.prompt:
             raise ValueError(
                 "train_config.yaml prompt must equal baseline inference_config.yaml prompt"
@@ -1755,6 +1907,8 @@ def _extract_summary_artifact_meta(
             "operation": result.operation,
             "n_rows_in": result.n_rows_in,
             "n_rows_out": result.n_rows_out,
+            "remote_materialization_mode": result.remote_materialization_mode,
+            "remote_control_retries": result.remote_control_retries,
         }
     elif isinstance(result, InfraResult):
         meta = {
@@ -1994,6 +2148,7 @@ def _extract_summary_artifact_meta(
     artifact = ""
     for field in (
         "training_dataset_path",  # DataResult (prepared dataset.jsonl)
+        "remote_data_receipt_path",  # remote DataResult (compact local evidence)
         "scoping_result_path",    # DataResult scope_problem (auto mode)
         # A private held-out Data ticket has no training dataset; its
         # questions-only copy is the primary artifact.
@@ -2037,7 +2192,13 @@ _TICKET_ARTIFACTS: dict[str, list[tuple[str, str]]] = {
     # the hidden Validation artifacts after the Data result is final so lineage
     # remains convenient without granting Data access to the scoring set.
     # Private held-out Data authors only its questions-only copy.
-    "data":           [("training_dataset_path", "training_dataset"), ("prepare_script_path", "script"),
+    "data":           [("training_dataset_path", "training_dataset"),
+                       ("remote_dataset_path", "training_dataset"),
+                       ("remote_data_receipt_path", "remote_data_receipt"),
+                       ("remote_data_profile_path", "remote_data_profile"),
+                       ("remote_training_package_path", "remote_training_package"),
+                       ("remote_dataset_spec_path", "remote_dataset_spec"),
+                       ("prepare_script_path", "script"),
                        # Auto mode: the derived scoring contract. Its own role,
                        # so no binding contract can ever treat it as training data.
                        ("scoping_result_path", "scoping_result"),
@@ -2070,6 +2231,12 @@ def _apply_run_score_monitor(
     so that a test result can never be mistaken for a tuning result.
     """
     if ticket.lane == "held_out_test":
+        return
+
+    # A component score is not the Run's model-selection score. Multi-benchmark
+    # Validation is recorded only after every eligible member for the candidate
+    # arrives and the engine computes the suite average.
+    if isinstance(result, EvaluationResult) and len(_validation_sets(run)) > 1:
         return
 
     incumbent = None if run.best_validation_score is None else float(run.best_validation_score)
@@ -2211,10 +2378,19 @@ def _essential_artifact_fields(result: BaseModel) -> list[str]:
         fields = ["scoring_public_path"]
         if result.operation == "prepare_run_data":
             fields.extend([
-                "training_dataset_path", "validation_dataset_path",
+                (
+                    "remote_data_receipt_path"
+                    if result.remote_dataset_path
+                    else "training_dataset_path"
+                ),
+                "validation_dataset_path",
                 "inference_data_profile_path",
                 "data_recipe_path",
             ])
+            if result.remote_dataset_path:
+                fields.extend([
+                    "remote_dataset_spec_path", "remote_training_package_path",
+                ])
             if result.validation_source_path:
                 fields.append("validation_source_path")
         if result.sample_submission_path:
@@ -2242,8 +2418,340 @@ def _essential_artifact_fields(result: BaseModel) -> list[str]:
     return []
 
 
-def _bind_system_validation_artifacts(
-    result: DataResult, *, run: Run, work_dir: str,
+async def _run_remote_control_command(
+    command: list[str], *, timeout: float = 900, max_attempts: int = 3,
+) -> tuple[int, str]:
+    """Run an idempotent SSH/SCP control command with bounded recovery.
+
+    Dataset preparation is deliberately not called here. Repeating these
+    commands can only upload immutable control files, validate/finalize an
+    already prepared artifact, or download a compact receipt.
+    """
+    last_detail = ""
+    last_code = 0
+    for attempt in range(1, max_attempts + 1):
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        timed_out = False
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=timeout,
+            )
+        except TimeoutError:
+            timed_out = True
+            process.kill()
+            stdout, stderr = await process.communicate()
+        last_code = int(process.returncode or 0)
+        last_detail = stderr.decode("utf-8", "replace")[-1200:]
+        if not last_detail:
+            last_detail = stdout.decode("utf-8", "replace")[-1200:]
+        if not timed_out and process.returncode == 0:
+            return attempt, stdout.decode("utf-8", "replace")
+
+        lowered = last_detail.casefold()
+        transient = timed_out or process.returncode == 255 or any(
+            marker in lowered for marker in (
+                "connection closed", "connection reset", "broken pipe",
+                "connection timed out", "operation timed out",
+                "connection refused", "no route to host",
+                "kex_exchange_identification",
+            )
+        )
+        if not transient or attempt == max_attempts:
+            break
+        _warn(
+            "remote_data_control_retry",
+            RuntimeError(
+                f"attempt {attempt}/{max_attempts} failed"
+                + (" by timeout" if timed_out else f" with exit {process.returncode}")
+            ),
+        )
+        await asyncio.sleep(float(2 ** (attempt - 1)))
+
+    if last_code == 0:
+        raise ValueError(f"remote data control command timed out: {command[0]}")
+    raise ValueError(
+        f"remote data control command failed ({last_code}): {last_detail}"
+    )
+
+
+async def _finalize_remote_data_artifact(
+    *,
+    result: DataResult,
+    inp: DataTaskInput,
+    package_path: str,
+    package_signature: str,
+    work_dir: str,
+) -> tuple[str, str, int, int, str, int]:
+    """Finalize and receipt Data on its assigned host without copying rows back."""
+    try:
+        info = InfrastructureDeviceInfo.model_validate_json(
+            Path(inp.device_info_path).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot load Data remote route: {exc}") from exc
+    prepared = PurePosixPath(result.remote_dataset_path)
+    if not prepared.is_absolute():
+        raise ValueError("remote_dataset_path must be absolute")
+    profile_path = PurePosixPath(result.remote_data_profile_path)
+    if not profile_path.is_absolute():
+        raise ValueError("remote_data_profile_path must be absolute")
+    route = info.cluster if info.provider == "cluster" else info.instance
+    assigned_output = PurePosixPath(inp.remote_data_output_dir)
+    for label, candidate in (
+        ("remote_dataset_path", prepared),
+        ("remote_data_profile_path", profile_path),
+    ):
+        if candidate != assigned_output and assigned_output not in candidate.parents:
+            raise ValueError(
+                f"{label} lies outside assigned remote_data_output_dir"
+            )
+    preparation_receipt = PurePosixPath(inp.remote_preparation_receipt_path)
+    if preparation_receipt.parent != assigned_output:
+        raise ValueError("remote preparation receipt is outside assigned output")
+    # output = <run>/prepared/<intent>; verified artifacts are shared by exact
+    # package identity across replacement tickets in the same Run.
+    try:
+        durable_run_root = assigned_output.parents[1]
+    except IndexError as exc:
+        raise ValueError("remote_data_output_dir has no durable Run root") from exc
+    control_dir = durable_run_root / ".zevo-control" / package_signature
+    final_dir = durable_run_root / "verified" / package_signature
+    remote_helper = control_dir / "remote_training_data.py"
+    remote_package = control_dir / "remote_training_package.json"
+    remote_receipt = final_dir / "remote_data_receipt.json"
+    final_dataset = final_dir / "dataset.jsonl"
+    helper_path = str(Path(inp.remote_data_helper_path).resolve())
+    control_retries = 0
+    for command in build_upload_commands(
+        info.ssh,
+        sources=[helper_path, str(Path(package_path).resolve())],
+        remote_dir=str(control_dir),
+    ):
+        attempts, _stdout = await _run_remote_control_command(command)
+        control_retries += attempts - 1
+    target = f"{info.ssh.user}@{info.ssh.host}"
+    environment_prefix = (
+        f"{route.env_setup} && "
+        if route is not None and route.env_setup.strip()
+        else ""
+    )
+    finalize = (
+        f"mkdir -p -- {shlex.quote(str(final_dir))} && "
+        f"{environment_prefix}python3 {shlex.quote(str(remote_helper))} finalize "
+        f"--package {shlex.quote(str(remote_package))} "
+        f"--prepared {shlex.quote(str(prepared))} "
+        f"--output {shlex.quote(str(final_dataset))} "
+        f"--receipt {shlex.quote(str(remote_receipt))} "
+        f"--profile {shlex.quote(str(profile_path))} "
+        f"--preparation-receipt {shlex.quote(str(preparation_receipt))}"
+    )
+    attempts, _stdout = await _run_remote_control_command(
+        [*ssh_base_args(info.ssh), target, finalize], timeout=3600,
+    )
+    control_retries += attempts - 1
+    attempts, _stdout = await _run_remote_control_command(build_download_command(
+        info.ssh,
+        remote_paths=[str(remote_receipt)],
+        local_dir=str(Path(work_dir).resolve()),
+    ))
+    control_retries += attempts - 1
+    local_receipt = str(Path(work_dir).resolve() / remote_receipt.name)
+    receipt = load_remote_dataset_receipt(local_receipt)
+    if receipt.data_signature != package_signature:
+        raise ValueError("remote receipt data_signature differs from engine package")
+    if receipt.dataset_path != str(final_dataset):
+        raise ValueError("remote receipt points at an unexpected dataset path")
+    return (
+        receipt.dataset_path,
+        local_receipt,
+        receipt.n_rows,
+        receipt.decontamination_removed_rows,
+        receipt.materialization_mode,
+        control_retries,
+    )
+
+
+def _references_remote_directory(value: Any, directory: PurePosixPath) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _references_remote_directory(item, directory)
+            for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(
+            _references_remote_directory(item, directory) for item in value
+        )
+    if not isinstance(value, str) or not value.startswith("/"):
+        return False
+    candidate = PurePosixPath(value)
+    return candidate == directory or directory in candidate.parents
+
+
+async def _trash_unreferenced_failed_remote_data(
+    *,
+    run: Run,
+    ticket: Ticket,
+    inp: DataTaskInput,
+    current_dataset_path: str,
+    session: AsyncSession,
+) -> list[str]:
+    """Move abandoned failed-ticket copies into recoverable remote trash."""
+    try:
+        info = InfrastructureDeviceInfo.model_validate_json(
+            Path(inp.device_info_path).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return []
+    route = info.cluster if info.provider == "cluster" else info.instance
+    if route is None:
+        return []
+    assigned_output = PurePosixPath(inp.remote_data_output_dir)
+    durable_run_root = assigned_output.parents[1]
+    current_dataset = PurePosixPath(current_dataset_path)
+
+    run_tickets = (await session.execute(
+        select(Ticket).where(Ticket.run_id == run.id)
+    )).scalars().all()
+    ticket_ids = [row.id for row in run_tickets]
+    work_products = (
+        (await session.execute(
+            select(WorkProduct).where(WorkProduct.ticket_id.in_(ticket_ids))
+        )).scalars().all()
+        if ticket_ids else []
+    )
+    active_tickets = [
+        row for row in run_tickets
+        if row.status in {
+            "queued", "running", "repairing", "awaiting_input", "waiting_external",
+        }
+    ]
+    failed_data = [
+        row for row in run_tickets
+        if row.id != ticket.id
+        and row.agent_id == "data"
+        and row.status in {"failed", "cancelled", "skipped"}
+    ]
+    if not failed_data:
+        return []
+    failed_ids = [row.id for row in failed_data]
+    results = (await session.execute(
+        select(HeartbeatResult)
+        .where(HeartbeatResult.ticket_id.in_(failed_ids))
+        .order_by(HeartbeatResult.created_at.desc())
+    )).scalars().all()
+    results_by_ticket: dict[str, list[HeartbeatResult]] = {}
+    for row in results:
+        results_by_ticket.setdefault(row.ticket_id, []).append(row)
+
+    trashed: list[str] = []
+    target = f"{info.ssh.user}@{info.ssh.host}"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for failed in failed_data:
+        for heartbeat_result in results_by_ticket.get(failed.id, []):
+            output = dict(heartbeat_result.output or {})
+            dataset_value = str(output.get("remote_dataset_path") or "")
+            profile_value = str(output.get("remote_data_profile_path") or "")
+            if not dataset_value.startswith("/") or not profile_value.startswith("/"):
+                continue
+            dataset = PurePosixPath(dataset_value)
+            profile = PurePosixPath(profile_value)
+            directory = dataset.parent
+            if profile.parent != directory:
+                continue
+            if (
+                dataset == current_dataset
+                or directory == assigned_output
+                or assigned_output in directory.parents
+            ):
+                continue
+            # Never let an Agent-reported path widen cleanup scope. Old layouts
+            # included the Ticket id in the artifact directory; require it.
+            if failed.id not in directory.parts:
+                continue
+            allowed = (
+                durable_run_root in directory.parents
+                or PurePosixPath(route.workdir) in directory.parents
+            )
+            if not allowed:
+                continue
+            if any(
+                _references_remote_directory(
+                    {"path": product.path, "meta": product.meta}, directory,
+                )
+                for product in work_products
+            ):
+                continue
+            if any(
+                _references_remote_directory(
+                    {"inputs": active.inputs, "payload": active.payload}, directory,
+                )
+                for active in active_tickets
+            ):
+                continue
+            receipt_path = str(output.get("remote_data_receipt_path") or "")
+            if receipt_path and Path(receipt_path).is_file():
+                try:
+                    receipt = load_remote_dataset_receipt(receipt_path)
+                except ValueError:
+                    continue
+                if _references_remote_directory(receipt.dataset_path, directory):
+                    continue
+
+            trash = (
+                durable_run_root / ".trash"
+                / f"{failed.id}-{timestamp}"
+            )
+            command = (
+                f"if [ ! -e {shlex.quote(str(directory))} ]; then "
+                "echo ZEVO_ABSENT; "
+                f"elif find {shlex.quote(str(directory))} -type f "
+                "\\( -name preparation_receipt.json -o "
+                "-name remote_data_receipt.json \\) -print -quit | grep -q .; then "
+                "echo ZEVO_RETAINED_RECEIPT; "
+                "else "
+                f"mkdir -p -- {shlex.quote(str(trash.parent))} && "
+                f"mv -- {shlex.quote(str(directory))} {shlex.quote(str(trash))} && "
+                "echo ZEVO_TRASHED; "
+                "fi"
+            )
+            _attempts, command_output = await _run_remote_control_command(
+                [*ssh_base_args(info.ssh), target, command],
+            )
+            if "ZEVO_RETAINED_RECEIPT" in command_output:
+                session.add(TicketNotice(
+                    ticket_id=failed.id,
+                    code="data.remote_artifacts_retained",
+                    severity="info",
+                    body=(
+                        "A replacement Data Ticket succeeded, but prior remote "
+                        "artifacts were retained because a durable receipt still "
+                        f"references `{directory}`."
+                    ),
+                ))
+                break
+            if "ZEVO_TRASHED" not in command_output:
+                break
+            trashed.append(f"{directory} -> {trash}")
+            session.add(TicketNotice(
+                ticket_id=failed.id,
+                code="data.remote_artifacts_trashed",
+                severity="info",
+                body=(
+                    "A replacement Data Ticket succeeded. Unreferenced remote "
+                    f"artifacts were moved to recoverable trash: `{trash}`."
+                ),
+            ))
+            break
+    return trashed
+
+
+async def _bind_system_validation_artifacts(
+    result: DataResult, *, run: Run, ticket: Ticket, work_dir: str,
+    inp: DataTaskInput, session: AsyncSession,
 ) -> DataResult:
     """Attach frozen Validation artifacts only after Data has completed.
 
@@ -2253,48 +2761,199 @@ def _bind_system_validation_artifacts(
     artifact and recipe already exist.
     """
     holdout = dict(run.holdout or {})
-    validation_source = str(holdout.get("validation_set") or "")
-    answer_fields = list(holdout.get("validation_answer_fields") or [])
-    sample_submission = str(holdout.get("validation_sample_submission") or "")
+    if looks_like_hub_id(inp.dataset) and not result.remote_dataset_path:
+        raise ValueError(
+            "Hugging Face Training data must stay on the assigned remote data plane"
+        )
+    validation_suite = _validation_sets(holdout)
+    if not validation_suite:
+        raise ValueError("engine Validation suite is empty after Data selection")
+    primary = validation_suite[0]
+    validation_source = str(primary.get("validation_set") or "")
+    answer_fields = list(primary.get("answer_fields") or [])
+    sample_submission = str(primary.get("sample_submission") or "")
     if not validation_source or not answer_fields or not sample_submission:
         raise ValueError(
             "engine Validation contract is incomplete after Data selection"
         )
 
-    sanitized = sanitize_training_against_scoring(
-        training_dataset=result.training_dataset_path,
-        validation_source=validation_source,
-        blocked_fingerprints=list(
+    sanitized = None
+    remote_package_path = ""
+    remote_receipt_path = ""
+    remote_dataset_path = result.remote_dataset_path
+    remote_rows = int(result.n_rows_out or 0)
+    remote_removed = 0
+    remote_materialization_mode = ""
+    remote_control_retries = 0
+    if result.remote_dataset_path:
+        if result.remote_training_package_path or result.remote_data_receipt_path:
+            raise ValueError("Data cannot author engine-owned remote package/receipt")
+        spec = load_remote_dataset_spec(result.remote_dataset_spec_path)
+        if spec.source.dataset_id != inp.dataset:
+            raise ValueError("remote dataset spec id differs from the Data work order")
+        if spec.source.split != (inp.dataset_split or "train"):
+            raise ValueError("remote dataset spec split differs from the Data work order")
+        if spec.source.config != inp.dataset_config:
+            raise ValueError("remote dataset spec config differs from the Data work order")
+        if spec.training_method != inp.training_method:
+            raise ValueError("remote dataset spec training method differs from the work order")
+        recipe = load_data_recipe(result.data_recipe_path)
+        if recipe.source_identity != inp.expected_source_identity:
+            raise ValueError("remote data recipe source identity differs from the work order")
+        if recipe.source_fingerprint != remote_source_fingerprint(spec):
+            raise ValueError(
+                "remote data recipe fingerprint does not bind the immutable Hub revision"
+            )
+        blocked = semantic_record_fingerprints(validation_source)
+        blocked.update(str(value) for value in (
             holdout.get("test_semantic_fingerprints") or []
-        ),
-        out_dir=work_dir,
-    )
-
-    public = str(holdout.get("validation_public") or "")
-    profile = str(holdout.get("inference_data_profile") or "")
-    if not (
-        public and profile and Path(public).is_file() and Path(profile).is_file()
-    ):
-        prepared = materialize_system_scoring_artifacts(
-            scoring_source=validation_source,
-            answer_fields=answer_fields,
-            sample_submission=sample_submission,
+        ) if value)
+        package = build_remote_training_package(
+            spec=spec,
+            recipe=recipe.model_dump(mode="json"),
+            prepare_script_path=result.prepare_script_path,
+            blocked_semantic_fingerprints=blocked,
+            data_intent_signature=inp.data_intent_signature,
+            recipe_path=result.data_recipe_path,
+        )
+        package_file = Path(work_dir) / "remote_training_package.json"
+        package_file.write_text(package.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        remote_package_path = str(package_file.resolve())
+        (
+            remote_dataset_path,
+            remote_receipt_path,
+            remote_rows,
+            remote_removed,
+            remote_materialization_mode,
+            remote_control_retries,
+        ) = await _finalize_remote_data_artifact(
+            result=result,
+            inp=inp,
+            package_path=remote_package_path,
+            package_signature=package.data_signature,
+            work_dir=work_dir,
+        )
+    else:
+        sanitized = sanitize_training_against_scoring(
+            training_dataset=result.training_dataset_path,
+            validation_source=validation_source,
+            blocked_fingerprints=list(
+                holdout.get("test_semantic_fingerprints") or []
+            ),
             out_dir=work_dir,
         )
-        public = prepared.questions_path
-        profile = prepared.profile_path
-        validation_source = prepared.validation_dataset_path
-        sample_submission = prepared.sample_submission_path
+
+    # Prepare every member behind the same engine boundary. Only the primary
+    # artifacts are returned through DataResult for Train compatibility; the
+    # complete suite is persisted on Run and used by engine-created validation
+    # mirror tickets.
+    prepared_suite: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(validation_suite):
+        item = dict(raw_item)
+        source = str(item.get("validation_set") or "")
+        fields = list(item.get("answer_fields") or [])
+        submission = str(item.get("sample_submission") or "")
+        if not source or not fields or not submission:
+            raise ValueError(
+                f"engine Validation contract {item.get('name')!r} is incomplete "
+                "after Data selection"
+            )
+        public = str(item.get("public") or "")
+        profile = str(item.get("inference_data_profile") or "")
+        if not (
+            public and profile and Path(public).is_file() and Path(profile).is_file()
+        ):
+            prepared = materialize_system_scoring_artifacts(
+                scoring_source=source,
+                answer_fields=fields,
+                sample_submission=submission,
+                out_dir=str(Path(work_dir) / "validation-suite" / f"{index:03d}"),
+            )
+            public = prepared.questions_path
+            profile = prepared.profile_path
+            source = prepared.validation_dataset_path
+            submission = prepared.sample_submission_path
+        item.update({
+            "validation_set": source,
+            "sample_submission": submission,
+            "public": public,
+            "inference_data_profile": profile,
+        })
+        prepared_suite.append(item)
+
+    primary = prepared_suite[0]
+    validation_source = str(primary["validation_set"])
+    answer_fields = list(primary["answer_fields"])
+    sample_submission = str(primary["sample_submission"])
+    public = str(primary["public"])
+    profile = str(primary["inference_data_profile"])
+    holdout.update({
+        "validation_sets": prepared_suite,
+        "validation_set": validation_source,
+        "validation_answer_fields": answer_fields,
+        "validation_sample_submission": sample_submission,
+        "validation_public": public,
+        "inference_data_profile": profile,
+    })
+    run.holdout = holdout
+
+    if result.remote_dataset_path:
+        session.add(TicketNotice(
+            ticket_id=ticket.id,
+            code="data.remote_artifact_finalized",
+            severity="info",
+            body=(
+                f"Verified remote Training data at `{remote_dataset_path}`; "
+                f"storage={remote_materialization_mode}; removed "
+                f"{remote_removed} held-out duplicate row(s); recovered "
+                f"{remote_control_retries} transient SSH control failure(s)."
+            ),
+        ))
+        try:
+            trashed = await _trash_unreferenced_failed_remote_data(
+                run=run,
+                ticket=ticket,
+                inp=inp,
+                current_dataset_path=remote_dataset_path,
+                session=session,
+            )
+            if trashed:
+                session.add(TicketNotice(
+                    ticket_id=ticket.id,
+                    code="data.superseded_artifacts_trashed",
+                    severity="info",
+                    body=(
+                        "Moved unreferenced failed-ticket artifacts to "
+                        "recoverable remote trash:\n- " + "\n- ".join(trashed)
+                    ),
+                ))
+        except Exception as exc:  # noqa: BLE001
+            _warn("remote_data_cleanup", exc)
+            session.add(TicketNotice(
+                ticket_id=ticket.id,
+                code="data.superseded_cleanup_deferred",
+                severity="warning",
+                body=(
+                    "Remote Training data was finalized successfully, but "
+                    f"superseded-artifact cleanup was deferred: {exc}"
+                )[:8000],
+            ))
 
     return result.model_copy(update={
-        "training_dataset_path": sanitized.path,
+        "training_dataset_path": sanitized.path if sanitized is not None else "",
+        "remote_dataset_path": remote_dataset_path,
+        "remote_data_receipt_path": remote_receipt_path,
+        "remote_training_package_path": remote_package_path,
+        "n_rows_out": remote_rows if sanitized is None else result.n_rows_out,
         "system_scoring_duplicates_removed": (
-            sanitized.removed_scoring_duplicates
+            sanitized.removed_scoring_duplicates if sanitized is not None else remote_removed
         ),
         "decontamination_checked": True,
         "decontamination_removed_rows": (
-            sanitized.removed_scoring_duplicates
+            sanitized.removed_scoring_duplicates if sanitized is not None else remote_removed
         ),
+        "remote_materialization_mode": remote_materialization_mode,
+        "remote_control_retries": remote_control_retries,
         "validation_source_path": validation_source,
         "validation_answer_fields": answer_fields,
         # This is the frozen raw scoring population. Train owns any temporary
@@ -3736,10 +4395,15 @@ async def run_ticket(
             and output.operation == "prepare_run_data"
         ):
             try:
-                output = _bind_system_validation_artifacts(
-                    output, run=run, work_dir=work_dir,
+                output = await _bind_system_validation_artifacts(
+                    output, run=run, ticket=tk, work_dir=work_dir, inp=inp,
+                    session=session,
                 )
-            except (OSError, ValueError) as exc:
+            # This is an engine-owned post-processing boundary.  A parser,
+            # transfer, or validation implementation error must become a normal
+            # failed Result so the heartbeat and Ticket are committed terminally;
+            # allowing it to escape leaves a completed agent displayed as live.
+            except Exception as exc:  # noqa: BLE001
                 message = f"engine could not prepare frozen Validation artifacts: {exc}"
                 output = output.model_copy(update={
                     "status": "failed",
@@ -3940,9 +4604,30 @@ async def run_ticket(
                         raise ValueError(
                             f"data_recipe.{field} differs from the requested recipe intent"
                         )
-                realized_signature = data_recipe_signature(
-                    stored_recipe, output.training_dataset_path,
-                )
+                if output.remote_dataset_path:
+                    package = load_remote_training_package(
+                        output.remote_training_package_path
+                    )
+                    receipt = load_remote_dataset_receipt(
+                        output.remote_data_receipt_path
+                    )
+                    if package.data_signature != receipt.data_signature:
+                        raise ValueError(
+                            "remote package and receipt data signatures differ"
+                        )
+                    if receipt.dataset_path != output.remote_dataset_path:
+                        raise ValueError(
+                            "remote receipt dataset path differs from DataResult"
+                        )
+                    if receipt.n_rows != output.n_rows_out:
+                        raise ValueError(
+                            "remote receipt row count differs from DataResult"
+                        )
+                    realized_signature = package.data_signature
+                else:
+                    realized_signature = data_recipe_signature(
+                        stored_recipe, output.training_dataset_path,
+                    )
                 artifact_meta.update({
                     "dataset_name": stored_recipe.dataset_name,
                     "dataset_source": stored_recipe.source_identity,
@@ -3954,6 +4639,14 @@ async def run_ticket(
                     "data_intent_signature": inp.data_intent_signature,
                     "data_signature": realized_signature,
                     "data_recipe": stored_recipe.model_dump(mode="json"),
+                    "location": (
+                        "remote" if output.remote_dataset_path else "local"
+                    ),
+                    "remote_data_receipt_path": output.remote_data_receipt_path,
+                    "remote_materialization_mode": (
+                        output.remote_materialization_mode
+                    ),
+                    "remote_control_retries": output.remote_control_retries,
                 })
                 if output.validation_source_path:
                     validation_source = str(
@@ -4046,18 +4739,31 @@ async def run_ticket(
             try:
                 from zevo.contracts.scoping import load_scoping_result
                 scoping = load_scoping_result(output.scoping_result_path)
-                for name in ("test_set_path", "test_sample_submission_path"):
-                    if not Path(getattr(scoping, name)).is_file():
-                        raise ValueError(f"{name} does not exist: {getattr(scoping, name)}")
-                if scoping.metric_type == "custom" and not Path(scoping.evaluation_script).is_file():
-                    raise ValueError(
-                        f"evaluation_script does not exist: {scoping.evaluation_script}"
-                    )
+                scoped_tests = scoping.effective_test_sets(
+                    task_objective=str((tk.payload or {}).get("task_objective") or ""),
+                )
+                for scoped_test in scoped_tests:
+                    for name in ("test_set_path", "test_sample_submission_path"):
+                        if not Path(getattr(scoped_test, name)).is_file():
+                            raise ValueError(
+                                f"{name} does not exist: {getattr(scoped_test, name)}"
+                            )
+                    if (
+                        scoped_test.metric_type == "custom"
+                        and not Path(scoped_test.evaluation_script).is_file()
+                    ):
+                        raise ValueError(
+                            "evaluation_script does not exist: "
+                            f"{scoped_test.evaluation_script}"
+                        )
                 artifact_meta.update({
                     "eval_source": scoping.eval_source,
-                    "metric": scoping.metric,
+                    "metric": (
+                        scoping.metric if len(scoped_tests) == 1 else "suite_average"
+                    ),
                     "metric_direction": scoping.metric_direction,
-                    "test_rows": scoping.test_rows,
+                    "test_rows": sum(item.test_rows for item in scoped_tests),
+                    "test_count": len(scoped_tests),
                 })
             except (OSError, ValueError) as exc:
                 runtime_contract_mismatches["scoping_result"] = {
@@ -4095,6 +4801,9 @@ async def run_ticket(
                     sample_submission=sample_submission,
                     answer_fields=answer_fields,
                     training_dataset=output.training_dataset_path,
+                    remote_training_rows=(
+                        output.n_rows_out if output.remote_dataset_path else None
+                    ),
                     validation_dataset=output.validation_dataset_path,
                     profile_path=output.inference_data_profile_path,
                 )
@@ -4349,7 +5058,16 @@ async def run_ticket(
                 if not items:  # fallback: at least the primary artifact
                     items = [(artifact, _role_for(tk.agent_id), dict(artifact_meta or {}))]
             for path, role, wp_meta in _unique_work_products(items):
-                is_remote = tk.agent_id == "train" and role == "checkpoint" and remote_model
+                is_remote = (
+                    tk.agent_id == "train" and role == "checkpoint" and remote_model
+                ) or (
+                    tk.agent_id == "data"
+                    and role in {"training_dataset", "remote_data_profile"}
+                    and bool(getattr(output, "remote_dataset_path", ""))
+                    and path in {
+                        output.remote_dataset_path, output.remote_data_profile_path,
+                    }
+                )
                 if is_remote:
                     # UI shows "on remote (transient)" instead of a scary "missing".
                     wp_meta = {**wp_meta, "location": "remote"}
@@ -4573,6 +5291,9 @@ async def run_ticket(
         # private mirror branch.
         held_out_ticket = tk.lane == "held_out_test"
         is_eval = tk.agent_id == "evaluation"
+        validation_suite_pending = await _validation_suite_pending(
+            session, tk.run_id,
+        )
         if held_out_ticket:
             # ANY mirror completion can be the one that settles the lane, not
             # just its final eval. A copy job that fails never reaches an eval
@@ -4580,12 +5301,32 @@ async def run_ticket(
             # lane that had already stopped, and the run simply never advanced.
             if await _holdout_settled(session, tk.run_id):
                 await _release_deferred_wake(session, tk.run_id)
+        elif validation_suite_pending:
+            # The primary Evaluation has started engine-owned Validation
+            # mirrors, or one of those mirrors has handed off to its evaluator.
+            # This is still one logical Evaluation frontier, so the supervisor
+            # must not plan the next experiment from a partial suite.
+            if is_eval and not await _has_deferred_evaluation(session, tk.run_id):
+                tk.supervisor_wake_deferred = True
+                await session.commit()
+        elif (
+            _is_validation_suite_mirror(tk)
+            and await _holdout_settled(session, tk.run_id)
+        ):
+            # A failed/cancelled mirror can settle the Validation frontier
+            # without producing the aggregate that would start held-out Test.
+            # Wake with that concrete failure, but first discard the primary
+            # Evaluation's borrowed wake flag so it cannot deadlock a later
+            # round or manufacture a duplicate wake.
+            await _clear_deferred_evaluations(session, tk.run_id)
+            await _maybe_wake_supervisor(session, tk)
         elif is_eval and not await _holdout_settled(session, tk.run_id):
             # Record WHICH wake is being held, rather than have the release step
             # guess: a lane that settles with nothing waiting must issue no wake,
             # and "the newest finished evaluation" is not the same question.
-            tk.supervisor_wake_deferred = True
-            await session.commit()
+            if not await _has_deferred_evaluation(session, tk.run_id):
+                tk.supervisor_wake_deferred = True
+                await session.commit()
         else:
             await _maybe_wake_supervisor(session, tk)
 
@@ -4747,6 +5488,231 @@ def _heldout_test_set(run: Run, name: str) -> dict[str, Any] | None:
     )
 
 
+_VALIDATION_MEMBER_PREFIX = "validation:"
+
+
+def _validation_member_name(ticket: Ticket) -> str:
+    raw = str((ticket.payload or {}).get("test_set_name") or "")
+    return raw[len(_VALIDATION_MEMBER_PREFIX):] if raw.startswith(
+        _VALIDATION_MEMBER_PREFIX
+    ) else ""
+
+
+def _is_validation_suite_mirror(ticket: Ticket) -> bool:
+    return ticket.lane == "optimization" and bool(_validation_member_name(ticket))
+
+
+def _validation_set(run: Run, name: str) -> dict[str, Any] | None:
+    return next(
+        (item for item in _validation_sets(run) if str(item.get("name")) == name),
+        None,
+    )
+
+
+async def _spawn_validation_infer(
+    session: AsyncSession, run: Run, source: Ticket, *, enqueue: bool = True,
+) -> list[Ticket]:
+    """Mirror one candidate across every non-primary Validation contract."""
+    from zevo.contracts.tickets import validate_stored_payload
+    from zevo.engine.run.wakeup import queue_wakeup
+
+    suite = _validation_sets(run)
+    if len(suite) <= 1:
+        return []
+    iteration = int(source.iteration or 0)
+    source_payload = dict(source.payload or {})
+    existing = (await session.execute(
+        select(Ticket).where(
+            Ticket.run_id == run.id,
+            Ticket.lane == "optimization",
+            Ticket.agent_id == "inference",
+        )
+    )).scalars().all()
+    created: list[Ticket] = []
+    for item in suite[1:]:
+        name = str(item.get("name") or "")
+        marker = f"{_VALIDATION_MEMBER_PREFIX}{name}"
+        duplicate = next((
+            candidate for candidate in existing
+            if int(candidate.iteration or 0) == iteration
+            and (candidate.payload or {}).get("model_source")
+                == source_payload.get("model_source")
+            and (candidate.payload or {}).get("base_model")
+                == source_payload.get("base_model")
+            and (candidate.payload or {}).get("test_set_name") == marker
+        ), None)
+        if duplicate is not None:
+            created.append(duplicate)
+            continue
+        public = str(item.get("public") or "")
+        submission = str(item.get("sample_submission") or "")
+        if not public or not submission:
+            raise ValueError(f"Validation set {name!r} has no prepared public contract")
+
+        payload = dict(source_payload)
+        configuration_pins = dict(payload.get("configuration_pins") or {})
+        inference_mapping = dict(configuration_pins.get("inference_config") or {})
+        inference_mapping["inference_query"] = str(item.get("inference_query") or "")
+        configuration_pins["inference_config"] = inference_mapping
+        payload.update({
+            "test_set_name": marker,
+            "scoring_set": public,
+            "sample_submission": submission,
+            "configuration_suggestions": {},
+            "configuration_pins": configuration_pins,
+        })
+        payload = validate_stored_payload(
+            agent_id="inference", input_format="typed", payload=payload,
+        )
+        inputs = dict(source.inputs or {})
+        inputs.pop("inference_data_profile", None)
+        inputs.pop("inference_config", None)
+        inputs.pop("predict_script", None)
+        profile = str(item.get("inference_data_profile") or "")
+        if profile:
+            inputs["inference_data_profile"] = {
+                "artifact_role": "inference_data_profile",
+                "path": profile,
+            }
+        if payload.get("model_source") == "checkpoint":
+            # Each benchmark owns its inference query, so it also owns one
+            # baseline configuration per model lineage. A trained checkpoint
+            # reuses that exact member-specific baseline, just as the primary
+            # Validation and held-out Test lanes do.
+            baseline = next((
+                candidate for candidate in reversed(existing)
+                if int(candidate.iteration or 0) <= iteration
+                and (candidate.payload or {}).get("model_source") == "base_model"
+                and (candidate.payload or {}).get("base_model")
+                    == source_payload.get("base_model")
+                and (candidate.payload or {}).get("test_set_name") == marker
+                and candidate.status in ("succeeded", "degraded")
+            ), None)
+            if baseline is None:
+                raise ValueError(
+                    f"Validation set {name!r} has no baseline inference "
+                    "configuration for this model lineage"
+                )
+            inputs["inference_config"] = _artifact_binding(
+                "inference_config", baseline,
+            )
+            inputs["predict_script"] = _artifact_binding("script", baseline)
+
+        count = len(existing) + len(created) + 1
+        ticket = Ticket(
+            id=f"validation-infer-{run.id[:8]}-{count:03d}",
+            run_id=run.id,
+            agent_id="inference",
+            status="queued",
+            input_format="typed",
+            lane="optimization",
+            iteration=iteration,
+            payload=payload,
+            customization=dict(source.customization or {}),
+            inputs=inputs,
+            summary=f"validation suite · {name}",
+        )
+        session.add(ticket)
+        created.append(ticket)
+    if not created:
+        return []
+    await session.commit()
+    if enqueue:
+        for ticket in created:
+            if ticket.status == "queued":
+                await queue_wakeup(
+                    session,
+                    agent_id="inference",
+                    ticket_id=ticket.id,
+                    source="handoff",
+                    reason=(
+                        f"measuring Validation suite member "
+                        f"{_validation_member_name(ticket)}"
+                    ),
+                )
+    return created
+
+
+async def _spawn_validation_eval(
+    session: AsyncSession, run: Run, source: Ticket,
+) -> Ticket | None:
+    """Score one engine-created Validation-suite inference."""
+    from zevo.contracts.tickets import validate_stored_payload
+    from zevo.engine.run.wakeup import queue_wakeup
+
+    name = _validation_member_name(source)
+    item = _validation_set(run, name)
+    if item is None:
+        return None
+    marker = f"{_VALIDATION_MEMBER_PREFIX}{name}"
+    duplicate = (await session.execute(
+        select(Ticket).where(
+            Ticket.run_id == run.id,
+            Ticket.lane == "optimization",
+            Ticket.agent_id == "evaluation",
+            Ticket.iteration == int(source.iteration or 0),
+        )
+    )).scalars().all()
+    existing = next((
+        candidate for candidate in duplicate
+        if (candidate.payload or {}).get("test_set_name") == marker
+        and str(((candidate.inputs or {}).get("predictions") or {}).get(
+            "source_ticket_id"
+        ) or "") == source.id
+    ), None)
+    if existing is not None:
+        return existing
+
+    payload = validate_stored_payload(
+        agent_id="evaluation",
+        input_format="typed",
+        payload={
+            "test_set_name": marker,
+            "metric": str(item.get("metric") or ""),
+            "evaluation_config": {},
+            "scoring_set": str(item.get("validation_set") or ""),
+            "evaluation_script": str(item.get("evaluation_script") or ""),
+            "evaluator_sha256": str(item.get("evaluator_sha256") or ""),
+            "answer_fields": list(item.get("answer_fields") or []),
+            "sample_submission": str(item.get("sample_submission") or ""),
+            "code_execution_adapter": str(
+                item.get("code_execution_adapter") or ""
+            ),
+        },
+    )
+    count = len(duplicate) + 1
+    ticket = Ticket(
+        id=f"validation-eval-{run.id[:8]}-{count:03d}",
+        run_id=run.id,
+        agent_id="evaluation",
+        status="queued",
+        input_format="typed",
+        lane="optimization",
+        iteration=int(source.iteration or 0),
+        payload=payload,
+        customization={},
+        inputs={
+            "predictions": {
+                "source_ticket_id": source.id,
+                "artifact_role": "predictions",
+                "work_product_id": "",
+                "path": "",
+            }
+        },
+        summary=f"validation suite · {name}",
+    )
+    session.add(ticket)
+    await session.commit()
+    await queue_wakeup(
+        session,
+        agent_id="evaluation",
+        ticket_id=ticket.id,
+        source="handoff",
+        reason=f"scoring Validation suite member {name}",
+    )
+    return ticket
+
+
 async def _spawn_holdout_data(
     session: AsyncSession, run: Run, source: Ticket, *, test_set_name: str = "",
     enqueue: bool = True,
@@ -4876,21 +5842,24 @@ async def _spawn_holdout_infer(
         inputs = dict(source.inputs or {})
         inputs.pop("inference_config", None)
         inputs.pop("predict_script", None)
-        data_rows = (await session.execute(
-            select(Ticket).where(
-                Ticket.run_id == run.id,
-                Ticket.lane == "held_out_test",
-                Ticket.agent_id == "data",
-                Ticket.status.in_(("succeeded", "degraded")),
-            ).order_by(Ticket.created_at.desc())
-        )).scalars().all()
-        data_ticket = next((
-            ticket for ticket in data_rows
-            if (ticket.payload or {}).get("test_set_name") == item["name"]
-        ), None)
-        if data_ticket is None:
-            raise ValueError(f"Test set {item['name']!r} has no prepared Data ticket")
-        if item.get("inference_data_profile"):
+        profile = str(item.get("inference_data_profile") or "")
+        if profile:
+            data_rows = (await session.execute(
+                select(Ticket).where(
+                    Ticket.run_id == run.id,
+                    Ticket.lane == "held_out_test",
+                    Ticket.agent_id == "data",
+                    Ticket.status.in_(("succeeded", "degraded")),
+                ).order_by(Ticket.created_at.desc())
+            )).scalars().all()
+            data_ticket = next((
+                ticket for ticket in data_rows
+                if (ticket.payload or {}).get("test_set_name") == item["name"]
+            ), None)
+            if data_ticket is None:
+                raise ValueError(
+                    f"Test set {item['name']!r} has no prepared Data ticket"
+                )
             inputs["inference_data_profile"] = _artifact_binding(
                 "inference_data_profile", data_ticket,
             )
@@ -4969,6 +5938,9 @@ async def _spawn_holdout_eval(
             "evaluator_sha256": str(item.get("evaluator_sha256") or ""),
             "answer_fields": list(item["answer_fields"]),
             "sample_submission": item["sample_submission"],
+            "code_execution_adapter": str(
+                item.get("code_execution_adapter") or ""
+            ),
         },
     )
     session.add(Ticket(
@@ -5123,6 +6095,7 @@ async def _record_holdout_score(
 
 async def _record_validation_score(
     session: AsyncSession, run: Run, ticket: Ticket, score: float,
+    *, components: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """File the score from an ordinary eval ticket as this run's validation point.
 
@@ -5144,11 +6117,78 @@ async def _record_validation_score(
     iteration = int(source_infer.iteration if source_infer else ticket.iteration or 0)
     infer_payload = dict(source_infer.payload or {}) if source_infer else {}
     source = "baseline" if infer_payload.get("model_source") == "base_model" else "trained"
+    component_scores = {
+        name: float(item["score"])
+        for name, item in (components or {}).items()
+    }
+    component_metrics = {
+        name: str(item.get("metric") or "")
+        for name, item in (components or {}).items()
+    }
+    if components:
+        # Registry may bind any Evaluation that measured the selected
+        # checkpoint. Stamp the authoritative aggregate onto every component's
+        # metrics WorkProduct so its meaning never depends on completion order
+        # or on which suite member the finalization request references.
+        evaluation_ticket_ids = {
+            str(item.get("evaluation_ticket_id") or "")
+            for item in components.values()
+            if str(item.get("evaluation_ticket_id") or "")
+        }
+        products = (await session.execute(
+            select(WorkProduct).where(
+                WorkProduct.ticket_id.in_(evaluation_ticket_ids),
+                WorkProduct.role == "metrics",
+            ).order_by(WorkProduct.created_at.desc())
+        )).scalars().all() if evaluation_ticket_ids else []
+        aggregate_document = {
+            "score": float(score),
+            "metric": run.validation_metric,
+            "aggregation": "unweighted_mean",
+            "validation_sets": {
+                name: {
+                    "score": component_scores[name],
+                    "metric": component_metrics[name],
+                    "metric_direction": str(item.get("metric_direction") or "max"),
+                }
+                for name, item in components.items()
+            },
+        }
+        for product in products:
+            if not str(product.path or ""):
+                continue
+            try:
+                Path(product.path).write_text(
+                    json.dumps(aggregate_document, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                product.meta = dict(aggregate_document)
+            except OSError as exc:
+                raise ValueError(
+                    f"could not persist aggregate Validation metrics: {exc}"
+                ) from exc
+
     session.add(ScoreEvent(
         run_id=run.id, iteration=iteration, split="validation",
         source=source,
         score=float(score), metric_name=run.validation_metric,
-        notes=f"validation score from {ticket.id}",
+        extras=(
+            {
+                "aggregation": "unweighted_mean",
+                "validation_sets": {
+                    name: {
+                        "score": component_scores[name],
+                        "metric": component_metrics[name],
+                    }
+                    for name in component_scores
+                },
+            }
+            if components else {}
+        ),
+        notes=(
+            f"validation suite completed by {ticket.id}"
+            if components else f"validation score from {ticket.id}"
+        ),
     ))
 
     # The chart and journal are factual views of measurements the engine has
@@ -5249,6 +6289,21 @@ async def _record_validation_score(
         training_diagnostics=training_diagnostics,
         generation_termination=generation_termination,
     )
+    if components:
+        history = [
+            dict(entry) if isinstance(entry, dict) else entry
+            for entry in (run.history or [])
+        ]
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            if (
+                int(entry.get("iteration", -1)) == iteration
+                and entry.get("source") == source
+            ):
+                entry["validation_scores"] = component_scores
+                entry["validation_metrics"] = component_metrics
+        run.history = history
     _sync_best_validation_score(run)
     if source == "baseline" and base_model:
         lineages = dict(run.model_lineages or {})
@@ -5269,6 +6324,76 @@ async def _record_validation_score(
     if champion_test is not None:
         run.champion_test_score = champion_test
     await session.commit()
+
+
+async def _record_validation_component(
+    session: AsyncSession, run: Run, ticket: Ticket, score: float,
+) -> tuple[bool, Ticket | None]:
+    """Record a component and publish exactly one suite-average point.
+
+    Returns ``(complete, source_inference)``. Until complete, neither Run
+    history nor ScoreEvent receives a model-selection number.
+    """
+    suite = _validation_sets(run)
+    if len(suite) <= 1:
+        await _record_validation_score(session, run, ticket, score)
+        binding = (ticket.inputs or {}).get("predictions") or {}
+        source = await session.get(
+            Ticket, str(binding.get("source_ticket_id") or "")
+        )
+        return True, source
+
+    binding = (ticket.inputs or {}).get("predictions") or {}
+    source_id = str(binding.get("source_ticket_id") or "")
+    source_infer = await session.get(Ticket, source_id) if source_id else None
+    iteration = int(
+        source_infer.iteration if source_infer is not None else ticket.iteration or 0
+    )
+    source_payload = dict(source_infer.payload or {}) if source_infer else {}
+    source_kind = (
+        "baseline" if source_payload.get("model_source") == "base_model" else "trained"
+    )
+    base_model = str(source_payload.get("base_model") or "")
+    name = _validation_member_name(ticket) or str(suite[0].get("name") or "validation")
+    names = [str(item.get("name") or "") for item in suite]
+    if name not in names:
+        raise ValueError(f"Unknown Validation suite member {name!r}")
+
+    holdout = dict(run.holdout or {})
+    all_results = dict(holdout.get("validation_suite_results") or {})
+    result_key = f"{source_kind}|{iteration}|{base_model}"
+    candidate = dict(all_results.get(result_key) or {})
+    item = next(member for member in suite if member.get("name") == name)
+    candidate[name] = {
+        "score": float(score),
+        "metric": str((ticket.payload or {}).get("metric") or item.get("metric") or ""),
+        "metric_direction": str(item.get("metric_direction") or "max"),
+        "evaluation_ticket_id": ticket.id,
+    }
+    all_results[result_key] = candidate
+    recorded = list(holdout.get("validation_suite_recorded") or [])
+    holdout["validation_suite_results"] = all_results
+    run.holdout = holdout
+    if result_key in recorded:
+        await session.commit()
+        return True, source_infer
+    if any(member_name not in candidate for member_name in names):
+        await session.commit()
+        return False, source_infer
+
+    aggregate = sum(float(candidate[member_name]["score"]) for member_name in names) / len(names)
+    recorded.append(result_key)
+    holdout["validation_suite_recorded"] = recorded
+    run.holdout = holdout
+    await session.commit()
+    await _record_validation_score(
+        session,
+        run,
+        ticket,
+        aggregate,
+        components={member_name: candidate[member_name] for member_name in names},
+    )
+    return True, source_infer
 
 
 async def _advance_measurements(
@@ -5320,15 +6445,28 @@ async def _advance_measurements(
                     latest,
                     test_set_name=str((tk.payload or {}).get("test_set_name") or ""),
                 )
+    elif (
+        not is_held_out_test
+        and tk.agent_id == "inference"
+        and _is_validation_suite_mirror(tk)
+    ):
+        await _spawn_validation_eval(session, run, tk)
     elif score is not None and not is_held_out_test and tk.agent_id == "evaluation":
-        await _record_validation_score(session, run, tk, score)
-        # Strict order: Validation Evaluation finishes first. Only then does
-        # the engine start the private held-out mirror for the exact Inference
-        # that produced these predictions.
-        pred = dict((tk.inputs or {}).get("predictions") or {})
-        source = await session.get(Ticket, str(pred.get("source_ticket_id") or ""))
-        if source is not None and source.agent_id == "inference":
-            await _spawn_holdout_infer(session, run, source)
+        complete, source = await _record_validation_component(
+            session, run, tk, score,
+        )
+        if complete:
+            # Strict order: the complete Validation suite lands first. Only
+            # then does the engine start the private held-out mirror for the
+            # exact candidate that produced those predictions.
+            if source is not None and source.agent_id == "inference":
+                await _spawn_holdout_infer(session, run, source)
+        elif not _is_validation_suite_mirror(tk):
+            # The ordinary pipeline Evaluation is the primary member. The
+            # remaining members are engine-created mirrors and deliberately do
+            # not require one Orchestrator decision per benchmark.
+            if source is not None and source.agent_id == "inference":
+                await _spawn_validation_infer(session, run, source)
     elif is_held_out_test and tk.agent_id == "inference":
         await _spawn_holdout_eval(session, run, tk)
     elif score is not None and is_held_out_test and tk.agent_id == "evaluation":
@@ -5381,6 +6519,51 @@ async def _holdout_settled(session: AsyncSession, run_id: str) -> bool:
     return int(pending or 0) == 0
 
 
+async def _validation_suite_pending(session: AsyncSession, run_id: str) -> bool:
+    """Whether an engine-created Validation-suite mirror is still active."""
+    rows = (await session.execute(
+        select(Ticket).where(
+            Ticket.run_id == run_id,
+            Ticket.lane == "optimization",
+            Ticket.agent_id.in_(("inference", "evaluation")),
+            Ticket.status.in_((
+                "queued", "running", "repairing", "awaiting_input", "waiting_external",
+            )),
+        )
+    )).scalars().all()
+    return any(_is_validation_suite_mirror(ticket) for ticket in rows)
+
+
+async def _has_deferred_evaluation(session: AsyncSession, run_id: str) -> bool:
+    row = (await session.execute(
+        select(Ticket.id).where(
+            Ticket.run_id == run_id,
+            Ticket.lane == "optimization",
+            Ticket.agent_id == "evaluation",
+            Ticket.supervisor_wake_deferred.is_(True),
+        ).limit(1)
+    )).scalar_one_or_none()
+    return row is not None
+
+
+async def _clear_deferred_evaluations(
+    session: AsyncSession, run_id: str,
+) -> None:
+    rows = (await session.execute(
+        select(Ticket).where(
+            Ticket.run_id == run_id,
+            Ticket.lane == "optimization",
+            Ticket.agent_id == "evaluation",
+            Ticket.supervisor_wake_deferred.is_(True),
+        )
+    )).scalars().all()
+    if not rows:
+        return
+    for ticket in rows:
+        ticket.supervisor_wake_deferred = False
+    await session.commit()
+
+
 async def _release_deferred_wake(session: AsyncSession, run_id: str) -> None:
     """Issue the supervisor wake the held-out lane was holding, if any.
 
@@ -5401,7 +6584,8 @@ async def _release_deferred_wake(session: AsyncSession, run_id: str) -> None:
     held = next((t for t in rows if t.supervisor_wake_deferred), None)
     if held is None:
         return
-    held.supervisor_wake_deferred = False
+    for ticket in rows:
+        ticket.supervisor_wake_deferred = False
     await session.commit()
     await _maybe_wake_supervisor(session, held)
 

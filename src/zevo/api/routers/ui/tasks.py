@@ -6,8 +6,10 @@ in are the same kind of thing: both listed here, both deletable.
 """
 from __future__ import annotations
 
+import csv
 import json
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,19 +30,13 @@ from zevo.contracts.orchestrator import (
     TaskTestSet,
     UserRequest,
     validate_test_suite,
+    validate_validation_suite,
 )
 from zevo.contracts.training_methods import (
     method_config_errors,
     normalize_method_config,
 )
-from zevo.contracts.prompting import (
-    canonical_prompt_contract,
-    normalize_prompt_framing,
-    validate_decoding_config,
-    validate_inference_config,
-    validate_loss_objective_config,
-)
-from zevo.holdout_storage import protect_assets
+from zevo.holdout_storage import protect_assets, resolve_asset
 
 
 router = APIRouter()
@@ -133,6 +129,65 @@ def data_source(dataset: str) -> dict:
     except ValueError:
         pass
     return {"kind": "path", "name": p.name, "detail": rel, "remote": False, "url": ""}
+
+
+@lru_cache(maxsize=256)
+def _local_table_rows(path: str, size: int, mtime_ns: int) -> int:
+    """Count a local scoring table once per immutable file revision.
+
+    Task cards are polled, so reading the same held-out CSV every five seconds
+    would turn a display detail into steady disk traffic. ``size`` and
+    ``mtime_ns`` are deliberately part of the cache key; changing the file
+    invalidates the count without maintaining another metadata file.
+    """
+    del size, mtime_ns  # cache-key inputs; the path is the value being read
+    target = Path(path)
+    suffix = target.suffix.lower()
+    if suffix == ".csv":
+        from zevo.engine.method.validation_split import _allow_large_csv_fields
+
+        _allow_large_csv_fields()
+        with target.open("r", encoding="utf-8", errors="replace", newline="") as fh:
+            return max(0, sum(1 for _ in csv.reader(fh)) - 1)
+    if suffix in {".jsonl", ".ndjson"}:
+        with target.open("r", encoding="utf-8", errors="replace") as fh:
+            return sum(1 for line in fh if line.strip())
+    if suffix == ".json":
+        import ijson
+
+        with target.open("rb") as fh:
+            return sum(1 for _ in ijson.items(fh, "item"))
+    if suffix == ".parquet":
+        import pyarrow.parquet as pq
+
+        return int(pq.ParquetFile(target).metadata.num_rows)
+    return 0
+
+
+def _with_source_rows(item: TaskTestSet, *, role: str) -> TaskTestSet:
+    """Add best-known source size without making it a scoring authority."""
+    from zevo.engine.remote_datasets import looks_like_hub_id, lookup
+
+    if looks_like_hub_id(item.test_set):
+        declared = lookup(item.test_set, role=role)
+        if declared is not None:
+            updates = {
+                **({"source_rows": declared.n_rows}
+                   if item.source_rows <= 0 and declared.n_rows > 0 else {}),
+                **({"split": declared.split} if not item.split and declared.split else {}),
+                **({"config": declared.config} if not item.config and declared.config else {}),
+            }
+            return item.model_copy(update=updates) if updates else item
+        return item
+    if item.source_rows > 0:
+        return item
+    try:
+        target = Path(resolve_asset(item.test_set))
+        stat = target.stat()
+        rows = _local_table_rows(str(target), stat.st_size, stat.st_mtime_ns)
+    except (OSError, ValueError, TypeError, csv.Error):
+        rows = 0
+    return item.model_copy(update={"source_rows": rows}) if rows > 0 else item
 
 
 def autonomy_level(dataset: str, base_model: str, training_method: str) -> str:
@@ -260,12 +315,13 @@ class TaskDTO(BaseModel):
 def _stored_test_sets(t: Task) -> list[TaskTestSet]:
     values = list(t.test_sets or [])
     if values:
-        return validate_test_suite([
+        items = validate_test_suite([
             TaskTestSet.model_validate(value) for value in values
         ])
+        return [_with_source_rows(item, role="test") for item in items]
     # Shipped catalogue rows predate suites. Treat their one Test contract as
     # a one-item suite until they are edited; no Run ever receives two shapes.
-    return [TaskTestSet(
+    return [_with_source_rows(TaskTestSet(
         name=t.name,
         test_set=t.test_set or "",
         inference_query=t.task_objective or "Answer the input.",
@@ -276,7 +332,7 @@ def _stored_test_sets(t: Task) -> list[TaskTestSet]:
         metric_direction=t.metric_direction,
         evaluation_script=t.evaluation_script or "",
         evaluator_sha256=t.evaluator_sha256 or "",
-    )]
+    ), role="test")]
 
 
 def _suite_headline(items: list[TaskTestSet]) -> tuple[str, Literal["max", "min"]]:
@@ -461,7 +517,11 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
     def normalized(field_name: str, value: Any) -> Any:
         if field_name == "test_sets":
             return tuple(
-                tuple(sorted(TaskTestSet.model_validate(item).model_dump().items()))
+                tuple(sorted(_with_source_rows(
+                    TaskTestSet.model_validate(item), role="test",
+                ).model_dump(
+                    exclude={"source_rows"},
+                ).items()))
                 for item in (value or [])
             )
         return value.strip() if isinstance(value, str) else value
@@ -542,8 +602,11 @@ class SettingBody(BaseModel):
     # Only meaningful when dataset is a hub id.
     dataset_split: str = ""
     dataset_config: str = ""
-    # What runs on this setting TUNE against. "" = each run carves 20% from
-    # Test, with a minimum of 200 rows (zevo.engine.method.validation_split).
+    # What runs on this setting TUNE against. A suite leaves every Test member
+    # intact. The scalar fields below remain the one-upload form and primary
+    # compatibility projection. When both are empty, Run setup derives 20%
+    # from eligible Test members with at least 200 resulting Validation rows.
+    validation_sets: list[TaskTestSet] = Field(default_factory=list)
     validation_set: str = ""
     # Only meaningful when validation_set is a hub id: which slice, and which
     # named subset. Run creation fetches that slice to a file.
@@ -558,17 +621,19 @@ class SettingBody(BaseModel):
     base_model: str = ""
     training_method: str = ""
     method_config: dict[str, Any] = Field(default_factory=dict)
-    prompt_framing: str = ""
-    system_prompt: str = ""
-    loss_objective_config: dict[str, Any] = Field(default_factory=dict)
-    inference_config: dict[str, Any] = Field(default_factory=dict)
-    decoding_config: dict[str, Any] = Field(default_factory=dict)
     data_query: str = ""
     model_query: str = ""
     method_query: str = ""
     iteration_budget: int = Field(0, ge=0)
     max_cost_usd: float = Field(0.0, ge=0.0)
     stop_threshold: float | None = Field(None, allow_inf_nan=False)
+
+    @field_validator("validation_sets")
+    @classmethod
+    def unique_validation_set_names(
+        cls, value: list[TaskTestSet],
+    ) -> list[TaskTestSet]:
+        return validate_validation_suite(value)
 
 
 class SettingDTO(BaseModel):
@@ -579,6 +644,7 @@ class SettingDTO(BaseModel):
     dataset_split: str
     dataset_config: str
     data_source: dict[str, Any]
+    validation_sets: list[TaskTestSet]
     validation_set: str
     validation_data_source: dict[str, Any]
     validation_split: str
@@ -593,11 +659,6 @@ class SettingDTO(BaseModel):
     base_model: str
     training_method: str
     method_config: dict[str, Any]
-    prompt_framing: str
-    system_prompt: str
-    loss_objective_config: dict[str, Any]
-    inference_config: dict[str, Any]
-    decoding_config: dict[str, Any]
     data_query: str
     model_query: str
     method_query: str
@@ -626,6 +687,10 @@ def _setting_dto(s: TaskSetting, *, run_count: int = 0, best_test_score: float |
         "dataset_split": s.dataset_split or "",
         "dataset_config": s.dataset_config or "",
         "data_source": data_source(s.dataset or ""),
+        "validation_sets": [
+            _with_source_rows(TaskTestSet.model_validate(item), role="validation")
+            for item in (s.validation_sets or [])
+        ],
         "validation_set": s.validation_set or "",
         # Classified the same way as the training data, so the UI can tell
         # whether the two came out of one dataset folder or two.
@@ -642,11 +707,6 @@ def _setting_dto(s: TaskSetting, *, run_count: int = 0, best_test_score: float |
         "base_model": s.base_model or "",
         "training_method": s.training_method or "",
         "method_config": dict(s.method_config or {}),
-        "prompt_framing": s.prompt_framing or "",
-        "system_prompt": s.system_prompt or "",
-        "loss_objective_config": dict(s.loss_objective_config or {}),
-        "inference_config": dict(s.inference_config or {}),
-        "decoding_config": dict(s.decoding_config or {}),
         "data_query": s.data_query or "",
         "model_query": s.model_query or "",
         "method_query": s.method_query or "",
@@ -694,9 +754,10 @@ def _next_setting_name(existing: list) -> str:
     return f"s{highest + 1}"
 
 
-# Every user-owned field a setting stores, and therefore every field that
-# distinguishes one from another. The model-derived reasoning type is not a
-# Setting field. `id`, `name` and `created_at` are not here: a label and a
+# Every Standard field a setting exposes, and therefore every field that
+# distinguishes one from another. Customized prompt, loss, inference and
+# decoding choices belong to the Run and are deliberately absent. `id`,
+# `name` and `created_at` are not here: a label and a
 # timestamp do not make a different experiment. `task_name` is not here either
 # — settings are only ever compared within one task.
 #
@@ -709,8 +770,7 @@ def _next_setting_name(existing: list) -> str:
 _SETTING_IDENTITY_FIELDS = (
     "dataset", "dataset_split", "dataset_config", "data_query",
     "base_model", "model_query", "training_method", "method_query", "method_config",
-    "prompt_framing", "system_prompt",
-    "loss_objective_config", "inference_config", "decoding_config",
+    "validation_sets",
     "validation_set", "validation_split", "validation_config",
     "validation_answer_fields",
     "validation_sample_submission",
@@ -772,19 +832,38 @@ def _norm_setting_value(field: str, v) -> object:
         return tuple(str(x).strip() for x in items if str(x).strip())
     if field in {
         "method_config", "loss_objective_config", "inference_config",
-        "decoding_config",
+        "decoding_config", "validation_sets",
     }:
         if isinstance(v, str):
             try:
                 v = json.loads(v) if v.strip() else {}
             except (TypeError, ValueError, json.JSONDecodeError):
                 return v.strip()
+        if field == "validation_sets" and isinstance(v, list):
+            # Row totals are display metadata discovered from the catalogue or
+            # local file. A refreshed count must not turn the same training
+            # strategy into a second Setting identity.
+            v = [
+                ({k: value for k, value in item.items() if k != "source_rows"}
+                 if isinstance(item, dict) else item)
+                for item in v
+            ]
         return json.dumps(v or {}, sort_keys=True, separators=(",", ":"))
     if v is None:
         return ""
     if isinstance(v, (list, tuple)):
         return tuple(str(x).strip() for x in v if str(x).strip())
     return str(v).strip()
+
+
+def _has_validation_suite(value: object) -> bool:
+    """Treat a JSON query-string list like the stored JSON list it represents."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return bool(value.strip())
+    return bool(value)
 
 
 def setting_identity(src) -> tuple:
@@ -802,7 +881,10 @@ def setting_identity(src) -> tuple:
     Setting, so saved settings and comparison groups cannot silently disagree.
     """
     get = src.get if isinstance(src, dict) else lambda k, d=None: getattr(src, k, d)
-    derived_validation = not str(get("validation_set") or "").strip()
+    derived_validation = not (
+        _has_validation_suite(get("validation_sets"))
+        or str(get("validation_set") or "").strip()
+    )
     return tuple(
         _norm_setting_value(
             field,
@@ -918,7 +1000,10 @@ async def match_task_setting(
         k: v for k, v in request.query_params.items()
         if k in _SETTING_IDENTITY_FIELDS
     }
-    if not str(candidate.get("validation_set") or "").strip():
+    if not (
+        _has_validation_suite(candidate.get("validation_sets"))
+        or str(candidate.get("validation_set") or "").strip()
+    ):
         task = await db.get(Task, name)
         if task is not None:
             candidate.update({
@@ -938,6 +1023,13 @@ async def match_task_setting(
 
 
 def _validate_named_validation_assets(body: SettingBody) -> None:
+    if body.validation_sets and body.validation_set.strip():
+        raise HTTPException(
+            400,
+            "use validation_sets or the single validation_set upload, not both",
+        )
+    if body.validation_sets:
+        return
     if not body.validation_set.strip():
         return
     missing = []
@@ -994,9 +1086,46 @@ async def _resolve_setting_validation_contract(
     body: SettingBody, task: Task,
 ) -> tuple[SettingBody, str]:
     """Inherit Task scoring unless this Setting supplies Validation data."""
+    if body.validation_sets:
+        from zevo.evaluator_storage import freeze_evaluator
+
+        frozen: list[TaskTestSet] = []
+        for item in body.validation_sets:
+            if item.metric_type == "custom":
+                try:
+                    script, digest = await run_in_threadpool(
+                        freeze_evaluator, item.evaluation_script,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                item = item.model_copy(update={
+                    "evaluation_script": script,
+                    "evaluator_sha256": digest,
+                })
+            frozen.append(item)
+        primary = frozen[0]
+        return body.model_copy(update={
+            "validation_sets": frozen,
+            "validation_set": "",
+            "validation_split": "",
+            "validation_config": "",
+            "validation_answer_fields": list(primary.answer_fields),
+            "validation_sample_submission": primary.sample_submission,
+            "validation_metric_type": (
+                "builtin" if len(frozen) > 1 else primary.metric_type
+            ),
+            "validation_metric": (
+                "suite_average" if len(frozen) > 1 else primary.metric
+            ),
+            "validation_metric_direction": primary.metric_direction,
+            "validation_evaluation_script": (
+                "" if len(frozen) > 1 else primary.evaluation_script
+            ),
+        }), "" if len(frozen) > 1 else primary.evaluator_sha256
     if body.validation_set.strip():
         return await _freeze_validation_metric(body)
     return body.model_copy(update={
+        "validation_sets": [],
         "validation_answer_fields": [],
         "validation_sample_submission": "",
         "validation_metric_type": task.metric_type,
@@ -1012,35 +1141,6 @@ def _validate_method_config(body: SettingBody) -> None:
     )
     if errors:
         raise HTTPException(400, "; ".join(errors))
-
-
-def _validate_setting_decision_inputs(body: SettingBody) -> dict[str, Any]:
-    """Validate and normalize the Setting-owned experiment preferences."""
-    try:
-        framing = normalize_prompt_framing(body.prompt_framing) if body.prompt_framing else ""
-        system = body.system_prompt.strip()
-        if framing:
-            framing, _reasoning_type, system = canonical_prompt_contract(
-                prompt_framing=framing,
-                model_reasoning_type="non_thinking",
-                system_prompt=system,
-            )
-        elif system:
-            raise ValueError("system_prompt requires prompt_framing")
-        loss = validate_loss_objective_config(
-            body.training_method, body.loss_objective_config,
-        )
-        if loss and not body.training_method.strip():
-            raise ValueError("loss_objective_config requires training_method")
-        return {
-            "prompt_framing": framing,
-            "system_prompt": system,
-            "loss_objective_config": loss,
-            "inference_config": validate_inference_config(body.inference_config),
-            "decoding_config": validate_decoding_config(body.decoding_config),
-        }
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/tasks/{name}/settings", status_code=201, response_model=SettingDTO)
@@ -1060,8 +1160,7 @@ async def create_task_setting(
         body, task,
     )
     _validate_method_config(body)
-    contracts = _validate_setting_decision_inputs(body)
-    key = setting_identity({**body.model_dump(), **contracts})
+    key = setting_identity(body.model_dump())
     existing = (await db.execute(
         select(TaskSetting).where(TaskSetting.task_name == name)
     )).scalars().all()
@@ -1079,6 +1178,9 @@ async def create_task_setting(
         dataset=body.dataset.strip(),
         dataset_split=body.dataset_split.strip(),
         dataset_config=body.dataset_config.strip(),
+        validation_sets=[
+            item.model_dump(mode="json") for item in body.validation_sets
+        ],
         validation_set=body.validation_set.strip(),
         validation_split=body.validation_split.strip(),
         validation_config=body.validation_config.strip(),
@@ -1092,7 +1194,6 @@ async def create_task_setting(
         base_model=body.base_model.strip(),
         training_method=body.training_method.strip(),
         method_config=normalize_method_config(body.method_config),
-        **contracts,
         data_query=body.data_query.strip(),
         model_query=body.model_query.strip(),
         method_query=body.method_query.strip(),
@@ -1128,12 +1229,11 @@ async def update_task_setting(
         body, task,
     )
     _validate_method_config(body)
-    contracts = _validate_setting_decision_inputs(body)
     row = await db.get(TaskSetting, setting_id)
     if row is None or row.task_name != name:
         raise HTTPException(404, f"setting {setting_id!r} not found on task {name!r}.")
 
-    key = setting_identity({**body.model_dump(), **contracts})
+    key = setting_identity(body.model_dump())
     others = (await db.execute(
         select(TaskSetting).where(
             TaskSetting.task_name == name, TaskSetting.id != setting_id)
@@ -1153,6 +1253,9 @@ async def update_task_setting(
     row.dataset = body.dataset.strip()
     row.dataset_split = body.dataset_split.strip()
     row.dataset_config = body.dataset_config.strip()
+    row.validation_sets = [
+        item.model_dump(mode="json") for item in body.validation_sets
+    ]
     row.validation_set = body.validation_set.strip()
     row.validation_split = body.validation_split.strip()
     row.validation_config = body.validation_config.strip()
@@ -1168,11 +1271,14 @@ async def update_task_setting(
     row.base_model = body.base_model.strip()
     row.training_method = body.training_method.strip()
     row.method_config = normalize_method_config(body.method_config)
-    row.prompt_framing = contracts["prompt_framing"]
-    row.system_prompt = contracts["system_prompt"]
-    row.loss_objective_config = contracts["loss_objective_config"]
-    row.inference_config = contracts["inference_config"]
-    row.decoding_config = contracts["decoding_config"]
+    # These columns remain only so an existing database does not need a
+    # destructive migration. Standard Settings never expose them, and editing
+    # a legacy row scrubs any invisible Customized values it carried.
+    row.prompt_framing = ""
+    row.system_prompt = ""
+    row.loss_objective_config = {}
+    row.inference_config = {}
+    row.decoding_config = {}
     row.data_query = body.data_query.strip()
     row.model_query = body.model_query.strip()
     row.method_query = body.method_query.strip()

@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from zevo.code_benchmarks import CodeExecutionAdapter
 from zevo.contracts.customizations import AgentCustomization
 from zevo.contracts.data import (
     DATA_METHOD_IDS,
@@ -639,6 +640,7 @@ class EvaluationPayload(StoredPayload):
     answer_fields: list[str] = Field(min_length=1)
     sample_submission: str = Field(min_length=1)
     test_set_name: str = ""
+    code_execution_adapter: CodeExecutionAdapter = ""
 
 
 class RegistryPayload(StoredPayload):
@@ -765,8 +767,18 @@ def specialist_input_binding_contracts() -> dict[str, Any]:
             "variants": {"default": {"required": {}}},
         },
         "data": {
-            "discriminator": "none",
-            "variants": {"default": {"required": {}}},
+            "discriminator": "payload.operation",
+            "variants": {
+                "prepare_run_data": {
+                    "required": {},
+                    "optional": {"device_info": "device_info"},
+                    "lineage": {
+                        "device_info": source("infrastructure"),
+                    },
+                },
+                "prepare_holdout_data": {"required": {}},
+                "scope_problem": {"required": {}},
+            },
         },
         "train": {
             "discriminator": "payload.model_source",
@@ -968,6 +980,11 @@ def validate_bindings(
             raise ValueError(
                 f"input {name!r} requires artifact_role={role!r}; "
                 f"got {binding['artifact_role']!r}"
+            )
+    if agent_id == "data" and "device_info" in parsed:
+        if parsed["device_info"]["artifact_role"] != "device_info":
+            raise ValueError(
+                "input 'device_info' requires artifact_role='device_info'"
             )
     return parsed
 

@@ -419,9 +419,15 @@ def render_inference_query(
 ) -> str:
     """Render one Test contract's query against an answer-free row.
 
-    A query with placeholders owns the whole user turn. Without placeholders,
-    the row is appended after a blank line. ``{input}`` means the sole value,
-    or newline-separated ``field: value`` pairs for a multi-field row.
+    A query with *recognised* placeholders owns the whole user turn. Without
+    one, the row is appended after a blank line. ``{input}`` means the sole
+    value, or newline-separated ``field: value`` pairs for a multi-field row.
+
+    Braces are common literal prompt text (LaTeX ``\\boxed{answer}``, JSON,
+    source code, and format examples). Only ``{input}`` and names that actually
+    exist in the answer-free row are placeholders; every other braced name is
+    preserved verbatim. This keeps a natural-language Inference Query usable
+    without requiring users to learn a separate escaping convention.
     """
     instruction = str(query or "").strip()
     if not instruction:
@@ -435,13 +441,14 @@ def render_inference_query(
     values = {field: str(value) for field, value in input_values.items()}
     values["input"] = joined
     placeholder = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
-    fields = placeholder.findall(instruction)
-    if fields:
-        unknown = sorted(set(fields) - set(values))
-        if unknown:
-            raise ValueError(
-                "inference_query references fields absent from the Test set: "
-                + ", ".join(unknown)
-            )
-        return placeholder.sub(lambda match: values[match.group(1)], instruction).strip()
+    recognised = {
+        match.group(1)
+        for match in placeholder.finditer(instruction)
+        if match.group(1) in values
+    }
+    if recognised:
+        return placeholder.sub(
+            lambda match: values.get(match.group(1), match.group(0)),
+            instruction,
+        ).strip()
     return f"{instruction}\n\n{joined}".strip()

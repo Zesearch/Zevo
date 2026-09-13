@@ -387,20 +387,20 @@ def test_method_config_is_part_of_exact_setting_identity() -> None:
     assert setting_identity(base) != setting_identity(other)
 
 
-def test_experiment_preferences_are_part_of_exact_setting_identity() -> None:
-    base = {
+def test_experiment_preferences_are_run_only_not_setting_identity() -> None:
+    standard = {"training_method": "full_sft", "base_model": "Qwen/Qwen3-0.6B"}
+    customized = {
+        **standard,
         "prompt_framing": "chat:Qwen/Qwen3-0.6B",
         "loss_objective_config": {"beta": 0.1},
         "decoding_config": {"temperature": 0.0, "seed": 0},
     }
-    same_from_query = {
-        **base,
-        "loss_objective_config": '{"beta":0.1}',
-        "decoding_config": '{"seed":0,"temperature":0.0}',
+    another_customization = {
+        **customized,
+        "decoding_config": {"temperature": 0.7, "seed": 0},
     }
-    changed = {**base, "decoding_config": {"temperature": 0.7, "seed": 0}}
-    assert setting_identity(base) == setting_identity(same_from_query)
-    assert setting_identity(base) != setting_identity(changed)
+    assert setting_identity(standard) == setting_identity(customized)
+    assert setting_identity(standard) == setting_identity(another_customization)
 
 
 # ─────────── opt-in multiple-choice option-scoring inference mode ────────────

@@ -47,7 +47,7 @@ export default function App() {
     () =>
       onCommand((c, arg, preset) => {
         if (c === "open-new-run") {
-          setRunMode(preset ? "full_pipeline" : "auto"); setRunAgent(undefined); setRunPreset(preset); setNewRun(true);
+          setRunMode(preset?.mode ?? (preset ? "full_pipeline" : "auto")); setRunAgent(undefined); setRunPreset(preset); setNewRun(true);
         }
         if (c === "open-new-run-single") {
           setRunMode("single_stage"); setRunAgent(arg); setRunPreset(undefined); setNewRun(true);
