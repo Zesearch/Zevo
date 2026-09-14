@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import re
+import threading
 import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
@@ -149,25 +150,37 @@ def touch(setup_id: str = "") -> None:
 
 @asynccontextmanager
 async def heartbeat(setup_id: str, interval: float = 5.0) -> AsyncIterator[None]:
-    """Keep an active setup alive while its worker is still executing."""
+    """Keep an active setup alive while its worker is still executing.
+
+    Dataset conversion includes deliberately synchronous CPU and filesystem
+    work.  Running the heartbeat as an asyncio task made that work look like a
+    dead worker whenever it held the request event loop for more than the
+    failure threshold.  A small daemon thread follows process liveness instead:
+    it survives an event-loop stall, but still stops immediately if the worker
+    process is killed.
+    """
     ident = (setup_id or "").strip()
-    task: asyncio.Task[None] | None = None
+    stop = threading.Event()
+    thread: threading.Thread | None = None
     if ident:
-        async def beat() -> None:
-            while True:
-                await asyncio.sleep(interval)
+        def beat() -> None:
+            while not stop.wait(interval):
                 touch(ident)
 
-        task = asyncio.create_task(beat())
+        thread = threading.Thread(
+            target=beat,
+            name=f"zevo-run-setup-{ident[:8]}",
+            daemon=True,
+        )
+        thread.start()
     try:
         yield
     finally:
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        stop.set()
+        if thread is not None:
+            # Event.set wakes Event.wait immediately. Keep the join away from
+            # the request loop in case the final EFS touch is still returning.
+            await asyncio.to_thread(thread.join, max(1.0, interval * 2))
 
 
 def read(setup_id: str) -> dict[str, Any] | None:
