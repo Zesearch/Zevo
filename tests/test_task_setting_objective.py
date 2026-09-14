@@ -301,3 +301,70 @@ def test_validation_suite_has_the_same_identity_as_its_json_query_value() -> Non
     }
     assert setting_identity(stored) == setting_identity(with_refreshed_row_metadata)
     assert setting_identity({"validation_sets": "[]"}) == setting_identity({})
+
+
+def test_multi_validation_suite_canonicalizes_its_scalar_projection() -> None:
+    """A stored suite average and the launch form's first-member projection
+    are the same Setting.
+
+    The suite is the source of truth.  Before Run creation freezes a request,
+    the browser can carry the first member's custom metric in the legacy
+    scalar fields; a stored multi-set row correctly carries ``suite_average``.
+    Matching those representations apart made selecting the row immediately
+    offer to save it again.
+    """
+    import json
+
+    from zevo.api.routers.ui.tasks import setting_identity
+
+    suite = [
+        {
+            "name": "Math · GSM8K",
+            "test_set": "openai/gsm8k",
+            "inference_query": "Solve {question}.",
+            "sample_submission": "/data/gsm8k.csv",
+            "metric_type": "custom",
+            "metric": "answer_accuracy",
+            "answer_fields": ["answer"],
+            "metric_direction": "max",
+            "evaluation_script": "/data/evaluator.py",
+        },
+        {
+            "name": "Knowledge · OpenBookQA",
+            "test_set": "allenai/openbookqa",
+            "inference_query": "Answer {question_stem}.",
+            "sample_submission": "/data/openbookqa.csv",
+            "metric_type": "custom",
+            "metric": "choice_accuracy",
+            "answer_fields": ["answerKey"],
+            "metric_direction": "max",
+            "evaluation_script": "/data/evaluator.py",
+        },
+    ]
+    stored = {
+        "base_model": "allenai/Olmo-3-1125-32B",
+        "validation_sets": suite,
+        "validation_answer_fields": ["answer"],
+        "validation_sample_submission": "/data/gsm8k.csv",
+        "validation_metric_type": "builtin",
+        "validation_metric": "suite_average",
+        "validation_metric_direction": "max",
+        "validation_evaluation_script": "",
+    }
+    launch_form = {
+        **stored,
+        "validation_sets": json.dumps(suite),
+        "validation_answer_fields": "answer",
+        "validation_metric_type": "custom",
+        "validation_metric": "answer_accuracy",
+        "validation_evaluation_script": "/data/evaluator.py",
+    }
+
+    assert setting_identity(stored) == setting_identity(launch_form)
+
+    changed_member = [*suite]
+    changed_member[1] = {**changed_member[1], "metric": "strict_choice_accuracy"}
+    assert setting_identity(stored) != setting_identity({
+        **launch_form,
+        "validation_sets": json.dumps(changed_member),
+    })

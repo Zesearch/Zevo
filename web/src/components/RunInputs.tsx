@@ -1047,13 +1047,25 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
 export function validationContractFromInputs(inputs: RunInputValues) {
   const primary = inputs.validationSets[0];
   const independent = !!primary || !!inputs.validationSet.trim();
-  const metricType = primary?.metric_type ?? (independent ? inputs.validationMetricType : "");
+  // Every member keeps its own evaluator, but the Run needs one scalar for
+  // champion selection.  The backend freezes a multi-member suite as the
+  // built-in suite average; projecting the first member here made a Setting
+  // loaded from storage look different from itself (and offered to save it
+  // again) until Run creation canonicalized the request.
+  const aggregate = inputs.validationSets.length > 1;
+  const metricType = aggregate
+    ? "builtin"
+    : primary?.metric_type ?? (independent ? inputs.validationMetricType : "");
   return {
     independent,
     metricType,
-    metric: primary?.metric ?? (independent ? inputs.validationMetric.trim() : ""),
+    metric: aggregate
+      ? "suite_average"
+      : primary?.metric ?? (independent ? inputs.validationMetric.trim() : ""),
     metricDirection: primary?.metric_direction ?? (independent ? inputs.validationMetricDirection : ""),
-    evaluationScript: primary
+    evaluationScript: aggregate
+      ? ""
+      : primary
       ? (primary.metric_type === "custom" ? primary.evaluation_script : "")
       : metricType === "custom" ? inputs.validationEvaluationScript.trim() : "",
     answerFields: primary?.answer_fields.join(", ")
