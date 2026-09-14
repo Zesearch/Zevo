@@ -572,6 +572,11 @@ export function NewRunModal({
       : null,
   );
   const alreadySaved = matched?.match ?? null;
+  // A setting explicitly picked by the user is authoritative until a
+  // Setting-owned field changes (the shared onChange path clears
+  // `pickedSetting`).  Do not flash "save for reuse" while the exact-match
+  // request catches up, and preserve its id when the Run is submitted.
+  const reusableSetting = picked ?? alreadySaved;
   const nameTaken = !!settingName.trim() && savedSettings.some(
     (x) => (x.name || "").trim().toLowerCase() === settingName.trim().toLowerCase(),
   );
@@ -651,8 +656,8 @@ export function NewRunModal({
     }
     // Explicit now. Unticked means this configuration is not written down;
     // already saved means there is nothing to write, the row exists.
-    const saveFields = alreadySaved
-      ? { save_setting: false, setting_id: alreadySaved.id }
+    const saveFields = reusableSetting
+      ? { save_setting: false, setting_id: reusableSetting.id }
       : { save_setting: saveSetting, setting_name: settingName.trim() };
     const limits = limitsFromInputs(inputs);
     let body: CreateRunRequest;
@@ -882,11 +887,11 @@ export function NewRunModal({
             <RunSetupProgressView progress={runSetup.progress} />
           ) : mode === "full_pipeline" && trimmedTask && touched && (
             <div className="mr-auto min-w-0 flex-1">
-              {alreadySaved ? (
+              {reusableSetting ? (
                 <p className="font-mono text-2xs text-slate-500">
                   {picked ? "reusing " : "same as the saved setting "}
                   <span className="text-brass-300">
-                    {alreadySaved.name || alreadySaved.id.slice(0, 8)}
+                    {reusableSetting.name || reusableSetting.id.slice(0, 8)}
                   </span>
                   , so nothing new is saved
                 </p>
@@ -933,7 +938,7 @@ export function NewRunModal({
               || launchMissing.length > 0
               // A clash would 409 at the end of a launch, which is the worst
               // moment to find out.
-              || (saveSetting && !alreadySaved && (nameTaken || !settingName.trim()))
+              || (saveSetting && !reusableSetting && (nameTaken || !settingName.trim()))
             }
             title={
               launchMissing.length

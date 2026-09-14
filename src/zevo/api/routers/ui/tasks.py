@@ -881,15 +881,46 @@ def setting_identity(src) -> tuple:
     Setting, so saved settings and comparison groups cannot silently disagree.
     """
     get = src.get if isinstance(src, dict) else lambda k, d=None: getattr(src, k, d)
+    raw_validation_suite = get("validation_sets")
+    validation_suite = raw_validation_suite
+    if isinstance(validation_suite, str):
+        try:
+            validation_suite = json.loads(validation_suite) if validation_suite.strip() else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            validation_suite = []
+    validation_suite = validation_suite if isinstance(validation_suite, list) else []
     derived_validation = not (
-        _has_validation_suite(get("validation_sets"))
+        _has_validation_suite(raw_validation_suite)
         or str(get("validation_set") or "").strip()
     )
+    # These scalar fields are only a compatibility projection of a Validation
+    # suite.  Canonicalize them from the suite itself so an un-frozen browser
+    # request (which may still carry the first member's metric) and the stored
+    # Setting (which carries suite_average for multiple members) describe one
+    # identity.  The suite remains the source of truth for every evaluator.
+    suite_projection: dict[str, object] = {}
+    if validation_suite and isinstance(validation_suite[0], dict):
+        primary = validation_suite[0]
+        aggregate = len(validation_suite) > 1
+        suite_projection = {
+            "validation_answer_fields": primary.get("answer_fields") or [],
+            "validation_sample_submission": primary.get("sample_submission") or "",
+            "validation_metric_type": (
+                "builtin" if aggregate else primary.get("metric_type") or ""
+            ),
+            "validation_metric": (
+                "suite_average" if aggregate else primary.get("metric") or ""
+            ),
+            "validation_metric_direction": primary.get("metric_direction") or "",
+            "validation_evaluation_script": (
+                "" if aggregate else primary.get("evaluation_script") or ""
+            ),
+        }
     return tuple(
         _norm_setting_value(
             field,
             "" if derived_validation and field in _DERIVED_VALIDATION_IDENTITY_FIELDS
-            else get(field),
+            else suite_projection.get(field, get(field)),
         )
         for field in _SETTING_IDENTITY_FIELDS
     )
