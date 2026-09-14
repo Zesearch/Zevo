@@ -49,6 +49,7 @@ from zevo.engine.agent.loader import AgentBlueprint
 from zevo.engine.agent.drivers._json_utils import extract_trailing_json
 from zevo.engine.agent.drivers._subprocess_stream import iter_subprocess_lines
 from zevo.engine.agent.drivers._bash_description import describe_bash_call
+from zevo.engine.agent.drivers._agent_loop import build_tool_env
 from zevo.engine.agent.drivers.base import DriverRunResult
 from zevo.engine.observe.markers import parse_line as _parse_marker
 from zevo.engine.observe.markers import scan_text as _scan_markers
@@ -440,19 +441,13 @@ class CodexCliDriver:
                 "your final assistant message after all execution and validation."
             )
 
-            env = {**os.environ}
+            env = build_tool_env(
+                base_env={**os.environ},
+                workspace_dir=workspace_dir,
+                input_payload=input_payload,
+                agent_id=blueprint.id,
+            )
             env.setdefault("HOME", "/root")
-            env["WORK_DIR"] = workspace_dir
-            env.setdefault("ZEVO_API_BASE", env.get("ZEVO_API_BASE", "http://backend:8000"))
-            for attr, key in (("ticket_id", "TICKET_ID"),
-                              ("agent_id", "AGENT_ID"),
-                              ("run_id", "RUN_ID")):
-                v = getattr(input_payload, attr, "")
-                if v:
-                    env[key] = str(v)
-            env.setdefault("AGENT_ID", blueprint.id)
-            if not env.get("RUN_ID"):
-                env["RUN_ID"] = Path(workspace_dir).parent.name
 
             auth_mode, auth_detail = _resolve_auth(env)
             if auth_mode in ("none", "invalid"):
