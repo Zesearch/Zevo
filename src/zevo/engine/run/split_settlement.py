@@ -105,9 +105,18 @@ async def settle_splits(
         )
         test_set = item.test_set
         if looks_like_hub_id(test_set):
-            declared = lookup(test_set, role="test")
-            split = declared.split if declared is not None else ""
-            config = declared.config if declared is not None else ""
+            # The suite member is the scoring contract. Its explicit location
+            # must win over catalogue discovery: the same Hub repository may
+            # carry several configs/splits, and deployments need not keep a
+            # local Files catalogue at all. The catalogue is only a fallback
+            # for fields the member left blank.
+            split = item.split
+            config = item.config
+            if not split or not config:
+                declared = lookup(test_set, role="test")
+                if declared is not None:
+                    split = split or declared.split
+                    config = config or declared.config
             try:
                 test_set, _columns, _rows, fetched_note = await materialize(
                     hub_id=test_set,
@@ -185,10 +194,10 @@ async def settle_splits(
             if looks_like_hub_id(source):
                 split = item.split
                 config = item.config
-                if not split:
+                if not split or not config:
                     declared = lookup(source, role="validation")
                     if declared is not None:
-                        split = declared.split
+                        split = split or declared.split
                         config = config or declared.config
                 try:
                     source, _columns, materialized_rows, fetched_note = (

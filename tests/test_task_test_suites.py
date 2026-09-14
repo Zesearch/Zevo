@@ -160,6 +160,102 @@ def test_inference_query_substitutes_real_fields_and_preserves_other_braces() ->
 
 
 @pytest.mark.asyncio
+async def test_remote_test_member_uses_its_explicit_split_without_catalogue(
+    tmp_path, monkeypatch,
+) -> None:
+    """A Task's scoring contract is portable across deployments.
+
+    In particular, AIME publishes only ``default/train``. A deployment whose
+    Files catalogue is absent or stored behind a tenant directory must still
+    use the split explicitly saved on the Task instead of asking the generic
+    resolver to guess a validation-like split.
+    """
+    import zevo.engine.remote_datasets as remote
+    from zevo.contracts.orchestrator import TaskTestSet, UserRequest
+    from zevo.engine.run.split_settlement import settle_splits
+
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "private"))
+    fetched: list[dict] = []
+
+    async def fake_materialize(*, hub_id, split, config, out_dir, limit=0):
+        fetched.append({
+            "hub_id": hub_id, "split": split, "config": config, "limit": limit,
+        })
+        path = tmp_path / "aime.csv"
+        path.write_text(
+            "id,question,answer\n" + "".join(
+                f"{index},problem-{index},{index % 10}\n" for index in range(120)
+            ),
+            encoding="utf-8",
+        )
+        return str(path), ["id", "question", "answer"], 120, "fetched AIME"
+
+    def catalogue_must_not_be_needed(*_args, **_kwargs):
+        raise AssertionError("explicit split/config must not require catalogue lookup")
+
+    monkeypatch.setattr(remote, "materialize", fake_materialize)
+    monkeypatch.setattr(remote, "lookup", catalogue_must_not_be_needed)
+
+    sample = tmp_path / "aime-submission.csv"
+    sample.write_text("id,prediction\nexample,<answer>\n", encoding="utf-8")
+    validation = tmp_path / "validation.csv"
+    validation.write_text(
+        "id,question,answer\n" + "".join(
+            f"{index},validation-{index},{index % 10}\n" for index in range(200)
+        ),
+        encoding="utf-8",
+    )
+    validation_sample = tmp_path / "validation-submission.csv"
+    validation_sample.write_text(
+        "id,prediction\nexample,<answer>\n", encoding="utf-8",
+    )
+
+    test = TaskTestSet(**{
+        **_member("AIME 2024"),
+        "test_set": "allenai/aime-2022-2025",
+        "split": "train",
+        "config": "default",
+        "sample_submission": str(sample),
+    })
+    validation_member = TaskTestSet(**{
+        **_member("validation"),
+        "test_set": str(validation),
+        "sample_submission": str(validation_sample),
+    })
+    request = UserRequest(
+        task_objective="Improve mathematical reasoning.",
+        test_sets=[test],
+        validation_sets=[validation_member],
+        metric=test.metric,
+        metric_direction="max",
+        training_method="",
+        dataset="",
+        base_model="owner/model",
+        test_set=test.test_set,
+        test_answer_fields=list(test.answer_fields),
+        test_sample_submission=test.sample_submission,
+        constraints=[],
+    )
+    run = Run(
+        id="explicit-aime-split", task_name="suite", status="running",
+        metric="accuracy", metric_direction="max",
+        started_at=datetime.now(timezone.utc),
+    )
+
+    _agent_request, holdout, _note = await settle_splits(
+        run, request, work_dir_root=str(tmp_path / "work"),
+    )
+
+    assert fetched == [{
+        "hub_id": "allenai/aime-2022-2025",
+        "split": "train",
+        "config": "default",
+        "limit": 0,
+    }]
+    assert holdout["test_sets"][0]["name"] == "AIME 2024"
+
+
+@pytest.mark.asyncio
 async def test_validation_is_derived_per_eligible_suite_member(
     tmp_path, monkeypatch,
 ) -> None:
