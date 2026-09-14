@@ -190,6 +190,45 @@ description: Site rules for Research Beta.
     assert not renamed_path.exists(), "verification must not invent an empty site Skill"
 
 
+def test_connection_reimports_only_operator_body_from_managed_skill() -> None:
+    exported = f"""---
+name: source-cluster
+description: A Skill exported from another Zevo connection.
+---
+
+This generated routing names source-connection-id and must not be imported.
+
+{ssh_hardware._SKILL_START}
+Use the beta partition and request all four B200 GPUs.
+{ssh_hardware._SKILL_END}
+"""
+
+    body = ssh_hardware._uploaded_skill_body(exported)
+
+    assert body == "Use the beta partition and request all four B200 GPUs."
+    assert "source-connection-id" not in body
+
+
+@pytest.mark.parametrize("markers", [
+    ssh_hardware._SKILL_START,
+    ssh_hardware._SKILL_END,
+    f"{ssh_hardware._SKILL_END}\n{ssh_hardware._SKILL_START}",
+    f"{ssh_hardware._SKILL_START}\n{ssh_hardware._SKILL_START}\n{ssh_hardware._SKILL_END}",
+])
+def test_connection_rejects_malformed_managed_skill_markers(markers: str) -> None:
+    uploaded = f"""---
+name: malformed
+description: A malformed managed Skill.
+---
+
+{markers}
+Instructions
+"""
+
+    with pytest.raises(HTTPException, match="exactly one ordered pair"):
+        ssh_hardware._uploaded_skill_body(uploaded)
+
+
 def test_connection_env_values_contain_paths_but_never_credentials() -> None:
     row = SshHost(
         id="my-instance-id",
