@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import os
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Literal, TypeAlias
 from urllib.parse import urlparse
@@ -29,6 +30,14 @@ _ADAPTERS: dict[str, CodeExecutionAdapter] = {
 }
 
 _ANSWER_PREFIX = "zevo-code-answer:v1:"
+_UTF8_CHUNK_CHARS = 1024 * 1024
+_ANSWER_FIELDS: dict[CodeExecutionAdapter, tuple[str, ...]] = {
+    "livecodebench": ("private_test_cases",),
+    "code_contests": (
+        "private_tests", "generated_tests", "solutions",
+        "incorrect_solutions",
+    ),
+}
 
 
 def _hub_id(reference: str) -> str:
@@ -69,13 +78,7 @@ def externalize_code_answers(
     row identity streamable while the token remains an answer field and is
     therefore removed before Inference.
     """
-    fields = {
-        "livecodebench": ("private_test_cases",),
-        "code_contests": (
-            "private_tests", "generated_tests", "solutions",
-            "incorrect_solutions",
-        ),
-    }.get(adapter, ())
+    fields = _ANSWER_FIELDS.get(adapter, ())
     projected = dict(row)
     for field in fields:
         raw = projected.get(field)
@@ -93,7 +96,41 @@ def externalize_code_answers(
 
 def _store_code_answer(raw: str) -> str:
     """Write one hidden code-answer payload once and return its opaque token."""
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    # Do not create a second, full-size UTF-8 copy. Some LiveCodeBench cells
+    # are hundreds of megabytes; hashing and TextIOWrapper encoding the whole
+    # value at once was enough to push the web task over its memory limit.
+    def chunks() -> Iterable[bytes]:
+        for start in range(0, len(raw), _UTF8_CHUNK_CHARS):
+            yield raw[start:start + _UTF8_CHUNK_CHARS].encode("utf-8")
+
+    return _store_code_answer_chunks(chunks)
+
+
+def store_code_answer_buffer(raw: object) -> str:
+    """Externalize an existing UTF-8 buffer without constructing a huge str.
+
+    PyArrow exposes StringScalar data as a zero-copy buffer. LiveCodeBench's
+    private cases use that route so conversion never holds both Arrow storage
+    and a hundreds-of-megabytes Python string.
+    """
+    view = memoryview(raw)
+
+    def chunks() -> Iterable[memoryview]:
+        for start in range(0, len(view), _UTF8_CHUNK_CHARS):
+            yield view[start:start + _UTF8_CHUNK_CHARS]
+
+    return _store_code_answer_chunks(chunks)
+
+
+def _store_code_answer_chunks(
+    chunks: Callable[[], Iterable[bytes | memoryview]],
+) -> str:
+    """Hash and compress a repeatable byte stream without joining it."""
+
+    hasher = hashlib.sha256()
+    for chunk in chunks():
+        hasher.update(chunk)
+    digest = hasher.hexdigest()
     from zevo.paths import holdout_root
 
     root = Path(holdout_root()) / "code-execution-answers"
@@ -103,8 +140,9 @@ def _store_code_answer(raw: str) -> str:
     if not target.is_file():
         temporary = root / f".{digest}.{uuid4().hex}.tmp"
         try:
-            with gzip.open(temporary, "wt", encoding="utf-8") as handle:
-                handle.write(raw)
+            with gzip.open(temporary, "wb") as handle:
+                for chunk in chunks():
+                    handle.write(chunk)
             temporary.chmod(0o600)
             os.replace(temporary, target)
         finally:

@@ -1031,7 +1031,7 @@ class CreateRunResponse(BaseModel):
 
 
 class RunSetupProgressResponse(BaseModel):
-    status: Literal["waiting", "active", "complete"]
+    status: Literal["waiting", "active", "complete", "failed"]
     phase: str = "checking"
     completed: int = 0
     total: int = 0
@@ -2377,11 +2377,23 @@ async def create_run(
     # run tunes on validation and is judged on the remaining Test rows. When
     # Validation is absent, both are settled together by carving 20% from Test.
     from zevo.engine.run.setup_progress import bind as bind_setup_progress
+    from zevo.engine.run.setup_progress import heartbeat as setup_heartbeat
     from zevo.engine.run.setup_progress import reset as reset_setup_progress
 
     progress_token = bind_setup_progress(setup_id)
     try:
-        agent_request, holdout, _split_note = await _settle_splits(run, user_request)
+        async with setup_heartbeat(setup_id):
+            agent_request, holdout, _split_note = await _settle_splits(run, user_request)
+    except Exception:
+        setup_progress(
+            setup_id,
+            phase="failed",
+            completed=0,
+            total=0,
+            label="Run setup failed",
+            status="failed",
+        )
+        raise
     finally:
         reset_setup_progress(progress_token)
     setup_progress(

@@ -180,6 +180,39 @@ async def test_materialize_prefers_one_parquet_shard_over_many_row_requests(
     assert not any(request.url.path == "/rows" for request in requests)
 
 
+def test_livecodebench_parquet_streams_private_answers_to_sidecars(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from zevo.code_benchmarks import resolve_code_answer
+    import zevo.engine.remote_datasets as remote
+
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "holdout"))
+    private = "encoded-private-case" * 150_000
+    shard = tmp_path / "livecodebench.parquet"
+    pq.write_table(pa.table({
+        "question_id": ["lcb/1"],
+        "question_content": ["Solve it"],
+        "private_test_cases": [private],
+    }), shard)
+
+    path, columns, rows = remote._write_parquet_csv(
+        shard_paths=[shard],
+        out_dir=str(tmp_path / "converted"),
+        limit=0,
+        hub_id="sam-paech/livecodebench-code_generation_lite",
+    )
+
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        converted = next(csv.DictReader(handle))
+    assert columns == ["question_id", "question_content", "private_test_cases"]
+    assert rows == 1
+    assert converted["private_test_cases"].startswith("zevo-code-answer:v1:")
+    assert resolve_code_answer(converted["private_test_cases"]) == private
+
+
 @pytest.mark.asyncio
 async def test_parquet_shard_download_resumes_retained_partial_file(
     tmp_path: Path,

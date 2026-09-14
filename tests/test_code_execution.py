@@ -13,6 +13,7 @@ from zevo.code_benchmarks import (
     code_execution_adapter_for,
     externalize_code_answers,
     resolve_code_answer,
+    store_code_answer_buffer,
 )
 from zevo.contracts.orchestrator import TaskTestSet
 from zevo.engine.code_execution.scorer import extract_python_code, score_code_benchmark
@@ -73,6 +74,30 @@ def test_large_livecodebench_answers_are_content_addressed(
     assert isinstance(token, str) and token.startswith("zevo-code-answer:v1:")
     assert resolve_code_answer(token) == "encoded"
     assert len(list((tmp_path / "holdout" / "code-execution-answers").iterdir())) == 1
+
+
+def test_large_answer_never_encodes_the_complete_source_string(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    class NoWholeValueEncode(str):
+        def encode(self, *args, **kwargs):  # pragma: no cover - failure path
+            raise AssertionError("the complete hidden answer was encoded at once")
+
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "holdout"))
+    raw = NoWholeValueEncode("private" * 300_000)
+    row = externalize_code_answers(
+        "livecodebench", {"question_id": "large", "private_test_cases": raw},
+    )
+    assert resolve_code_answer(row["private_test_cases"]) == raw
+
+
+def test_arrow_style_buffer_is_externalized_without_a_python_string(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "holdout"))
+    raw = ("π-private-case\n" * 200_000).encode("utf-8")
+    token = store_code_answer_buffer(memoryview(raw))
+    assert resolve_code_answer(token) == raw.decode("utf-8")
 
 
 def test_code_contests_hidden_answers_are_content_addressed(

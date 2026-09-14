@@ -6,9 +6,10 @@ import pytest
 from pydantic import ValidationError
 
 
-def test_setup_progress_is_scoped_to_the_bound_launch() -> None:
+def test_setup_progress_is_scoped_to_the_bound_launch(tmp_path, monkeypatch) -> None:
     from zevo.engine.run import setup_progress
 
+    monkeypatch.setenv("ZEVO_RUN_SETUP_DIR", str(tmp_path))
     setup_progress._PROGRESS.clear()
     first = str(uuid4())
     second = str(uuid4())
@@ -40,10 +41,11 @@ def test_setup_progress_is_scoped_to_the_bound_launch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_setup_progress_endpoint_waits_then_returns_real_state() -> None:
+async def test_setup_progress_endpoint_waits_then_returns_real_state(tmp_path, monkeypatch) -> None:
     from zevo.api.routers.shared.runs import get_run_setup_progress
     from zevo.engine.run import setup_progress
 
+    monkeypatch.setenv("ZEVO_RUN_SETUP_DIR", str(tmp_path))
     setup_progress._PROGRESS.clear()
     setup_id = uuid4()
     waiting = await get_run_setup_progress(setup_id)
@@ -62,6 +64,29 @@ async def test_setup_progress_endpoint_waits_then_returns_real_state() -> None:
     assert current.completed == 5
     assert current.total == 17
     assert current.label == "MATH-500"
+
+
+def test_setup_progress_survives_another_worker_and_reports_a_dead_one(
+    tmp_path, monkeypatch,
+) -> None:
+    import os
+
+    from zevo.engine.run import setup_progress
+
+    monkeypatch.setenv("ZEVO_RUN_SETUP_DIR", str(tmp_path))
+    setup_id = str(uuid4())
+    setup_progress.update(
+        setup_id, phase="benchmarks", completed=16, total=17, label="LiveCodeBench v3",
+    )
+    setup_progress._PROGRESS.clear()  # simulate a different Uvicorn worker
+    assert setup_progress.read(setup_id)["label"] == "LiveCodeBench v3"
+
+    progress_path = tmp_path / f"{setup_id}.json"
+    old = progress_path.stat().st_mtime - setup_progress._FAILED_AFTER_SECONDS - 1
+    os.utime(progress_path, (old, old))
+    failed = setup_progress.read(setup_id)
+    assert failed["status"] == "failed"
+    assert failed["phase"] == "failed"
 
 
 def test_create_run_request_accepts_only_a_uuid_setup_id() -> None:

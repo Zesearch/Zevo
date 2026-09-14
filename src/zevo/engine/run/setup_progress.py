@@ -1,31 +1,102 @@
-"""Ephemeral progress for the synchronous part of ``POST /runs``.
+"""Cross-worker progress for the synchronous part of ``POST /runs``.
 
-A Run does not exist until its complete scoring contract has been materialized
-and committed, so ordinary Run/Ticket progress cannot describe this interval.
-The browser supplies an unguessable UUID and polls a small read endpoint while
-the request is open. State is deliberately process-local and short-lived: it is
-UI feedback, never durable Run state or part of the transaction.
+A Run is committed only after its complete scoring contract has been
+materialized. The browser therefore supplies an unguessable UUID and polls a
+small endpoint while the POST remains open. Web workers share ``data/`` in
+production, so the progress record lives there as a tiny atomic JSON file as
+well as in memory. A heartbeat lets a surviving worker distinguish a slow
+setup from one whose worker was killed (for example by the container OOM
+killer).
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import re
 import time
+from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
-from typing import Any
+from pathlib import Path
+from typing import Any, AsyncIterator
+from uuid import uuid4
 
 
 _CURRENT_SETUP: ContextVar[str] = ContextVar("zevo_run_setup_id", default="")
 _PROGRESS: dict[str, dict[str, Any]] = {}
 _STALE_AFTER_SECONDS = 10 * 60
+_FAILED_AFTER_SECONDS = 30
+_IDENT = re.compile(r"^[0-9a-fA-F-]{36}$")
+_LAST_DISK_PRUNE = 0.0
+
+
+def _root() -> Path:
+    configured = (os.environ.get("ZEVO_RUN_SETUP_DIR") or "").strip()
+    if configured:
+        return Path(configured)
+    from zevo.paths import work_dir_root
+
+    return Path(work_dir_root()).parent / "run-setups"
+
+
+def _path(setup_id: str) -> Path | None:
+    ident = (setup_id or "").strip()
+    if not _IDENT.fullmatch(ident):
+        return None
+    return _root() / f"{ident}.json"
 
 
 def _prune(now: float) -> None:
+    global _LAST_DISK_PRUNE
+
     stale = [
         setup_id
         for setup_id, state in _PROGRESS.items()
-        if now - float(state.get("updated_monotonic") or 0.0) > _STALE_AFTER_SECONDS
+        if now - float(state.get("updated_at") or 0.0) > _STALE_AFTER_SECONDS
     ]
     for setup_id in stale:
         _PROGRESS.pop(setup_id, None)
+    if now - _LAST_DISK_PRUNE < 60:
+        return
+    _LAST_DISK_PRUNE = now
+    try:
+        for path in _root().glob("*.json"):
+            if now - path.stat().st_mtime > _STALE_AFTER_SECONDS:
+                path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _write(ident: str, state: dict[str, Any]) -> None:
+    """Best-effort atomic persistence; UI feedback must never fail a Run."""
+    path = _path(ident)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+        try:
+            temporary.write_text(
+                json.dumps(state, separators=(",", ":")), encoding="utf-8",
+            )
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def _read_file(ident: str) -> tuple[dict[str, Any], float] | None:
+    path = _path(ident)
+    if path is None:
+        return None
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            return None
+        return state, path.stat().st_mtime
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def bind(setup_id: str) -> Token[str]:
@@ -49,22 +120,77 @@ def update(
     ident = (setup_id or _CURRENT_SETUP.get()).strip()
     if not ident:
         return
-    now = time.monotonic()
+    now = time.time()
     _prune(now)
-    _PROGRESS[ident] = {
+    state = {
         "status": status,
         "phase": phase,
         "completed": max(0, int(completed)),
         "total": max(0, int(total)),
         "label": str(label or ""),
-        "updated_monotonic": now,
+        "updated_at": now,
     }
+    _PROGRESS[ident] = state
+    _write(ident, state)
+
+
+def touch(setup_id: str = "") -> None:
+    """Refresh only liveness, without racing a newer phase back to an old one."""
+    ident = (setup_id or _CURRENT_SETUP.get()).strip()
+    path = _path(ident)
+    if path is None:
+        return
+    try:
+        if path.is_file():
+            path.touch()
+    except OSError:
+        return
+
+
+@asynccontextmanager
+async def heartbeat(setup_id: str, interval: float = 5.0) -> AsyncIterator[None]:
+    """Keep an active setup alive while its worker is still executing."""
+    ident = (setup_id or "").strip()
+    task: asyncio.Task[None] | None = None
+    if ident:
+        async def beat() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                touch(ident)
+
+        task = asyncio.create_task(beat())
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 def read(setup_id: str) -> dict[str, Any] | None:
-    now = time.monotonic()
+    ident = (setup_id or "").strip()
+    now = time.time()
     _prune(now)
-    state = _PROGRESS.get((setup_id or "").strip())
+    state = _PROGRESS.get(ident)
+    updated_at = float(state.get("updated_at") or 0.0) if state else 0.0
+    stored = _read_file(ident)
+    if stored is not None:
+        disk_state, disk_mtime = stored
+        # The file's mtime is the liveness clock: heartbeats intentionally
+        # touch it without rewriting a potentially newer phase payload.
+        state = disk_state
+        updated_at = disk_mtime
     if state is None:
         return None
-    return {key: value for key, value in state.items() if key != "updated_monotonic"}
+    public = {key: value for key, value in state.items() if key != "updated_at"}
+    if public.get("status") == "active" and now - updated_at > _FAILED_AFTER_SECONDS:
+        return {
+            **public,
+            "status": "failed",
+            "phase": "failed",
+            "label": "Run setup stopped unexpectedly. Try starting it again.",
+        }
+    return public

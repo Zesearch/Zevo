@@ -18,6 +18,8 @@ import {
   TrainingSetupFields,
   EMPTY_RUN_INPUTS,
   methodConfigFromInputs,
+  normalizeScoringSuite,
+  scoringSuiteMissing,
   computeTargetValue,
   requiredFieldStateCls,
   useComputeTargets,
@@ -73,20 +75,22 @@ function buildUserRequest(
   nl: string,
   inputs: RunInputValues,
 ): UserRequest {
-  if (!inputs.metricType) throw new Error("Choose the Test metric type.");
+  const testSets = normalizeScoringSuite(inputs.testSets);
+  const testMissing = scoringSuiteMissing(testSets, "Test");
+  if (testMissing.length) throw new Error(`Complete the Test suite: ${testMissing.join(", ")}.`);
+  const primaryTest = testSets[0];
+  const validationSets = normalizeScoringSuite(inputs.validationSets);
   const validation = validationContractFromInputs(inputs);
-  if (validation.independent && !validation.metricType) {
-    throw new Error("Choose the Validation metric type.");
-  }
-  const columns = (v: string) => v.split(",").map((c) => c.trim()).filter(Boolean);
+  const primaryValidation = validationSets[0];
   return {
     task_objective: nl,
-    validation_sets: inputs.validationSets,
-    metric: inputs.metric.trim(),
-    metric_direction: inputs.metricDirection as "max" | "min",
-    metric_type: inputs.metricType,
-    evaluation_script: inputs.metricType === "custom" ? inputs.evaluationScript.trim() : "",
-    evaluator_sha256: "",
+    test_sets: testSets,
+    validation_sets: validationSets,
+    metric: primaryTest.metric,
+    metric_direction: primaryTest.metric_direction,
+    metric_type: primaryTest.metric_type,
+    evaluation_script: primaryTest.metric_type === "custom" ? primaryTest.evaluation_script : "",
+    evaluator_sha256: primaryTest.evaluator_sha256,
     validation_metric: validation.metric,
     validation_metric_direction: validation.metricDirection,
     validation_metric_type: validation.metricType,
@@ -105,14 +109,14 @@ function buildUserRequest(
     base_model: inputs.baseModel,
     dataset_split: inputs.datasetSplit.trim(),
     dataset_config: inputs.datasetConfig.trim(),
-    test_set: inputs.testSet,
-    test_answer_fields: columns(inputs.answerFields),
-    validation_set: inputs.validationSet,
-    validation_split: inputs.validationSplit.trim(),
-    validation_config: inputs.validationConfig.trim(),
-    validation_answer_fields: columns(validation.answerFields),
+    test_set: primaryTest.test_set,
+    test_answer_fields: primaryTest.answer_fields,
+    validation_set: primaryValidation?.test_set ?? "",
+    validation_split: primaryValidation?.split ?? "",
+    validation_config: primaryValidation?.config ?? "",
+    validation_answer_fields: primaryValidation?.answer_fields ?? [],
     validation_sample_submission: validation.sampleSubmission,
-    test_sample_submission: inputs.testSampleSubmission,
+    test_sample_submission: primaryTest.sample_submission,
     constraints: [],
   };
 }
@@ -304,6 +308,25 @@ export function NewRunModal({
    *  belong to the task and are already filled in, and re-applying an old run's
    *  paths would undo a file the user has just swapped for this run. */
   function applySetting(s: TaskSettingDTO) {
+    const validationSets = s.validation_sets?.length
+      ? s.validation_sets
+      : s.validation_set ? [{
+          name: "Validation",
+          test_set: s.validation_set,
+          split: s.validation_split,
+          config: s.validation_config,
+          max_rows: 0,
+          source_rows: 0,
+          inference_query: tasks.find((task) => task.name === taskName.trim())
+            ?.test_sets?.[0]?.inference_query || "Answer each validation example.",
+          sample_submission: s.validation_sample_submission,
+          metric_type: s.validation_metric_type,
+          metric: s.validation_metric,
+          answer_fields: s.validation_answer_fields,
+          metric_direction: s.validation_metric_direction,
+          evaluation_script: s.validation_evaluation_script,
+          evaluator_sha256: s.validation_evaluator_sha256,
+        }] : [];
     setPickedSetting(s.id);
     setError(null);
     setTouched(true);
@@ -315,12 +338,12 @@ export function NewRunModal({
       dataQuery: s.data_query || "",
       modelQuery: s.model_query || "",
       methodQuery: s.method_query || "",
-      validationSets: s.validation_sets ?? [],
-      validationSet: s.validation_set || "",
-      validationSplit: s.validation_split || "",
-      validationConfig: s.validation_config || "",
-      validationAnswerFields: (s.validation_answer_fields ?? []).join(", "),
-      validationSampleSubmission: s.validation_sample_submission || "",
+      validationSets,
+      validationSet: "",
+      validationSplit: "",
+      validationConfig: "",
+      validationAnswerFields: "",
+      validationSampleSubmission: "",
       validationMetricType: s.validation_metric_type,
       validationMetric: s.validation_metric,
       validationMetricDirection: s.validation_metric_direction,
@@ -367,8 +390,6 @@ export function NewRunModal({
     [tasks, trimmedTask],
   );
 
-  const requiredColumns = (v: string) =>
-    v.split(",").map((c) => c.trim()).filter(Boolean);
   const explicitComputeValue = computeTargetValue(inputs);
   const effectiveComputeTarget = (
     compute.targets.find((target) => target.value === explicitComputeValue)
@@ -380,36 +401,9 @@ export function NewRunModal({
     !trimmedTask && "Task name",
     !(predefined?.task_objective || nl).trim() && "Objective",
     !effectiveComputeTarget && "GPU backend",
-    ...(!predefined?.test_sets?.length ? [
-      !inputs.metricType && "Test metric type",
-      !inputs.metric.trim() && "Metric",
-      inputs.metricType === "custom" && !inputs.evaluationScript.trim() && "Evaluation script",
-      !inputs.metricDirection && "Target",
-    ] : []),
-    validationContract.independent
-      && !validationContract.metricType
-      && "Validation metric type",
-    validationContract.independent
-      && !validationContract.metric
-      && "Validation metric",
-    validationContract.independent
-      && validationContract.metricType === "custom"
-      && !validationContract.evaluationScript
-      && "Validation evaluation script",
-    validationContract.independent
-      && !validationContract.metricDirection
-      && "Validation target",
-    ...(!predefined?.test_sets?.length ? [
-      !inputs.testSet.trim() && "Test set",
-      requiredColumns(inputs.answerFields).length === 0 && "Test answer fields",
-      !inputs.testSampleSubmission.trim() && "Sample submission",
-    ] : []),
-    !!inputs.validationSet.trim()
-      && requiredColumns(inputs.validationAnswerFields).length === 0
-      && "Validation answer fields",
-    !!inputs.validationSet.trim()
-      && !inputs.validationSampleSubmission.trim()
-      && "Validation sample submission",
+    ...(!predefined?.test_sets?.length ? scoringSuiteMissing(inputs.testSets, "Test") : []),
+    ...(inputs.validationSets.length
+      ? scoringSuiteMissing(inputs.validationSets, "Validation") : []),
     inputs.trainingMethod === "gkd" && !inputs.teacherModel.trim() && "Teacher model",
     inputs.trainingMethod === "online_dpo" && !inputs.rewardModel.trim() && "Reward model",
   ].filter(Boolean) as string[];
@@ -508,6 +502,7 @@ export function NewRunModal({
     if (predefined && next.trim() !== predefined.name) {
       setInputs((v) => ({
         ...v,
+        testSets: [],
         testSet: "",
         answerFields: "",
         metricType: "",
@@ -541,6 +536,7 @@ export function NewRunModal({
   // apart (server: `setting_identity`). Sending only the four compared fields
   // is what made changing the Budget answer "same as the saved setting": the
   // cap never reached the question.
+  const primaryValidationSetting = inputs.validationSets[0];
   const matchQuery = new URLSearchParams({
     base_model: effective(inputs.baseModel),
     training_method: effective(inputs.trainingMethod),
@@ -556,10 +552,10 @@ export function NewRunModal({
     data_query: inputs.dataQuery.trim(),
     model_query: inputs.modelQuery.trim(),
     method_query: inputs.methodQuery.trim(),
-    validation_set: inputs.validationSet.trim(),
+    validation_set: primaryValidationSetting?.test_set ?? "",
     validation_sets: JSON.stringify(inputs.validationSets),
-    validation_split: inputs.validationSplit.trim(),
-    validation_config: inputs.validationConfig.trim(),
+    validation_split: primaryValidationSetting?.split ?? "",
+    validation_config: primaryValidationSetting?.config ?? "",
     validation_answer_fields: validationContract.answerFields.trim(),
     validation_sample_submission: validationContract.sampleSubmission,
     validation_metric_type: validationContract.metricType,
@@ -604,6 +600,7 @@ export function NewRunModal({
     const primaryTest = predefined.test_sets?.[0];
     setInputs((v) => ({
       ...v,
+      testSets: [],
       testSet: primaryTest?.test_set || predefined.test_set || "",
       answerFields: (primaryTest?.answer_fields ?? predefined.test_answer_fields ?? []).join(", "),
       metricType: primaryTest?.metric_type ?? predefined.metric_type,
@@ -643,36 +640,14 @@ export function NewRunModal({
     // A predefined name executes that package; anything else ships the task the
     // user described, under the name they gave it.
     // Blank stays blank: omitted limits resolve to 0 (no hard cap).
-    const columns = (v: string) => v.split(",").map((c) => c.trim()).filter(Boolean);
     const validation = validationContractFromInputs(inputs);
     if (!predefined?.test_sets?.length) {
-      if (!inputs.metricType) throw new Error("Choose the Test metric type.");
-      if (!inputs.metric.trim()) throw new Error("Name the evaluation metric.");
-      if (inputs.metricType === "custom" && !inputs.evaluationScript.trim()) {
-        throw new Error("Choose the custom evaluation script.");
-      }
-      if (!inputs.testSet.trim()) throw new Error("Choose the held-out test set.");
-      if (!inputs.metricDirection) throw new Error("Choose whether the evaluation target is Max or Min.");
+      const missing = scoringSuiteMissing(inputs.testSets, "Test");
+      if (missing.length) throw new Error(`Complete the Test suite: ${missing.join(", ")}.`);
     }
-    if (validation.independent) {
-      if (!validation.metricType) throw new Error("Choose the Validation metric type.");
-      if (!validation.metric) throw new Error("Choose the Validation metric.");
-      if (validation.metricType === "custom" && !validation.evaluationScript) {
-        throw new Error("Choose the custom Validation evaluation script.");
-      }
-      if (!validation.metricDirection) throw new Error("Choose the Validation target.");
-    }
-    if (!predefined?.test_sets?.length) {
-      if (!columns(inputs.answerFields).length) throw new Error("Name at least one test answer field.");
-      if (!inputs.testSampleSubmission.trim()) throw new Error("Choose the test sample submission.");
-    }
-    if (inputs.validationSet.trim()) {
-      if (!columns(inputs.validationAnswerFields).length) {
-        throw new Error("A named validation set requires validation answer fields.");
-      }
-      if (!inputs.validationSampleSubmission.trim()) {
-        throw new Error("A named validation set requires a validation sample submission.");
-      }
+    if (inputs.validationSets.length) {
+      const missing = scoringSuiteMissing(inputs.validationSets, "Validation");
+      if (missing.length) throw new Error(`Complete the Validation suite: ${missing.join(", ")}.`);
     }
     // Explicit now. Unticked means this configuration is not written down;
     // already saved means there is nothing to write, the row exists.
@@ -684,6 +659,8 @@ export function NewRunModal({
     if (predefined) {
       const primaryTest = predefined.test_sets[0];
       if (!primaryTest) throw new Error("The selected Task has no Test suite.");
+      const validationSets = normalizeScoringSuite(inputs.validationSets);
+      const primaryValidation = validationSets[0];
       // Build the complete canonical request from what the form shows.
       const edited = {
         dataset: inputs.dataset,
@@ -692,11 +669,11 @@ export function NewRunModal({
         test_sets: predefined.test_sets,
         test_set: primaryTest.test_set,
         test_answer_fields: primaryTest.answer_fields,
-        validation_sets: inputs.validationSets,
-        validation_set: inputs.validationSet,
-        validation_split: inputs.validationSplit.trim(),
-        validation_config: inputs.validationConfig.trim(),
-        validation_answer_fields: columns(validation.answerFields),
+        validation_sets: validationSets,
+        validation_set: primaryValidation?.test_set ?? "",
+        validation_split: primaryValidation?.split ?? "",
+        validation_config: primaryValidation?.config ?? "",
+        validation_answer_fields: primaryValidation?.answer_fields ?? [],
         validation_sample_submission: validation.sampleSubmission,
         test_sample_submission: primaryTest.sample_submission,
         base_model: inputs.baseModel,
