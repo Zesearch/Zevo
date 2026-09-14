@@ -993,7 +993,10 @@ async def _sweep_stuck_tickets(
         )).scalars().all()
         live_stage = next((
             row for row in stage_rows
-            if bool((row.meta or {}).get("stage_job"))
+            if bool(
+                (row.meta or {}).get("resource_request")
+                or (row.meta or {}).get("stage_job")
+            )
             and _normalise_slurm_state(
                 str((row.meta or {}).get("scheduler_state") or "")
             ) not in _SLURM_TERMINAL_STATES

@@ -31,12 +31,13 @@ import hashlib
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 
 
@@ -102,6 +103,7 @@ from zevo.engine.run.failure_policy import (
     classify_failure,
     repair_instruction,
 )
+from zevo.engine.run.resource_planning import plan_stage_resources
 from zevo.engine.observe import transcript_bus
 from zevo.engine.artifact_validation import (
     materialize_system_scoring_artifacts,
@@ -451,6 +453,7 @@ def _build_data_input(
             and os.environ.get("HF_TOKEN", "").strip()
             else []
         ),
+        slurm_job=SlurmStageJobContract(),
     )
 
 
@@ -706,6 +709,7 @@ async def _build_infra_input(
 async def _slurm_stage_job_contract(
     *, run: Run, ticket: Ticket, work_dir: str, filename: str,
     device_info_path: str, session: AsyncSession,
+    stage: Literal["data", "train", "inference"],
 ) -> SlurmStageJobContract:
     """Stamp a new submission or the newest backend-observed Slurm job."""
     cluster = str(run.gpu_provider or "instance") == "cluster"
@@ -723,29 +727,42 @@ async def _slurm_stage_job_contract(
             f"stage provider {expected_provider!r} differs from Infrastructure "
             f"provider {info.provider!r}"
         )
-    selected_gpus = int(info.resource_plan.num_gpus)
     maximum_gpus = _num_gpus(run)
-    if selected_gpus < 1 or (maximum_gpus and selected_gpus > maximum_gpus):
-        limit = str(maximum_gpus) if maximum_gpus else "unlimited"
-        raise ValueError(
-            f"Infrastructure selected {selected_gpus} GPUs outside Run maximum {limit}"
-        )
     job_row = None
     if cluster:
-        job_row = (await session.execute(
-            select(InfraInstance)
-            .where(
-                InfraInstance.provider == "cluster",
-                InfraInstance.run_id == run.id,
-                InfraInstance.ticket_id == ticket.id,
-                InfraInstance.instance_id != "",
-            )
-            .order_by(InfraInstance.created_at.desc())
-            .limit(1)
-        )).scalar_one_or_none()
+        job_row = await _latest_slurm_resource_request(session, ticket)
     meta = dict(job_row.meta or {}) if job_row is not None else {}
     if cluster and info.cluster is None:
         raise ValueError("cluster stage has no cluster execution route")
+    if cluster:
+        registered_gpus = int(job_row.gpu_count or 0) if job_row is not None else 0
+        registered_nodes = int(meta.get("nodes") or 0) if job_row is not None else 0
+        if job_row is not None and registered_nodes < 1 and registered_gpus > 0:
+            registered_per_node = int(meta.get("gpus_per_node") or 0)
+            if registered_per_node > 0 and registered_gpus % registered_per_node == 0:
+                registered_nodes = registered_gpus // registered_per_node
+            elif stage == "inference":
+                # Legacy Inference jobs were single-node in execution even when
+                # their copied Infrastructure envelope said otherwise.
+                registered_nodes = 1
+            else:
+                registered_nodes = int(info.resource_plan.nodes)
+        selection = plan_stage_resources(
+            stage=stage,
+            base_model=str((ticket.payload or {}).get("base_model") or ""),
+            info=info,
+            maximum_gpus=maximum_gpus,
+            registered_gpus=registered_gpus,
+            registered_nodes=registered_nodes,
+        )
+    else:
+        selected_gpus = int(info.resource_plan.num_gpus)
+        if selected_gpus < 1 or (maximum_gpus and selected_gpus > maximum_gpus):
+            limit = str(maximum_gpus) if maximum_gpus else "unlimited"
+            raise ValueError(
+                f"Infrastructure selected {selected_gpus} GPUs outside Run maximum {limit}"
+            )
+        selection = None
     status_path = (
         str(PurePosixPath(info.cluster.workdir) / ticket.id / SLURM_STATUS_FILENAME)
         if cluster and info.cluster is not None else ""
@@ -754,6 +771,10 @@ async def _slurm_stage_job_contract(
     return SlurmStageJobContract(
         enabled=cluster,
         phase="collect" if job_row is not None else "submit",
+        stage=stage if cluster else "",
+        estimated_gpus=selection.estimated_gpus if selection is not None else 0,
+        resource_plan_source=selection.source if selection is not None else "",
+        resource_plan_rationale=selection.rationale if selection is not None else "",
         script_path=str(Path(work_dir) / filename) if cluster else "",
         job_name=f"zevo-{ticket.id}" if cluster else "",
         status_path=status_path,
@@ -774,8 +795,8 @@ async def _slurm_stage_job_contract(
         ),
         scheduler_exit_code=str(meta.get("scheduler_exit_code") or ""),
         scheduler_reason=str(meta.get("scheduler_reason") or ""),
-        num_gpus=selected_gpus,
-        nodes=int(info.resource_plan.nodes),
+        num_gpus=(selection.num_gpus if selection is not None else selected_gpus),
+        nodes=(selection.nodes if selection is not None else int(info.resource_plan.nodes)),
         max_queue_wait_hours=float(run.max_queue_wait_hours or 24.0),
         infra_instance_create_schema=(
             CreateInfraInstanceBody.model_json_schema() if cluster else {}
@@ -842,7 +863,7 @@ async def _build_train_input(
     )
     slurm_job = await _slurm_stage_job_contract(
         run=run, ticket=ticket, work_dir=work_dir, filename="train.sbatch",
-        device_info_path=device_info_path, session=session,
+        device_info_path=device_info_path, session=session, stage="train",
     )
     return TrainTaskInput(
         ticket_id=ticket.id,
@@ -978,7 +999,7 @@ async def _build_inference_input(
         device_info_path=device_info_path,
         slurm_job=await _slurm_stage_job_contract(
             run=run, ticket=ticket, work_dir=work_dir, filename="predict.sbatch",
-            device_info_path=device_info_path, session=session,
+            device_info_path=device_info_path, session=session, stage="inference",
         ),
         work_dir=work_dir,
         generation_backend=generation_backend,
@@ -1131,9 +1152,26 @@ async def _build_input(
     if agent_id == "orchestrator":
         return _build_orchestrate_input(ticket, payload)
     if agent_id == "data":
-        return _build_data_input(
+        data_input = _build_data_input(
             ticket, payload, inputs, work_dir, run, specialist_context,
         )
+        if (
+            isinstance(data_input, DataTaskInput)
+            and data_input.device_info_path
+            and str(run.gpu_provider or "instance") == "cluster"
+        ):
+            data_input = data_input.model_copy(update={
+                "slurm_job": await _slurm_stage_job_contract(
+                    run=run,
+                    ticket=ticket,
+                    work_dir=work_dir,
+                    filename="data.sbatch",
+                    device_info_path=data_input.device_info_path,
+                    session=session,
+                    stage="data",
+                ),
+            })
+        return data_input
     if agent_id == "infrastructure":
         return await _build_infra_input(
             ticket, payload, inputs, work_dir, run, session, specialist_context,
@@ -1785,6 +1823,20 @@ def _python_memory_helper_problem(path: str) -> str:
     )
 
 
+def _slurm_directive_value(body: str, name: str) -> str:
+    pattern = re.compile(
+        rf"^\s*#SBATCH\s+--{re.escape(name)}(?:=|\s+)(\S+)",
+        flags=re.MULTILINE,
+    )
+    match = pattern.search(body)
+    return match.group(1).strip() if match else ""
+
+
+def _slurm_gpu_value(value: str) -> int:
+    match = re.search(r"(?::|^)(\d+)$", value.strip())
+    return int(match.group(1)) if match else 0
+
+
 def _slurm_stage_result_problem(
     inp: BaseModel, reported_path: str, executable_name: str,
     *, configuration_path: str = "",
@@ -1814,6 +1866,25 @@ def _slurm_stage_result_problem(
     missing = [token for token in required if token not in body]
     if missing:
         return f"cluster stage Slurm script is missing {missing}"
+    declared_nodes = _slurm_gpu_value(_slurm_directive_value(body, "nodes"))
+    if declared_nodes and declared_nodes != contract.nodes:
+        return (
+            f"cluster stage requests {declared_nodes} nodes; the engine resource "
+            f"request requires {contract.nodes}"
+        )
+    if contract.nodes > 1 and declared_nodes != contract.nodes:
+        return f"cluster stage must render #SBATCH --nodes={contract.nodes}"
+    total_gpus = _slurm_gpu_value(_slurm_directive_value(body, "gpus"))
+    per_node_gpus = max(
+        _slurm_gpu_value(_slurm_directive_value(body, "gpus-per-node")),
+        _slurm_gpu_value(_slurm_directive_value(body, "gres")),
+    )
+    if total_gpus != contract.num_gpus and per_node_gpus != contract.gpus_per_node:
+        return (
+            "cluster stage GPU directives differ from the engine resource "
+            f"request: expected total={contract.num_gpus} or "
+            f"gpus_per_node={contract.gpus_per_node}"
+        )
     lowered = body.lower()
     if "sleep infinity" in lowered or "--wrap" in lowered:
         return "cluster stage Slurm script must be a finite direct job, not a holder/wrap"
@@ -1903,6 +1974,11 @@ def _extract_summary_artifact_meta(
 
     meta: dict = {}
     if isinstance(result, DataResult):
+        slurm_problem = _slurm_stage_result_problem(
+            inp, result.slurm_script_path, "prepare_data.py",
+        )
+        if status in {"succeeded", "deferred"} and slurm_problem:
+            return "failed", slurm_problem, result.training_dataset_path, {}
         meta = {
             "operation": result.operation,
             "n_rows_in": result.n_rows_in,
@@ -2199,6 +2275,7 @@ _TICKET_ARTIFACTS: dict[str, list[tuple[str, str]]] = {
                        ("remote_training_package_path", "remote_training_package"),
                        ("remote_dataset_spec_path", "remote_dataset_spec"),
                        ("prepare_script_path", "script"),
+                       ("slurm_script_path", "slurm_script"),
                        # Auto mode: the derived scoring contract. Its own role,
                        # so no binding contract can ever treat it as training data.
                        ("scoping_result_path", "scoping_result"),
@@ -2391,6 +2468,8 @@ def _essential_artifact_fields(result: BaseModel) -> list[str]:
                 fields.extend([
                     "remote_dataset_spec_path", "remote_training_package_path",
                 ])
+            if result.slurm_script_path:
+                fields.append("slurm_script_path")
             if result.validation_source_path:
                 fields.append("validation_source_path")
         if result.sample_submission_path:
@@ -2999,10 +3078,15 @@ _SLURM_TERMINAL_STATES = {
 }
 
 
-async def _latest_slurm_stage_job(
+def _is_resource_request(meta: dict[str, Any]) -> bool:
+    """Recognize the generic marker plus legacy finite-stage rows."""
+    return bool(meta.get("resource_request") or meta.get("stage_job"))
+
+
+async def _latest_slurm_resource_request(
     session: AsyncSession, ticket: Ticket,
 ) -> InfraInstance | None:
-    """Return the newest finite Slurm job registered for this exact Ticket."""
+    """Return the newest Slurm resource request for this exact Ticket."""
     rows = (await session.execute(
         select(InfraInstance)
         .where(
@@ -3015,7 +3099,7 @@ async def _latest_slurm_stage_job(
         .limit(5)
     )).scalars().all()
     return next(
-        (row for row in rows if bool((row.meta or {}).get("stage_job"))),
+        (row for row in rows if _is_resource_request(dict(row.meta or {}))),
         None,
     )
 
@@ -4326,10 +4410,10 @@ async def run_ticket(
     cancelled_by_user = tk.status == "cancelled"
     if output is None or error_message:
         summary = error_message or "driver produced no output"
-        deferred_stage_row = await _latest_slurm_stage_job(session, tk)
+        deferred_stage_row = await _latest_slurm_resource_request(session, tk)
         if (
             not cancelled_by_user
-            and tk.agent_id in {"train", "inference"}
+            and tk.agent_id in {"data", "train", "inference"}
             and _slurm_job_is_live(deferred_stage_row)
         ):
             # Submission is already a durable side effect. A malformed
@@ -4474,9 +4558,9 @@ async def run_ticket(
                     "reported": reported_operation or "<missing>",
                 }
         if status == "deferred":
-            if not isinstance(output, (TrainResult, InferenceResult)):
+            if not isinstance(output, (DataResult, TrainResult, InferenceResult)):
                 runtime_contract_mismatches["deferred_status"] = {
-                    "declared": "Train or Inference cluster stage",
+                    "declared": "Data, Train, or Inference cluster resource request",
                     "reported": type(output).__name__,
                 }
             elif not isinstance(
@@ -4487,7 +4571,7 @@ async def run_ticket(
                     "reported": "non-cluster execution",
                 }
             else:
-                stage_row = await _latest_slurm_stage_job(session, tk)
+                stage_row = await _latest_slurm_resource_request(session, tk)
                 deferred_stage_row = stage_row
                 if stage_row is None:
                     runtime_contract_mismatches["deferred_status"] = {
@@ -4501,6 +4585,25 @@ async def run_ticket(
                         "declared": inp.slurm_job.status_path,
                         "reported": str(
                             (stage_row.meta or {}).get("status_path") or "<missing>"
+                        ),
+                    }
+                elif int(stage_row.gpu_count or 0) != inp.slurm_job.num_gpus:
+                    runtime_contract_mismatches["slurm_gpu_count"] = {
+                        "declared": inp.slurm_job.num_gpus,
+                        "reported": int(stage_row.gpu_count or 0),
+                    }
+                elif int((stage_row.meta or {}).get("nodes") or 0) != inp.slurm_job.nodes:
+                    runtime_contract_mismatches["slurm_nodes"] = {
+                        "declared": inp.slurm_job.nodes,
+                        "reported": int((stage_row.meta or {}).get("nodes") or 0),
+                    }
+                elif int((stage_row.meta or {}).get("gpus_per_node") or 0) != (
+                    inp.slurm_job.gpus_per_node
+                ):
+                    runtime_contract_mismatches["slurm_gpus_per_node"] = {
+                        "declared": inp.slurm_job.gpus_per_node,
+                        "reported": int(
+                            (stage_row.meta or {}).get("gpus_per_node") or 0
                         ),
                     }
                 elif (
@@ -5155,7 +5258,7 @@ async def run_ticket(
         and isinstance(getattr(inp, "slurm_job", None), SlurmStageJobContract)
         and inp.slurm_job.enabled
     ):
-        completed_stage_row = await _latest_slurm_stage_job(session, tk)
+        completed_stage_row = await _latest_slurm_resource_request(session, tk)
         if completed_stage_row is not None:
             await _add_slurm_stage_message_once(
                 session,

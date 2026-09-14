@@ -874,12 +874,13 @@ function StageDetail({ ticketId, wake, benchmarkProgress }: {
       : chronological[effectiveWake + 1]?.started_at ?? "\uffff";
     return t.execution_events.filter((p) => p.ts >= from && p.ts < to);
   })();
-  const pendingSlurmJob = infraInstances.find((instance) =>
-    instance.provider === "cluster"
-    && instance.ticket_id === ticketId
-    && instance.status === "provisioning"
-    && !instance.ready_at
-    && !instance.released_at,
+  // Resource-request state is provider- and stage-agnostic. The row is created
+  // immediately after a request/submission, so Data and future compute stages
+  // get the same Waiting -> Running card as Inference and Train.
+  const activeResourceRequest = infraInstances.find((instance) =>
+    instance.ticket_id === ticketId
+    && !instance.released_at
+    && !["released", "failed"].includes(instance.status),
   );
   return (
     <Bezel className="overflow-hidden">
@@ -928,7 +929,9 @@ function StageDetail({ ticketId, wake, benchmarkProgress }: {
         <div className="rounded-bezel border border-hair bg-canvas/40 p-3">
           <div className="mb-2"><Kicker strong>Overview</Kicker></div>
           <BenchmarkStageProgress ticket={t} progress={benchmarkProgress} />
-          {pendingSlurmJob && <SlurmQueueWait instance={pendingSlurmJob} />}
+          {activeResourceRequest && (
+            <ResourceRequestStatus instance={activeResourceRequest} />
+          )}
           {/* What it did, in order, read off the feed below — so a step appears
               because it happened, not because a script remembered to say so. */}
           <StepTimeline
@@ -1023,7 +1026,7 @@ function BenchmarkStageProgress({
   );
 }
 
-function SlurmQueueWait({ instance }: { instance: InfraInstanceDTO }) {
+function ResourceRequestStatus({ instance }: { instance: InfraInstanceDTO }) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -1032,30 +1035,52 @@ function SlurmQueueWait({ instance }: { instance: InfraInstanceDTO }) {
     return () => window.clearInterval(timer);
   }, [instance.id, instance.created_at]);
 
-  const submittedAt = Date.parse(instance.created_at);
-  const waitedSeconds = Number.isFinite(submittedAt)
-    ? Math.max(0, Math.floor((now - submittedAt) / 1000))
+  const schedulerState = String(instance.meta?.scheduler_state || "").toUpperCase();
+  const running = schedulerState === "RUNNING" || instance.status === "ready" || !!instance.ready_at;
+  const pending = !running && !["released", "failed"].includes(instance.status);
+  const timerStartedAt = Date.parse(
+    running ? (instance.ready_at || instance.created_at) : instance.created_at,
+  );
+  const elapsedSeconds = Number.isFinite(timerStartedAt)
+    ? Math.max(0, Math.floor((now - timerStartedAt) / 1000))
     : 0;
+  const label = running
+    ? "Running with resources"
+    : instance.provider === "cluster"
+      ? "Waiting for resources"
+      : "Provisioning resources";
 
   return (
-    <div className="mb-3 rounded-bezel border border-brass-500/30 bg-brass-500/[0.06] px-3 py-2.5">
+    <div className={`mb-3 rounded-bezel border px-3 py-2.5 ${
+      running
+        ? "border-emerald-500/30 bg-emerald-500/[0.06]"
+        : "border-brass-500/30 bg-brass-500/[0.06]"
+    }`}>
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
-        <span className="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.12em] text-brass-300">
+        <span className={`flex items-center gap-2 font-mono text-xs uppercase tracking-[0.12em] ${
+          running ? "text-emerald-300" : "text-brass-300"
+        }`}>
           <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brass-400 opacity-60" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-brass-400" />
+            {pending && (
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brass-400 opacity-60" />
+            )}
+            <span className={`relative inline-flex h-2 w-2 rounded-full ${
+              running ? "bg-emerald-400" : "bg-brass-400"
+            }`} />
           </span>
-          Waiting for GPU
+          {label}
         </span>
         <span className="font-mono text-xs text-slate-300 tabular-nums">
-          <span className="mr-1.5 text-dim">waited</span>{fmtDuration(waitedSeconds)}
+          <span className="mr-1.5 text-dim">{running ? "running" : "waited"}</span>
+          {fmtDuration(elapsedSeconds)}
         </span>
       </div>
-      {instance.instance_id && (
-        <div className="mt-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-dim">
-          Slurm job {instance.instance_id}
-        </div>
-      )}
+      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.12em] text-dim">
+        {instance.instance_id && (
+          <span>{instance.provider === "cluster" ? "Slurm job" : "Resource"} {instance.instance_id}</span>
+        )}
+        {instance.gpu_count > 0 && <span>{instance.gpu_count} GPU{instance.gpu_count === 1 ? "" : "s"}</span>}
+      </div>
     </div>
   );
 }

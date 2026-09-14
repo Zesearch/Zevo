@@ -118,12 +118,13 @@ result upload or engine finalization: the small receipt is the recovery point
 for an SSH control failure. Never create, edit, or waive the receipt manually.
 
 Run `remote_dataset_spec_validation_command` locally, upload the script/spec,
-then execute preparation on the assigned host. For cluster, submit a finite
-CPU/data job using the matched site Skill rather than loading a login node; for
-cloud/instance use direct SSH. Return the absolute remote dataset and profile
-paths. The engine subsequently applies the private scoring-exclusion step on
-that host and copies back only a compact receipt; do not attempt that comparison
-yourself.
+then execute preparation on the assigned host. For cluster, `slurm_job` is the
+engine-owned resource request: submit a finite CPU/data job using its exact GPU
+and node shape plus the matched site Skill rather than loading a login node.
+For cloud/instance use direct SSH. Return the absolute remote dataset and
+profile paths. The engine subsequently applies the private scoring-exclusion
+step on that host and copies back only a compact receipt; do not attempt that
+comparison yourself.
 Copy the validator's printed `source_fingerprint` exactly into
 `data_recipe.source_fingerprint`; it binds the immutable Hub revision and is
 not a hash of a locally downloaded dataset.
@@ -177,6 +178,33 @@ Do not split Training, Validation, or Test. Run setup and the post-Data system
 transform own scoring populations; return no scoring artifacts.
 The engine, not this Agent, removes exact cross-schema semantic duplicates on
 the same remote host before the dataset enters downstream lineage.
+
+### Cluster resource-request lifecycle
+
+When `slurm_job.enabled=true`, treat it as a finite external resource request;
+the lifecycle does not depend on this Ticket being called Data. On
+`phase="submit"`, write `data.sbatch` at the exact `script_path`; render the
+exact `nodes`, `num_gpus`/`gpus_per_node`, job name, stdout, stderr, and matched
+site directives; embed `lifecycle_prologue`; and run `prepare_data.py` in the
+foreground. Validate and upload it, then submit only the remote file with
+`sbatch --parsable`.
+
+Immediately POST the JOBID to `slurm_job.infra_instances_endpoint` with
+`provider="cluster"`, `status="provisioning"`, exact Run/Ticket ids,
+`gpu_count=slurm_job.num_gpus`, and metadata containing
+`resource_request=true`, `stage="data"`, `scheduler_state="PENDING"`,
+`nodes=slurm_job.nodes`, `gpus_per_node=slurm_job.gpus_per_node`, the remote
+script/workdir, and exact `status_path`. If registration fails, cancel that
+JOBID. Return `status="deferred"` and the exact local `slurm_script_path`; do
+not poll or wait inside the Agent activation. Registration is what makes the
+generic Overview resource card appear immediately.
+
+On `phase="collect"`, never submit duplicate work. A non-terminal state remains
+deferred. On `COMPLETED`, copy and validate the compact control artifacts and
+return the ordinary successful Data result. On another terminal state, inspect
+the separate exact stdout/stderr files and fail specifically. The backend
+watcher changes the same request from Waiting to Running and wakes this Ticket
+at terminal.
 
 ### `prepare_holdout_data`
 

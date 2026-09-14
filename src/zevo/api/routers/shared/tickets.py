@@ -1459,7 +1459,13 @@ async def post_message(
             .limit(5)
         )).scalars().all()
         stage = next(
-            (row for row in stage_rows if bool((row.meta or {}).get("stage_job"))),
+            (
+                row for row in stage_rows
+                if bool(
+                    (row.meta or {}).get("resource_request")
+                    or (row.meta or {}).get("stage_job")
+                )
+            ),
             None,
         )
         if stage is not None:
