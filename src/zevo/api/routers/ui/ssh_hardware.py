@@ -260,11 +260,11 @@ def _uploaded_skill_body(markdown: str) -> str:
     """Validate an uploaded Agent Skill and return its instruction body.
 
     Zevo owns the connection-specific routing frontmatter so a renamed host or
-    connection cannot leave stale triggers behind. The uploaded file supplies
-    the operator-authored body.
+    connection cannot leave stale triggers behind. A raw Skill supplies its
+    whole body. A Skill exported from another Zevo connection may contain one
+    managed marker pair; only its operator-authored section is imported so the
+    source connection's id, host, and generated routing never cross over.
     """
-    if _SKILL_START in markdown or _SKILL_END in markdown:
-        raise HTTPException(400, "SKILL.md cannot contain Zevo managed markers")
     try:
         document = frontmatter.loads(markdown)
     except Exception as exc:
@@ -274,7 +274,21 @@ def _uploaded_skill_body(markdown: str) -> str:
         raise HTTPException(400, "SKILL.md frontmatter must include name")
     if not str(metadata.get("description") or "").strip():
         raise HTTPException(400, "SKILL.md frontmatter must include description")
-    body = document.content.strip()
+    start_count = markdown.count(_SKILL_START)
+    end_count = markdown.count(_SKILL_END)
+    if start_count or end_count:
+        if (
+            start_count != 1
+            or end_count != 1
+            or markdown.index(_SKILL_START) >= markdown.index(_SKILL_END)
+        ):
+            raise HTTPException(
+                400,
+                "SKILL.md must contain exactly one ordered pair of Zevo managed markers",
+            )
+        body = markdown.split(_SKILL_START, 1)[1].split(_SKILL_END, 1)[0].strip()
+    else:
+        body = document.content.strip()
     if not body:
         raise HTTPException(400, "SKILL.md must include an instruction body")
     return body
