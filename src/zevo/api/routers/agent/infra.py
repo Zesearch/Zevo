@@ -1,7 +1,7 @@
 """Remote-compute tracking endpoints.
 
-Infrastructure records cloud/instance resources; Train and Inference record
-their finite cluster stage jobs. The submitting ticket owns the exact handle;
+Infrastructure records cloud/instance resources; any compute Ticket records
+its finite cluster resource request. The submitting ticket owns the exact handle;
 terminal lifecycle code provides automatic/forced cleanup.
 The backend keeps a
 single source of truth so:

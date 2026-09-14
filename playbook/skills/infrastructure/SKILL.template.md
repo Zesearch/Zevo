@@ -28,14 +28,19 @@ that contain a file named `SKILL.md`; this template filename is not loaded.
 
 - List bounded, read-only commands for checking the host, scheduler, available
   GPU types, associations, quotas, and environment readiness.
+- State the live GPU request geometry that Infrastructure must record in
+  `cluster.gpu_constraints`: minimum GPUs per job, cluster-wide allocation
+  step, GPUs per node, approximate VRAM per GPU, and whether only whole nodes
+  are legal. These are site capabilities, not one workload's chosen size.
 - Treat live scheduler and device output as more authoritative than this Skill.
 - Use low-frequency monitoring with backoff on shared schedulers.
 
 ## Execute
 
-- For a Slurm cluster, require Train and Inference to write a finite
-  `train.sbatch` or `predict.sbatch`, submit that file, register the job ID,
-  and let the backend monitor it through queued, running, and terminal states.
+- For a Slurm cluster, require any requesting stage (including remote Data) to
+  write its finite `.sbatch`, submit that file, register the job ID as a generic
+  `resource_request`, and let the backend monitor it through queued, running,
+  and terminal states.
 - For a fixed instance, describe direct execution and idle-GPU selection.
 - Define site-specific checkpoint/resume, cache, temporary-directory,
   container, mount, log, and cleanup rules without weakening Zevo ownership.

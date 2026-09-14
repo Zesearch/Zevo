@@ -203,7 +203,7 @@ class PatchInfraInstanceBody(StrictBody):
 
 
 class SlurmStageJobContract(BaseModel):
-    """Engine-owned contract for a finite Train or Inference Slurm job.
+    """Engine-owned contract for a finite Data, Train, or Inference Slurm job.
 
     Cluster stages render this contract as a local ``.sbatch`` artifact, copy
     it to the verified login route, and submit that file. Other providers keep
@@ -214,6 +214,14 @@ class SlurmStageJobContract(BaseModel):
 
     enabled: bool = False
     phase: Literal["submit", "collect"] = "submit"
+    stage: Literal["", "data", "train", "inference"] = ""
+    estimated_gpus: int = Field(
+        default=0,
+        ge=0,
+        description="Rough pre-rounding workload estimate; zero when disabled.",
+    )
+    resource_plan_source: str = ""
+    resource_plan_rationale: str = ""
     script_path: str = ""
     job_name: str = ""
     status_path: str = ""
@@ -229,8 +237,9 @@ class SlurmStageJobContract(BaseModel):
         1,
         ge=1,
         description=(
-            "Total GPU count selected in the bound Infrastructure resource plan "
-            "for this finite Slurm stage, summed across nodes. It renders as "
+            "Total GPU count selected by Zevo's stage planner after rounding a "
+            "rough estimate to a roomy tier and applying live cluster constraints. "
+            "It is summed across nodes and renders as "
             "#SBATCH --gpus (or nodes * --gpus-per-node) in the stage script."
         ),
     )
@@ -266,6 +275,8 @@ class SlurmStageJobContract(BaseModel):
             )
         if not self.enabled:
             if any((
+                self.stage, self.estimated_gpus, self.resource_plan_source,
+                self.resource_plan_rationale,
                 self.script_path, self.job_name, self.bookkeeping_row_id,
                 self.job_id, self.scheduler_state, self.scheduler_exit_code,
                 self.scheduler_reason, self.status_path, self.stdout_path,
@@ -273,6 +284,14 @@ class SlurmStageJobContract(BaseModel):
             )) or self.phase != "submit":
                 raise ValueError("disabled Slurm stage contract cannot carry job state")
             return self
+        if not (
+            self.stage and self.estimated_gpus >= 1
+            and self.resource_plan_source.strip()
+            and self.resource_plan_rationale.strip()
+        ):
+            raise ValueError(
+                "enabled Slurm stage contract requires stage resource-planning evidence"
+            )
         if not self.script_path.startswith("/") or not self.script_path.endswith(".sbatch"):
             raise ValueError("enabled Slurm stage contract requires an absolute .sbatch path")
         if not self.job_name.startswith("zevo-"):
@@ -545,6 +564,54 @@ class DeviceCostInfo(BaseModel):
     dph_total: float = Field(ge=0, allow_inf_nan=False)
 
 
+class ClusterGpuConstraints(BaseModel):
+    """Live scheduler geometry used to round rough stage GPU estimates.
+
+    These are site capabilities, not a workload request.  For example, Empire
+    AI Beta records 4/4/4/true because its user QoS grants whole four-GPU
+    nodes; an ordinary eight-GPU node that permits partial allocation records
+    1/1/8/false.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_gpus_per_job: int = Field(ge=1)
+    allocation_step: int = Field(
+        ge=1,
+        description="Legal increment for the cluster-wide total GPU request.",
+    )
+    gpus_per_node: int = Field(
+        ge=1,
+        description="Maximum schedulable GPUs on one node in this route.",
+    )
+    gpu_vram_gib: int = Field(
+        default=0,
+        ge=0,
+        description="Approximate memory per GPU from live/site evidence; zero if unknown.",
+    )
+    whole_node: bool = Field(
+        default=False,
+        description="True when every stage must take complete GPU nodes.",
+    )
+    source: str = Field(
+        min_length=1,
+        description="Short evidence label, such as live QOS MinTRES and sinfo.",
+    )
+
+    @model_validator(mode="after")
+    def require_satisfiable_shape(self) -> "ClusterGpuConstraints":
+        if self.whole_node:
+            if self.min_gpus_per_job < self.gpus_per_node:
+                raise ValueError(
+                    "whole-node scheduling requires min_gpus_per_job >= gpus_per_node"
+                )
+            if self.allocation_step % self.gpus_per_node:
+                raise ValueError(
+                    "whole-node allocation_step must be a multiple of gpus_per_node"
+                )
+        return self
+
+
 class DeviceClusterRoute(BaseModel):
     model_config = ConfigDict(extra="forbid")
     jobid: str = ""
@@ -568,6 +635,14 @@ class DeviceClusterRoute(BaseModel):
     env_setup: str = ""
     workdir: str = Field(min_length=1)
     hf_cache: str = Field(min_length=1)
+    gpu_constraints: ClusterGpuConstraints | None = Field(
+        default=None,
+        description=(
+            "Live scheduler GPU minimum, allocation step, and node capacity. "
+            "New provisions must record it. None is accepted only for older "
+            "device artifacts, which downstream planning handles conservatively."
+        ),
+    )
 
 
 class DeviceInstanceRoute(BaseModel):
@@ -646,6 +721,26 @@ class InfrastructureDeviceInfo(BaseModel):
                 raise ValueError(
                     "cluster requested_gpus must be an exact multiple of nodes"
                 )
+            constraints = self.cluster.gpu_constraints
+            if constraints is not None:
+                selected = self.cluster.requested_gpus
+                selected_per_node = selected // self.cluster.nodes
+                if selected < constraints.min_gpus_per_job:
+                    raise ValueError(
+                        "cluster requested_gpus is below gpu_constraints minimum"
+                    )
+                if selected % constraints.allocation_step:
+                    raise ValueError(
+                        "cluster requested_gpus violates gpu_constraints allocation_step"
+                    )
+                if selected_per_node > constraints.gpus_per_node:
+                    raise ValueError(
+                        "cluster plan exceeds gpu_constraints gpus_per_node"
+                    )
+                if constraints.whole_node and selected_per_node != constraints.gpus_per_node:
+                    raise ValueError(
+                        "whole-node cluster plan must request every GPU on each node"
+                    )
             if self.auto_release:
                 raise ValueError("cluster access has no resource to auto-release")
         else:

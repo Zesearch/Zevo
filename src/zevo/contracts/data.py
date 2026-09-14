@@ -26,6 +26,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from zevo.contracts._base import AgentResult, AgentTaskInput
+from zevo.contracts.infrastructure import SlurmStageJobContract
 from zevo.contracts.training_methods import METHOD_CONFIG_KEYS
 
 
@@ -581,6 +582,13 @@ class DataTaskInput(AgentTaskInput):
     remote_timeout_seconds: Literal[14400] = 14400
     remote_required_environment: dict[str, str] = Field(default_factory=dict)
     secret_environment_names: list[Literal["HF_TOKEN"]] = Field(default_factory=list)
+    slurm_job: SlurmStageJobContract = Field(
+        default_factory=SlurmStageJobContract,
+        description=(
+            "Finite Data job contract for a cluster-hosted remote preparation. "
+            "Disabled for local, fixed-instance, held-out, and scoping work."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_lane_scope(self) -> "DataTaskInput":
@@ -609,6 +617,7 @@ class DataTaskInput(AgentTaskInput):
                 or self.remote_hf_cache_path or self.remote_data_output_dir
                 or self.remote_preparation_receipt_path
                 or self.remote_required_environment or self.secret_environment_names
+                or self.slurm_job.enabled
             ):
                 raise ValueError(
                     "scope_problem derives the scoring contract itself and must "
@@ -764,8 +773,15 @@ class DataTaskInput(AgentTaskInput):
 
 
 class DataResult(AgentResult):
-    status: Literal["succeeded", "failed"]
+    status: Literal["succeeded", "failed", "deferred"]
     operation: DataOperation
+    slurm_script_path: str = Field(
+        "",
+        description=(
+            "Exact engine-assigned Data .sbatch path for cluster preparation; "
+            "empty for every non-cluster execution."
+        ),
+    )
 
     # Auto mode: the one artifact a successful scope_problem must produce. The
     # engine validates it as a ScopingResult and settles the Run's scoring
@@ -857,6 +873,12 @@ class DataResult(AgentResult):
 
     @model_validator(mode="after")
     def require_operation_artifacts(self) -> "DataResult":
+        if self.status == "deferred":
+            if self.operation != "prepare_run_data" or not self.slurm_script_path:
+                raise ValueError(
+                    "deferred Data requires prepare_run_data and slurm_script_path"
+                )
+            return self
         if self.status != "succeeded":
             return self
         if self.operation == "scope_problem":

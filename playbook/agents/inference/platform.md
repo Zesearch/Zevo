@@ -50,8 +50,11 @@ Never fall back to CPU or run GPU inference inside the scheduler container.
 When `slurm_job.enabled=true` and `slurm_job.phase="submit"`, write the exact local file at
 `slurm_job.script_path`. Load the installed site-operation Skill matching
 `device_info.ssh.host` and apply its scheduler/container constraints; fail if
-multiple site Skills match. Put the resource plan and `slurm_job.num_gpus` into
-`#SBATCH` directives, use exactly `slurm_job.job_name`, activate
+multiple site Skills match. `device_info.resource_plan` is an Infrastructure
+envelope, while `slurm_job` is the exact engine-selected request for this
+Inference execution. Put `slurm_job.nodes` and `slurm_job.num_gpus` /
+`slurm_job.gpus_per_node` into `#SBATCH` directives, use exactly
+`slurm_job.job_name`, activate
 `cluster.env_setup`, and, when `memory_helper_path` is supplied, import the
 copied `zevo_inference_memory` helper to select an allocated GPU using the
 recorded absolute target. Run `predict.py` in the
@@ -81,8 +84,10 @@ Validate with `bash -n`, upload and checksum the file, then submit only
 `sbatch --parsable <remote-predict.sbatch>`. Parse only its first
 semicolon-delimited component as the JOBID, then immediately register it at
 `slurm_job.infra_instances_endpoint` as cluster/provisioning for this
-Run/Ticket, zero cost, and metadata containing `auto_release=true`,
-`stage_job=true`, `scheduler_state="PENDING"`, the remote script/workdir, and
+Run/Ticket, zero cost, `gpu_count=slurm_job.num_gpus`, and metadata containing
+`auto_release=true`, `resource_request=true`,
+`stage="inference"`, `scheduler_state="PENDING"`,
+`nodes=slurm_job.nodes`, `gpus_per_node=slurm_job.gpus_per_node`, the remote script/workdir, and
 `status_path` equal to the exact `slurm_job.status_path`.
 Use the supplied exact schemas. If bookkeeping fails, cancel the job. Then
 return `status="deferred"` with `slurm_script_path` set and no claimed

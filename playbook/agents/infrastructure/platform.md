@@ -35,8 +35,10 @@ Resolve one `resource_plan` before searching, submitting, or leasing anything:
   invent a site value;
 - choose a positive `resource_plan.num_gpus`; when Run `num_gpus` is positive,
   do not exceed it, and when it is zero there is no user-imposed GPU-count cap.
-  Use the smallest count that safely supports the immediate purpose and known
-  model, method, memory, time, distributed, and budget requirements;
+  Make a deliberately rough estimate with safety room, then prefer a coarse
+  count such as 1, 2, 4, 6, or 8 (larger jobs continue with roomy 12/16/24/32
+  tiers). Use the smallest tier that safely supports the immediate purpose and
+  known model, method, memory, time, distributed, and budget requirements;
 - choose `resource_plan.nodes` (default 1 = single node, unchanged). Set
   `nodes>1` only when the training plan needs multi-node distribution — an FSDP
   `hybrid_shard` / DeepSpeed ZeRO-3 full-SFT of a large model, or a data volume
@@ -192,7 +194,15 @@ submission route. It contains no allocation yet:
     "container_image": "",
     "env_setup": "source ~/miniconda3/bin/activate zevo",
     "workdir": "/remote/root/<run-id>",
-    "hf_cache": "/remote/root/hf_cache"
+    "hf_cache": "/remote/root/hf_cache",
+    "gpu_constraints": {
+      "min_gpus_per_job": 1,
+      "allocation_step": 1,
+      "gpus_per_node": 8,
+      "gpu_vram_gib": 80,
+      "whole_node": false,
+      "source": "live sinfo and QOS/account limits"
+    }
   }
 }
 ```
@@ -346,6 +356,15 @@ Resolve a bounded resource plan for the downstream stage. Record the exact
 partition/account/QOS, CPU, RAM, requested GPU type/count, and walltime that the
 stage must render as `#SBATCH` directives. If a requested GPU mapping or account
 association cannot be established from live read-only state, fail visibly.
+Also record `cluster.gpu_constraints` from that same evidence: the minimum GPUs
+per job, legal cluster-wide allocation increment, maximum GPUs per node,
+approximate VRAM per GPU (zero only when genuinely unknown), whether partial
+nodes are forbidden, and a short evidence label. These are reusable scheduler
+capabilities, not the Train allocation. Downstream engine planning uses them to
+round every Data/Inference/Train request independently. For example, a site
+that allows partial eight-GPU nodes records `1/1/8/false`; a whole four-GPU
+node site records `4/4/4/true`. Never copy the current Train GPU count into
+these capability fields unless the live scheduler really imposes it.
 
 Write cluster `device_info.json` as an access contract:
 

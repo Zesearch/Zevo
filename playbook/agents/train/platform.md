@@ -103,9 +103,11 @@ ticket-specific remote directory, verify its checksum, then run only
 `sbatch --parsable <remote-train.sbatch>`. Parse only the first
 semicolon-delimited component as the JOBID, then immediately POST it to
 `slurm_job.infra_instances_endpoint` as `provider="cluster"`,
-`status="provisioning"`, this Run/Ticket, zero cost, and
-metadata containing `auto_release=true`, `stage_job=true`,
-`scheduler_state="PENDING"`, the remote script/workdir, and `status_path` equal
+`status="provisioning"`, this Run/Ticket, zero cost,
+`gpu_count=slurm_job.num_gpus`, and metadata containing `auto_release=true`,
+`resource_request=true`, `stage="train"`,
+`scheduler_state="PENDING"`, `nodes=slurm_job.nodes`,
+`gpus_per_node=slurm_job.gpus_per_node`, the remote script/workdir, and `status_path` equal
 to the exact `slurm_job.status_path`; validate
 requests/responses with the supplied schemas. If bookkeeping fails, cancel that
 exact JOBID and fail. Then return `status="deferred"` with
@@ -242,12 +244,12 @@ report Section 3, choose by model size vs. available VRAM:
   (long context) subdivide the world for very large models / long sequences;
   short MC-QA does not need them.
 
-The plan is the single source of the launcher. `world_size = nodes ×
+The stage request is the single source of the launcher. `world_size = nodes ×
 gpus_per_node` and must equal `training.world_size`, so
 `effective_batch_size = batch_size × gradient_accumulation_steps × world_size`
-composes across nodes. Take `nodes` and per-node GPUs from
-`device_info.resource_plan` (`nodes`, `gpus_per_node`); never invent a topology
-the Infrastructure plan did not provision.
+composes across nodes. Take `nodes` and per-node GPUs from `slurm_job`; never
+copy the reusable Infrastructure envelope or invent a topology the engine's
+stage request did not select.
 
 Emit the launcher exactly as `zevo.contracts.configuration.build_launch_command`
 derives it, so the recorded command and the executed command agree:

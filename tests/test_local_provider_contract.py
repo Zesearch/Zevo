@@ -11,8 +11,9 @@ from zevo.contracts.infrastructure import (
     SlurmStageJobContract,
     slurm_lifecycle_prologue,
 )
+from zevo.contracts.data import DataResult
 from zevo.db.models import InfraInstance
-from zevo.engine.run.runner import _commit_slurm_submission
+from zevo.engine.run.runner import _commit_slurm_submission, _is_resource_request
 
 
 def test_provider_literals_are_exactly_cloud_cluster_instance() -> None:
@@ -26,6 +27,10 @@ def test_cluster_stage_contract_names_a_finite_sbatch_artifact() -> None:
     status_path = "/remote/run/train-001/.zevo-slurm-status"
     contract = SlurmStageJobContract(
         enabled=True,
+        stage="train",
+        estimated_gpus=2,
+        resource_plan_source="test scheduler",
+        resource_plan_rationale="rough estimate rounded to the two-GPU tier",
         script_path="/tmp/train.sbatch",
         job_name="zevo-train-001",
         status_path=status_path,
@@ -65,3 +70,21 @@ def test_runner_commits_watcher_ownership_only_after_deferred_validation() -> No
     assert row.meta["submission_committed_at"]
     assert row.meta["log_path"] == "/remote/run/train-001/slurm-12345.out"
     assert row.meta["stderr_path"] == "/remote/run/train-001/slurm-12345.err"
+
+
+def test_resource_request_marker_is_generic_and_legacy_marker_still_works() -> None:
+    assert _is_resource_request({"resource_request": True, "stage": "data"})
+    assert _is_resource_request({"stage_job": True})
+    assert not _is_resource_request({"stage": "inference"})
+
+
+def test_data_can_defer_after_registering_a_cluster_resource_request() -> None:
+    result = DataResult(
+        status="deferred",
+        operation="prepare_run_data",
+        ticket_id="data-run-001",
+        slurm_script_path="/tmp/data.sbatch",
+        error_message="",
+        notes="submitted resource request",
+    )
+    assert result.status == "deferred"
