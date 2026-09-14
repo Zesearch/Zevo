@@ -33,12 +33,12 @@ from zevo.engine.agent.loader import (
 
 
 def _write_card(root: Path, agent: str, name: str, *, description: str = "does a thing",
-                body: str = "BODY-SENTINEL") -> None:
+                body: str = "BODY-SENTINEL", declared_name: str = "") -> None:
     """One card on disk, in the layout the loader reads."""
     d = root / agent / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "SKILL.md").write_text(
-        f'---\nname: {name}\ndescription: "{description}"\n---\n\n{body}\n',
+        f'---\nname: {declared_name or name}\ndescription: "{description}"\n---\n\n{body}\n',
         encoding="utf-8",
     )
 
@@ -162,6 +162,24 @@ def test_default_skill_layout_remains_claude_for_native_and_tool_drivers(
     assert staged == workspace / ".claude" / "skills"
     assert (staged / "full-sft" / "SKILL.md").is_file()
     assert not (workspace / ".agents").exists()
+
+
+def test_staging_uses_declared_skill_name_instead_of_storage_id(
+    pool, tmp_path, monkeypatch,
+):
+    storage_id = "915f61f4-5342-4e17-b7f3-2126a0d8e141"
+    _write_card(
+        pool, "infrastructure", storage_id,
+        declared_name="Empire-AI-Beta",
+    )
+    monkeypatch.setattr(agent_skills, "SKILLS_ROOT", pool)
+
+    staged = agent_skills.stage_skills(
+        "infrastructure", str(tmp_path / "ticket"),
+    )
+
+    assert (staged / "Empire-AI-Beta" / "SKILL.md").is_file()
+    assert not (staged / storage_id).exists()
 
 
 def test_cluster_site_skills_are_shared_with_gpu_stage_agents(

@@ -23,6 +23,7 @@ each heartbeat has its own workspace, so staged dirs never collide.
 """
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import Literal
@@ -48,6 +49,20 @@ def _stage_path(workspace_dir: str, layout: SkillLayout) -> Path:
     except KeyError as exc:  # defensive for untyped external callers
         raise ValueError(f"unknown skill layout: {layout!r}") from exc
     return Path(workspace_dir).joinpath(*subpath)
+
+
+def _staged_skill_name(skill_dir: Path) -> str:
+    """Return the native CLI name declared by this Skill.
+
+    Managed user Skills live below stable connection-id directories, but
+    Claude Code and Codex derive the command shown to the agent from the
+    *staged directory name*, not from ``SKILL.md`` frontmatter.  Stage by the
+    declared name so an Infrastructure Skill appears as ``Empire-AI-Beta``
+    instead of an opaque SSH connection UUID.
+    """
+    name, _, _ = _parse_skill(skill_dir / "SKILL.md")
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")
+    return safe or skill_dir.name
 
 
 def agent_skill_dirs(agent_id: str) -> list[Path]:
@@ -85,7 +100,7 @@ def stage_skills(
     dest = _stage_path(workspace_dir, layout)
     dest.mkdir(parents=True, exist_ok=True)
     for d in dirs:
-        target = dest / d.name
+        target = dest / _staged_skill_name(d)
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(d, target)
