@@ -375,6 +375,7 @@ export function CustomizedRunForm({
   const primaryTest = testSuite[0];
   const validationSuite = normalizeScoringSuite(inputs.validationSets);
   const primaryValidation = validationSuite[0];
+  const hasValidationSuite = validationSuite.length > 0;
 
   const userRequest: UserRequest = {
     task_objective: objective.trim(),
@@ -405,10 +406,12 @@ export function CustomizedRunForm({
     base_model: inputs.baseModel.trim(),
     test_set: primaryTest?.test_set ?? "",
     test_answer_fields: primaryTest?.answer_fields ?? [],
-    validation_set: primaryValidation?.test_set ?? "",
-    validation_split: primaryValidation?.split ?? "",
-    validation_config: primaryValidation?.config ?? "",
-    validation_answer_fields: primaryValidation?.answer_fields ?? [],
+    validation_set: hasValidationSuite ? "" : inputs.validationSet.trim(),
+    validation_split: hasValidationSuite ? "" : inputs.validationSplit.trim(),
+    validation_config: hasValidationSuite ? "" : inputs.validationConfig.trim(),
+    validation_answer_fields: hasValidationSuite
+      ? primaryValidation?.answer_fields ?? []
+      : validationContract.answerFields.split(",").map((field) => field.trim()).filter(Boolean),
     validation_sample_submission: validationContract.sampleSubmission,
     test_sample_submission: primaryTest?.sample_submission ?? "",
     constraints: [],

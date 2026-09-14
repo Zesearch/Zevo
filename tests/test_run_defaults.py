@@ -661,6 +661,120 @@ async def test_saving_first_custom_setting_creates_task_and_setting(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_selected_multi_validation_setting_clears_legacy_head_location(
+    tmp_path, monkeypatch,
+) -> None:
+    """A suite selected by id must not 409 because its first member was also
+    copied into the legacy one-set location fields by a launch client."""
+    from zevo.api.routers.shared import runs as runs_router
+
+    monkeypatch.setenv("ZEVO_WORK_DIR", str(tmp_path / "runs"))
+    seen: dict[str, UserRequest] = {}
+
+    async def settled(run, request):
+        seen["request"] = request
+        return request, {"test_set": request.test_set}, "already settled"
+
+    monkeypatch.setattr(runs_router, "_settle_splits", settled)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+
+    test_member = {
+        "name": "held-out",
+        "test_set": "/data/test.csv",
+        "inference_query": "Answer {question}.",
+        "sample_submission": "/data/test-submission.csv",
+        "metric_type": "builtin",
+        "metric": "accuracy",
+        "answer_fields": ["answer"],
+        "metric_direction": "max",
+    }
+    validation_suite = [
+        {
+            "name": "validation-a",
+            "test_set": "/data/validation-a.csv",
+            "inference_query": "Answer {question}.",
+            "sample_submission": "/data/validation-a-submission.csv",
+            "metric_type": "builtin",
+            "metric": "accuracy",
+            "answer_fields": ["answer"],
+            "metric_direction": "max",
+            "split": "validation",
+            "config": "main",
+        },
+        {
+            "name": "validation-b",
+            "test_set": "/data/validation-b.csv",
+            "inference_query": "Answer {question}.",
+            "sample_submission": "/data/validation-b-submission.csv",
+            "metric_type": "builtin",
+            "metric": "exact_match",
+            "answer_fields": ["answer"],
+            "metric_direction": "max",
+        },
+    ]
+
+    async with Session() as db:
+        db.add(Agent(
+            id="orchestrator", name="Orchestrator", title="Supervisor",
+            identity_path="playbook/agents/orchestrator/identity.md",
+        ))
+        db.add(Task(
+            name="suite-task", task_objective="Answer the benchmark.",
+            test_sets=[test_member], test_set=test_member["test_set"],
+            test_answer_fields=["answer"],
+            test_sample_submission=test_member["sample_submission"],
+            metric_type="builtin", metric="accuracy", metric_direction="max",
+        ))
+        setting = TaskSetting(
+            task_name="suite-task", name="L1",
+            dataset="train.jsonl", base_model="owner/model",
+            training_method="full_sft", validation_sets=validation_suite,
+            validation_set="", validation_split="", validation_config="",
+            validation_answer_fields=["answer"],
+            validation_sample_submission="/data/validation-a-submission.csv",
+            validation_metric_type="builtin", validation_metric="suite_average",
+            validation_metric_direction="max",
+        )
+        db.add(setting)
+        await db.commit()
+
+        request = UserRequest(
+            task_objective="Answer the benchmark.",
+            test_sets=[test_member], test_set=test_member["test_set"],
+            test_answer_fields=["answer"],
+            test_sample_submission=test_member["sample_submission"],
+            metric_type="builtin", metric="accuracy", metric_direction="max",
+            dataset="train.jsonl", base_model="owner/model",
+            training_method="full_sft", validation_sets=validation_suite,
+            # Exact shape emitted by the faulty browser: the complete suite
+            # plus a duplicate of its first member in the legacy fields.
+            validation_set="/data/validation-a.csv",
+            validation_split="validation", validation_config="main",
+            validation_answer_fields=["answer"],
+            validation_sample_submission="/data/validation-a-submission.csv",
+            validation_metric_type="builtin", validation_metric="suite_average",
+            validation_metric_direction="max", constraints=[],
+        )
+        response = await create_run(CreateRunRequest(
+            task_name="suite-task", run_name="reuse-L1",
+            user_request=request, gpu_provider="instance",
+            setting_id=setting.id,
+        ), db)
+
+        run = await db.get(Run, response.run_id)
+        assert run is not None
+        assert run.setting_id == setting.id
+        assert seen["request"].validation_set == ""
+        assert seen["request"].validation_split == ""
+        assert seen["request"].validation_config == ""
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_run_request_reports_the_persisted_runtime() -> None:
     from zevo.api.routers.shared.runs import get_run_request
 

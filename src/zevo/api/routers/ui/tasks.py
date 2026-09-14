@@ -840,14 +840,25 @@ def _norm_setting_value(field: str, v) -> object:
             except (TypeError, ValueError, json.JSONDecodeError):
                 return v.strip()
         if field == "validation_sets" and isinstance(v, list):
-            # Row totals are display metadata discovered from the catalogue or
-            # local file. A refreshed count must not turn the same training
-            # strategy into a second Setting identity.
-            v = [
-                ({k: value for k, value in item.items() if k != "source_rows"}
-                 if isinstance(item, dict) else item)
-                for item in v
-            ]
+            # Normalize stored JSON, a query-string suite and a Pydantic dump
+            # to the same complete shape. Older rows may omit optional keys
+            # that TaskTestSet supplies as defaults; a launch request always
+            # contains them after Pydantic parsing. Row totals remain display
+            # metadata and never distinguish Settings.
+            normalized_suite = []
+            for item in v:
+                if isinstance(item, dict):
+                    try:
+                        item = TaskTestSet.model_validate(item).model_dump(
+                            mode="json", exclude={"source_rows"},
+                        )
+                    except (TypeError, ValueError):
+                        item = {
+                            k: value for k, value in item.items()
+                            if k != "source_rows"
+                        }
+                normalized_suite.append(item)
+            v = normalized_suite
         return json.dumps(v or {}, sort_keys=True, separators=(",", ":"))
     if v is None:
         return ""
@@ -903,6 +914,9 @@ def setting_identity(src) -> tuple:
         primary = validation_suite[0]
         aggregate = len(validation_suite) > 1
         suite_projection = {
+            "validation_set": "",
+            "validation_split": "",
+            "validation_config": "",
             "validation_answer_fields": primary.get("answer_fields") or [],
             "validation_sample_submission": primary.get("sample_submission") or "",
             "validation_metric_type": (

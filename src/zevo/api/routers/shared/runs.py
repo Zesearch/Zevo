@@ -2053,6 +2053,13 @@ async def create_run(
         primary_validation = frozen_validation_suite[0]
         user_request = user_request.model_copy(update={
             "validation_sets": frozen_validation_suite,
+            # `validation_sets` is the complete contract.  These three fields
+            # are the legacy location for one independent set, not a duplicate
+            # projection of the suite's first member.  Keeping both made a
+            # selected saved Setting fail its exact-identity check with 409.
+            "validation_set": "",
+            "validation_split": "",
+            "validation_config": "",
             "validation_metric_type": (
                 "builtin" if len(frozen_validation_suite) > 1
                 else primary_validation.metric_type
