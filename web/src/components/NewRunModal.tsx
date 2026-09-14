@@ -82,6 +82,7 @@ function buildUserRequest(
   const validationSets = normalizeScoringSuite(inputs.validationSets);
   const validation = validationContractFromInputs(inputs);
   const primaryValidation = validationSets[0];
+  const hasValidationSuite = validationSets.length > 0;
   return {
     task_objective: nl,
     test_sets: testSets,
@@ -111,10 +112,15 @@ function buildUserRequest(
     dataset_config: inputs.datasetConfig.trim(),
     test_set: primaryTest.test_set,
     test_answer_fields: primaryTest.answer_fields,
-    validation_set: primaryValidation?.test_set ?? "",
-    validation_split: primaryValidation?.split ?? "",
-    validation_config: primaryValidation?.config ?? "",
-    validation_answer_fields: primaryValidation?.answer_fields ?? [],
+    // A suite and the legacy one-set location are mutually exclusive.  The
+    // first member still supplies the scalar answer/submission compatibility
+    // projection, but must not also masquerade as a separate Validation set.
+    validation_set: hasValidationSuite ? "" : inputs.validationSet.trim(),
+    validation_split: hasValidationSuite ? "" : inputs.validationSplit.trim(),
+    validation_config: hasValidationSuite ? "" : inputs.validationConfig.trim(),
+    validation_answer_fields: hasValidationSuite
+      ? primaryValidation?.answer_fields ?? []
+      : validation.answerFields.split(",").map((field) => field.trim()).filter(Boolean),
     validation_sample_submission: validation.sampleSubmission,
     test_sample_submission: primaryTest.sample_submission,
     constraints: [],
@@ -536,7 +542,7 @@ export function NewRunModal({
   // apart (server: `setting_identity`). Sending only the four compared fields
   // is what made changing the Budget answer "same as the saved setting": the
   // cap never reached the question.
-  const primaryValidationSetting = inputs.validationSets[0];
+  const hasValidationSuite = inputs.validationSets.length > 0;
   const matchQuery = new URLSearchParams({
     base_model: effective(inputs.baseModel),
     training_method: effective(inputs.trainingMethod),
@@ -552,10 +558,10 @@ export function NewRunModal({
     data_query: inputs.dataQuery.trim(),
     model_query: inputs.modelQuery.trim(),
     method_query: inputs.methodQuery.trim(),
-    validation_set: primaryValidationSetting?.test_set ?? "",
+    validation_set: hasValidationSuite ? "" : inputs.validationSet.trim(),
     validation_sets: JSON.stringify(inputs.validationSets),
-    validation_split: primaryValidationSetting?.split ?? "",
-    validation_config: primaryValidationSetting?.config ?? "",
+    validation_split: hasValidationSuite ? "" : inputs.validationSplit.trim(),
+    validation_config: hasValidationSuite ? "" : inputs.validationConfig.trim(),
     validation_answer_fields: validationContract.answerFields.trim(),
     validation_sample_submission: validationContract.sampleSubmission,
     validation_metric_type: validationContract.metricType,
@@ -666,6 +672,7 @@ export function NewRunModal({
       if (!primaryTest) throw new Error("The selected Task has no Test suite.");
       const validationSets = normalizeScoringSuite(inputs.validationSets);
       const primaryValidation = validationSets[0];
+      const hasValidationSuite = validationSets.length > 0;
       // Build the complete canonical request from what the form shows.
       const edited = {
         dataset: inputs.dataset,
@@ -675,10 +682,12 @@ export function NewRunModal({
         test_set: primaryTest.test_set,
         test_answer_fields: primaryTest.answer_fields,
         validation_sets: validationSets,
-        validation_set: primaryValidation?.test_set ?? "",
-        validation_split: primaryValidation?.split ?? "",
-        validation_config: primaryValidation?.config ?? "",
-        validation_answer_fields: primaryValidation?.answer_fields ?? [],
+        validation_set: hasValidationSuite ? "" : inputs.validationSet.trim(),
+        validation_split: hasValidationSuite ? "" : inputs.validationSplit.trim(),
+        validation_config: hasValidationSuite ? "" : inputs.validationConfig.trim(),
+        validation_answer_fields: hasValidationSuite
+          ? primaryValidation?.answer_fields ?? []
+          : validation.answerFields.split(",").map((field) => field.trim()).filter(Boolean),
         validation_sample_submission: validation.sampleSubmission,
         test_sample_submission: primaryTest.sample_submission,
         base_model: inputs.baseModel,

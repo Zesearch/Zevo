@@ -354,6 +354,12 @@ def test_multi_validation_suite_canonicalizes_its_scalar_projection() -> None:
     launch_form = {
         **stored,
         "validation_sets": json.dumps(suite),
+        # The pre-fix launch payload also duplicated the first suite member in
+        # the old one-set location fields.  A suite owns the location, so that
+        # redundant projection must not split the Setting identity either.
+        "validation_set": "openai/gsm8k",
+        "validation_split": "test",
+        "validation_config": "main",
         "validation_answer_fields": "answer",
         "validation_metric_type": "custom",
         "validation_metric": "answer_accuracy",
