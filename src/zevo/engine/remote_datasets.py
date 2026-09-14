@@ -637,6 +637,7 @@ def _write_parquet_csv(
     from zevo.code_benchmarks import (
         code_execution_adapter_for,
         externalize_code_answers,
+        store_code_answer_buffer,
     )
     adapter = code_execution_adapter_for(hub_id)
     try:
@@ -650,7 +651,27 @@ def _write_parquet_csv(
                     batch_size=1
                     if adapter in {"livecodebench", "code_contests"} else 1024,
                 ):
-                    for row in batch.to_pylist():
+                    # Avoid StringScalar.as_py() for LiveCodeBench's enormous
+                    # private payload. Its Arrow UTF-8 buffer can be hashed and
+                    # compressed directly, without a second full-size string.
+                    if adapter == "livecodebench" and "private_test_cases" in batch.schema.names:
+                        rows = []
+                        for row_index in range(batch.num_rows):
+                            row = {}
+                            for column_index, name in enumerate(batch.schema.names):
+                                scalar = batch.column(column_index)[row_index]
+                                if name == "private_test_cases" and scalar.is_valid:
+                                    buffer = scalar.as_buffer()
+                                    row[name] = (
+                                        store_code_answer_buffer(buffer)
+                                        if buffer.size else ""
+                                    )
+                                else:
+                                    row[name] = scalar.as_py()
+                            rows.append(row)
+                    else:
+                        rows = batch.to_pylist()
+                    for row in rows:
                         row = externalize_code_answers(adapter, row)
                         writer.writerow({c: _cell(row.get(c)) for c in columns})
                         written += 1
@@ -689,7 +710,11 @@ async def _materialize_parquet(
         paths.append(await _download_parquet_shard(client, shard, target))
     completed = False
     try:
-        result = _write_parquet_csv(
+        # Conversion is CPU-heavy and LiveCodeBench contains exceptionally
+        # large scalar values. Keep it off the API event loop so setup
+        # heartbeats and progress polling continue while rows are streamed.
+        result = await asyncio.to_thread(
+            _write_parquet_csv,
             shard_paths=paths,
             out_dir=out_dir,
             limit=limit,

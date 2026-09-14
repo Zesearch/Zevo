@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
-import { ChevronRight, Upload, X } from "lucide-react";
+import { ChevronRight, Plus, Trash2, Upload, X } from "lucide-react";
 import { FILES_ROOT, fmtScoringRows, splitDatasetPath } from "../lib/format";
 import { api } from "../lib/api";
 import type {
@@ -186,6 +186,247 @@ function TaskTestSuite({ items }: { items: TaskTestSet[] }) {
       items={items}
       note="defined by Task · unweighted average"
     />
+  );
+}
+
+export function emptyScoringSet(): TaskTestSet {
+  return {
+    name: "",
+    test_set: "",
+    split: "",
+    config: "",
+    max_rows: 0,
+    source_rows: 0,
+    inference_query: "",
+    sample_submission: "",
+    metric_type: "builtin",
+    metric: "",
+    answer_fields: [],
+    metric_direction: "max",
+    evaluation_script: "",
+    evaluator_sha256: "",
+  };
+}
+
+/** Return field-level launch blockers for one independently scored suite. */
+export function scoringSuiteMissing(
+  items: TaskTestSet[], lane: "Test" | "Validation",
+): string[] {
+  if (!items.length) return [`${lane} set`];
+  const missing = items.flatMap((item, index) => {
+    const prefix = `${lane} ${index + 1}`;
+    const answerFields = item.answer_fields.map((field) => field.trim()).filter(Boolean);
+    return [
+      !item.name.trim() && `${prefix} name`,
+      !item.test_set.trim() && `${prefix} data`,
+      !item.inference_query.trim() && `${prefix} inference query`,
+      !item.metric.trim() && `${prefix} metric`,
+      !item.metric_direction && `${prefix} target`,
+      !answerFields.length && `${prefix} answer fields`,
+      new Set(answerFields).size !== answerFields.length
+        && `${prefix} answer fields must be unique`,
+      !item.sample_submission.trim() && `${prefix} sample submission`,
+      item.metric_type === "custom"
+        && !item.evaluation_script.trim()
+        && `${prefix} evaluation script`,
+    ].filter(Boolean) as string[];
+  });
+  const names = items.map((item) => item.name.trim().toLowerCase()).filter(Boolean);
+  if (new Set(names).size !== names.length) missing.push(`${lane} set names must be unique`);
+  if (new Set(items.map((item) => item.metric_direction)).size > 1) {
+    missing.push(`${lane} targets must all use Max or all use Min`);
+  }
+  return missing;
+}
+
+export function normalizeScoringSuite(items: TaskTestSet[]): TaskTestSet[] {
+  return items.map((item) => ({
+    ...item,
+    name: item.name.trim(),
+    test_set: item.test_set.trim(),
+    split: item.split?.trim() || "",
+    config: item.config?.trim() || "",
+    inference_query: item.inference_query.trim(),
+    sample_submission: item.sample_submission.trim(),
+    metric: item.metric.trim().toLowerCase(),
+    answer_fields: item.answer_fields.map((field) => field.trim()).filter(Boolean),
+    evaluation_script: item.metric_type === "custom" ? item.evaluation_script.trim() : "",
+    evaluator_sha256: item.metric_type === "custom" ? item.evaluator_sha256 : "",
+  }));
+}
+
+/** Editable form for Test and independent Validation. Both lanes carry the
+ * same prompt, output schema and evaluator contract, so they intentionally use
+ * the same cards instead of unrelated single-file controls. */
+function ScoringSuiteEditor({
+  items, lane, onChange,
+}: {
+  items: TaskTestSet[];
+  lane: "Test" | "Validation";
+  onChange: (items: TaskTestSet[]) => void;
+}) {
+  const update = (index: number, patch: Partial<TaskTestSet>) => onChange(
+    items.map((item, position) => position === index ? { ...item, ...patch } : item),
+  );
+  const lower = lane.toLowerCase();
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-end justify-between gap-4 px-0.5">
+        <p className="font-mono text-2xs leading-relaxed text-slate-500">
+          Each {lane} set has its own inference query, output format, answers, and metric.
+        </p>
+        <button
+          type="button"
+          onClick={() => onChange([...items, emptyScoringSet()])}
+          className="btn shrink-0 !py-1 !text-2xs"
+        >
+          <Plus size={12} /> add {lane} set
+        </button>
+      </div>
+      {!items.length && (
+        <button
+          type="button"
+          onClick={() => onChange([emptyScoringSet()])}
+          className="w-full rounded-md border border-dashed border-hair px-4 py-5 font-mono text-xs text-slate-500 transition hover:border-brass-500/40 hover:text-brass-300"
+        >
+          Add the first {lane} set
+        </button>
+      )}
+      {items.map((item, index) => (
+        <section key={index} className="rounded-lg border border-hair bg-white/[0.018] p-4">
+          <div className="mb-4 flex items-center justify-between">
+            <span className="font-mono text-xs uppercase tracking-[0.14em] text-brass-300">
+              {lane} set {index + 1}
+            </span>
+            <button
+              type="button"
+              title={`Remove ${lane} set`}
+              onClick={() => onChange(items.filter((_, position) => position !== index))}
+              className="rounded p-1.5 text-slate-500 transition hover:bg-coral-500/10 hover:text-coral-300"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+          <div className="space-y-3">
+            <TextField
+              label="Name"
+              value={item.name}
+              onChange={(value) => update(index, { name: value })}
+              placeholder={`e.g. ${lane === "Test" ? "MATH-500" : "Math validation"}`}
+              required
+            />
+            <TrainingDataField
+              label={`${lane} set`}
+              required
+              tag={false}
+              value={item.test_set}
+              onChange={(value) => update(index, { test_set: value })}
+              split={item.split || ""}
+              onSplit={(value) => update(index, { split: value })}
+              config={item.config || ""}
+              onConfig={(value) => update(index, { config: value })}
+              splitPlaceholder={lane === "Test" ? "test" : "validation"}
+              note="from Files"
+            />
+            <div>
+              <SlotLabel label="Inference query" tag={false} />
+              <textarea
+                value={item.inference_query}
+                onChange={(event) => update(index, { inference_query: event.target.value })}
+                rows={3}
+                placeholder="Tell Inference how to answer each row; use {input} or {question}, or Zevo appends the row."
+                className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(item.inference_query.trim()))}`}
+              />
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div>
+                <SlotLabel label="Metric" tag={false} />
+                <ThemedSelect
+                  value={item.metric_type === "custom" ? "__other__" : item.metric}
+                  onChange={(value) => update(index, value === "__other__"
+                    ? { metric_type: "custom", metric: "", evaluation_script: "", evaluator_sha256: "" }
+                    : { metric_type: "builtin", metric: value, evaluation_script: "", evaluator_sha256: "" })}
+                  options={[
+                    ...BUILTIN_METRICS.map((value) => ({
+                      value,
+                      label: value === "pass_at_1" ? "pass@1 · code execution" : value,
+                    })),
+                    { value: "__other__", label: "Other (custom script)" },
+                  ]}
+                  placeholder="Choose metric"
+                  ariaLabel={`Metric for ${lane} set ${index + 1}`}
+                  buttonClassName={`${fieldCls} h-10 font-mono ${requiredFieldStateCls(Boolean(item.metric.trim()))}`}
+                />
+              </div>
+              <div>
+                <SlotLabel label="Target" tag={false} />
+                <ThemedSelect
+                  value={item.metric_direction}
+                  onChange={(value) => update(index, { metric_direction: value as "max" | "min" })}
+                  options={[{ value: "max", label: "Maximize" }, { value: "min", label: "Minimize" }]}
+                  ariaLabel={`Target for ${lane} set ${index + 1}`}
+                  buttonClassName={`${fieldCls} h-10 font-mono`}
+                />
+              </div>
+              <div>
+                <SlotLabel label={`${lane} answer fields`} tag={false} />
+                <input
+                  value={item.answer_fields.join(", ")}
+                  onChange={(event) => update(index, {
+                    // Keep a trailing empty draft so typing the comma does not
+                    // immediately erase it before the next field is entered.
+                    answer_fields: event.target.value.split(","),
+                  })}
+                  placeholder="answer, or comma-separated fields"
+                  className={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm placeholder:text-slate-600 focus:outline-none ${requiredFieldStateCls(item.answer_fields.some((field) => field.trim()))}`}
+                />
+              </div>
+            </div>
+            {item.metric_type === "custom" && (
+              <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2">
+                <div>
+                  <SlotLabel label="Custom metric name" tag={false} />
+                  <input
+                    value={item.metric}
+                    onChange={(event) => update(index, { metric: event.target.value })}
+                    placeholder="e.g. benchmark_average"
+                    className={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm placeholder:text-slate-600 focus:outline-none ${requiredFieldStateCls(Boolean(item.metric.trim()))}`}
+                  />
+                </div>
+                <FileSlot
+                  label="Evaluation script"
+                  value={item.evaluation_script}
+                  onChange={(value) => update(index, { evaluation_script: value, evaluator_sha256: "" })}
+                  required
+                  tag={false}
+                  controlClassName="h-10"
+                  hint="Python scorer (.py)"
+                />
+              </div>
+            )}
+            <FileSlot
+              label="Sample submission"
+              value={item.sample_submission}
+              onChange={(value) => update(index, { sample_submission: value })}
+              required
+              tag={false}
+              hint={`Prediction columns and example output for this ${lower} set.`}
+            />
+            {lane === "Validation" && (
+              <NumberField
+                label="Maximum rows"
+                value={item.max_rows ? String(item.max_rows) : ""}
+                onChange={(value) => update(index, { max_rows: Math.max(0, Number(value) || 0) })}
+                min={1}
+                placeholder=""
+                hint="Blank uses every row in the selected split."
+              />
+            )}
+          </div>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -696,6 +937,8 @@ export function TrainingDataField({
 }
 
 export type RunInputValues = {
+  /** Editable held-out suite for a custom (non-predefined) Task. */
+  testSets: TaskTestSet[];
   /** Held-out Test evaluator selected for this Run. */
   metricType: "" | "builtin" | "custom";
   /** Required name of the Test evaluator value. */
@@ -770,6 +1013,7 @@ export type RunInputValues = {
 };
 
 export const EMPTY_RUN_INPUTS: RunInputValues = {
+  testSets: [],
   metricType: "", metric: "", evaluationScript: "",
   metricDirection: "",
   validationMetricType: "", validationMetric: "",
@@ -801,18 +1045,21 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
 
 /** The effective Validation scorer shown and sent by both launch modes. */
 export function validationContractFromInputs(inputs: RunInputValues) {
-  const independent = inputs.validationSets.length > 0 || !!inputs.validationSet.trim();
-  const metricType = independent ? inputs.validationMetricType : "";
+  const primary = inputs.validationSets[0];
+  const independent = !!primary || !!inputs.validationSet.trim();
+  const metricType = primary?.metric_type ?? (independent ? inputs.validationMetricType : "");
   return {
     independent,
     metricType,
-    metric: independent ? inputs.validationMetric.trim() : "",
-    metricDirection: independent ? inputs.validationMetricDirection : "",
-    evaluationScript: metricType === "custom"
-      ? inputs.validationEvaluationScript.trim()
-      : "",
-    answerFields: independent ? inputs.validationAnswerFields : "",
-    sampleSubmission: independent ? inputs.validationSampleSubmission.trim() : "",
+    metric: primary?.metric ?? (independent ? inputs.validationMetric.trim() : ""),
+    metricDirection: primary?.metric_direction ?? (independent ? inputs.validationMetricDirection : ""),
+    evaluationScript: primary
+      ? (primary.metric_type === "custom" ? primary.evaluation_script : "")
+      : metricType === "custom" ? inputs.validationEvaluationScript.trim() : "",
+    answerFields: primary?.answer_fields.join(", ")
+      ?? (independent ? inputs.validationAnswerFields : ""),
+    sampleSubmission: primary?.sample_submission
+      ?? (independent ? inputs.validationSampleSubmission.trim() : ""),
   };
 }
 
@@ -847,6 +1094,7 @@ export const MODEL_ID_HINT =
 
 export const BUILTIN_METRICS = [
   "accuracy", "exact_match", "f1", "token_f1", "bleu", "rouge_l",
+  "mc_loglikelihood", "accuracy_norm",
   "pass_at_1",
 ];
 
@@ -1449,14 +1697,9 @@ export function TrainingSetupFields({
 
 /** The block of named inputs a full-pipeline run is scored on. */
 export function RunInputs({
-  metricType, metric, evaluationScript, metricDirection,
-  validationMetricType, validationMetric, validationEvaluationScript,
-  validationMetricDirection,
-  validationSets,
-  dataset, testSet, answerFields, validationSet, validationAnswerFields,
-  validationSplit, validationConfig, validationSampleSubmission,
+  testSets, validationSets,
+  dataset,
   datasetSplit, datasetConfig, dataQuery,
-  testSampleSubmission,
   baseModel, modelQuery, trainingMethod, methodQuery,
   teacherModel, rewardModel, usePeft,
   gpuProvider, cloudBackend, sshHostId, numGpus, generation_backend,
@@ -1493,20 +1736,11 @@ export function RunInputs({
     ?? (!explicitComputeValue ? compute.defaultTarget : undefined)
   );
   const hasValidationSuite = validationSets.length > 0;
-  const validationIsIndependent = hasValidationSuite || !!validationSet.trim();
+  const validationIsIndependent = hasValidationSuite;
   const hasTaskTestSuite = !!taskTestSuite?.length;
-  const updateValidationSet = (value: string) => onChange({
-    validationSet: value,
-    ...(value.trim() ? { validationSets: [] } : {}),
-    ...(!value.trim() ? {
-      validationMetricType: "",
-      validationMetric: "",
-      validationMetricDirection: "",
-      validationEvaluationScript: "",
-      validationAnswerFields: "",
-      validationSampleSubmission: "",
-    } : {}),
-  });
+  const customTestMissing = scoringSuiteMissing(testSets, "Test");
+  const validationSuiteMissing = hasValidationSuite
+    ? scoringSuiteMissing(validationSets, "Validation") : [];
   const requiredValues: RunSummaryValue[] = [
     ...requiredPrefixValues,
     {
@@ -1518,55 +1752,18 @@ export function RunInputs({
       name: "Test suite",
       value: `${taskTestSuite!.length} ${taskTestSuite!.length === 1 ? "benchmark" : "benchmarks"}`,
       complete: true,
-    }] : [
-      { name: "Test metric type", value: metricType || "Not set", complete: Boolean(metricType) },
-      { name: "Test metric", value: metric.trim() || "Not set", complete: Boolean(metric.trim()) },
-      ...(metricType === "custom" ? [{
-        name: "Test evaluation script",
-        value: evaluationScript.trim() ? short(evaluationScript) : "Not set",
-        complete: Boolean(evaluationScript.trim()),
-      }] : []),
-      { name: "Test target", value: metricDirection || "Not set", complete: Boolean(metricDirection) },
-      { name: "Test set", value: testSet.trim() ? short(testSet) : "Not set", complete: Boolean(testSet.trim()) },
-      { name: "Test answer fields", value: answerFields.trim() || "Not set", complete: Boolean(answerFields.trim()) },
-      {
-        name: "Test sample submission",
-        value: testSampleSubmission.trim() ? short(testSampleSubmission) : "Not set",
-        complete: Boolean(testSampleSubmission.trim()),
-      },
-    ]),
-    ...(validationIsIndependent ? [
-      {
-        name: "Validation metric type",
-        value: validationMetricType || "Not set",
-        complete: Boolean(validationMetricType),
-      },
-      {
-        name: "Validation metric",
-        value: validationMetric.trim() || "Not set",
-        complete: Boolean(validationMetric.trim()),
-      },
-      ...(validationMetricType === "custom" ? [{
-        name: "Validation evaluation script",
-        value: validationEvaluationScript.trim() ? short(validationEvaluationScript) : "Not set",
-        complete: Boolean(validationEvaluationScript.trim()),
-      }] : []),
-      {
-        name: "Validation target",
-        value: validationMetricDirection || "Not set",
-        complete: Boolean(validationMetricDirection),
-      },
-      {
-        name: "Validation answer fields",
-        value: validationAnswerFields.trim() || "Not set",
-        complete: Boolean(validationAnswerFields.trim()),
-      },
-      {
-        name: "Validation sample submission",
-        value: validationSampleSubmission.trim() ? short(validationSampleSubmission) : "Not set",
-        complete: Boolean(validationSampleSubmission.trim()),
-      },
-    ] : []),
+    }] : [{
+      name: "Test suite",
+      value: testSets.length
+        ? `${testSets.length} ${testSets.length === 1 ? "dataset" : "datasets"}`
+        : "Not set",
+      complete: customTestMissing.length === 0,
+    }]),
+    ...(validationIsIndependent ? [{
+      name: "Validation suite",
+      value: `${validationSets.length} ${validationSets.length === 1 ? "dataset" : "datasets"}`,
+      complete: validationSuiteMissing.length === 0,
+    }] : []),
     ...(trainingMethod === "gkd" ? [{
       name: "Teacher model", value: teacherModel.trim() || "Not set", complete: Boolean(teacherModel.trim()),
     }] : []),
@@ -1577,10 +1774,8 @@ export function RunInputs({
   const optionalValues: RunSummaryValue[] = [
     ...(validationIsIndependent ? [
       {
-        name: hasValidationSuite ? "Validation suite" : "Validation set",
-        value: hasValidationSuite
-          ? `${validationSets.length} independent datasets`
-          : short(validationSet),
+        name: "Validation suite",
+        value: `${validationSets.length} independent datasets`,
         overridden: true,
       },
     ] : [
@@ -1650,96 +1845,11 @@ export function RunInputs({
             hasTaskTestSuite ? (
               <TaskTestSuite items={taskTestSuite!} />
             ) : (
-            <div className="space-y-3">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <ChoiceField
-                  label="Test metric type"
-                  value={metricType}
-                  required
-                  onChange={(v) => onChange({
-                    metricType: v as "" | "builtin" | "custom",
-                    ...(v === "builtin" ? { evaluationScript: "" } : {}),
-                  })}
-                  options={[["builtin", "Built-in"], ["custom", "Custom"]]}
-                  hint="Choose"
-                />
-                <div>
-                  <SlotLabel label="Test metric" tag={false} />
-                  {metricType === "builtin" ? (
-                    <ThemedSelect
-                      value={metric}
-                      onChange={(value) => onChange({ metric: value })}
-                      options={BUILTIN_METRICS.map((value) => ({
-                        value,
-                        label: value === "pass_at_1" ? "pass@1 · code execution" : value,
-                      }))}
-                      placeholder="Choose metric"
-                      ariaLabel="Built-in Test metric"
-                      buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(Boolean(metric.trim()))}`}
-                    />
-                  ) : metricType === "custom" ? (
-                    <input
-                      value={metric}
-                      onChange={(e) => onChange({ metric: e.target.value })}
-                      placeholder="e.g. benchmark_average"
-                      className={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm placeholder:text-slate-600 focus:outline-none ${requiredFieldStateCls(Boolean(metric.trim()))}`}
-                    />
-                  ) : (
-                    <ThemedSelect
-                      value=""
-                      onChange={() => undefined}
-                      options={[]}
-                      placeholder="Choose metric type first"
-                      ariaLabel="Test metric"
-                      disabled
-                      buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(false)}`}
-                    />
-                  )}
-                </div>
-                <ChoiceField
-                  label="Test target"
-                  value={metricDirection}
-                  required
-                  onChange={(v) => onChange({ metricDirection: v as "" | "max" | "min" })}
-                  options={[["max", "Max"], ["min", "Min"]]}
-                  hint="Choose"
-                />
-              </div>
-              {metricType === "custom" && (
-                <FileSlot
-                  label="Test evaluation script" tag={false} value={evaluationScript}
-                  onChange={(v) => onChange({ evaluationScript: v })}
-                  required
-                  hint="Frozen for Test and run only after predictions match the Test sample submission."
-                />
-              )}
-              {/* Two halves of one split, and they must not be the same file: the
-                  evaluator needs the answers, while Inference must never see
-                  them. */}
-              <FileSlot
-                label="Test set" tag={false} value={testSet}
-                onChange={(v) => onChange({ testSet: v })}
-                required
-                hint="Held-out data used only for the final test score."
+              <ScoringSuiteEditor
+                items={testSets}
+                lane="Test"
+                onChange={(items) => onChange({ testSets: items })}
               />
-              {/* Not a second file: the fields. The data agent drops exactly these
-                  to build the questions-only copy inference is given, so the pair can
-                  never drift out of sync the way two hand-maintained files did. */}
-              <TextField
-                label="Test answer fields"
-                value={answerFields}
-                onChange={(v) => onChange({ answerFields: v })}
-                required
-                placeholder="Ground-truth columns, e.g. answer, gold"
-                hint="Columns or keys containing the test ground truth."
-              />
-              <FileSlot
-                label="Test sample submission" tag={false} value={testSampleSubmission}
-                onChange={(v) => onChange({ testSampleSubmission: v })}
-                required
-                hint="Defines prediction columns, order, and example formatting; its row count need not match Test."
-              />
-            </div>
             )
           )}
         </div>
@@ -1770,148 +1880,36 @@ export function RunInputs({
                 <div className="rounded-md border border-brass-500/25 bg-brass-500/[0.04] px-4 py-3">
                   <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
                     <span className="field-label !text-brass-200">
-                      {hasTaskTestSuite ? "Constructed from Test suite" : "Constructed from Test"}
+                      Constructed from Test suite
                     </span>
                     <span className="font-mono text-xs leading-relaxed text-slate-400 sm:text-right">
                       20% per eligible set · minimum 200 rows
                     </span>
                   </div>
-                  <details className="group mt-3 border-t border-hair pt-2">
-                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
-                      <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
-                      Use an independent Validation set
-                    </summary>
-                    <div className="mt-3">
-                      <ValidationSetField
-                        value={validationSet}
-                        onChange={updateValidationSet}
-                        split={validationSplit}
-                        onSplit={(v) => onChange({ validationSplit: v })}
-                        config={validationConfig}
-                        onConfig={(v) => onChange({ validationConfig: v })}
-                        answerFields={validationAnswerFields}
-                        onAnswerFields={(v) => onChange({ validationAnswerFields: v })}
-                        sampleSubmission={validationSampleSubmission}
-                        onSampleSubmission={(v) => onChange({ validationSampleSubmission: v })}
-                        tag={false}
-                        note="Choose a fixed Validation set with its own scoring contract."
-                        showHints={false}
-                      />
-                    </div>
-                  </details>
+                  <button
+                    type="button"
+                    onClick={() => onChange({ validationSets: [emptyScoringSet()] })}
+                    className="btn mt-3 !py-1 !text-2xs"
+                  >
+                    <Plus size={12} /> use independent Validation sets
+                  </button>
                 </div>
-              ) : hasValidationSuite ? (
+              ) : (
                 <div className="space-y-3">
-                  <ScoringSuiteManifest
+                  <ScoringSuiteEditor
                     items={validationSets}
-                    title={`${validationSets.length} ${validationSets.length === 1 ? "dataset" : "datasets"}`}
-                    note="independent Validation · Test remains 100%"
-                    setLabel="Validation set"
+                    lane="Validation"
+                    onChange={(items) => onChange({ validationSets: items })}
                   />
-                  <details className="group mt-3 border-t border-hair pt-2">
-                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
-                      <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
-                      Replace with one uploaded Validation set
-                    </summary>
-                    <div className="mt-3">
-                      <ValidationSetField
-                        value={validationSet}
-                        onChange={updateValidationSet}
-                        split={validationSplit}
-                        onSplit={(v) => onChange({ validationSplit: v })}
-                        config={validationConfig}
-                        onConfig={(v) => onChange({ validationConfig: v })}
-                        answerFields={validationAnswerFields}
-                        onAnswerFields={(v) => onChange({ validationAnswerFields: v })}
-                        sampleSubmission={validationSampleSubmission}
-                        onSampleSubmission={(v) => onChange({ validationSampleSubmission: v })}
-                        tag={false}
-                        note="This replaces the complete independent Validation suite for this run."
-                        showHints={false}
-                      />
-                    </div>
-                  </details>
+                  <button
+                    type="button"
+                    onClick={() => onChange({ validationSets: [] })}
+                    className="font-mono text-2xs text-slate-500 transition hover:text-brass-300"
+                  >
+                    Use automatic Validation from Test instead
+                  </button>
                 </div>
-              ) : (<>
-              <ValidationSetField
-                value={validationSet}
-                onChange={updateValidationSet}
-                split={validationSplit}
-                onSplit={(v) => onChange({ validationSplit: v })}
-                config={validationConfig}
-                onConfig={(v) => onChange({ validationConfig: v })}
-                answerFields={validationAnswerFields}
-                onAnswerFields={(v) => onChange({ validationAnswerFields: v })}
-                sampleSubmission={validationSampleSubmission}
-                onSampleSubmission={(v) => onChange({ validationSampleSubmission: v })}
-                tag={false}
-                note="Independent Validation data and scoring contract."
-                showHints={false}
-              />
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <ChoiceField
-                  label="Validation metric type"
-                  value={validationMetricType}
-                  required
-                  onChange={(v) => onChange({
-                    validationMetricType: v as "" | "builtin" | "custom",
-                    ...(v === "builtin" ? { validationEvaluationScript: "" } : {}),
-                  })}
-                  options={[["builtin", "Built-in"], ["custom", "Custom"]]}
-                  hint="Choose"
-                />
-                <div>
-                  <SlotLabel label="Validation metric" tag={false} />
-                  {validationMetricType === "builtin" ? (
-                    <ThemedSelect
-                      value={validationMetric}
-                      onChange={(value) => onChange({ validationMetric: value })}
-                      options={BUILTIN_METRICS.map((value) => ({
-                        value,
-                        label: value === "pass_at_1" ? "pass@1 · code execution" : value,
-                      }))}
-                      placeholder="Choose metric"
-                      ariaLabel="Built-in Validation metric"
-                      buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(Boolean(validationMetric.trim()))}`}
-                    />
-                  ) : validationMetricType === "custom" ? (
-                    <input
-                      value={validationMetric}
-                      onChange={(e) => onChange({ validationMetric: e.target.value })}
-                      placeholder="e.g. token_f1"
-                      className={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm placeholder:text-slate-600 focus:outline-none ${requiredFieldStateCls(Boolean(validationMetric.trim()))}`}
-                    />
-                  ) : (
-                    <ThemedSelect
-                      value=""
-                      onChange={() => undefined}
-                      options={[]}
-                      placeholder="Choose metric type first"
-                      ariaLabel="Validation metric"
-                      disabled
-                      buttonClassName={`h-10 w-full rounded-md border bg-canvas px-2.5 font-mono text-sm ${requiredFieldStateCls(false)}`}
-                    />
-                  )}
-                </div>
-                <ChoiceField
-                  label="Validation target"
-                  value={validationMetricDirection}
-                  required
-                  onChange={(v) => onChange({ validationMetricDirection: v as "" | "max" | "min" })}
-                  options={[["max", "Max"], ["min", "Min"]]}
-                  hint="Choose"
-                />
-              </div>
-              {validationMetricType === "custom" && (
-                <FileSlot
-                  label="Validation evaluation script" tag={false}
-                  value={validationEvaluationScript}
-                  onChange={(v) => onChange({ validationEvaluationScript: v })}
-                  required
-                  hint="Frozen for Validation and run only after predictions match its sample submission."
-                />
               )}
-              </>)}
             </div>
           )}
         </div>

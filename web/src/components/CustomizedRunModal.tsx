@@ -12,7 +12,9 @@ import {
   contractPreferencesFromInputs,
   computeTargetValue,
   methodConfigFromInputs,
+  normalizeScoringSuite,
   requiredFieldStateCls,
+  scoringSuiteMissing,
   useComputeTargets,
   validationContractFromInputs,
   type RunInputValues,
@@ -23,9 +25,6 @@ import { ThemedSelect } from "./ThemedSelect";
 import { TaskSettingHistory } from "./TaskSettings";
 import type { AgentCustomization, TaskDTO, TaskSettingDTO, UserRequest } from "../lib/api";
 import { RunSetupProgressView, useRunSetupProgress } from "./RunSetupProgress";
-
-const columns = (s: string) =>
-  s.split(",").map((c) => c.trim()).filter(Boolean);
 
 /**
  * Customized Pipeline — a guided pipeline where the user fills in each agent's marching
@@ -178,6 +177,7 @@ export function CustomizedRunForm({
     const primaryTest = predefined.test_sets?.[0];
     setInputs((v) => ({
       ...v,
+      testSets: [],
       testSet: primaryTest?.test_set || predefined.test_set || "",
       answerFields: (primaryTest?.answer_fields ?? predefined.test_answer_fields ?? []).join(", "),
       metricType: primaryTest?.metric_type ?? predefined.metric_type,
@@ -189,6 +189,25 @@ export function CustomizedRunForm({
   }, [predefined?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function applySetting(s: TaskSettingDTO) {
+    const validationSets = s.validation_sets?.length
+      ? s.validation_sets
+      : s.validation_set ? [{
+          name: "Validation",
+          test_set: s.validation_set,
+          split: s.validation_split,
+          config: s.validation_config,
+          max_rows: 0,
+          source_rows: 0,
+          inference_query: predefined?.test_sets?.[0]?.inference_query
+            || "Answer each validation example.",
+          sample_submission: s.validation_sample_submission,
+          metric_type: s.validation_metric_type,
+          metric: s.validation_metric,
+          answer_fields: s.validation_answer_fields,
+          metric_direction: s.validation_metric_direction,
+          evaluation_script: s.validation_evaluation_script,
+          evaluator_sha256: s.validation_evaluator_sha256,
+        }] : [];
     setPickedSetting(s.id);
     setTouched(true);
     setInputs((v) => ({
@@ -199,12 +218,12 @@ export function CustomizedRunForm({
       dataQuery: s.data_query || "",
       modelQuery: s.model_query || "",
       methodQuery: s.method_query || "",
-      validationSets: s.validation_sets ?? [],
-      validationSet: s.validation_set || "",
-      validationSplit: s.validation_split || "",
-      validationConfig: s.validation_config || "",
-      validationAnswerFields: (s.validation_answer_fields ?? []).join(", "),
-      validationSampleSubmission: s.validation_sample_submission || "",
+      validationSets,
+      validationSet: "",
+      validationSplit: "",
+      validationConfig: "",
+      validationAnswerFields: "",
+      validationSampleSubmission: "",
       validationMetricType: s.validation_metric_type,
       validationMetric: s.validation_metric,
       validationMetricDirection: s.validation_metric_direction,
@@ -244,6 +263,7 @@ export function CustomizedRunForm({
         setObjective("");
         setInputs((v) => ({
           ...v,
+          testSets: [],
           testSet: "",
           answerFields: "",
           metricType: "",
@@ -285,36 +305,9 @@ export function CustomizedRunForm({
     !taskName.trim() && "Task name",
     !objective.trim() && "Objective",
     !effectiveComputeTarget && "GPU backend",
-    ...(!predefined?.test_sets?.length ? [
-      !inputs.metricType && "Test metric type",
-      !inputs.metric.trim() && "Metric",
-      inputs.metricType === "custom" && !inputs.evaluationScript.trim() && "Evaluation script",
-      !inputs.metricDirection && "Target",
-    ] : []),
-    !!inputs.validationSet.trim()
-      && !inputs.validationMetricType
-      && "Validation metric type",
-    !!inputs.validationSet.trim()
-      && !inputs.validationMetric.trim()
-      && "Validation metric",
-    !!inputs.validationSet.trim()
-      && inputs.validationMetricType === "custom"
-      && !inputs.validationEvaluationScript.trim()
-      && "Validation evaluation script",
-    !!inputs.validationSet.trim()
-      && !inputs.validationMetricDirection
-      && "Validation target",
-    ...(!predefined?.test_sets?.length ? [
-      !inputs.testSet.trim() && "Test set",
-      columns(inputs.answerFields).length === 0 && "Test answer fields",
-      !inputs.testSampleSubmission.trim() && "Sample submission",
-    ] : []),
-    !!inputs.validationSet.trim()
-      && columns(inputs.validationAnswerFields).length === 0
-      && "Validation answer fields",
-    !!inputs.validationSet.trim()
-      && !inputs.validationSampleSubmission.trim()
-      && "Validation sample submission",
+    ...(!predefined?.test_sets?.length ? scoringSuiteMissing(inputs.testSets, "Test") : []),
+    ...(inputs.validationSets.length
+      ? scoringSuiteMissing(inputs.validationSets, "Validation") : []),
     inputs.trainingMethod === "gkd" && !inputs.teacherModel.trim() && "Teacher model",
     inputs.trainingMethod === "online_dpo" && !inputs.rewardModel.trim() && "Reward model",
   ].filter(Boolean) as string[];
@@ -377,22 +370,23 @@ export function CustomizedRunForm({
 
   const validationContract = validationContractFromInputs(inputs);
 
-  const primaryTest = predefined?.test_sets?.[0];
+  const testSuite = predefined?.test_sets?.length
+    ? predefined.test_sets : normalizeScoringSuite(inputs.testSets);
+  const primaryTest = testSuite[0];
+  const validationSuite = normalizeScoringSuite(inputs.validationSets);
+  const primaryValidation = validationSuite[0];
 
   const userRequest: UserRequest = {
     task_objective: objective.trim(),
-    ...(predefined?.test_sets?.length ? { test_sets: predefined.test_sets } : {}),
-    validation_sets: inputs.validationSets,
-    metric: primaryTest?.metric ?? inputs.metric.trim(),
+    test_sets: testSuite,
+    validation_sets: validationSuite,
+    metric: primaryTest?.metric ?? "",
     metric_direction: primaryTest?.metric_direction
-      ?? inputs.metricDirection as "max" | "min",
+      ?? "max",
     metric_type: primaryTest?.metric_type
-      ?? inputs.metricType as "builtin" | "custom",
-    evaluation_script: primaryTest
-      ? (primaryTest.metric_type === "custom" ? primaryTest.evaluation_script : "")
-      : inputs.metricType === "custom"
-        ? inputs.evaluationScript.trim()
-      : "",
+      ?? "builtin",
+    evaluation_script: primaryTest?.metric_type === "custom"
+      ? primaryTest.evaluation_script : "",
     evaluator_sha256: primaryTest?.evaluator_sha256 ?? "",
     validation_metric: validationContract.metric,
     validation_metric_direction: validationContract.metricDirection,
@@ -409,14 +403,14 @@ export function CustomizedRunForm({
     model_query: inputs.modelQuery.trim(),
     method_query: inputs.methodQuery.trim(),
     base_model: inputs.baseModel.trim(),
-    test_set: primaryTest?.test_set ?? inputs.testSet.trim(),
-    test_answer_fields: primaryTest?.answer_fields ?? columns(inputs.answerFields),
-    validation_set: inputs.validationSet.trim(),
-    validation_split: inputs.validationSplit.trim(),
-    validation_config: inputs.validationConfig.trim(),
-    validation_answer_fields: columns(validationContract.answerFields),
+    test_set: primaryTest?.test_set ?? "",
+    test_answer_fields: primaryTest?.answer_fields ?? [],
+    validation_set: primaryValidation?.test_set ?? "",
+    validation_split: primaryValidation?.split ?? "",
+    validation_config: primaryValidation?.config ?? "",
+    validation_answer_fields: primaryValidation?.answer_fields ?? [],
     validation_sample_submission: validationContract.sampleSubmission,
-    test_sample_submission: primaryTest?.sample_submission ?? inputs.testSampleSubmission.trim(),
+    test_sample_submission: primaryTest?.sample_submission ?? "",
     constraints: [],
   };
 
@@ -428,29 +422,12 @@ export function CustomizedRunForm({
       if (!taskName.trim()) throw new Error("Give the run a task name.");
       if (!objective.trim()) throw new Error("Describe the objective.");
       if (!predefined?.test_sets?.length) {
-        if (!inputs.metricType) throw new Error("Choose the Test metric type.");
-        if (!inputs.metric.trim()) throw new Error("Name the evaluation metric.");
-        if (inputs.metricType === "custom" && !inputs.evaluationScript.trim()) {
-          throw new Error("Choose the custom evaluation script.");
-        }
-        if (!inputs.metricDirection) throw new Error("Choose whether the evaluation target is Max or Min.");
+        const missing = scoringSuiteMissing(inputs.testSets, "Test");
+        if (missing.length) throw new Error(`Complete the Test suite: ${missing.join(", ")}.`);
       }
-      if (validationContract.independent) {
-        if (!validationContract.metricType) throw new Error("Choose the Validation metric type.");
-        if (!validationContract.metric) throw new Error("Choose the Validation metric.");
-        if (validationContract.metricType === "custom" && !validationContract.evaluationScript) {
-          throw new Error("Choose the custom Validation evaluation script.");
-        }
-        if (!validationContract.metricDirection) throw new Error("Choose the Validation target.");
-      }
-      if (!predefined?.test_sets?.length) {
-        if (!inputs.testSet.trim()) throw new Error("Choose the held-out test set.");
-        if (!columns(inputs.answerFields).length) throw new Error("Name at least one test answer field.");
-        if (!inputs.testSampleSubmission.trim()) throw new Error("Choose the test sample submission.");
-      }
-      if (inputs.validationSet.trim()) {
-        if (!columns(inputs.validationAnswerFields).length) throw new Error("A named validation set requires validation answer fields.");
-        if (!inputs.validationSampleSubmission.trim()) throw new Error("A named validation set requires a validation sample submission.");
+      if (inputs.validationSets.length) {
+        const missing = scoringSuiteMissing(inputs.validationSets, "Validation");
+        if (missing.length) throw new Error(`Complete the Validation suite: ${missing.join(", ")}.`);
       }
       if (!pickedSetting && saveSetting && !settingName.trim()) throw new Error("Name the setting you want to save.");
       if (!pickedSetting && saveSetting && nameTaken) throw new Error("That setting name is already taken.");

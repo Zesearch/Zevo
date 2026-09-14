@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 
 export type RunSetupProgress = {
-  status: "waiting" | "active" | "complete";
+  status: "waiting" | "active" | "complete" | "failed";
   phase: string;
   completed: number;
   total: number;
@@ -45,7 +45,13 @@ export function useRunSetupProgress() {
         const response = await fetch(`/api/run-setups/${encodeURIComponent(setupId)}`);
         if (!response.ok || activeId.current !== setupId) return;
         const next = await response.json() as RunSetupProgress;
-        if (activeId.current === setupId) setProgress(next);
+        if (activeId.current === setupId) {
+          setProgress(next);
+          if (next.status === "failed" && timer.current != null) {
+            window.clearInterval(timer.current);
+            timer.current = null;
+          }
+        }
       } catch {
         // The launch POST remains authoritative. A transient progress-poll
         // failure must neither cancel it nor replace its useful API error.
@@ -79,19 +85,23 @@ export function RunSetupProgressView({ progress }: { progress: RunSetupProgress 
     title = "Creating Run";
   } else if (progress.phase === "complete") {
     title = "Run started";
+  } else if (progress.phase === "failed" || progress.status === "failed") {
+    title = "Run setup stopped";
   }
 
   return (
     <div className="mr-auto min-w-[15rem] max-w-md flex-1 pr-4" aria-live="polite">
       <div className="mb-1 flex items-center justify-between gap-3 font-mono text-2xs">
-        <span className="text-slate-300">{title}</span>
-        <span className="max-w-[16rem] truncate text-slate-500" title={progress.label}>
+        <span className={progress.status === "failed" ? "text-coral-300" : "text-slate-300"}>{title}</span>
+        <span className={`max-w-[16rem] truncate ${progress.status === "failed" ? "text-coral-300" : "text-slate-500"}`} title={progress.label}>
           {progress.label}
         </span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
         <div
-          className={`h-full rounded-full bg-brass-400 transition-[width] duration-300 ${
+          className={`h-full rounded-full transition-[width] duration-300 ${
+            progress.status === "failed" ? "bg-coral-400" : "bg-brass-400"
+          } ${
             total === 0 ? "animate-pulse" : ""
           }`}
           style={{ width: `${percent}%` }}
