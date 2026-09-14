@@ -34,10 +34,12 @@ type SkillFile = { name: "SKILL.md"; markdown: string };
 function SkillFilePicker({
   selected,
   currentPath = "",
+  onReadingChange,
   onChange,
 }: {
   selected: SkillFile | null;
   currentPath?: string;
+  onReadingChange?: (reading: boolean) => void;
   onChange: (file: SkillFile | null) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -45,21 +47,26 @@ function SkillFilePicker({
 
   async function choose(file?: File) {
     if (!file) return;
-    setError("");
-    if (file.name.toLowerCase() !== "skill.md") {
-      setError("Choose a file named SKILL.md.");
-      return;
+    onReadingChange?.(true);
+    try {
+      setError("");
+      if (file.name.toLowerCase() !== "skill.md") {
+        setError("Choose a file named SKILL.md.");
+        return;
+      }
+      if (file.size > 50_000) {
+        setError("SKILL.md must be 50 KB or smaller.");
+        return;
+      }
+      const markdown = await file.text();
+      if (!markdown.trim()) {
+        setError("SKILL.md cannot be empty.");
+        return;
+      }
+      onChange({ name: "SKILL.md", markdown });
+    } finally {
+      onReadingChange?.(false);
     }
-    if (file.size > 50_000) {
-      setError("SKILL.md must be 50 KB or smaller.");
-      return;
-    }
-    const markdown = await file.text();
-    if (!markdown.trim()) {
-      setError("SKILL.md cannot be empty.");
-      return;
-    }
-    onChange({ name: "SKILL.md", markdown });
   }
 
   return (
@@ -179,6 +186,7 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
   };
   const [f, setF] = useState(empty);
   const [skillFile, setSkillFile] = useState<SkillFile | null>(null);
+  const [skillReading, setSkillReading] = useState(false);
   const [keyFile, setKeyFile] = useState<KeyFile | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -266,7 +274,7 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
       </label>
       <div className="mt-2.5 text-2xs text-slate-400">
         Infrastructure SKILL.md <span className="text-slate-600">(optional site rules)</span>
-        <SkillFilePicker selected={skillFile} onChange={setSkillFile} />
+        <SkillFilePicker selected={skillFile} onReadingChange={setSkillReading} onChange={setSkillFile} />
       </div>
       <p className="mt-1 text-2xs text-slate-500">
         Upload a complete SKILL.md with name and description frontmatter. Zevo installs its instruction body under <code>playbook/skills/infrastructure</code>. Do not include credentials or private-key contents.
@@ -285,7 +293,7 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
       {error && <div className="mt-2 rounded-md border border-coral-500/30 bg-coral-500/10 p-2 text-2xs text-coral-300">{error}</div>}
       <div className="mt-4 flex justify-end gap-2">
         <button onClick={close} className="btn justify-center !px-3 !py-1 !text-[12px] uppercase !tracking-[0.1em]">cancel</button>
-        <button onClick={submit} disabled={busy || !f.name.trim() || !f.category || !f.host.trim() || !f.username.trim() || !f.remote_parent_dir.trim() || !f.env_setup.trim() || (Boolean(keyFile) === Boolean(f.password))}
+        <button onClick={submit} disabled={busy || skillReading || !f.name.trim() || !f.category || !f.host.trim() || !f.username.trim() || !f.remote_parent_dir.trim() || !f.env_setup.trim() || (Boolean(keyFile) === Boolean(f.password))}
           className="btn btn-brass justify-center !px-3 !py-1 !text-[12px] uppercase !tracking-[0.1em] !text-phosphor-300 disabled:opacity-40">
           {busy ? <RotateCw size={11} className="inline animate-spin" /> : "save & verify"}
         </button>
@@ -326,6 +334,7 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EditDraft>(() => editDraft(h));
   const [skillFile, setSkillFile] = useState<SkillFile | null>(null);
+  const [skillReading, setSkillReading] = useState(false);
   const [keyFile, setKeyFile] = useState<KeyFile | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -372,7 +381,7 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
   const invalidCredential = Boolean(keyFile) && Boolean(draft.password);
   const saveDisabled = busy === "save" || !draft.name.trim() || !draft.host.trim()
     || !draft.username.trim() || !draft.remote_parent_dir.trim()
-    || !draft.env_setup.trim() || invalidCredential;
+    || !draft.env_setup.trim() || invalidCredential || skillReading;
   return (
     <div className="py-3">
       <div className="flex items-start justify-between gap-3">
@@ -455,7 +464,7 @@ function HostRow({ h, onChanged }: { h: SshHost; onChanged: () => void }) {
           </label>
           <div className="mt-2.5 text-2xs text-slate-400">
             Infrastructure SKILL.md <span className="text-slate-600">(optional site rules)</span>
-            <SkillFilePicker selected={skillFile} currentPath={h.skill_path} onChange={setSkillFile} />
+            <SkillFilePicker selected={skillFile} currentPath={h.skill_path} onReadingChange={setSkillReading} onChange={setSkillFile} />
           </div>
           <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             <div className="text-2xs text-slate-400">New private key <span className="text-slate-600">(optional)</span><PrivateKeyPicker selected={keyFile} onChange={setKeyFile} replace /></div>

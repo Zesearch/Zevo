@@ -50,6 +50,7 @@ from zevo.engine.agent.drivers._bash_description import (
     describe_bash_call,
     is_bash_tool,
 )
+from zevo.engine.agent.drivers._agent_loop import build_tool_env
 from zevo.engine.agent.drivers._subprocess_stream import iter_subprocess_lines
 from zevo.engine.observe.markers import parse_line as _parse_marker
 from zevo.engine.observe.markers import scan_text as _scan_markers
@@ -476,7 +477,12 @@ class ClaudeCliDriver:
             prompt = _render_prompt(blueprint, input_payload, conversation=conversation)
 
             # Auth resolution.
-            env = {**os.environ}
+            env = build_tool_env(
+                base_env={**os.environ},
+                workspace_dir=workspace_dir,
+                input_payload=input_payload,
+                agent_id=blueprint.id,
+            )
             env.setdefault("HOME", "/root")
             # Claude Code refuses --dangerously-skip-permissions when
             # running as root for security reasons. Containers always run
@@ -488,25 +494,6 @@ class ClaudeCliDriver:
             # https://github.com/anthropics/claude-code/issues, search for
             # IS_SANDBOX.)
             env.setdefault("IS_SANDBOX", "1")
-            env["WORK_DIR"] = workspace_dir
-            env.setdefault("ZEVO_API_BASE", env.get("ZEVO_API_BASE", "http://backend:8000"))
-            for attr, key in (
-                ("ticket_id", "TICKET_ID"),
-                ("agent_id", "AGENT_ID"),
-                ("run_id", "RUN_ID"),
-            ):
-                v = getattr(input_payload, attr, "")
-                if v:
-                    env[key] = str(v)
-            env.setdefault("AGENT_ID", blueprint.id)
-            # run_id isn't in the typed inputs — derive it from the per-run work dir
-            # (<root>/<run-id>/<ticket>) so $RUN_ID is set for the agent's shell.
-            # Without this it was empty and agents fell back to $TICKET_ID, so the
-            # remote work dir became <remote>/infra-005 instead of <remote>/<run-id>.
-            # (Mirrors _agent_loop.build_tool_env, which the bedrock driver uses.)
-            if not env.get("RUN_ID"):
-                from pathlib import Path as _P
-                env["RUN_ID"] = _P(workspace_dir).parent.name
             auth_mode, auth_detail = _resolve_auth(env)
             if auth_mode == "none":
                 raise RuntimeError(
