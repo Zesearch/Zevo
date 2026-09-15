@@ -43,7 +43,7 @@ from zevo.paths import work_dir_root
 from zevo.engine.run.runner import run_ticket
 from zevo.engine.run.scheduler.reconciler import reconcile_runs_and_tickets
 from zevo.engine.run.wakeup import advisory_lock, queue_wakeup
-from zevo.contracts.tickets import TERMINAL_RUN_STATUSES
+from zevo.contracts.tickets import TERMINAL_RUN_STATUSES, TERMINAL_TICKET_STATUSES
 
 
 log = logging.getLogger(__name__)
@@ -337,6 +337,37 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                             log.info(
                                 "[wakeup] ticket %s is already running; defer %s",
                                 w.ticket_id, wakeup_id[:8],
+                            )
+                            return
+                        # Automatic wakeups describe work that was pending when
+                        # they were created.  A sibling activation may have
+                        # completed that Specialist before this row acquired
+                        # the ticket lock; running the old row would revive a
+                        # succeeded Ticket and duplicate the stage.  The
+                        # Orchestrator is deliberately long-lived, and an
+                        # explicit on-demand heartbeat is a user-requested
+                        # inspection, so those two cases remain runnable.
+                        target = (await s.execute(
+                            select(Ticket).where(Ticket.id == w.ticket_id)
+                        )).scalar_one_or_none()
+                        obsolete = bool(
+                            target is not None
+                            and target.status in TERMINAL_TICKET_STATUSES
+                            and target.agent_id != "orchestrator"
+                            and w.source != "on_demand"
+                        )
+                        if obsolete:
+                            w.status = "completed"
+                            w.finished_at = datetime.now(timezone.utc)
+                            w.reason = (
+                                f"{w.reason or ''} | skipped obsolete wakeup: ticket "
+                                f"already {target.status}"
+                            ).lstrip(" |")[:2000]
+                            await s.commit()
+                            log.info(
+                                "[wakeup] skipped obsolete %s for terminal "
+                                "ticket %s (%s)",
+                                wakeup_id[:8], target.id, target.status,
                             )
                             return
                         log.info("[wakeup] %s -> running wakeup %s (ticket=%s, source=%s)",

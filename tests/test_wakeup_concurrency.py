@@ -17,6 +17,7 @@ that decides whether to call it at all.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pytest
@@ -182,6 +183,43 @@ async def test_background_exception_is_retrieved_logged_and_frees_slot(caplog):
     assert "background task escaped with an exception" in caplog.text
     assert "worker exploded" in caplog.text
     assert wd._inflight.get("train") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_automatic_wakeup_cannot_revive_terminal_specialist(
+    db, monkeypatch,
+) -> None:
+    async with db() as s:
+        s.add(Ticket(
+            id="data-finished", run_id="run-1", agent_id="data",
+            status="succeeded", payload={}, customization={}, inputs={},
+        ))
+        s.add(AgentWakeupRequest(
+            id="stale-collect", agent_id="data", ticket_id="data-finished",
+            status="queued", source="slurm_watcher",
+            scheduled_for=datetime.now(timezone.utc),
+        ))
+        await s.commit()
+
+    @asynccontextmanager
+    async def _lock(*_args, **_kwargs):
+        yield True
+
+    async def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("obsolete wakeup revived a terminal specialist")
+
+    monkeypatch.setattr(wd, "advisory_lock", _lock)
+    monkeypatch.setattr(wd, "run_ticket", _must_not_run)
+
+    await wd._run_one("data", "stale-collect", datetime.now(timezone.utc))
+
+    async with db() as s:
+        ticket = await s.get(Ticket, "data-finished")
+        wakeup = await s.get(AgentWakeupRequest, "stale-collect")
+        assert ticket.status == "succeeded"
+        assert wakeup.status == "completed"
+        assert wakeup.finished_at is not None
+        assert "skipped obsolete wakeup" in wakeup.reason
 
 
 @pytest.mark.asyncio
