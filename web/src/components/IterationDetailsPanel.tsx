@@ -3,7 +3,7 @@ import useSWR from "swr";
 import { ChevronRight, X } from "lucide-react";
 import type { RunDetail } from "../lib/api";
 import { assignIterations, iterationOrder } from "../lib/iterations";
-import { fmtScore } from "../lib/format";
+import { fmtMetric, fmtScore } from "../lib/format";
 import { Kicker } from "./zevo/primitives";
 
 type Artifact = {
@@ -18,10 +18,26 @@ type ArtifactDetail = Artifact & {
   preview_columns: string[];
   preview_rows: Array<Record<string, unknown>>;
 };
-type DetailKind = "data" | "train" | "inference";
+type DetailKind = "data" | "train" | "inference" | "evaluation";
+type BenchmarkPerformance = {
+  name: string;
+  score: number;
+  metric: string;
+  direction: "min" | "max";
+};
+type EvaluationPerformance = {
+  validation: BenchmarkPerformance[];
+  test: BenchmarkPerformance[];
+  validationAggregate?: number;
+  testAggregate?: number;
+  validationMetric: string;
+  testMetric: string;
+};
 type Selection = {
   artifactId?: string;
   testArtifactId?: string;
+  validationArtifacts?: Array<{ id: string; name: string; rows: unknown }>;
+  testArtifacts?: Array<{ id: string; name: string; rows: unknown }>;
   title: string;
   kind: DetailKind;
   configuration?: unknown;
@@ -29,6 +45,7 @@ type Selection = {
   dataRows?: unknown;
   validationRows?: unknown;
   testRows?: unknown;
+  evaluation?: EvaluationPerformance;
 };
 
 const TRAIN_PARAMETERS = [
@@ -100,6 +117,29 @@ function numberText(value: unknown): string {
   return Number.isFinite(numeric) && numeric >= 0 ? numeric.toLocaleString() : "—";
 }
 
+function numericScore(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function benchmarkPerformance(
+  scores: Record<string, number> | undefined,
+  metrics: Record<string, string> | undefined,
+  directions: Record<string, "min" | "max"> | undefined,
+  fallback: BenchmarkPerformance | null,
+): BenchmarkPerformance[] {
+  const rows = Object.entries(scores || {}).flatMap(([name, score]) => {
+    const numeric = numericScore(score);
+    if (numeric == null) return [];
+    return [{
+      name,
+      score: numeric,
+      metric: metrics?.[name] || "",
+      direction: directions?.[name] === "min" ? "min" as const : "max" as const,
+    }];
+  });
+  return rows.length ? rows : fallback ? [fallback] : [];
+}
+
 export function IterationDetailsPanel({ run }: { run: RunDetail }) {
   const { data: artifacts = [], error } = useSWR<Artifact[]>(
     `/api/runs/${encodeURIComponent(run.id)}/artifacts`,
@@ -109,8 +149,12 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [resultLane, setResultLane] = useState<"validation" | "test">("validation");
   const [previewPage, setPreviewPage] = useState(1);
+  const [validationArtifactId, setValidationArtifactId] = useState<string | null>(null);
+  const [testArtifactId, setTestArtifactId] = useState<string | null>(null);
   const detailArtifactId = selection?.kind === "inference"
-    ? (resultLane === "test" ? selection.testArtifactId : selection.artifactId)
+    ? (resultLane === "test"
+        ? testArtifactId || selection.testArtifactId
+        : validationArtifactId || selection.artifactId)
     : selection?.artifactId;
   const { data: detail } = useSWR<ArtifactDetail>(
     detailArtifactId
@@ -157,7 +201,15 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
     : [];
   const selectedTotalRows = selection?.kind === "data"
     ? selection.dataRows
-    : resultLane === "test" ? selection?.testRows : selection?.validationRows;
+    : selection?.kind === "inference"
+      ? resultLane === "test"
+        ? selection.testArtifacts?.find(
+            (item) => item.id === (testArtifactId || selection.testArtifactId),
+          )?.rows ?? selection.testRows
+        : selection.validationArtifacts?.find(
+            (item) => item.id === (validationArtifactId || selection.artifactId),
+          )?.rows ?? selection.validationRows
+      : undefined;
   const selectedTotal = Number(selectedTotalRows);
   const previewPageCount = Number.isFinite(selectedTotal) && selectedTotal > 0
     ? Math.min(10, Math.ceil(selectedTotal / 10))
@@ -173,15 +225,17 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
           return ticket?.agent_id === "train" && item.role === "checkpoint"
             && item.meta.checkpoint_kind !== "intermediate";
         }) || group.artifacts.find((item) => ticketById.get(item.ticket_id)?.agent_id === "train" && item.role === "checkpoint");
-        const infer = group.artifacts.find((item) => {
+        const validationPredictions = group.artifacts.filter((item) => {
           const ticket = ticketById.get(item.ticket_id);
           return ticket?.agent_id === "inference" && ticket.lane === "optimization"
             && item.role === "predictions";
         });
-        const testPrediction = group.artifacts.find((item) => {
+        const infer = validationPredictions[0];
+        const testPredictions = group.artifacts.filter((item) => {
           const ticket = ticketById.get(item.ticket_id);
           return ticket?.lane === "held_out_test" && item.role === "predictions";
         });
+        const testPrediction = testPredictions[0];
         const testEvidence = testPrediction || group.artifacts.find((item) => {
           const ticket = ticketById.get(item.ticket_id);
           return ticket?.lane === "held_out_test" && item.role === "scoring_questions";
@@ -194,12 +248,52 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
         const dataMeta = data?.meta || {};
         const trainMeta = train?.meta || {};
         const inferMeta = infer?.meta || {};
+        const validationArtifacts = validationPredictions.map((item, index) => ({
+          id: item.id,
+          name: text(item.meta.suite_member_name || `Validation ${index + 1}`),
+          rows: item.meta.n_rows,
+        }));
+        const validationRows = validationArtifacts.reduce(
+          (total, item) => total + (Number(item.rows) || 0), 0,
+        );
         const testMeta = testEvidence?.meta || {};
         const model = text(trainMeta.base_model || inferMeta.base_model || journal?.base_model);
         const method = text(trainMeta.training_method || journal?.training_method);
         const trainParameters = importantParameters(trainMeta.configuration, "train");
         const inferenceParameters = importantParameters(inferMeta.configuration, "inference");
-        const testRows = testMeta.n_rows ?? testMeta.question_rows ?? testMeta.n_rows_out;
+        const testArtifacts = testPredictions.map((item, index) => ({
+          id: item.id,
+          name: text(item.meta.suite_member_name || `Test ${index + 1}`),
+          rows: item.meta.n_rows,
+        }));
+        const testRows = testArtifacts.reduce(
+          (total, item) => total + (Number(item.rows) || 0), 0,
+        ) || testMeta.n_rows || testMeta.question_rows || testMeta.n_rows_out;
+        const validationAggregate = numericScore(journal?.score);
+        const testAggregate = numericScore(journal?.test_score);
+        const validationPerformance = benchmarkPerformance(
+          journal?.validation_scores,
+          journal?.validation_metrics,
+          journal?.validation_metric_directions,
+          validationAggregate == null ? null : {
+            name: validationArtifacts[0]?.name || "Validation",
+            score: validationAggregate,
+            metric: run.validation_metric,
+            direction: run.validation_metric_direction,
+          },
+        );
+        const testPerformance = benchmarkPerformance(
+          journal?.test_scores,
+          journal?.test_metrics,
+          journal?.test_metric_directions,
+          testAggregate == null ? null : {
+            name: testArtifacts[0]?.name || "Final Test",
+            score: testAggregate,
+            metric: run.metric,
+            direction: run.metric_direction,
+          },
+        );
+        const hasEvaluation = validationPerformance.length > 0 || testPerformance.length > 0;
 
         return (
           <section key={group.key} className="overflow-hidden rounded-bezel border border-hair bg-panel/60">
@@ -232,7 +326,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
               </span>
             </button>
             {!isCollapsed && (
-            <div className="grid grid-cols-1 divide-y divide-hair md:grid-cols-2 xl:grid-cols-4 xl:divide-x xl:divide-y-0">
+            <div className="grid grid-cols-1 divide-y divide-hair md:grid-cols-2 xl:grid-cols-5 xl:divide-x xl:divide-y-0">
               <Fact
                 label="Data"
                 value={group.num === 0 ? "—" : `Train ${numberText(dataMeta.training_rows)} · ${datasetName(dataMeta)}`}
@@ -262,20 +356,45 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
               />
               <Fact
                 label="Inference / Prediction"
-                value={`Val ${numberText(inferMeta.n_rows)} · Test ${numberText(testRows)}`}
+                value={`Val ${numberText(validationRows || inferMeta.n_rows)} · Test ${numberText(testRows)}`}
                 onClick={inferenceParameters.length || infer || testPrediction ? () => {
                   setPreviewPage(1);
                   setResultLane(infer ? "validation" : "test");
+                  setValidationArtifactId(infer?.id || null);
+                  setTestArtifactId(testPrediction?.id || null);
                   setSelection({
                     artifactId: infer?.id,
                     testArtifactId: testPrediction?.id,
+                    validationArtifacts,
+                    testArtifacts,
                     title: "Inference / Prediction",
                     kind: "inference",
                     configuration: inferMeta.configuration,
-                    validationRows: inferMeta.n_rows,
+                    validationRows: validationRows || inferMeta.n_rows,
                     testRows,
                   });
                 } : undefined}
+              />
+              <Fact
+                label="Evaluation"
+                value={hasEvaluation
+                  ? `Val ${fmtScore(validationAggregate, run.validation_metric)} · Test ${fmtScore(testAggregate, run.metric)}`
+                  : infer ? "Awaiting scores" : "—"}
+                hint={!hasEvaluation && infer
+                  ? "Available after deterministic Evaluation finishes"
+                  : undefined}
+                onClick={hasEvaluation ? () => setSelection({
+                  title: "Benchmark performance",
+                  kind: "evaluation",
+                  evaluation: {
+                    validation: validationPerformance,
+                    test: testPerformance,
+                    validationAggregate,
+                    testAggregate,
+                    validationMetric: run.validation_metric,
+                    testMetric: run.metric,
+                  },
+                }) : undefined}
               />
             </div>
             )}
@@ -302,6 +421,9 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
                 ))}
               </div>
             )}
+            {selection.kind === "evaluation" && selection.evaluation && (
+              <EvaluationPerformancePanel value={selection.evaluation} />
+            )}
             {selection.kind === "inference" && (selection.artifactId || selection.testArtifactId) && (
               <div className="mt-4 flex items-center gap-2">
                 <button type="button" disabled={!selection.artifactId}
@@ -314,6 +436,44 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
                   className={`btn ${resultLane === "test" ? "btn-brass" : ""} disabled:cursor-not-allowed disabled:opacity-40`}>
                   Test · {numberText(selection.testRows)}
                 </button>
+              </div>
+            )}
+            {selection.kind === "inference"
+              && resultLane === "validation"
+              && (selection.validationArtifacts?.length || 0) > 1 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {selection.validationArtifacts!.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => { setValidationArtifactId(item.id); setPreviewPage(1); }}
+                    className={`btn ${
+                      item.id === (validationArtifactId || selection.artifactId)
+                        ? "btn-brass" : ""
+                    }`}
+                  >
+                    {item.name} · {numberText(item.rows)}
+                  </button>
+                ))}
+              </div>
+            )}
+            {selection.kind === "inference"
+              && resultLane === "test"
+              && (selection.testArtifacts?.length || 0) > 1 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {selection.testArtifacts!.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => { setTestArtifactId(item.id); setPreviewPage(1); }}
+                    className={`btn ${
+                      item.id === (testArtifactId || selection.testArtifactId)
+                        ? "btn-brass" : ""
+                    }`}
+                  >
+                    {item.name} · {numberText(item.rows)}
+                  </button>
+                ))}
               </div>
             )}
             {(selection.kind === "data" || (selection.kind === "inference" && detailArtifactId)) && (
@@ -337,6 +497,92 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
         </div>
       )}
     </div>
+  );
+}
+
+function EvaluationPerformancePanel({ value }: { value: EvaluationPerformance }) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <PerformanceSuite
+        title="Validation performance"
+        rows={value.validation}
+        aggregate={value.validationAggregate}
+        aggregateMetric={value.validationMetric}
+        tone="validation"
+        empty="Validation Evaluation has not finished."
+      />
+      <PerformanceSuite
+        title="Final Test performance"
+        rows={value.test}
+        aggregate={value.testAggregate}
+        aggregateMetric={value.testMetric}
+        tone="test"
+        empty="Final Test Evaluation has not finished."
+      />
+    </div>
+  );
+}
+
+function PerformanceSuite({
+  title, rows, aggregate, aggregateMetric, tone, empty,
+}: {
+  title: string;
+  rows: BenchmarkPerformance[];
+  aggregate?: number;
+  aggregateMetric: string;
+  tone: "validation" | "test";
+  empty: string;
+}) {
+  const accent = tone === "test" ? "text-phosphor-300" : "text-brass-300";
+  const frame = tone === "test" ? "border-phosphor-500/25" : "border-brass-500/25";
+  return (
+    <section className={`overflow-hidden rounded-bezel border ${frame} bg-canvas/55`}>
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-hair bg-panel/55 px-4 py-3">
+        <div>
+          <Kicker strong className={accent}>{title}</Kicker>
+          <p className="mt-1 font-mono text-2xs text-slate-500">
+            {rows.length} benchmark{rows.length === 1 ? "" : "s"} evaluated
+          </p>
+        </div>
+        {aggregate != null && (
+          <div className="text-right">
+            <Kicker>Suite average</Kicker>
+            <p className={`mt-1 font-mono text-lg tabular-nums ${accent}`}>
+              {fmtScore(aggregate, aggregateMetric)}
+            </p>
+          </div>
+        )}
+      </div>
+      {rows.length ? (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[30rem] border-collapse text-left font-mono text-xs">
+            <thead>
+              <tr className="text-2xs uppercase tracking-[0.12em] text-slate-500">
+                <th className="border-b border-hair px-4 py-2 font-medium">Benchmark</th>
+                <th className="border-b border-hair px-4 py-2 font-medium">Metric</th>
+                <th className="border-b border-hair px-4 py-2 text-right font-medium">Performance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.name} className="even:bg-white/[0.015]">
+                  <td className="border-b border-hair px-4 py-3 text-slate-200">{row.name}</td>
+                  <td className="border-b border-hair px-4 py-3 text-slate-400">
+                    {fmtMetric(row.metric)}
+                    <span className="ml-1.5 text-slate-600">{row.direction === "min" ? "↓" : "↑"}</span>
+                  </td>
+                  <td className={`border-b border-hair px-4 py-3 text-right text-sm tabular-nums ${accent}`}>
+                    {fmtScore(row.score, row.metric)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="p-8 text-center text-sm text-dim">{empty}</div>
+      )}
+    </section>
   );
 }
 
@@ -570,7 +816,7 @@ function Fact({
   ) : <div className="min-w-0 p-4">{content}</div>;
 }
 
-function TablePreview({
+export function TablePreview({
   columns, rows, page, pageSize,
 }: {
   columns: string[];
@@ -610,7 +856,7 @@ function TablePreview({
   );
 }
 
-function Pagination({
+export function Pagination({
   page, pageCount, onPage,
 }: {
   page: number;

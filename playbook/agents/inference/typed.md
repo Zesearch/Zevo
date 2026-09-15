@@ -26,6 +26,7 @@
 | `slurm_job` | Engine-owned finite-job path/name, job-id stdout/stderr patterns, GPU count, queue deadline, phase, backend-observed JOBID/state, bookkeeping endpoints, and exact schemas. Enabled only for cluster. `submit` creates one job and returns deferred; `collect` never duplicates it. |
 | `generation_backend` | Run-owned `hf` or `vllm`. |
 | `work_dir` | Persistent local artifact directory. |
+| `suite_members` | Additional benchmark contracts for this same model execution. Run them sequentially inside this job; never submit one GPU job per member. |
 
 `inference_config.yaml` must validate as `InferenceRunConfig` and include:
 
@@ -53,7 +54,9 @@ Baseline Inference from the exact model/checkpoint tokenizer and template. The
 rendered prompt, template kwargs, and measured output must match that model
 class. It is not a work-order pin or advisory choice.
 
-Return exactly one `InferenceResult`. A cluster submission returns
+Return exactly one `InferenceResult`. Its top-level artifact fields describe
+the primary benchmark; on success, its `suite_members` must contain exactly
+one result for every assigned non-primary member. A cluster submission returns
 `status="deferred"` after the JOBID is registered; this is not success or
 failure and carries no predictions. It posts `Waiting:`, never `Done:`; the
 engine posts `Done:` only after a later collect Result and its artifacts pass
@@ -70,6 +73,14 @@ input artifact and records reuse provenance; do not echo or transform a source
 path in the Result. A
 missing helper is visible as an advisory artifact warning; it cannot relax
 config or prediction checks.
+
+For an assigned suite, keep each member in its own `work_dir` with its own
+`inference_config.yaml`, `predictions.csv`, and
+`generation_diagnostics.json`. Initialize the tokenizer and model engine once,
+then process the primary member followed by `suite_members` in order. All
+member configs must share the exact model/backend/tokenizer/chat-template
+identity and vLLM `llm_kwargs`; prompt mapping, decoding controls, and output
+schema remain member-specific. Emit progress before and after every member.
 
 Run `predictions_validation_command` after `predictions.csv` is copied back and
 before success. Do not recreate its checks with a basename, the current working

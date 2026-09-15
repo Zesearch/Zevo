@@ -8,6 +8,7 @@ import {
 import { assignIterations, iterationOrder, liveIterationKey, type MinimalTicket } from "../lib/iterations";
 import { bytes, relPath } from "../lib/format";
 import { Kicker } from "./zevo/primitives";
+import { Pagination, TablePreview } from "./IterationDetailsPanel";
 
 type Artifact = {
   id: string;
@@ -25,6 +26,10 @@ type Artifact = {
 type ArtifactDetail = Artifact & {
   preview_kind: "text" | "jsonl" | "binary" | "missing";
   preview: string;
+  preview_columns: string[];
+  preview_rows: Array<Record<string, unknown>>;
+  preview_page: number;
+  preview_page_size: number;
 };
 
 /** Eight kinds is more distinctions than the column can carry — half of them
@@ -62,6 +67,7 @@ export function ArtifactsPanel({ runId, tickets = [] }: { runId: string; tickets
     { refreshInterval: 5000 },
   );
   const [openId, setOpenId] = useState<string | null>(null);
+  const [previewPage, setPreviewPage] = useState(1);
   // Track which groups are EXPANDED; empty by default → everything collapsed.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Follow the run: the block being worked on opens, and the one before it
@@ -88,7 +94,9 @@ export function ArtifactsPanel({ runId, tickets = [] }: { runId: string; tickets
       return next;
     });
   const { data: detail } = useSWR<ArtifactDetail>(
-    openId ? `/api/runs/${encodeURIComponent(runId)}/artifacts/${openId}` : null,
+    openId
+      ? `/api/runs/${encodeURIComponent(runId)}/artifacts/${openId}?preview_page=${previewPage}&preview_page_size=10`
+      : null,
   );
 
   if (error) {
@@ -165,7 +173,7 @@ export function ArtifactsPanel({ runId, tickets = [] }: { runId: string; tickets
     return (
       <tr
         key={a.id}
-        onClick={() => setOpenId(a.id)}
+        onClick={() => { setPreviewPage(1); setOpenId(a.id); }}
         className="group/row cursor-pointer transition hover:bg-raised/60"
       >
         <td className="w-[18%] py-2 pl-8 pr-6 align-middle">
@@ -348,13 +356,32 @@ export function ArtifactsPanel({ runId, tickets = [] }: { runId: string; tickets
                   <Kicker>
                     preview · {previewFormat(detail.local_path || detail.path, detail.preview_kind)}
                   </Kicker>
-                  <div className="mt-1.5 max-h-[60vh] overflow-auto rounded-bezel border border-hair bg-canvas">
-                    <Preview
-                      text={detail.preview || ""}
-                      path={detail.local_path || detail.path}
-                      kind={detail.preview_kind}
-                    />
-                  </div>
+                  {detail.role === "predictions" && detail.preview_rows?.length ? (
+                    <div className="mt-1.5">
+                      <TablePreview
+                        columns={detail.preview_columns}
+                        rows={detail.preview_rows}
+                        page={previewPage}
+                        pageSize={10}
+                      />
+                      <Pagination
+                        page={previewPage}
+                        pageCount={Math.min(
+                          10,
+                          Math.max(1, Math.ceil(Number(detail.meta?.n_rows || 0) / 10)),
+                        )}
+                        onPage={setPreviewPage}
+                      />
+                    </div>
+                  ) : (
+                    <div className="mt-1.5 max-h-[60vh] overflow-auto rounded-bezel border border-hair bg-canvas">
+                      <Preview
+                        text={detail.preview || ""}
+                        path={detail.local_path || detail.path}
+                        kind={detail.preview_kind}
+                      />
+                    </div>
+                  )}
                 </div>
               </>
             )}

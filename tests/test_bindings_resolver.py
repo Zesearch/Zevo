@@ -110,6 +110,43 @@ async def test_exact_work_product_selects_intermediate_but_default_selects_final
 
 
 @pytest.mark.asyncio
+async def test_role_binding_prefers_inference_suite_primary(
+    session: AsyncSession,
+) -> None:
+    await _seed(session)
+    session.add(Ticket(
+        id="infer-001", run_id="r1", agent_id="inference",
+        status="succeeded", input_format="typed", lane="optimization",
+        iteration=0, payload={}, customization={}, inputs={},
+    ))
+    primary = WorkProduct(
+        id="config-primary", ticket_id="infer-001", role="inference_config",
+        path="/data/infer-001/inference_config.yaml",
+        meta={"suite_primary": True, "suite_member_name": "math"},
+    )
+    member = WorkProduct(
+        id="config-member", ticket_id="infer-001", role="inference_config",
+        path="/data/infer-001/suite/001/inference_config.yaml",
+        meta={"suite_primary": False, "suite_member_name": "qa"},
+    )
+    session.add_all([primary, member])
+    await session.commit()
+
+    resolved = await resolve_input_bindings(
+        session, run_id="r1",
+        inputs={"inference_config": _binding("infer-001", "inference_config")},
+    )
+    assert resolved["inference_config"]["work_product_id"] == primary.id
+
+    exact_member = _binding("infer-001", "inference_config")
+    exact_member["work_product_id"] = member.id
+    resolved_member = await resolve_input_bindings(
+        session, run_id="r1", inputs={"inference_config": exact_member},
+    )
+    assert resolved_member["inference_config"]["work_product_id"] == member.id
+
+
+@pytest.mark.asyncio
 async def test_rejects_non_usable_source(session: AsyncSession) -> None:
     await _seed(session)
     with pytest.raises(ValueError, match="not succeeded/degraded"):

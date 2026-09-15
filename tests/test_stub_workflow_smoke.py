@@ -129,3 +129,55 @@ def test_stub_baseline_and_one_training_iteration(tmp_path: Path) -> None:
     assert Path(trained.log_path).is_file()
     assert Path(registered.registry_path).is_file()
     assert Path(registered.registry_path) == tmp_path / "registry" / "registry.yaml"
+
+
+def test_stub_inference_suite_keeps_member_outputs_separate(tmp_path: Path) -> None:
+    validation = tmp_path / "validation.json"
+    validation.write_text(json.dumps([
+        {"id": "v1", "question": "one plus one", "answer": "2"},
+    ]), encoding="utf-8")
+    sample = tmp_path / "sample.csv"
+    sample.write_text("id,prediction\nexample,\n", encoding="utf-8")
+    scoring = materialize_system_scoring_artifacts(
+        scoring_source=str(validation),
+        answer_fields=["answer"],
+        sample_submission=str(sample),
+        out_dir=str(tmp_path / "scoring"),
+    )
+    member_dir = tmp_path / "infer" / "suite" / "001"
+    result = _stub_infer(
+        {
+            "ticket_id": "infer-suite",
+            "base_model": "owner/model",
+            "generation_backend": "vllm",
+            "inference_data_profile_path": scoring.profile_path,
+            "suite_members": [{
+                "name": "qa",
+                "test_set_name": "validation:qa",
+                "work_dir": str(member_dir),
+                "configuration_pins": {
+                    "inference_config": {
+                        "input_fields": ["question"],
+                        "answer_column": "prediction",
+                        "inference_query": "Answer {question}.",
+                    },
+                },
+            }],
+        },
+        tmp_path / "infer",
+    )
+
+    assert result.status == "succeeded"
+    assert [member.name for member in result.suite_members] == ["qa"]
+    member = result.suite_members[0]
+    assert Path(member.predictions_path).parent == member_dir
+    assert Path(member.inference_config_path).parent == member_dir
+    primary_config = load_inference_config(result.inference_config_path)
+    member_config = load_inference_config(member.inference_config_path)
+    assert (
+        member_config.implementation_config
+        == primary_config.implementation_config
+    )
+    assert member_config.measurement.inference_config["inference_query"] == (
+        "Answer {question}."
+    )

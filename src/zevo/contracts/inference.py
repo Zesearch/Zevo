@@ -1,4 +1,4 @@
-"""Typed contract for one Inference execution.
+"""Typed contract for one model-scoped Inference execution.
 
 Baseline Inference selects and writes one ``inference_config.yaml`` for each
 base-model lineage explored by the Run. Every trained-model Inference receives
@@ -40,6 +40,40 @@ class InferenceMemoryPlanningContract(BaseModel):
         "clamp(ceil_step(target_gpu_memory_gib / total_gpu_memory_gib, "
         "0.05), 0.1, 0.9)"
     )
+
+
+class InferenceSuiteMemberInput(BaseModel):
+    """One additional benchmark executed inside the owning Inference job.
+
+    The model/runtime belongs to :class:`InferenceTaskInput`; members only own
+    their answer-free rows, output schema, prompt mapping, and durable output
+    directory.  This is what lets a cluster load one model once while keeping
+    every benchmark's measurement contract and artifacts independent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    test_set_name: str = Field(min_length=1)
+    scoring_set: str = Field(min_length=1)
+    sample_submission: str = Field(min_length=1)
+    inference_data_profile_path: str = ""
+    configuration_mode: Literal["select", "reuse"]
+    inference_config_path: str = ""
+    predictions_validation_command: str = Field(min_length=1)
+    configuration_pins: dict[str, Any] = Field(default_factory=dict)
+    work_dir: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_config_source(self) -> "InferenceSuiteMemberInput":
+        if self.configuration_mode == "select":
+            if self.inference_config_path:
+                raise ValueError("suite selection must create its inference config")
+            if not self.inference_data_profile_path:
+                raise ValueError("suite selection requires an inference data profile")
+        elif not self.inference_config_path:
+            raise ValueError("suite reuse requires inference_config_path")
+        return self
 
 
 class InferenceTaskInput(AgentTaskInput):
@@ -165,6 +199,14 @@ class InferenceTaskInput(AgentTaskInput):
     )
     work_dir: str = Field(min_length=1)
     generation_backend: Literal["hf", "vllm"] = "vllm"
+    suite_members: list[InferenceSuiteMemberInput] = Field(
+        default_factory=list,
+        description=(
+            "Additional benchmark contracts executed sequentially by the same "
+            "finite job and already-loaded model. The top-level fields are the "
+            "primary member."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_model_and_config_source(self) -> "InferenceTaskInput":
@@ -200,6 +242,10 @@ class InferenceTaskInput(AgentTaskInput):
             # wedging the ticket on every wakeup. All other reuse guarantees
             # above still hold.
             self.configuration_suggestions = {}
+        names = [member.name for member in self.suite_members]
+        markers = [member.test_set_name for member in self.suite_members]
+        if len(names) != len(set(names)) or len(markers) != len(set(markers)):
+            raise ValueError("inference suite member names must be unique")
         return self
 
 
@@ -268,6 +314,27 @@ def summarize_generation_diagnostics(
     )
 
 
+class InferenceSuiteMemberResult(BaseModel):
+    """Durable result for one non-primary member of an Inference suite."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    test_set_name: str = Field(min_length=1)
+    inference_config_path: str = Field(min_length=1)
+    predictions_path: str = Field(min_length=1)
+    generation_diagnostics_path: str = Field(min_length=1)
+    n_rows: int = Field(ge=1)
+    n_requests: int = Field(ge=1)
+    n_unparseable: int = Field(0, ge=0)
+
+    @model_validator(mode="after")
+    def require_request_coverage(self) -> "InferenceSuiteMemberResult":
+        if self.n_requests < self.n_rows:
+            raise ValueError("suite member n_requests must cover every row")
+        return self
+
+
 class InferenceResult(AgentResult):
     status: Literal["succeeded", "deferred", "failed"]
     operation: Literal["run_inference"] = "run_inference"
@@ -292,6 +359,7 @@ class InferenceResult(AgentResult):
     n_rows: int = Field(0, ge=0)
     n_requests: int = Field(0, ge=0)
     n_unparseable: int = Field(0, ge=0)
+    suite_members: list[InferenceSuiteMemberResult] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def require_success_artifacts(self) -> "InferenceResult":
@@ -306,6 +374,10 @@ class InferenceResult(AgentResult):
             )
         if self.status == "succeeded" and self.n_requests < self.n_rows:
             raise ValueError("successful inference requires n_requests >= n_rows")
+        names = [member.name for member in self.suite_members]
+        markers = [member.test_set_name for member in self.suite_members]
+        if len(names) != len(set(names)) or len(markers) != len(set(markers)):
+            raise ValueError("inference suite result member names must be unique")
         return self
 
 

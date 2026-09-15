@@ -221,6 +221,21 @@ def test_prediction_preview_joins_questions_by_id(tmp_path: Path) -> None:
     assert rows_with_truth[0]["ground_truth"] == "Indeed"
     assert rows_with_truth[0]["prediction"] == "Because"
 
+    benchmark_predictions = tmp_path / "benchmark-predictions.csv"
+    _write_csv(
+        benchmark_predictions, ["benchmark", "prediction"],
+        [
+            {"benchmark": "qa", "prediction": "Because"},
+            {"benchmark": "qa", "prediction": "Carefully"},
+        ],
+    )
+    benchmark_rows = _prediction_with_questions_rows(
+        benchmark_predictions, questions,
+    )
+    assert _preview_columns(benchmark_rows) == [
+        "id", "question", "benchmark", "prediction",
+    ]
+
 
 def test_carve_keeps_the_columns_eval_scores_on(task_dir: Path, tmp_path: Path) -> None:
     """The carve keeps the ground truth: the questions-only copy is the data

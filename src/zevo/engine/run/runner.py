@@ -142,6 +142,7 @@ from zevo.contracts.train import (
 )
 from zevo.contracts.freeform import FreeformInput
 from zevo.contracts.inference import (
+    InferenceSuiteMemberInput,
     InferenceTaskInput,
     InferenceResult,
     load_generation_diagnostics,
@@ -931,6 +932,179 @@ def _eval_set_of(payload: dict, ticket: Ticket) -> str:
     raise KeyError(f"ticket {ticket.id!r} has no scoring_set and no Run scoring specification")
 
 
+async def _baseline_suite_config_path(
+    session: AsyncSession, *, run: Run, base_model: str, member_name: str,
+    lane: str = "optimization",
+) -> str:
+    """Find the frozen baseline YAML for one named Validation member."""
+    rows = (await session.execute(
+        select(WorkProduct, Ticket)
+        .join(Ticket, WorkProduct.ticket_id == Ticket.id)
+        .where(
+            Ticket.run_id == run.id,
+            Ticket.agent_id == "inference",
+            Ticket.lane == lane,
+            Ticket.status.in_(("succeeded", "degraded")),
+            WorkProduct.role == "inference_config",
+        )
+        .order_by(WorkProduct.created_at.desc())
+    )).all()
+    for product, ticket in rows:
+        meta = dict(product.meta or {})
+        if (
+            str(meta.get("suite_member_name") or "") == member_name
+            and str((ticket.payload or {}).get("model_source") or "") == "base_model"
+            and str((ticket.payload or {}).get("base_model") or "") == base_model
+        ):
+            return str(product.path or "")
+    return ""
+
+
+async def _build_validation_suite_members(
+    *, ticket: Ticket, payload: dict, work_dir: str, run: Run,
+    session: AsyncSession,
+) -> list[InferenceSuiteMemberInput]:
+    """Bind non-primary Validation benchmarks to one model-scoped job.
+
+    Only the ordinary optimization Inference owns a suite. Engine-created
+    legacy mirrors and held-out Test tickets remain single-member work orders.
+    """
+    if ticket.lane != "optimization" or str(payload.get("test_set_name") or ""):
+        return []
+    suite = _validation_sets(run)
+    if len(suite) <= 1:
+        return []
+
+    model_source = str(payload.get("model_source") or "base_model")
+    base_model = str(payload.get("base_model") or "")
+    source_pins = dict(payload.get("configuration_pins") or {})
+    members: list[InferenceSuiteMemberInput] = []
+    for index, item in enumerate(suite[1:], start=1):
+        name = str(item.get("name") or f"Validation {index + 1}")
+        scoring_set = str(item.get("public") or "")
+        sample_submission = str(item.get("sample_submission") or "")
+        profile = str(item.get("inference_data_profile") or "")
+        if not scoring_set or not sample_submission:
+            raise ValueError(
+                f"Validation suite member {name!r} has no prepared public contract"
+            )
+        member_pins = dict(source_pins)
+        mapping = dict(member_pins.get("inference_config") or {})
+        mapping["inference_query"] = str(item.get("inference_query") or "")
+        member_pins["inference_config"] = mapping
+        config_path = ""
+        mode = "select"
+        if model_source == "checkpoint":
+            config_path = await _baseline_suite_config_path(
+                session, run=run, base_model=base_model, member_name=name,
+            )
+            if not config_path:
+                raise ValueError(
+                    f"Validation suite member {name!r} has no baseline inference "
+                    "configuration for this model lineage"
+                )
+            mode = "reuse"
+        member_dir = str(Path(work_dir) / "suite" / f"{index:03d}")
+        members.append(InferenceSuiteMemberInput(
+            name=name,
+            test_set_name=f"{_VALIDATION_MEMBER_PREFIX}{name}",
+            scoring_set=scoring_set,
+            sample_submission=sample_submission,
+            inference_data_profile_path=profile,
+            configuration_mode=mode,
+            inference_config_path=config_path,
+            predictions_validation_command=(
+                "python -m zevo.engine.artifact_validation validate-predictions "
+                "--predictions <absolute-predictions-csv-path> "
+                f"--questions {shlex.quote(scoring_set)} "
+                f"--sample-submission {shlex.quote(sample_submission)}"
+            ),
+            configuration_pins=member_pins,
+            work_dir=member_dir,
+        ))
+    return members
+
+
+async def _build_holdout_suite_members(
+    *, ticket: Ticket, payload: dict, work_dir: str, run: Run,
+    session: AsyncSession,
+) -> list[InferenceSuiteMemberInput]:
+    """Bind the remaining private Test benchmarks to one held-out job."""
+    if ticket.lane != "held_out_test":
+        return []
+    suite = _heldout_test_sets(run)
+    primary_name = str(payload.get("test_set_name") or "")
+    if len(suite) <= 1 or not primary_name:
+        return []
+    primary_index = next((
+        index for index, item in enumerate(suite)
+        if str(item.get("name") or "") == primary_name
+    ), -1)
+    if primary_index < 0:
+        return []
+
+    from zevo.holdout_storage import resolve_asset
+
+    model_source = str(payload.get("model_source") or "base_model")
+    base_model = str(payload.get("base_model") or "")
+    source_pins = dict(payload.get("configuration_pins") or {})
+    members: list[InferenceSuiteMemberInput] = []
+    ordered = [
+        item for index, item in enumerate(suite) if index != primary_index
+    ]
+    for index, item in enumerate(ordered, start=1):
+        name = str(item.get("name") or f"Test {index + 1}")
+        scoring_set = resolve_asset(str(item.get("public") or ""))
+        sample_submission = resolve_asset(
+            str(item.get("sample_submission") or "")
+        )
+        profile = resolve_asset(str(item.get("inference_data_profile") or ""))
+        if not scoring_set or not sample_submission:
+            raise ValueError(
+                f"Test suite member {name!r} has no prepared questions contract"
+            )
+        member_pins = dict(source_pins)
+        mapping = dict(member_pins.get("inference_config") or {})
+        mapping["inference_query"] = str(item.get("inference_query") or "")
+        member_pins["inference_config"] = mapping
+        config_path = ""
+        mode = "select"
+        if model_source == "checkpoint":
+            config_path = await _baseline_suite_config_path(
+                session, run=run, base_model=base_model, member_name=name,
+                lane="held_out_test",
+            )
+            if not config_path:
+                raise ValueError(
+                    f"Test suite member {name!r} has no baseline inference "
+                    "configuration for this model lineage"
+                )
+            mode = "reuse"
+        elif not profile:
+            raise ValueError(
+                f"Test suite member {name!r} has no inference data profile"
+            )
+        member_dir = str(Path(work_dir) / "suite" / f"{index:03d}")
+        members.append(InferenceSuiteMemberInput(
+            name=name,
+            test_set_name=name,
+            scoring_set=scoring_set,
+            sample_submission=sample_submission,
+            inference_data_profile_path=profile,
+            configuration_mode=mode,
+            inference_config_path=config_path,
+            predictions_validation_command=(
+                "python -m zevo.engine.artifact_validation validate-predictions "
+                "--predictions <absolute-predictions-csv-path> "
+                f"--questions {shlex.quote(scoring_set)} "
+                f"--sample-submission {shlex.quote(sample_submission)}"
+            ),
+            configuration_pins=member_pins,
+            work_dir=member_dir,
+        ))
+    return members
+
+
 async def _build_inference_input(
     ticket: Ticket, payload: dict, inputs: dict, work_dir: str, generation_backend: str,
     run: Run, session: AsyncSession, specialist_context: dict | None = None,
@@ -1003,6 +1177,16 @@ async def _build_inference_input(
         ),
         work_dir=work_dir,
         generation_backend=generation_backend,
+        suite_members=(
+            await _build_validation_suite_members(
+                ticket=ticket, payload=payload, work_dir=work_dir, run=run,
+                session=session,
+            )
+            or await _build_holdout_suite_members(
+                ticket=ticket, payload=payload, work_dir=work_dir, run=run,
+                session=session,
+            )
+        ),
     )
 
 
@@ -1550,6 +1734,91 @@ def _validate_specialist_yaml(
             problem = _python_memory_helper_problem(result.predict_script_path)
             if problem:
                 raise ValueError(problem)
+        expected_members = {member.name: member for member in inp.suite_members}
+        result_members = {member.name: member for member in result.suite_members}
+        if set(result_members) != set(expected_members):
+            raise ValueError(
+                "inference suite results differ from assigned members: "
+                f"expected {sorted(expected_members)}, got {sorted(result_members)}"
+            )
+        shared_runtime = {
+            "base_model": config.base_model,
+            "generation_backend": config.generation_backend,
+            "tokenizer_source": config.tokenizer_source,
+            "chat_template_source": config.chat_template_source,
+            "chat_template_hash": config.chat_template_hash,
+            "llm_kwargs": dict(config.implementation_config or {}).get("llm_kwargs"),
+        }
+        for name, member_result in result_members.items():
+            member = expected_members[name]
+            if member_result.test_set_name != member.test_set_name:
+                raise ValueError(
+                    f"suite member {name!r} changed its test_set_name"
+                )
+            if not Path(member_result.inference_config_path).is_absolute():
+                raise ValueError(
+                    f"suite member {name!r} inference_config_path must be absolute"
+                )
+            member_config = load_inference_config(
+                member_result.inference_config_path
+            )
+            member_diagnostics = load_generation_diagnostics(
+                member_result.generation_diagnostics_path
+            )
+            if len(member_diagnostics.records) != member_result.n_requests:
+                raise ValueError(
+                    f"suite member {name!r} diagnostics count differs from n_requests"
+                )
+            if "--adaptive-vllm-memory" in inp.config_validation_command:
+                validate_adaptive_vllm_memory_config(member_config)
+            member_runtime = {
+                "base_model": member_config.base_model,
+                "generation_backend": member_config.generation_backend,
+                "tokenizer_source": member_config.tokenizer_source,
+                "chat_template_source": member_config.chat_template_source,
+                "chat_template_hash": member_config.chat_template_hash,
+                "llm_kwargs": dict(member_config.implementation_config or {}).get(
+                    "llm_kwargs"
+                ),
+            }
+            if member_runtime != shared_runtime:
+                raise ValueError(
+                    f"suite member {name!r} changed the shared model runtime; "
+                    "one allocation must load one model engine exactly once"
+                )
+            member_pins = dict(member.configuration_pins or {})
+            for key in ("prompt_framing", "system_prompt"):
+                if key in member_pins and getattr(
+                    member_config.prompt, key
+                ) != member_pins[key]:
+                    raise ValueError(
+                        f"suite member {name!r} violates pinned {key}"
+                    )
+            for key, value in dict(
+                member_pins.get("inference_config") or {}
+            ).items():
+                if member_config.measurement.inference_config.get(key) != value:
+                    raise ValueError(
+                        f"suite member {name!r} violates pinned "
+                        f"inference_config.{key}"
+                    )
+            for key, value in dict(
+                member_pins.get("decoding_config") or {}
+            ).items():
+                if getattr(member_config.measurement, key) != value:
+                    raise ValueError(
+                        f"suite member {name!r} violates pinned decoding_config.{key}"
+                    )
+            if member.inference_config_path:
+                supplied = load_inference_config(member.inference_config_path)
+                if member_config.model_dump(mode="json") != supplied.model_dump(
+                    mode="json"
+                ) or file_sha256(
+                    member_result.inference_config_path
+                ) != file_sha256(member.inference_config_path):
+                    raise ValueError(
+                        f"suite member {name!r} must reuse its exact baseline config"
+                    )
         return config.model_dump(mode="json")
 
     if isinstance(result, TrainResult) and result.status == "succeeded":
@@ -3702,6 +3971,15 @@ async def run_ticket(
         cur = int(data.get("step", data.get("current_step", 0)))
         tot = int(data.get("total", data.get("total_steps", 0)))
         name = phase or data.get("phase", "")
+        benchmark_name = str(data.get("benchmark_name") or "").strip()
+        if tk.agent_id == "inference" and benchmark_name:
+            benchmark_index = int(data.get("benchmark_index") or 0)
+            benchmark_total = int(data.get("benchmark_total") or 0)
+            position = (
+                f" ({benchmark_index}/{benchmark_total})"
+                if benchmark_index > 0 and benchmark_total > 0 else ""
+            )
+            tk.summary = f"Inference suite · {benchmark_name}{position}"[:1000]
         # Exact-tuple, not just consecutive: a replay re-emits the whole run of
         # steps, so the duplicates are not adjacent to their originals. Training
         # steps carry a distinct loss each, so real progress is never collapsed.
@@ -4948,6 +5226,52 @@ async def run_ticket(
                 # owns the persisted row count and columns.
                 artifact_meta["n_rows"] = report.rows
                 artifact_meta["prediction_columns"] = list(report.columns)
+                validation_suite = _validation_sets(run)
+                if (
+                    tk.lane == "optimization"
+                    and not str((tk.payload or {}).get("test_set_name") or "")
+                    and validation_suite
+                ):
+                    primary_name = str(
+                        validation_suite[0].get("name") or "Validation"
+                    )
+                    artifact_meta.update({
+                        "suite_member_name": primary_name,
+                        "test_set_name": f"{_VALIDATION_MEMBER_PREFIX}{primary_name}",
+                        "scoring_set": inp.scoring_set,
+                        "suite_primary": True,
+                    })
+                elif tk.lane == "held_out_test":
+                    primary_name = str(
+                        (tk.payload or {}).get("test_set_name") or "Test"
+                    )
+                    artifact_meta.update({
+                        "suite_member_name": primary_name,
+                        "test_set_name": primary_name,
+                        "scoring_set": inp.scoring_set,
+                        "suite_primary": True,
+                    })
+                expected_members = {
+                    member.name: member for member in inp.suite_members
+                }
+                for member_result in output.suite_members:
+                    member = expected_members.get(member_result.name)
+                    if member is None:
+                        raise ValueError(
+                            f"unassigned inference suite member {member_result.name!r}"
+                        )
+                    member_report = validate_prediction_artifacts(
+                        predictions=member_result.predictions_path,
+                        questions=member.scoring_set,
+                        sample_submission=member.sample_submission,
+                    )
+                    if member_report.rows != member_result.n_rows:
+                        raise ValueError(
+                            f"suite member {member.name!r} row count differs from Result"
+                        )
+                artifact_meta["suite_member_count"] = 1 + len(
+                    output.suite_members
+                )
             except (OSError, ValueError) as exc:
                 runtime_contract_mismatches["prediction_artifacts"] = {
                     "declared": "valid predictions aligned to assigned inputs",
@@ -5147,6 +5471,77 @@ async def run_ticket(
                             v, role,
                             dict(artifact_meta or {}) if not items else {},
                         ))
+                if isinstance(output, InferenceResult) and isinstance(
+                    inp, InferenceTaskInput
+                ):
+                    # A role-only downstream binding means the suite primary.
+                    # Stamp every primary Inference artifact, not just the
+                    # first/output item, so config/script reuse cannot resolve
+                    # to whichever member happened to be inserted last.
+                    for item_index, (item_path, item_role, item_meta) in enumerate(items):
+                        items[item_index] = (
+                            item_path,
+                            item_role,
+                            {**item_meta, "suite_primary": True},
+                        )
+                    assigned_members = {
+                        member.name: member for member in inp.suite_members
+                    }
+                    for member_result in output.suite_members:
+                        member_input = assigned_members[member_result.name]
+                        member_config = load_inference_config(
+                            member_result.inference_config_path
+                        )
+                        member_diagnostics = load_generation_diagnostics(
+                            member_result.generation_diagnostics_path
+                        )
+                        member_report = validate_prediction_artifacts(
+                            predictions=member_result.predictions_path,
+                            questions=member_input.scoring_set,
+                            sample_submission=member_input.sample_submission,
+                        )
+                        member_meta = {
+                            "suite_member_name": member_result.name,
+                            "test_set_name": member_result.test_set_name,
+                            "scoring_set": member_input.scoring_set,
+                            "n_rows": member_report.rows,
+                            "n_requests": member_result.n_requests,
+                            "n_unparseable": member_result.n_unparseable,
+                            "prediction_columns": list(member_report.columns),
+                            "base_model": member_config.base_model,
+                            "configuration": member_config.model_dump(mode="json"),
+                            "generation_termination": (
+                                summarize_generation_diagnostics(
+                                    member_diagnostics
+                                ).model_dump(mode="json")
+                            ),
+                            "suite_primary": False,
+                        }
+                        items.extend([
+                            (
+                                member_result.predictions_path,
+                                "predictions",
+                                member_meta,
+                            ),
+                            (
+                                member_result.generation_diagnostics_path,
+                                "generation_diagnostics",
+                                {
+                                    "suite_member_name": member_result.name,
+                                    "test_set_name": member_result.test_set_name,
+                                    "suite_primary": False,
+                                },
+                            ),
+                            (
+                                member_result.inference_config_path,
+                                "inference_config",
+                                {
+                                    "suite_member_name": member_result.name,
+                                    "test_set_name": member_result.test_set_name,
+                                    "suite_primary": False,
+                                },
+                            ),
+                        ])
                 if isinstance(output, TrainResult):
                     # The primary final model is the default checkpoint for
                     # downstream bindings. Intermediate models share the role
@@ -5627,138 +6022,55 @@ def _validation_set(run: Run, name: str) -> dict[str, Any] | None:
     )
 
 
-async def _spawn_validation_infer(
+async def _spawn_validation_suite_evals(
     session: AsyncSession, run: Run, source: Ticket, *, enqueue: bool = True,
 ) -> list[Ticket]:
-    """Mirror one candidate across every non-primary Validation contract."""
-    from zevo.contracts.tickets import validate_stored_payload
-    from zevo.engine.run.wakeup import queue_wakeup
+    """Score suite outputs produced by one model-scoped Inference job.
 
+    This creates no GPU Inference tickets. Every non-primary prediction was
+    produced inside ``source``'s one allocation and is handed to its own
+    deterministic Evaluation ticket.
+    """
     suite = _validation_sets(run)
     if len(suite) <= 1:
         return []
-    iteration = int(source.iteration or 0)
-    source_payload = dict(source.payload or {})
-    existing = (await session.execute(
-        select(Ticket).where(
-            Ticket.run_id == run.id,
-            Ticket.lane == "optimization",
-            Ticket.agent_id == "inference",
-        )
+    products = (await session.execute(
+        select(WorkProduct).where(
+            WorkProduct.ticket_id == source.id,
+            WorkProduct.role == "predictions",
+        ).order_by(WorkProduct.created_at.asc())
     )).scalars().all()
     created: list[Ticket] = []
     for item in suite[1:]:
         name = str(item.get("name") or "")
-        marker = f"{_VALIDATION_MEMBER_PREFIX}{name}"
-        duplicate = next((
-            candidate for candidate in existing
-            if int(candidate.iteration or 0) == iteration
-            and (candidate.payload or {}).get("model_source")
-                == source_payload.get("model_source")
-            and (candidate.payload or {}).get("base_model")
-                == source_payload.get("base_model")
-            and (candidate.payload or {}).get("test_set_name") == marker
+        product = next((
+            candidate for candidate in products
+            if str((candidate.meta or {}).get("suite_member_name") or "") == name
         ), None)
-        if duplicate is not None:
-            created.append(duplicate)
-            continue
-        public = str(item.get("public") or "")
-        submission = str(item.get("sample_submission") or "")
-        if not public or not submission:
-            raise ValueError(f"Validation set {name!r} has no prepared public contract")
-
-        payload = dict(source_payload)
-        configuration_pins = dict(payload.get("configuration_pins") or {})
-        inference_mapping = dict(configuration_pins.get("inference_config") or {})
-        inference_mapping["inference_query"] = str(item.get("inference_query") or "")
-        configuration_pins["inference_config"] = inference_mapping
-        payload.update({
-            "test_set_name": marker,
-            "scoring_set": public,
-            "sample_submission": submission,
-            "configuration_suggestions": {},
-            "configuration_pins": configuration_pins,
-        })
-        payload = validate_stored_payload(
-            agent_id="inference", input_format="typed", payload=payload,
-        )
-        inputs = dict(source.inputs or {})
-        inputs.pop("inference_data_profile", None)
-        inputs.pop("inference_config", None)
-        inputs.pop("predict_script", None)
-        profile = str(item.get("inference_data_profile") or "")
-        if profile:
-            inputs["inference_data_profile"] = {
-                "artifact_role": "inference_data_profile",
-                "path": profile,
-            }
-        if payload.get("model_source") == "checkpoint":
-            # Each benchmark owns its inference query, so it also owns one
-            # baseline configuration per model lineage. A trained checkpoint
-            # reuses that exact member-specific baseline, just as the primary
-            # Validation and held-out Test lanes do.
-            baseline = next((
-                candidate for candidate in reversed(existing)
-                if int(candidate.iteration or 0) <= iteration
-                and (candidate.payload or {}).get("model_source") == "base_model"
-                and (candidate.payload or {}).get("base_model")
-                    == source_payload.get("base_model")
-                and (candidate.payload or {}).get("test_set_name") == marker
-                and candidate.status in ("succeeded", "degraded")
-            ), None)
-            if baseline is None:
-                raise ValueError(
-                    f"Validation set {name!r} has no baseline inference "
-                    "configuration for this model lineage"
-                )
-            inputs["inference_config"] = _artifact_binding(
-                "inference_config", baseline,
+        if product is None:
+            raise ValueError(
+                f"Inference suite did not register predictions for {name!r}"
             )
-            inputs["predict_script"] = _artifact_binding("script", baseline)
-
-        count = len(existing) + len(created) + 1
-        ticket = Ticket(
-            id=f"validation-infer-{run.id[:8]}-{count:03d}",
-            run_id=run.id,
-            agent_id="inference",
-            status="queued",
-            input_format="typed",
-            lane="optimization",
-            iteration=iteration,
-            payload=payload,
-            customization=dict(source.customization or {}),
-            inputs=inputs,
-            summary=f"validation suite · {name}",
+        evaluation = await _spawn_validation_eval(
+            session, run, source, member_name=name,
+            predictions_product=product, enqueue=enqueue,
         )
-        session.add(ticket)
-        created.append(ticket)
-    if not created:
-        return []
-    await session.commit()
-    if enqueue:
-        for ticket in created:
-            if ticket.status == "queued":
-                await queue_wakeup(
-                    session,
-                    agent_id="inference",
-                    ticket_id=ticket.id,
-                    source="handoff",
-                    reason=(
-                        f"measuring Validation suite member "
-                        f"{_validation_member_name(ticket)}"
-                    ),
-                )
+        if evaluation is not None:
+            created.append(evaluation)
     return created
 
 
 async def _spawn_validation_eval(
-    session: AsyncSession, run: Run, source: Ticket,
+    session: AsyncSession, run: Run, source: Ticket, *,
+    member_name: str = "",
+    predictions_product: WorkProduct | None = None,
+    enqueue: bool = True,
 ) -> Ticket | None:
     """Score one engine-created Validation-suite inference."""
     from zevo.contracts.tickets import validate_stored_payload
     from zevo.engine.run.wakeup import queue_wakeup
 
-    name = _validation_member_name(source)
+    name = member_name or _validation_member_name(source)
     item = _validation_set(run, name)
     if item is None:
         return None
@@ -5799,6 +6111,21 @@ async def _spawn_validation_eval(
         },
     )
     count = len(duplicate) + 1
+    prediction_binding = (
+        {
+            "source_ticket_id": source.id,
+            "artifact_role": "predictions",
+            "work_product_id": predictions_product.id,
+            "path": predictions_product.path,
+        }
+        if predictions_product is not None else
+        {
+            "source_ticket_id": source.id,
+            "artifact_role": "predictions",
+            "work_product_id": "",
+            "path": "",
+        }
+    )
     ticket = Ticket(
         id=f"validation-eval-{run.id[:8]}-{count:03d}",
         run_id=run.id,
@@ -5809,25 +6136,19 @@ async def _spawn_validation_eval(
         iteration=int(source.iteration or 0),
         payload=payload,
         customization={},
-        inputs={
-            "predictions": {
-                "source_ticket_id": source.id,
-                "artifact_role": "predictions",
-                "work_product_id": "",
-                "path": "",
-            }
-        },
+        inputs={"predictions": prediction_binding},
         summary=f"validation suite · {name}",
     )
     session.add(ticket)
     await session.commit()
-    await queue_wakeup(
-        session,
-        agent_id="evaluation",
-        ticket_id=ticket.id,
-        source="handoff",
-        reason=f"scoring Validation suite member {name}",
-    )
+    if enqueue:
+        await queue_wakeup(
+            session,
+            agent_id="evaluation",
+            ticket_id=ticket.id,
+            source="handoff",
+            reason=f"scoring Validation suite member {name}",
+        )
     return ticket
 
 
@@ -5906,14 +6227,26 @@ async def _spawn_holdout_infer(
     session: AsyncSession, run: Run, source: Ticket, *, test_set_name: str = "",
     enqueue: bool = True,
 ) -> Ticket | None:
-    """Measure one candidate independently on every named Test contract."""
+    """Measure the complete Test suite in one model-scoped GPU job."""
     from zevo.engine.run.wakeup import queue_wakeup
 
     suite = _heldout_test_sets(run)
-    selected = [
+    if not suite:
+        return None
+    missing = [
         item for item in suite
-        if not test_set_name or item["name"] == test_set_name
+        if not item.get("public")
     ]
+    if missing:
+        # Preparation is answer stripping/profiling and may proceed per member;
+        # GPU inference waits at the barrier until every member is ready.
+        for item in missing:
+            await _spawn_holdout_data(
+                session, run, source, test_set_name=str(item["name"]),
+                enqueue=enqueue,
+            )
+        return None
+
     iteration = int(source.iteration or 0)
     already = (await session.execute(
         select(Ticket).where(
@@ -5922,129 +6255,131 @@ async def _spawn_holdout_infer(
             Ticket.agent_id == "inference",
         )
     )).scalars().all()
-    created: list[Ticket] = []
-    for item in selected:
-        if not item.get("public"):
-            await _spawn_holdout_data(
-                session, run, source, test_set_name=item["name"], enqueue=enqueue,
-            )
-            continue
-        duplicate = next((
-            ticket for ticket in already
-            if int(ticket.iteration or 0) == iteration
-            and (ticket.payload or {}).get("model_source")
-                == (source.payload or {}).get("model_source")
-            and (ticket.payload or {}).get("base_model")
-                == (source.payload or {}).get("base_model")
-            and (ticket.payload or {}).get("test_set_name") == item["name"]
+    primary = suite[0]
+    duplicate = next((
+        ticket for ticket in already
+        if int(ticket.iteration or 0) == iteration
+        and (ticket.payload or {}).get("model_source")
+            == (source.payload or {}).get("model_source")
+        and (ticket.payload or {}).get("base_model")
+            == (source.payload or {}).get("base_model")
+        and (ticket.payload or {}).get("test_set_name") == primary["name"]
+    ), None)
+    if duplicate is not None:
+        return duplicate
+
+    payload = dict(source.payload or {})
+    configuration_pins = dict(payload.get("configuration_pins") or {})
+    inference_mapping = dict(configuration_pins.get("inference_config") or {})
+    inference_mapping["inference_query"] = primary["inference_query"]
+    configuration_pins["inference_config"] = inference_mapping
+    payload.update({
+        "test_set_name": primary["name"],
+        "scoring_set": primary["public"],
+        "sample_submission": primary["sample_submission"],
+        "configuration_suggestions": {},
+        "configuration_pins": configuration_pins,
+    })
+    payload = validate_stored_payload(
+        agent_id="inference", input_format="typed", payload=payload,
+    )
+    inputs = dict(source.inputs or {})
+    inputs.pop("inference_config", None)
+    inputs.pop("predict_script", None)
+    inputs.pop("inference_data_profile", None)
+    data_rows = (await session.execute(
+        select(Ticket).where(
+            Ticket.run_id == run.id,
+            Ticket.lane == "held_out_test",
+            Ticket.agent_id == "data",
+            Ticket.status.in_(("succeeded", "degraded")),
+        ).order_by(Ticket.created_at.desc())
+    )).scalars().all()
+    data_ticket = next((
+        ticket for ticket in data_rows
+        if (ticket.payload or {}).get("test_set_name") == primary["name"]
+    ), None)
+    if data_ticket is None:
+        raise ValueError(
+            f"Test set {primary['name']!r} has no prepared Data ticket"
+        )
+    inputs["inference_data_profile"] = _artifact_binding(
+        "inference_data_profile", data_ticket,
+    )
+
+    if payload.get("model_source") == "checkpoint":
+        baseline = next((
+            ticket for ticket in reversed(already)
+            if (ticket.payload or {}).get("model_source") == "base_model"
+            and (ticket.payload or {}).get("base_model") == payload.get("base_model")
+            and (ticket.payload or {}).get("test_set_name") == primary["name"]
+            and ticket.status in ("succeeded", "degraded")
         ), None)
-        if duplicate is not None:
-            created.append(duplicate)
-            continue
-
-        payload = dict(source.payload or {})
-        configuration_pins = dict(payload.get("configuration_pins") or {})
-        inference_mapping = dict(configuration_pins.get("inference_config") or {})
-        inference_mapping["inference_query"] = item["inference_query"]
-        configuration_pins["inference_config"] = inference_mapping
-        payload.update({
-            "test_set_name": item["name"],
-            "scoring_set": item["public"],
-            "sample_submission": item["sample_submission"],
-            "configuration_suggestions": {},
-            "configuration_pins": configuration_pins,
-        })
-        payload = validate_stored_payload(
-            agent_id="inference", input_format="typed", payload=payload,
+        configuration_source = baseline or source
+        inputs["inference_config"] = _artifact_binding(
+            "inference_config", configuration_source,
         )
-        inputs = dict(source.inputs or {})
-        inputs.pop("inference_config", None)
-        inputs.pop("predict_script", None)
-        profile = str(item.get("inference_data_profile") or "")
-        if profile:
-            data_rows = (await session.execute(
-                select(Ticket).where(
-                    Ticket.run_id == run.id,
-                    Ticket.lane == "held_out_test",
-                    Ticket.agent_id == "data",
-                    Ticket.status.in_(("succeeded", "degraded")),
-                ).order_by(Ticket.created_at.desc())
-            )).scalars().all()
-            data_ticket = next((
-                ticket for ticket in data_rows
-                if (ticket.payload or {}).get("test_set_name") == item["name"]
-            ), None)
-            if data_ticket is None:
-                raise ValueError(
-                    f"Test set {item['name']!r} has no prepared Data ticket"
-                )
-            inputs["inference_data_profile"] = _artifact_binding(
-                "inference_data_profile", data_ticket,
-            )
-
-        if payload.get("model_source") == "checkpoint":
-            baseline = next((
-                ticket for ticket in reversed(already)
-                if (ticket.payload or {}).get("model_source") == "base_model"
-                and (ticket.payload or {}).get("base_model") == payload.get("base_model")
-                and (ticket.payload or {}).get("test_set_name") == item["name"]
-                and ticket.status in ("succeeded", "degraded")
-            ), None)
-            configuration_source = baseline or source
-            inputs["inference_config"] = _artifact_binding(
-                "inference_config", configuration_source,
-            )
-            inputs["predict_script"] = _artifact_binding(
-                "script", configuration_source,
-            )
-
-        tid = f"holdout-infer-{run.id[:8]}-{len(already) + len(created) + 1:03d}"
-        ticket = Ticket(
-            id=tid, run_id=run.id, agent_id="inference", status="queued",
-            input_format="typed", lane="held_out_test", iteration=iteration,
-            payload=payload, customization=dict(source.customization or {}),
-            inputs=inputs, summary="",
+        inputs["predict_script"] = _artifact_binding(
+            "script", configuration_source,
         )
-        session.add(ticket)
-        created.append(ticket)
-    if not created:
-        return None
+
+    tid = f"holdout-infer-{run.id[:8]}-{len(already) + 1:03d}"
+    ticket = Ticket(
+        id=tid, run_id=run.id, agent_id="inference", status="queued",
+        input_format="typed", lane="held_out_test", iteration=iteration,
+        payload=payload, customization=dict(source.customization or {}),
+        inputs=inputs, summary="",
+    )
+    session.add(ticket)
     await session.commit()
-    if enqueue:
-        for ticket in created:
-            if ticket.status == "queued":
-                await queue_wakeup(
-                    session, agent_id="inference", ticket_id=ticket.id,
-                    source="handoff",
-                    reason=(
-                        f"held-out {ticket.payload['test_set_name']} measurement "
-                        f"mirroring {source.id}"
-                    ),
-                )
-    return created[0]
+    if enqueue and ticket.status == "queued":
+        await queue_wakeup(
+            session, agent_id="inference", ticket_id=ticket.id,
+            source="handoff",
+            reason=(
+                f"held-out Test suite measurement mirroring {source.id}"
+            ),
+        )
+    return ticket
 
 
 async def _spawn_holdout_eval(
-    session: AsyncSession, run: Run, source: Ticket,
-) -> None:
+    session: AsyncSession, run: Run, source: Ticket, *,
+    test_set_name: str = "",
+    predictions_product: WorkProduct | None = None,
+    enqueue: bool = True,
+) -> Ticket | None:
     """Score held-out predictions with the Task's custom or built-in metric."""
     from zevo.engine.run.wakeup import queue_wakeup
 
-    test_set_name = str((source.payload or {}).get("test_set_name") or "")
+    test_set_name = test_set_name or str(
+        (source.payload or {}).get("test_set_name") or ""
+    )
     item = _heldout_test_set(run, test_set_name)
     if item is None:
         return
 
     iteration = int(source.iteration or 0)
-    n = (await session.execute(
-        select(func.count()).select_from(Ticket).where(
+    existing_rows = (await session.execute(
+        select(Ticket).where(
             Ticket.run_id == run.id,
             Ticket.lane == "held_out_test",
             Ticket.agent_id == "evaluation",
         )
-    )).scalar_one()
+    )).scalars().all()
+    existing = next((
+        ticket for ticket in existing_rows
+        if int(ticket.iteration or 0) == iteration
+        and str((ticket.payload or {}).get("test_set_name") or "")
+            == test_set_name
+        and str(((ticket.inputs or {}).get("predictions") or {}).get(
+            "source_ticket_id"
+        ) or "") == source.id
+    ), None)
+    if existing is not None:
+        return existing
 
-    tid = f"holdout-eval-{run.id[:8]}-{int(n) + 1:03d}"
+    tid = f"holdout-eval-{run.id[:8]}-{len(existing_rows) + 1:03d}"
     payload = validate_stored_payload(
         agent_id="evaluation",
         input_format="typed",
@@ -6061,23 +6396,77 @@ async def _spawn_holdout_eval(
             ),
         },
     )
-    session.add(Ticket(
+    prediction_binding = (
+        {
+            "source_ticket_id": source.id,
+            "artifact_role": "predictions",
+            "work_product_id": predictions_product.id,
+            "path": predictions_product.path,
+        }
+        if predictions_product is not None else
+        {
+            "source_ticket_id": source.id,
+            "artifact_role": "predictions",
+            "work_product_id": "",
+            "path": "",
+        }
+    )
+    ticket = Ticket(
         id=tid, run_id=run.id, agent_id="evaluation",
         status="queued", input_format="typed", lane="held_out_test",
         iteration=iteration,
         payload=payload,
         customization={},
-        inputs={"predictions": {"source_ticket_id": source.id,
-                                "artifact_role": "predictions",
-                                "work_product_id": "", "path": ""}},
+        inputs={"predictions": prediction_binding},
         summary="",
-    ))
-    await session.commit()
-    await queue_wakeup(
-        session, agent_id="evaluation", ticket_id=tid,
-        source="handoff",
-        reason=f"scoring held-out {test_set_name} predictions from {source.id}",
     )
+    session.add(ticket)
+    await session.commit()
+    if enqueue:
+        await queue_wakeup(
+            session, agent_id="evaluation", ticket_id=tid,
+            source="handoff",
+            reason=f"scoring held-out {test_set_name} predictions from {source.id}",
+        )
+    return ticket
+
+
+async def _spawn_holdout_suite_evals(
+    session: AsyncSession, run: Run, source: Ticket, *, enqueue: bool = True,
+) -> list[Ticket]:
+    """Fan one completed Test-suite inference into deterministic scorers."""
+    products = (await session.execute(
+        select(WorkProduct).where(
+            WorkProduct.ticket_id == source.id,
+            WorkProduct.role == "predictions",
+        ).order_by(WorkProduct.created_at.asc())
+    )).scalars().all()
+    created: list[Ticket] = []
+    for item in _heldout_test_sets(run):
+        name = str(item.get("name") or "")
+        product = next((
+            candidate for candidate in products
+            if str((candidate.meta or {}).get("suite_member_name") or "") == name
+        ), None)
+        if product is None:
+            if len(_heldout_test_sets(run)) == 1:
+                evaluation = await _spawn_holdout_eval(
+                    session, run, source, test_set_name=name,
+                    enqueue=enqueue,
+                )
+                if evaluation is not None:
+                    created.append(evaluation)
+                continue
+            raise ValueError(
+                f"held-out Inference suite did not register predictions for {name!r}"
+            )
+        evaluation = await _spawn_holdout_eval(
+            session, run, source, test_set_name=name,
+            predictions_product=product, enqueue=enqueue,
+        )
+        if evaluation is not None:
+            created.append(evaluation)
+    return created
 
 
 async def _record_holdout_score(
@@ -6243,6 +6632,10 @@ async def _record_validation_score(
         name: str(item.get("metric") or "")
         for name, item in (components or {}).items()
     }
+    component_directions = {
+        name: str(item.get("metric_direction") or "max")
+        for name, item in (components or {}).items()
+    }
     if components:
         # Registry may bind any Evaluation that measured the selected
         # checkpoint. Stamp the authoritative aggregate onto every component's
@@ -6297,6 +6690,7 @@ async def _record_validation_score(
                     name: {
                         "score": component_scores[name],
                         "metric": component_metrics[name],
+                        "metric_direction": component_directions[name],
                     }
                     for name in component_scores
                 },
@@ -6421,6 +6815,7 @@ async def _record_validation_score(
             ):
                 entry["validation_scores"] = component_scores
                 entry["validation_metrics"] = component_metrics
+                entry["validation_metric_directions"] = component_directions
         run.history = history
     _sync_best_validation_score(run)
     if source == "baseline" and base_model:
@@ -6584,9 +6979,9 @@ async def _advance_measurements(
             # remaining members are engine-created mirrors and deliberately do
             # not require one Orchestrator decision per benchmark.
             if source is not None and source.agent_id == "inference":
-                await _spawn_validation_infer(session, run, source)
+                await _spawn_validation_suite_evals(session, run, source)
     elif is_held_out_test and tk.agent_id == "inference":
-        await _spawn_holdout_eval(session, run, tk)
+        await _spawn_holdout_suite_evals(session, run, tk)
     elif score is not None and is_held_out_test and tk.agent_id == "evaluation":
         await _record_holdout_score(session, run, tk, score)
 

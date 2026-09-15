@@ -26,14 +26,23 @@
    a ticket-specific remote directory, using the `remote_transfer` helper by
    default or correctly constructed direct SCP when needed. Run directly for
    cloud/instance or use the finite cluster job below.
+   When `suite_members` is non-empty, initialize the model engine exactly once
+   and loop over the primary plus every member inside that same process. Never
+   submit another GPU job for a suite member. Atomically persist each member
+   before moving on so a repaired/preempted execution can validate and skip
+   completed members. During every member emit progress with exact
+   `benchmark_name`, one-based `benchmark_index`, and `benchmark_total`, in
+   addition to row `step` / `total`; this drives the live Overview label.
 6. Copy back `predict.py`, the execution log, `predictions.csv`, and
    `generation_diagnostics.json` through the
    helper or correctly constructed direct SCP. Direct cloud/instance execution
    uses `infer.log`; cluster execution preserves the exact successful
    `slurm-<JOBID>.out` and sibling `slurm-<JOBID>.err`, and reports the `.out`
    file as `InferenceResult.log_path`.
-7. Run the exact `predictions_validation_command`, verify one termination
-   record per real request, then return one
+   Also copy each suite member's config, predictions, and diagnostics into its
+   assigned `work_dir`.
+7. Run the exact primary and per-member `predictions_validation_command`,
+   verify one termination record per real request, then return one complete
    `InferenceResult`.
 
 Use direct SSH for `cloud`; Infrastructure obtains that route from the cloud
@@ -57,8 +66,9 @@ Inference execution. Put `slurm_job.nodes` and `slurm_job.num_gpus` /
 `slurm_job.job_name`, activate
 `cluster.env_setup`, and, when `memory_helper_path` is supplied, import the
 copied `zevo_inference_memory` helper to select an allocated GPU using the
-recorded absolute target. Run `predict.py` in the
-foreground, and exit with it. The file is the actual inference job, not an
+recorded absolute target. Run `predict.py` in the foreground with the complete
+suite and exit with it. One suite is one `sbatch`, one allocation, and one
+model load. The file is the actual inference job, not an
 empty allocation. Never use `sleep infinity`, `salloc`, `srun --overlap`,
 `--wrap`, or resource flags on the `sbatch` command line.
 Use exactly `#SBATCH --output=<slurm_job.stdout_path>` and
