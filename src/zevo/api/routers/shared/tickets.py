@@ -1625,10 +1625,10 @@ async def post_progress(
     `{"kind":"config", ...resolved hyper-params...}`. Best-effort: never 404s on
     a missing ticket (the run may have just been cancelled) — returns ok=false.
     """
-    exists = (await db.execute(
-        select(Ticket.id).where(Ticket.id == ticket_id)
+    ticket = (await db.execute(
+        select(Ticket).where(Ticket.id == ticket_id)
     )).scalar_one_or_none()
-    if exists is None:
+    if ticket is None:
         return {"ok": False, "reason": "ticket not found"}
 
     kind = str(body.get("kind") or "progress")
@@ -1698,6 +1698,18 @@ async def post_progress(
             "current_step", "total_steps", "phase",
         }
         extras = {k: v for k, v in body.items() if k not in reserved}
+        benchmark_name = str(body.get("benchmark_name") or "").strip()
+        if benchmark_name and ticket.agent_id == "inference":
+            try:
+                benchmark_index = int(body.get("benchmark_index") or 0)
+                benchmark_total = int(body.get("benchmark_total") or 0)
+            except (TypeError, ValueError):
+                benchmark_index = benchmark_total = 0
+            position = (
+                f" ({benchmark_index}/{benchmark_total})"
+                if benchmark_index > 0 and benchmark_total > 0 else ""
+            )
+            ticket.summary = f"Inference suite · {benchmark_name}{position}"[:1000]
         phase = str(body.get("phase", ""))
         current_step = int(body.get("step", body.get("current_step", 0)) or 0)
         existing = (await db.execute(select(ExecutionEvent).where(

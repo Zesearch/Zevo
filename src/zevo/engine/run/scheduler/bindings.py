@@ -59,6 +59,9 @@ async def resolve_input_bindings(
             product.role == "checkpoint"
             and (product.meta or {}).get("checkpoint_kind") == "final"
             and (current.meta or {}).get("checkpoint_kind") != "final"
+        ) or (
+            bool((product.meta or {}).get("suite_primary"))
+            and not bool((current.meta or {}).get("suite_primary"))
         ):
             by_role[key] = product
 

@@ -538,11 +538,20 @@ async def test_validation_suite_publishes_one_unweighted_average(tmp_path) -> No
         assert event.metric_name == "suite_average"
         assert event.score == pytest.approx(0.6)
         assert event.extras["validation_sets"] == {
-            "math": {"score": 0.4, "metric": "accuracy"},
-            "qa": {"score": 0.8, "metric": "exact_match"},
+            "math": {
+                "score": 0.4, "metric": "accuracy",
+                "metric_direction": "max",
+            },
+            "qa": {
+                "score": 0.8, "metric": "exact_match",
+                "metric_direction": "max",
+            },
         }
         await db.refresh(run)
         assert run.history[0]["validation_scores"] == {"math": 0.4, "qa": 0.8}
+        assert run.history[0]["validation_metric_directions"] == {
+            "math": "max", "qa": "max",
+        }
         for path in metric_paths:
             stored = json.loads(path.read_text(encoding="utf-8"))
             assert stored["score"] == pytest.approx(0.6)
@@ -554,7 +563,10 @@ async def test_validation_suite_publishes_one_unweighted_average(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_validation_member_selects_its_own_baseline_inference_query() -> None:
-    from zevo.engine.run.runner import _spawn_validation_infer
+    from zevo.engine.run.runner import (
+        _build_validation_suite_members,
+        _spawn_validation_suite_evals,
+    )
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -563,12 +575,16 @@ async def test_validation_member_selects_its_own_baseline_inference_query() -> N
     validation_suite = [
         {
             "name": "math", "public": "/work/math-public.csv",
+            "validation_set": "/work/math.csv", "metric": "accuracy",
+            "answer_fields": ["answer"],
             "sample_submission": "/work/math-submission.csv",
             "inference_data_profile": "/work/math-profile.json",
             "inference_query": "Solve {question}.",
         },
         {
             "name": "qa", "public": "/work/qa-public.csv",
+            "validation_set": "/work/qa.csv", "metric": "exact_match",
+            "answer_fields": ["answer"],
             "sample_submission": "/work/qa-submission.csv",
             "inference_data_profile": "/work/qa-profile.json",
             "inference_query": "Answer {question} with one short phrase.",
@@ -598,17 +614,42 @@ async def test_validation_member_selects_its_own_baseline_inference_query() -> N
         db.add_all([run, primary])
         await db.commit()
 
-        created = await _spawn_validation_infer(db, run, primary, enqueue=False)
-        assert len(created) == 1
-        qa = created[0]
-        assert qa.payload["test_set_name"] == "validation:qa"
-        assert qa.payload["configuration_pins"]["inference_config"][
+        members = await _build_validation_suite_members(
+            ticket=primary,
+            payload=dict(primary.payload or {}),
+            work_dir="/work/run/primary-infer",
+            run=run,
+            session=db,
+        )
+        assert len(members) == 1
+        qa = members[0]
+        assert qa.test_set_name == "validation:qa"
+        assert qa.configuration_pins["inference_config"][
             "inference_query"
         ] == "Answer {question} with one short phrase."
-        assert "inference_config" not in qa.inputs
-        assert qa.inputs["inference_data_profile"] == {
-            "artifact_role": "inference_data_profile",
-            "path": "/work/qa-profile.json",
+        assert qa.configuration_mode == "select"
+        assert qa.inference_data_profile_path == "/work/qa-profile.json"
+
+        prediction = WorkProduct(
+            ticket_id=primary.id,
+            role="predictions",
+            path="/work/run/primary-infer/suite/001/predictions.csv",
+            meta={"suite_member_name": "qa"},
+        )
+        db.add(prediction)
+        await db.commit()
+        created = await _spawn_validation_suite_evals(
+            db, run, primary, enqueue=False,
+        )
+        assert len(created) == 1
+        evaluation = created[0]
+        assert evaluation.agent_id == "evaluation"
+        assert evaluation.payload["test_set_name"] == "validation:qa"
+        assert evaluation.inputs["predictions"] == {
+            "source_ticket_id": primary.id,
+            "artifact_role": "predictions",
+            "work_product_id": prediction.id,
+            "path": prediction.path,
         }
 
     await engine.dispose()
@@ -677,12 +718,26 @@ async def test_run_overview_reports_current_benchmark_and_suite_progress() -> No
         assert progress["test"]["completed"] == 0
         assert progress["current"][0]["name"] == "qa"
 
+        primary.status = "running"
+        primary.summary = "Inference suite · qa (2/2)"
+        progress = _benchmark_progress(
+            run, [primary], reveal_holdout=True,
+        )
+        assert progress["validation"]["current"] == [{
+            "suite": "validation", "name": "qa",
+            "stage": "inference", "status": "running", "iteration": 0,
+        }]
+
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_heldout_suite_runs_each_inference_query_independently() -> None:
-    from zevo.engine.run.runner import _spawn_holdout_infer
+async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
+    from zevo.engine.run.runner import (
+        _build_holdout_suite_members,
+        _spawn_holdout_infer,
+        _spawn_holdout_suite_evals,
+    )
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -690,9 +745,9 @@ async def test_heldout_suite_runs_each_inference_query_independently() -> None:
     Session = async_sessionmaker(engine, expire_on_commit=False)
     suite = [
         {**_member("math"), "public": "/work/math-public.csv",
-         "inference_data_profile": ""},
+         "inference_data_profile": "/work/math-profile.json"},
         {**_member("qa", "exact_match"), "public": "/work/qa-public.csv",
-         "inference_data_profile": ""},
+         "inference_data_profile": "/work/qa-profile.json"},
     ]
     async with Session() as db:
         run = Run(
@@ -727,7 +782,45 @@ async def test_heldout_suite_runs_each_inference_query_independently() -> None:
         ]
         db.add_all([run, source, *data_tickets])
         await db.commit()
-        await _spawn_holdout_infer(db, run, source, enqueue=False)
+        ticket = await _spawn_holdout_infer(
+            db, run, source, enqueue=False,
+        )
+        assert ticket is not None
+        members = await _build_holdout_suite_members(
+            ticket=ticket,
+            payload=dict(ticket.payload or {}),
+            work_dir="/work/holdout",
+            run=run,
+            session=db,
+        )
+        assert len(members) == 1
+        assert members[0].name == "qa"
+        assert members[0].configuration_pins["inference_config"][
+            "inference_query"
+        ] == next(
+            item["inference_query"] for item in suite if item["name"] == "qa"
+        )
+        predictions = [
+            WorkProduct(
+                ticket_id=ticket.id,
+                role="predictions",
+                path=f"/work/holdout/{name}/predictions.csv",
+                meta={"suite_member_name": name},
+            )
+            for name in ("math", "qa")
+        ]
+        db.add_all(predictions)
+        await db.commit()
+        evaluations = await _spawn_holdout_suite_evals(
+            db, run, ticket, enqueue=False,
+        )
+        assert [item.payload["test_set_name"] for item in evaluations] == [
+            "math", "qa",
+        ]
+        assert [
+            item.inputs["predictions"]["work_product_id"]
+            for item in evaluations
+        ] == [item.id for item in predictions]
 
     async with Session() as db:
         tickets = (await db.execute(
@@ -737,14 +830,14 @@ async def test_heldout_suite_runs_each_inference_query_independently() -> None:
                 Ticket.agent_id == "inference",
             ).order_by(Ticket.id)
         )).scalars().all()
-        assert len(tickets) == 2
-        by_name = {ticket.payload["test_set_name"]: ticket for ticket in tickets}
-        assert by_name["math"].payload["scoring_set"] == "/work/math-public.csv"
-        assert by_name["qa"].payload["scoring_set"] == "/work/qa-public.csv"
-        for name, ticket in by_name.items():
-            assert ticket.payload["configuration_pins"]["inference_config"][
-                "inference_query"
-            ] == next(item["inference_query"] for item in suite if item["name"] == name)
+        assert len(tickets) == 1
+        assert tickets[0].payload["test_set_name"] == "math"
+        assert tickets[0].payload["scoring_set"] == "/work/math-public.csv"
+        assert tickets[0].payload["configuration_pins"]["inference_config"][
+            "inference_query"
+        ] == next(
+            item["inference_query"] for item in suite if item["name"] == "math"
+        )
 
     await engine.dispose()
 

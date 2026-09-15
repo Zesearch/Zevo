@@ -315,11 +315,27 @@ def _benchmark_progress(
             if ticket.lane == "optimization" and ticket.agent_id in {
                 "inference", "evaluation",
             }:
+                if ticket.agent_id == "inference":
+                    summary = str(ticket.summary or "")
+                    current = next((
+                        name for name in names
+                        if summary.startswith(f"Inference suite · {name}")
+                    ), "")
+                    if current:
+                        return current
                 return names[0] if names else ""
             return ""
         if ticket.lane == "held_out_test" and ticket.agent_id in {
             "data", "inference", "evaluation",
         }:
+            if ticket.agent_id == "inference":
+                summary = str(ticket.summary or "")
+                current = next((
+                    name for name in names
+                    if summary.startswith(f"Inference suite · {name}")
+                ), "")
+                if current:
+                    return current
             return raw or (names[0] if len(names) == 1 else "")
         return ""
 
@@ -3169,7 +3185,15 @@ def _prediction_with_questions_rows(
             if key not in row or row.get(key) != value
         ]
         for key, value in prediction_values:
-            output_key = "prediction" if len(prediction_values) == 1 else f"prediction · {key}"
+            # Keep submission column names readable when they do not collide
+            # with an input field. Prefix only a real collision; turning an
+            # ordinary `benchmark,prediction` submission into two nested-looking
+            # labels made the joined preview harder to scan than the raw CSV.
+            output_key = (
+                "prediction"
+                if len(prediction_values) == 1
+                else key if key not in row else f"prediction · {key}"
+            )
             row[output_key] = value
         combined.append(row)
     return combined
@@ -3375,7 +3399,14 @@ async def get_artifact_detail(
         # answer column. That is correct for Evaluation but poor for a human
         # preview, so pair it with the exact questions-only file assigned to
         # this Inference ticket.
-        question_path = Path(str((tk.payload or {}).get("scoring_set") or ""))
+        # A model-scoped Inference ticket may own several benchmark outputs.
+        # The WorkProduct records the exact member questions; falling back to
+        # Ticket.payload keeps single-member and older artifacts readable.
+        question_path = Path(str(
+            meta.get("scoring_set")
+            or (tk.payload or {}).get("scoring_set")
+            or ""
+        ))
         truth_path: Path | None = None
         answer_fields: list[str] = []
         if is_trusted_ui_request(request):
@@ -3385,15 +3416,34 @@ async def get_artifact_detail(
             holdout = dict(run_row.holdout or {}) if run_row is not None else {}
             scoring_lane = "test" if tk.lane == "held_out_test" else "validation"
             member = None
+            raw_set_name = str(
+                meta.get("test_set_name")
+                or (tk.payload or {}).get("test_set_name")
+                or ""
+            )
             if scoring_lane == "test":
-                test_set_name = str((tk.payload or {}).get("test_set_name") or "")
+                test_set_name = raw_set_name
                 member = next((
                     item for item in (holdout.get("test_sets") or [])
                     if isinstance(item, dict)
                     and str(item.get("name") or "") == test_set_name
                 ), None)
+            else:
+                validation_name = (
+                    raw_set_name[len("validation:"):]
+                    if raw_set_name.startswith("validation:")
+                    else raw_set_name
+                )
+                if validation_name:
+                    member = next((
+                        item for item in (holdout.get("validation_sets") or [])
+                        if isinstance(item, dict)
+                        and str(item.get("name") or "") == validation_name
+                    ), None)
             candidate = Path(str(
-                (member or {}).get("test_set")
+                (member or {}).get(
+                    "test_set" if scoring_lane == "test" else "validation_set"
+                )
                 or holdout.get(f"{scoring_lane}_set")
                 or ""
             ))

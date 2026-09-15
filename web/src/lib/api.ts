@@ -511,6 +511,10 @@ export type IterationHistoryEntry = {
   base_model: string;
   /** VALIDATION score — what the orchestrator saw and steered by. */
   score: number;
+  /** Named component scores for a multi-Validation Task. */
+  validation_scores?: Record<string, number>;
+  validation_metrics?: Record<string, string>;
+  validation_metric_directions?: Record<string, MetricDirection>;
   /**
    * HELD-OUT test score for the same iteration, written by the harness after
    * the fact. Absent while the held-out measurement is still running, and

@@ -567,7 +567,10 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
 
 
 def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
-    from zevo.contracts.inference import InferenceResult
+    from zevo.contracts.inference import (
+        InferenceResult,
+        InferenceSuiteMemberResult,
+    )
     from zevo.contracts.configuration import (
         InferencePromptExample, InferenceRunConfig, PromptMessageExample,
         SuggestionDecision, load_inference_config,
@@ -748,6 +751,92 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
             encoding="utf-8",
         )
         slurm_script_path = str(slurm_script)
+    suite_results: list[InferenceSuiteMemberResult] = []
+    for member in list(payload.get("suite_members") or []):
+        member_dir = Path(str(member.get("work_dir") or work_dir / "suite"))
+        member_dir.mkdir(parents=True, exist_ok=True)
+        supplied_member_path = str(member.get("inference_config_path") or "")
+        if supplied_member_path:
+            member_config_path = Path(supplied_member_path)
+        else:
+            member_config = config.model_copy(deep=True)
+            member_pins = dict(member.get("configuration_pins") or {})
+            member_mapping = dict(
+                member_pins.get("inference_config")
+                or member_config.measurement.inference_config
+            )
+            member_config.measurement.inference_config = member_mapping
+            member_inputs = {
+                field: f"<INPUT:{field}>"
+                for field in member_mapping.get("input_fields", [])
+            }
+            member_query = str(member_mapping.get("inference_query") or "")
+            if member_query:
+                from zevo.contracts.prompting import render_inference_query
+
+                member_text = render_inference_query(
+                    member_query, member_inputs,
+                )
+            else:
+                member_text = "\n".join(
+                    f"{field}: {value}"
+                    for field, value in member_inputs.items()
+                )
+            if member_config.prompt.prompt_framing == "chat" or (
+                member_config.prompt.prompt_framing.startswith("chat:")
+            ):
+                member_messages = [
+                    PromptMessageExample(
+                        role="system",
+                        content=member_config.prompt.system_prompt,
+                    ),
+                    PromptMessageExample(role="user", content=member_text),
+                ]
+                member_rendered = (
+                    f"<|im_start|>system\n{member_config.prompt.system_prompt}"
+                    "<|im_end|>\n"
+                    f"<|im_start|>user\n{member_text}<|im_end|>\n"
+                    "<|im_start|>assistant\n"
+                    + (
+                        "<think>\n"
+                        if member_config.prompt.model_reasoning_type == "thinking"
+                        else ""
+                    )
+                )
+            else:
+                member_messages = []
+                member_rendered = member_text
+            member_config.prompt_example = InferencePromptExample(
+                input_values=member_inputs,
+                messages=member_messages,
+                rendered_prompt=member_rendered,
+            )
+            member_config_path = member_dir / "inference_config.yaml"
+            member_config_path.write_text(
+                yaml.safe_dump(
+                    member_config.model_dump(mode="json"), sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+        member_predictions = member_dir / "predictions.csv"
+        member_predictions.write_text(
+            "id,prediction\n1,A\n2,B\n3,A\n", encoding="utf-8",
+        )
+        member_diagnostics = member_dir / "generation_diagnostics.json"
+        member_diagnostics.write_text(
+            generation_diagnostics.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        suite_results.append(InferenceSuiteMemberResult(
+            name=str(member.get("name") or "member"),
+            test_set_name=str(member.get("test_set_name") or "member"),
+            inference_config_path=str(member_config_path),
+            predictions_path=str(member_predictions),
+            generation_diagnostics_path=str(member_diagnostics),
+            n_rows=3,
+            n_requests=3,
+            n_unparseable=0,
+        ))
     return InferenceResult(
         status="succeeded", operation="run_inference",
         ticket_id=payload.get("ticket_id", "infer-stub"),
@@ -757,6 +846,7 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
         predictions_path=str(preds),
         generation_diagnostics_path=str(generation_diagnostics),
         n_rows=3, n_requests=3, n_unparseable=0,
+        suite_members=suite_results,
         error_message="", notes="stub predictions",
     )
 

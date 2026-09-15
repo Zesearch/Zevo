@@ -280,6 +280,20 @@ async def _persist_slurm_execution_marker(
         "current_step", "total_steps", "phase",
     }
     extras = {key: value for key, value in payload.items() if key not in reserved}
+    benchmark_name = str(payload.get("benchmark_name") or "").strip()
+    if benchmark_name:
+        ticket = await session.get(Ticket, ticket_id)
+        if ticket is not None and ticket.agent_id == "inference":
+            try:
+                benchmark_index = int(payload.get("benchmark_index") or 0)
+                benchmark_total = int(payload.get("benchmark_total") or 0)
+            except (TypeError, ValueError):
+                benchmark_index = benchmark_total = 0
+            position = (
+                f" ({benchmark_index}/{benchmark_total})"
+                if benchmark_index > 0 and benchmark_total > 0 else ""
+            )
+            ticket.summary = f"Inference suite · {benchmark_name}{position}"[:1000]
     existing = (await session.execute(select(ExecutionEvent).where(
         ExecutionEvent.heartbeat_id == heartbeat.id,
         ExecutionEvent.attempt_id == attempt_id,
