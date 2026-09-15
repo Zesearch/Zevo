@@ -4181,6 +4181,21 @@ async def run_ticket(
         )
         output = result.output
         exit_code = result.exit_code
+    except asyncio.CancelledError:
+        # Daemon/container shutdown used to bypass the entire terminalization
+        # tail below because CancelledError is not an Exception. The Claude
+        # subprocess disappeared, but its HeartbeatRun remained live until the
+        # reconciler's 30-minute stale cutoff. Stop every process owned by this
+        # activation and turn the interruption into an ordinary failed attempt
+        # so heartbeat/ticket cleanup and bounded retry policy still run.
+        from zevo.engine.run import process_registry
+        process_registry.cancel(heartbeat_id)
+        process_registry.cancel(tk.id)
+        exit_code = 1
+        error_message = (
+            "RuntimeError: activation task was cancelled unexpectedly; "
+            "owned process groups were stopped and the attempt was finalized"
+        )
     except Exception as e:
         exit_code = 1
         error_message = f"{type(e).__name__}: {e}"

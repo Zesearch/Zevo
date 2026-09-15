@@ -31,3 +31,22 @@ async def test_final_unterminated_cli_event_is_preserved() -> None:
     lines = [line async for line in iter_subprocess_lines(stream, chunk_size=3)]
 
     assert lines == [b"first\n", b"last-without-newline"]
+
+
+@pytest.mark.asyncio
+async def test_raw_chunks_report_activity_before_a_line_is_complete() -> None:
+    stream = asyncio.StreamReader(limit=8)
+    chunks: list[bytes] = []
+    stream.feed_data(b"one-long-event-without-a-newline")
+    stream.feed_eof()
+
+    lines = [
+        line
+        async for line in iter_subprocess_lines(
+            stream, chunk_size=4, on_chunk=chunks.append,
+        )
+    ]
+
+    assert b"".join(chunks) == b"one-long-event-without-a-newline"
+    assert len(chunks) > 1
+    assert lines == [b"one-long-event-without-a-newline"]

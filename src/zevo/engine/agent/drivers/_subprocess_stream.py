@@ -9,13 +9,14 @@ one large event cannot crash the entire Ticket before the CLI can recover.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 
 async def iter_subprocess_lines(
     stream: asyncio.StreamReader,
     *,
     chunk_size: int = 64 * 1024,
+    on_chunk: Callable[[bytes], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """Yield complete newline-delimited records without ``readline`` limits.
 
@@ -29,6 +30,11 @@ async def iter_subprocess_lines(
         chunk = await stream.read(chunk_size)
         if not chunk:
             break
+        # Report raw-byte activity before waiting for a newline. Claude can
+        # emit one very large JSONL event over several reads; a watchdog that
+        # only observes completed lines would incorrectly call that silence.
+        if on_chunk is not None:
+            on_chunk(chunk)
         pending.extend(chunk)
         consumed = 0
         while True:

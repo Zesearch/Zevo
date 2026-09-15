@@ -89,7 +89,25 @@ def _inflight_count(agent_id: str) -> int:
     return len(_inflight.get(agent_id, ()))
 
 
-def _inflight_done(agent_id: str, wakeup_id: str) -> None:
+def _inflight_done(
+    agent_id: str, wakeup_id: str, task: asyncio.Task,
+) -> None:
+    # A bare done-callback that only discarded the Task also discarded its
+    # exception. In particular, daemon cancellations produced no diagnostic at
+    # the point the work vanished. Retrieve and report terminal state first.
+    if task.cancelled():
+        log.error(
+            "[wakeup] task cancelled unexpectedly: agent=%s wakeup=%s",
+            agent_id, wakeup_id[:8],
+        )
+    else:
+        exc = task.exception()
+        if exc is not None:
+            log.error(
+                "[wakeup] background task escaped with an exception: "
+                "agent=%s wakeup=%s",
+                agent_id, wakeup_id[:8], exc_info=exc,
+            )
     live = _inflight.get(agent_id)
     if live is not None:
         live.pop(wakeup_id, None)
@@ -259,7 +277,7 @@ async def _drain_once(lane: str | None = None) -> int:
             task = asyncio.create_task(_run_one(agent_id, w.id, w.created_at))
             _inflight.setdefault(agent_id, {})[w.id] = task
             task.add_done_callback(
-                lambda _t, a=agent_id, i=w.id: _inflight_done(a, i)
+                lambda _t, a=agent_id, i=w.id: _inflight_done(a, i, _t)
             )
             processed += 1
 
@@ -329,6 +347,23 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                              agent_id, w.id[:8], w.source)
                     await _process_wakeup(s, w)
     except asyncio.CancelledError:
+        # If cancellation happens before/around run_ticket's own guarded
+        # driver section, there is no runner tail to finalize this queue row.
+        # Record it in a fresh transaction before preserving cancellation.
+        log.error(
+            "[wakeup] task cancelled while processing %s; marking failed",
+            wakeup_id[:8],
+        )
+        try:
+            await asyncio.shield(_mark_wakeup_terminal(
+                wakeup_id,
+                f"daemon task cancelled unexpectedly during wakeup {wakeup_id}",
+            ))
+        except Exception:
+            log.exception(
+                "[wakeup] could not finalize cancelled wakeup %s",
+                wakeup_id[:8],
+            )
         raise
     except Exception:
         # Last-resort guard: NO wakeup may ever take down the daemon.
