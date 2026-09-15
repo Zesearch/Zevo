@@ -158,7 +158,7 @@ export type AgentCustomization = {
 type RunEnvelope = {
   task_name: string;
   run_name: string;
-  /** Ephemeral correlation id used only while POST /runs prepares Test data. */
+  /** Ephemeral correlation id for asynchronous Test/Validation preparation. */
   setup_id?: string;
   iteration_budget?: number;
   stop_threshold?: number;

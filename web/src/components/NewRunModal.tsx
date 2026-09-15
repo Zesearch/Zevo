@@ -748,12 +748,14 @@ export function NewRunModal({
       };
     }
     body = { ...body, setup_id: setupId };
-    const out = await api<{ run_id: string }>("/runs", {
+    const out = await api<{ run_id?: string; setup_id?: string; status: string }>("/runs", {
       method: "POST",
       body: JSON.stringify(body),
     });
+    const runId = out.run_id || (await runSetup.wait(out.setup_id || setupId)).run_id;
+    if (!runId) throw new Error("Run setup completed without a Run id.");
     onClose();
-    nav(`/runs/${out.run_id}?tab=timeline`);
+    nav(`/runs/${runId}?tab=timeline`);
   }
 
   /** Auto replaces only the Test setup. Training ownership is expressed by

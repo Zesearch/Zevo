@@ -7,6 +7,8 @@ export type RunSetupProgress = {
   completed: number;
   total: number;
   label: string;
+  run_id?: string;
+  error?: string;
 };
 
 
@@ -21,15 +23,10 @@ const INITIAL_PROGRESS: RunSetupProgress = {
 
 export function useRunSetupProgress() {
   const [progress, setProgress] = useState<RunSetupProgress | null>(null);
-  const timer = useRef<number | null>(null);
   const activeId = useRef("");
 
   const stop = useCallback(() => {
     activeId.current = "";
-    if (timer.current != null) {
-      window.clearInterval(timer.current);
-      timer.current = null;
-    }
   }, []);
 
   useEffect(() => stop, [stop]);
@@ -39,30 +36,36 @@ export function useRunSetupProgress() {
     const setupId = crypto.randomUUID();
     activeId.current = setupId;
     setProgress(INITIAL_PROGRESS);
-
-    const poll = async () => {
-      try {
-        const response = await fetch(`/api/run-setups/${encodeURIComponent(setupId)}`);
-        if (!response.ok || activeId.current !== setupId) return;
-        const next = await response.json() as RunSetupProgress;
-        if (activeId.current === setupId) {
-          setProgress(next);
-          if (next.status === "failed" && timer.current != null) {
-            window.clearInterval(timer.current);
-            timer.current = null;
-          }
-        }
-      } catch {
-        // The launch POST remains authoritative. A transient progress-poll
-        // failure must neither cancel it nor replace its useful API error.
-      }
-    };
-    void poll();
-    timer.current = window.setInterval(poll, 350);
     return setupId;
   }, [stop]);
 
-  return { progress, begin, stop };
+  const wait = useCallback(async (setupId: string): Promise<RunSetupProgress> => {
+    while (activeId.current === setupId) {
+      let next: RunSetupProgress | null = null;
+      try {
+        const response = await fetch(`/api/run-setups/${encodeURIComponent(setupId)}`);
+        if (response.ok && activeId.current === setupId) {
+          next = await response.json() as RunSetupProgress;
+        }
+      } catch {
+        // A transient progress-poll failure must not cancel server-side setup.
+      }
+      if (next && activeId.current === setupId) {
+        setProgress(next);
+        if (next.status === "complete") {
+          if (!next.run_id) throw new Error("Run setup completed without a Run id.");
+          return next;
+        }
+        if (next.status === "failed") {
+          throw new Error(next.error || next.label || "Run setup failed.");
+        }
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    throw new Error("Run setup was cancelled.");
+  }, []);
+
+  return { progress, begin, wait, stop };
 }
 
 

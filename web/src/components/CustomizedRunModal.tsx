@@ -457,8 +457,9 @@ export function CustomizedRunForm({
       if (!Number.isFinite(queueWaitHours) || queueWaitHours <= 0 || queueWaitHours > 168) {
         throw new Error("Max queue wait must be greater than 0 and at most 168 hours.");
       }
+      const setupId = runSetup.begin();
       const body = {
-        setup_id: runSetup.begin(),
+        setup_id: setupId,
         mode: "customized_pipeline",
         task_name: taskName.trim(),
         run_name: runName.trim(),
@@ -480,12 +481,14 @@ export function CustomizedRunForm({
           ? { save_setting: true, setting_name: settingName.trim() }
           : {}),
       };
-      const d = await api<{ run_id?: string }>("/runs", {
+      const d = await api<{ run_id?: string; setup_id?: string; status: string }>("/runs", {
         method: "POST",
         body: JSON.stringify(body),
       });
+      const runId = d.run_id || (await runSetup.wait(d.setup_id || setupId)).run_id;
+      if (!runId) throw new Error("Run setup completed without a Run id.");
       onDone();
-      if (d.run_id) nav(`/runs/${d.run_id}?tab=timeline`);
+      nav(`/runs/${runId}?tab=timeline`);
     } catch (e) {
       setError(String((e as Error).message || e));
     } finally {
