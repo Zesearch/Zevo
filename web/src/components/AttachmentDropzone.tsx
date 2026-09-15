@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Paperclip, X, Upload, Loader2 } from "lucide-react";
+import { CheckCircle2, ChevronRight, Paperclip, X, Upload, Loader2 } from "lucide-react";
 import { api } from "../lib/api";
 import { bytes } from "../lib/format";
 
@@ -18,6 +18,8 @@ export function AttachmentDropzone({
   onChange: (next: Attachment[]) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [open, setOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,6 +39,7 @@ export function AttachmentDropzone({
         uploaded.push(await uploadOne(f));
       }
       onChange([...attachments, ...uploaded]);
+      setOpen(false);
     } catch (e) {
       setError(String((e as Error).message || e));
     } finally {
@@ -52,13 +55,49 @@ export function AttachmentDropzone({
     <div>
       <button
         type="button"
-        onClick={() => inputRef.current?.click()}
+        onClick={() => setOpen((v) => !v)}
         disabled={uploading}
         className="btn !text-[13px] disabled:opacity-50"
       >
         {uploading ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
         {uploading ? "Uploading…" : "Upload files"}
+        <ChevronRight size={12} className={`transition-transform ${open ? "rotate-90" : ""}`} />
       </button>
+      {open && (
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragging(false);
+            if (e.dataTransfer.files?.length) void ingestFiles(e.dataTransfer.files);
+          }}
+          className={`mt-2 space-y-2 rounded-md border bg-raised/40 p-3 transition ${
+            dragging ? "border-brass-500/60 bg-brass-500/10" : "border-hair"
+          }`}
+        >
+          <div className={`flex flex-col items-center justify-center gap-1 rounded-md border border-dashed py-5 font-mono text-2xs ${
+            dragging ? "border-brass-500/60 text-brass-300" : "border-hair/70 text-slate-500"
+          }`}>
+            <Upload size={16} />
+            {dragging ? "Release to upload" : "Drag files here"}
+          </div>
+          <div className="flex items-center justify-center gap-2">
+            <span className="font-mono text-2xs text-slate-600">or</span>
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              disabled={uploading}
+              className="btn !text-[13px] disabled:opacity-50"
+            >
+              Select from your computer
+            </button>
+          </div>
+        </div>
+      )}
       <input
         ref={inputRef}
         type="file"
@@ -75,31 +114,37 @@ export function AttachmentDropzone({
         </div>
       )}
       {attachments.length > 0 && (
-        <ul className="stagger mt-2 space-y-1.5">
-          {attachments.map((a, i) => (
-            <li
-              key={a.path}
-              className="bezel-flat flex items-center justify-between gap-2 px-3 py-2 text-2xs"
-            >
-              <div className="flex min-w-0 items-center gap-2">
-                <Paperclip size={13} className="shrink-0 text-brass-400/70" />
-                <span className="truncate font-mono text-slate-300">{a.name}</span>
-                <span className="readout text-slate-600">{bytes(a.size_bytes)}</span>
-              </div>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  remove(i);
-                }}
-                className="rounded p-0.5 text-slate-500 transition hover:text-coral-300"
-                title="remove"
+        <div className="mt-2">
+          <div className="mb-1.5 flex items-center gap-1.5 font-mono text-2xs text-phosphor-300">
+            <CheckCircle2 size={13} />
+            {attachments.length} {attachments.length === 1 ? "file" : "files"} uploaded
+          </div>
+          <ul className="stagger space-y-1.5">
+            {attachments.map((a, i) => (
+              <li
+                key={a.path}
+                className="bezel-flat flex items-center justify-between gap-2 px-3 py-2 text-2xs"
               >
-                <X size={13} />
-              </button>
-            </li>
-          ))}
-        </ul>
+                <div className="flex min-w-0 items-center gap-2">
+                  <Paperclip size={13} className="shrink-0 text-brass-400/70" />
+                  <span className="truncate font-mono text-slate-300">{a.name}</span>
+                  <span className="readout text-slate-600">{bytes(a.size_bytes)}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    remove(i);
+                  }}
+                  className="rounded p-0.5 text-slate-500 transition hover:text-coral-300"
+                  title="remove"
+                >
+                  <X size={13} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
-import { ChevronRight, Plus, Trash2, Upload, X } from "lucide-react";
+import { CheckCircle2, ChevronRight, Plus, Trash2, Upload, X } from "lucide-react";
 import { FILES_ROOT, fmtScoringRows, splitDatasetPath } from "../lib/format";
 import { api } from "../lib/api";
 import type {
@@ -53,6 +53,15 @@ async function uploadFile(f: File): Promise<string> {
 function short(p: string): string {
   if (p.startsWith(FILES_ROOT + "/")) return p.slice(FILES_ROOT.length + 1);
   return p.startsWith("/app/") ? p.slice(5) : p;
+}
+
+function isUploadedPath(value: string): boolean {
+  return /(^|\/)uploads\//.test(value.replaceAll("\\", "/"));
+}
+
+function uploadedFileName(value: string): string {
+  const normalized = value.replaceAll("\\", "/");
+  return normalized.split("/").filter(Boolean).pop() || short(value);
 }
 
 /** Task names may retain an old grouping prefix ("Math · MATH-500") for
@@ -326,6 +335,11 @@ function ScoringSuiteEditor({
               onSplit={(value) => update(index, { split: value })}
               config={item.config || ""}
               onConfig={(value) => update(index, { config: value })}
+              onSourceChange={({ value, split, config }) => update(index, {
+                test_set: value,
+                split,
+                config,
+              })}
               splitPlaceholder={lane === "Test" ? "test" : "validation"}
               note="from Files"
             />
@@ -682,7 +696,7 @@ function HubInput({
 /** The upload route, as a box beside the picker rather than a bare button —
  *  the two ways in should look like two ways in. Shows what was uploaded. */
 function UploadBox({
-  onChange, className = "", buttonClassName = "", label = "Upload file",
+  onChange, className = "", buttonClassName = "", label = "Upload files",
 }: {
   onChange: (v: string) => void; className?: string; buttonClassName?: string;
   label?: string;
@@ -690,6 +704,9 @@ function UploadBox({
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // Both upload paths stay discoverable until a file has been selected.
+  const [open, setOpen] = useState(false);
+  const [dragDepth, setDragDepth] = useState(0);
 
   async function pick(f: File | undefined) {
     if (!f) return;
@@ -697,6 +714,7 @@ function UploadBox({
     setErr("");
     try {
       onChange(await uploadFile(f));
+      setOpen(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -708,12 +726,47 @@ function UploadBox({
     <div className={className}>
       <button
         type="button"
-        onClick={() => input.current?.click()}
+        onClick={() => setOpen((v) => !v)}
         disabled={busy}
         className={`btn !text-[13px] disabled:opacity-50 ${buttonClassName}`}
       >
         <Upload size={12} /> {busy ? "Uploading…" : label}
       </button>
+      {open && (
+        <div
+          onDragEnter={(e) => { e.preventDefault(); setDragDepth((d) => d + 1); }}
+          onDragOver={(e) => e.preventDefault()}
+          onDragLeave={() => setDragDepth((d) => Math.max(0, d - 1))}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragDepth(0);
+            void pick(e.dataTransfer.files?.[0]);
+          }}
+          className="mt-2 space-y-2 rounded-md border border-hair bg-raised/40 p-3"
+        >
+          <div
+            className={`flex flex-col items-center justify-center gap-1 rounded-md border border-dashed py-5 font-mono text-2xs transition ${
+              dragDepth > 0
+                ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
+                : "border-hair/70 text-slate-500"
+            }`}
+          >
+            <Upload size={16} />
+            {dragDepth > 0 ? "Release to upload" : "Drag files here"}
+          </div>
+          <div className="flex items-center justify-center gap-2">
+            <span className="font-mono text-2xs text-slate-600">or</span>
+            <button
+              type="button"
+              onClick={() => input.current?.click()}
+              disabled={busy}
+              className="btn !text-[13px] disabled:opacity-50"
+            >
+              Select from your computer
+            </button>
+          </div>
+        </div>
+      )}
       <input
         ref={input}
         type="file"
@@ -734,10 +787,18 @@ function Chosen({
   value, onChange, note = "", className = "",
 }: { value: string; onChange: (v: string) => void; note?: string; className?: string }) {
   const inCatalogue = splitDatasetPath(value);
+  const uploaded = isUploadedPath(value);
+  const displayValue = uploaded
+    ? uploadedFileName(value)
+    : inCatalogue ? inCatalogue.label : short(value);
   return (
     <div className={`flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2 ${className}`}>
-      <span className="min-w-0 flex-1 truncate font-mono text-sm text-slate-100" title={value}>
-        {inCatalogue ? inCatalogue.label : short(value)}
+      {uploaded && <CheckCircle2 size={15} className="shrink-0 text-phosphor-300" />}
+      <span className="min-w-0 flex-1" title={value}>
+        <span className="block truncate font-mono text-sm text-slate-100">{displayValue}</span>
+        {uploaded && (
+          <span className="mt-0.5 block font-mono text-2xs text-phosphor-300">Upload complete</span>
+        )}
       </span>
       {note && <span className="shrink-0 font-mono text-2xs text-slate-500">{note}</span>}
       <button
@@ -803,7 +864,7 @@ export function FileSlot({
  */
 export function TrainingDataField({
   value, onChange, label = "Training data", required = false, note = "", tag = true,
-  split, onSplit, config, onConfig, splitPlaceholder = "train",
+  split, onSplit, config, onConfig, onSourceChange, splitPlaceholder = "train",
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -817,10 +878,23 @@ export function TrainingDataField({
   onSplit?: (v: string) => void;
   config?: string;
   onConfig?: (v: string) => void;
+  /** Atomically update the source and its slice metadata. Scoring-suite cards
+   *  need this because three separate React updates would all read the same
+   *  pre-upload item and the final one could erase the uploaded path. */
+  onSourceChange?: (source: { value: string; split: string; config: string }) => void;
   splitPlaceholder?: string;
   showHints?: boolean;
 }) {
   const { data: datasets = [] } = useSWR<FileSetDTO[]>("/api/files");
+  const changeSource = (nextValue: string, nextSplit = "", nextConfig = "") => {
+    if (onSourceChange) {
+      onSourceChange({ value: nextValue, split: nextSplit, config: nextConfig });
+      return;
+    }
+    onChange(nextValue);
+    onSplit?.(nextSplit);
+    onConfig?.(nextConfig);
+  };
 
   return (
     <div>
@@ -832,7 +906,7 @@ export function TrainingDataField({
         {value ? (
           <Chosen
             value={value}
-            onChange={(v) => { onChange(v); onSplit?.(""); onConfig?.(""); }}
+            onChange={(v) => changeSource(v)}
             note={isHubId(value) ? "hf" : ""}
           />
         ) : (
@@ -843,20 +917,20 @@ export function TrainingDataField({
                 value=""
                 split={split}
                 config={config}
-                onPick={(o) => { onChange(o.value); onSplit?.(o.split); onConfig?.(o.config); }}
+                onPick={(o) => changeSource(o.value, o.split, o.config)}
                 className="min-w-0 flex-1"
                 placeholder={note || "from Files"}
               />
               <HubInput
                 value=""
-                onChange={(v) => { onChange(v); if (!v) { onSplit?.(""); onConfig?.(""); } }}
+                onChange={(v) => changeSource(v, v ? split ?? "" : "", v ? config ?? "" : "")}
                 className="min-w-0 flex-1"
               />
             </div>
             {/* An upload has no slice; clearing them stops a stale split
                 pointing the run at rows it was never told to use. */}
             <UploadBox
-              onChange={(v) => { onChange(v); onSplit?.(""); onConfig?.(""); }}
+              onChange={(v) => changeSource(v)}
             />
           </>
         )}
@@ -1335,6 +1409,8 @@ export function MultiFileSlot({
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [showUpload, setShowUpload] = useState(false);
+  const [dragDepth, setDragDepth] = useState(0);
 
   const add = (v: string) => {
     const p = v.trim();
@@ -1343,17 +1419,13 @@ export function MultiFileSlot({
     setDraft("");
   };
 
-  async function upload(files: FileList | File[] | null) {
-    const selected = Array.from(files ?? []);
-    if (!selected.length) return;
+  async function upload(f: File | undefined) {
+    if (!f) return;
     setBusy(true);
     setErr("");
     try {
-      const uploaded = await Promise.all(selected.map(uploadFile));
-      const additions = uploaded
-        .map((value) => value.trim())
-        .filter((value) => value && !values.includes(value));
-      if (additions.length) onChange([...values, ...additions]);
+      add(await uploadFile(f));
+      setShowUpload(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1376,7 +1448,7 @@ export function MultiFileSlot({
         />
         <button
           type="button"
-          onClick={() => input.current?.click()}
+          onClick={() => setShowUpload((v) => !v)}
           disabled={busy}
           className="btn shrink-0 !text-[13px] disabled:opacity-50"
         >
@@ -1385,16 +1457,53 @@ export function MultiFileSlot({
         <input
           ref={input}
           type="file"
-          multiple
           className="hidden"
-          onChange={(e) => { void upload(e.target.files); e.target.value = ""; }}
+          onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ""; }}
         />
       </div>
+      {showUpload && (
+        <div
+          onDragEnter={(e) => { e.preventDefault(); setDragDepth((d) => d + 1); }}
+          onDragOver={(e) => e.preventDefault()}
+          onDragLeave={() => setDragDepth((d) => Math.max(0, d - 1))}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragDepth(0);
+            void upload(e.dataTransfer.files?.[0]);
+          }}
+          className="mt-2 space-y-2 rounded-md border border-hair bg-raised/40 p-3"
+        >
+          <div className={`flex flex-col items-center justify-center gap-1 rounded-md border border-dashed py-5 font-mono text-2xs transition ${
+            dragDepth > 0
+              ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
+              : "border-hair/70 text-slate-500"
+          }`}>
+            <Upload size={16} />
+            {dragDepth > 0 ? "Release to upload" : "Drag files here"}
+          </div>
+          <div className="flex items-center justify-center gap-2">
+            <span className="font-mono text-2xs text-slate-600">or</span>
+            <button type="button" onClick={() => input.current?.click()} className="btn !text-[13px]">
+              Select from your computer
+            </button>
+          </div>
+        </div>
+      )}
       {values.length > 0 && (
         <div className="mt-1.5 space-y-1">
           {values.map((v) => (
-            <div key={v} className="flex items-center justify-between gap-2">
-              <span className="min-w-0 truncate font-mono text-[0.62rem] text-slate-400">{short(v)}</span>
+            <div key={v} className="flex items-center justify-between gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2">
+              <span className="flex min-w-0 items-center gap-2" title={v}>
+                {isUploadedPath(v) && <CheckCircle2 size={14} className="shrink-0 text-phosphor-300" />}
+                <span className="min-w-0">
+                  <span className="block truncate font-mono text-xs text-slate-200">
+                    {isUploadedPath(v) ? uploadedFileName(v) : short(v)}
+                  </span>
+                  <span className={`block font-mono text-2xs ${isUploadedPath(v) ? "text-phosphor-300" : "text-slate-500"}`}>
+                    {isUploadedPath(v) ? "Upload complete" : "Selected"}
+                  </span>
+                </span>
+              </span>
               <button
                 type="button"
                 onClick={() => onChange(values.filter((x) => x !== v))}
