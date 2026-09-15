@@ -1,14 +1,15 @@
 """GET/POST /runs, GET /runs/{id}.
 
 POST /runs accepts the named Run envelope and either a complete UserRequest or
-a catalogue task_name. It queues the stable Orchestrator Ticket in the
-background and returns the run_id immediately; LLM and GPU work never blocks
-the HTTP response.
+a catalogue task_name. UI launches are acknowledged before scoring datasets
+are settled; API/CLI launches without a setup id retain the direct run_id
+response. LLM and GPU work never blocks the HTTP response.
 """
 from __future__ import annotations
 
 import csv
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -18,7 +19,15 @@ from datetime import datetime, timezone
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import asc, delete as sa_delete, desc, func, or_, select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,6 +72,7 @@ from zevo.contracts.tickets import RunMode, RunStatus
 
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 def _normalize_gpu_provider(value: str) -> str:
@@ -962,8 +972,8 @@ class CreateRunRequest(BaseModel):
     save_setting: bool = False
     setting_name: str = Field("", max_length=32)
     setting_id: str = ""
-    # Browser-generated correlation id for the synchronous pre-Run setup
-    # interval. It is UI telemetry only and is never stored on the Run.
+    # Browser-generated correlation id for asynchronous pre-Run setup. It is
+    # UI telemetry only and is never stored on the Run.
     setup_id: UUID | None = None
 
     @model_validator(mode="after")
@@ -1030,17 +1040,24 @@ class CreateRunResponse(BaseModel):
     status: Literal["running"]
 
 
+class CreateRunAcceptedResponse(BaseModel):
+    setup_id: str
+    status: Literal["accepted"] = "accepted"
+
+
 class RunSetupProgressResponse(BaseModel):
     status: Literal["waiting", "active", "complete", "failed"]
     phase: str = "checking"
     completed: int = 0
     total: int = 0
     label: str = ""
+    run_id: str = ""
+    error: str = ""
 
 
 @router.get("/run-setups/{setup_id}", response_model=RunSetupProgressResponse)
 async def get_run_setup_progress(setup_id: UUID) -> RunSetupProgressResponse:
-    """Read ephemeral pre-Run progress while the launch POST is still open."""
+    """Read ephemeral progress after a UI launch has been acknowledged."""
     from zevo.engine.run.setup_progress import read
 
     state = read(str(setup_id))
@@ -1834,7 +1851,6 @@ async def _create_auto_run(
     return CreateRunResponse(run_id=run.id, status="running")
 
 
-@router.post("/runs", response_model=CreateRunResponse)
 async def create_run(
     body: CreateRunRequest,
     db: AsyncSession = Depends(get_db),
@@ -1844,8 +1860,8 @@ async def create_run(
     The Ticket auto-enqueues a wakeup. The Orchestrator normally advances one
     semantic transition per heartbeat; the DAG expansion endpoint is the sole
     multi-node transition and independently queues the Run Setup Infrastructure
-    and Data prerequisites. POST returns immediately with the run_id; the UI subscribes to
-    /ws/runs/{id} or polls /runs/{id} for progress.
+    and Data prerequisites. The public route may execute this function in a
+    response-independent background task while the UI polls setup progress.
     """
     from zevo.api.routers.ui.tasks import task_to_user_request
     from zevo.engine.persistence import create_run as persist_create
@@ -1894,6 +1910,7 @@ async def create_run(
             total=1,
             label="Run started",
             status="complete",
+            run_id=result.run_id,
         )
         return result
     user_request = body.user_request
@@ -2482,8 +2499,90 @@ async def create_run(
         total=1,
         label="Run started",
         status="complete",
+        run_id=run.id,
     )
     return CreateRunResponse(run_id=run.id, status="running")
+
+
+def _run_setup_error(exc: Exception) -> str:
+    """Return the user-facing error previously delivered by synchronous POST."""
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, str):
+            return detail
+        return json.dumps(detail, ensure_ascii=False)
+    # Split/materialization and contract ValueErrors are deliberately written
+    # for the person launching the Run. Preserve those actionable messages.
+    if isinstance(exc, ValueError) or exc.__class__.__name__ in {
+        "MaterializeError",
+        "SplitSettlementError",
+    }:
+        detail = str(exc).strip()
+        if detail:
+            return detail
+    return "Run setup stopped unexpectedly. Try starting it again."
+
+
+async def _create_run_in_background(body: CreateRunRequest) -> None:
+    """Finish one UI launch after its HTTP 202 response has been sent.
+
+    A fresh session is essential: request-scoped dependencies are closed as
+    soon as the acknowledgement response finishes. Starlette awaits this
+    background task independently of the browser connection, so closing the
+    modal or crossing the ALB idle timeout cannot cancel split settlement.
+    """
+    from zevo.db import get_session_factory
+    from zevo.engine.run.setup_progress import heartbeat, update
+
+    setup_id = str(body.setup_id or "")
+    Session = get_session_factory()
+    try:
+        async with heartbeat(setup_id):
+            async with Session() as db:
+                await create_run(body, db)
+    except Exception as exc:  # noqa: BLE001 - persisted for the polling client
+        log.exception("background Run setup %s failed", setup_id)
+        detail = _run_setup_error(exc)
+        update(
+            setup_id,
+            phase="failed",
+            label=detail,
+            status="failed",
+            error=detail,
+        )
+
+
+@router.post(
+    "/runs",
+    response_model=CreateRunResponse | CreateRunAcceptedResponse,
+)
+async def submit_run(
+    body: CreateRunRequest,
+    response: Response,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> CreateRunResponse | CreateRunAcceptedResponse:
+    """Acknowledge UI setup immediately; retain synchronous CLI compatibility.
+
+    Browser launch forms supply ``setup_id`` and then poll its progress. Their
+    potentially slow Hub materialization runs after this 202 response, outside
+    the lifetime of the HTTP connection. Existing API/CLI callers that omit
+    ``setup_id`` keep the original synchronous contract and receive ``run_id``.
+    """
+    setup_id = str(body.setup_id or "")
+    if setup_id and body.mode != "auto":
+        from zevo.engine.run.setup_progress import update
+
+        update(
+            setup_id,
+            phase="queued",
+            label="Run setup queued",
+            status="waiting",
+        )
+        background_tasks.add_task(_create_run_in_background, body.model_copy(deep=True))
+        response.status_code = 202
+        return CreateRunAcceptedResponse(setup_id=setup_id)
+    return await create_run(body, db)
 
 
 

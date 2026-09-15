@@ -1,12 +1,12 @@
-"""Cross-worker progress for the synchronous part of ``POST /runs``.
+"""Cross-worker progress for asynchronous UI Run setup.
 
 A Run is committed only after its complete scoring contract has been
-materialized. The browser therefore supplies an unguessable UUID and polls a
-small endpoint while the POST remains open. Web workers share ``data/`` in
-production, so the progress record lives there as a tiny atomic JSON file as
-well as in memory. A heartbeat lets a surviving worker distinguish a slow
-setup from one whose worker was killed (for example by the container OOM
-killer).
+materialized. The browser therefore supplies an unguessable UUID, receives an
+immediate acknowledgement, and polls a small endpoint while setup continues.
+Web workers share ``data/`` in production, so the progress record lives there
+as a tiny atomic JSON file as well as in memory. A heartbeat lets a surviving
+worker distinguish a slow setup from one whose worker was killed (for example
+by the container OOM killer).
 """
 from __future__ import annotations
 
@@ -117,6 +117,8 @@ def update(
     total: int = 0,
     label: str = "",
     status: str = "active",
+    run_id: str = "",
+    error: str = "",
 ) -> None:
     ident = (setup_id or _CURRENT_SETUP.get()).strip()
     if not ident:
@@ -131,6 +133,10 @@ def update(
         "label": str(label or ""),
         "updated_at": now,
     }
+    if run_id:
+        state["run_id"] = str(run_id)
+    if error:
+        state["error"] = str(error)
     _PROGRESS[ident] = state
     _write(ident, state)
 
@@ -199,11 +205,12 @@ def read(setup_id: str) -> dict[str, Any] | None:
     if state is None:
         return None
     public = {key: value for key, value in state.items() if key != "updated_at"}
-    if public.get("status") == "active" and now - updated_at > _FAILED_AFTER_SECONDS:
+    if public.get("status") in {"waiting", "active"} and now - updated_at > _FAILED_AFTER_SECONDS:
         return {
             **public,
             "status": "failed",
             "phase": "failed",
             "label": "Run setup stopped unexpectedly. Try starting it again.",
+            "error": "Run setup stopped unexpectedly. Try starting it again.",
         }
     return public

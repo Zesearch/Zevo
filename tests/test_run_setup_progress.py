@@ -5,6 +5,7 @@ import time
 from uuid import uuid4
 
 import pytest
+from fastapi import BackgroundTasks, Response
 from pydantic import ValidationError
 
 
@@ -121,3 +122,70 @@ def test_create_run_request_accepts_only_a_uuid_setup_id() -> None:
     assert parsed.setup_id == setup_id
     with pytest.raises(ValidationError):
         CreateRunRequest(task_name="task", run_name="run", setup_id="not-a-uuid")
+
+
+@pytest.mark.asyncio
+async def test_ui_run_submission_returns_before_background_setup(
+    tmp_path, monkeypatch,
+) -> None:
+    from zevo.api.routers.shared.runs import (
+        CreateRunAcceptedResponse,
+        CreateRunRequest,
+        submit_run,
+    )
+    from zevo.engine.run import setup_progress
+
+    monkeypatch.setenv("ZEVO_RUN_SETUP_DIR", str(tmp_path))
+    setup_progress._PROGRESS.clear()
+    setup_id = uuid4()
+    tasks = BackgroundTasks()
+    response = Response()
+
+    accepted = await submit_run(
+        CreateRunRequest(task_name="task", run_name="run", setup_id=setup_id),
+        response,
+        tasks,
+        db=None,  # The request session is deliberately unused by async setup.
+    )
+
+    assert accepted == CreateRunAcceptedResponse(setup_id=str(setup_id))
+    assert response.status_code == 202
+    assert len(tasks.tasks) == 1
+    assert setup_progress.read(str(setup_id)) == {
+        "status": "waiting",
+        "phase": "queued",
+        "completed": 0,
+        "total": 0,
+        "label": "Run setup queued",
+    }
+
+
+def test_completed_setup_carries_run_id_and_failed_setup_carries_error(
+    tmp_path, monkeypatch,
+) -> None:
+    from zevo.engine.run import setup_progress
+
+    monkeypatch.setenv("ZEVO_RUN_SETUP_DIR", str(tmp_path))
+    setup_progress._PROGRESS.clear()
+    completed_id = str(uuid4())
+    failed_id = str(uuid4())
+
+    setup_progress.update(
+        completed_id,
+        phase="complete",
+        completed=1,
+        total=1,
+        label="Run started",
+        status="complete",
+        run_id="run-123",
+    )
+    setup_progress.update(
+        failed_id,
+        phase="failed",
+        label="cannot fetch benchmark",
+        status="failed",
+        error="cannot fetch benchmark",
+    )
+
+    assert setup_progress.read(completed_id)["run_id"] == "run-123"
+    assert setup_progress.read(failed_id)["error"] == "cannot fetch benchmark"
