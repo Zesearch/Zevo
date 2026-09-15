@@ -154,6 +154,37 @@ async def test_finished_work_frees_its_slot(db, started, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_background_work_is_logged_and_frees_its_slot(caplog):
+    task = asyncio.create_task(asyncio.sleep(60))
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    wd._inflight["data"] = {"wake-cancelled": task}
+
+    with caplog.at_level("ERROR"):
+        wd._inflight_done("data", "wake-cancelled", task)
+
+    assert "task cancelled unexpectedly" in caplog.text
+    assert wd._inflight.get("data") is None
+
+
+@pytest.mark.asyncio
+async def test_background_exception_is_retrieved_logged_and_frees_slot(caplog):
+    async def _boom() -> None:
+        raise RuntimeError("worker exploded")
+
+    task = asyncio.create_task(_boom())
+    await asyncio.sleep(0)
+    wd._inflight["train"] = {"wake-failed": task}
+
+    with caplog.at_level("ERROR"):
+        wd._inflight_done("train", "wake-failed", task)
+
+    assert "background task escaped with an exception" in caplog.text
+    assert "worker exploded" in caplog.text
+    assert wd._inflight.get("train") is None
+
+
+@pytest.mark.asyncio
 async def test_each_daemon_starts_only_its_ticket_lane(db, started):
     """Physical scheduler separation starts with queue ownership."""
     async with db() as s:

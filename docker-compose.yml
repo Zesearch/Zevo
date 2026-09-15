@@ -41,6 +41,7 @@ x-zevo-env: &zevo-env
   CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+  ZEVO_CLAUDE_IDLE_TIMEOUT_SECONDS: ${ZEVO_CLAUDE_IDLE_TIMEOUT_SECONDS:-300}
   # codex_cli: personal ChatGPT-plan auth is seeded from the host auth.json
   # into the persistent Codex volume below. An API key remains an optional
   # usage-billed fallback.

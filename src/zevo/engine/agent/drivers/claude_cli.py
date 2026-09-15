@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import shutil
 import sys
 from pathlib import Path
@@ -63,6 +64,97 @@ from zevo.engine.run import process_registry
 
 CLAUDE_BIN_ENV = "ZEVO_CLAUDE_BIN"
 DEFAULT_CLAUDE_BIN = "claude"
+CLAUDE_IDLE_TIMEOUT_ENV = "ZEVO_CLAUDE_IDLE_TIMEOUT_SECONDS"
+DEFAULT_CLAUDE_IDLE_TIMEOUT_SECONDS = 300.0
+
+
+class ClaudeStreamStalled(RuntimeError):
+    """Claude stayed alive without producing any stdout/stderr bytes."""
+
+
+def _claude_idle_timeout_seconds() -> float:
+    """Configured no-output limit; zero explicitly disables the watchdog."""
+    raw = os.environ.get(CLAUDE_IDLE_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_CLAUDE_IDLE_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        _warn(
+            "idle_timeout",
+            ValueError(
+                f"${CLAUDE_IDLE_TIMEOUT_ENV} must be a number, got {raw!r}; "
+                f"using {DEFAULT_CLAUDE_IDLE_TIMEOUT_SECONDS:g}s"
+            ),
+        )
+        return DEFAULT_CLAUDE_IDLE_TIMEOUT_SECONDS
+    return max(0.0, value)
+
+
+async def _await_cli_activity(
+    tasks: list[asyncio.Task],
+    *,
+    last_activity: Callable[[], float],
+    idle_timeout_seconds: float,
+    agent_id: str,
+) -> None:
+    """Wait for CLI I/O + exit, failing when raw output becomes inactive."""
+    pending = set(tasks)
+    if idle_timeout_seconds <= 0:
+        await asyncio.gather(*pending)
+        return
+    loop = asyncio.get_running_loop()
+    poll_seconds = max(0.01, min(1.0, idle_timeout_seconds / 4.0))
+    while pending:
+        done, pending = await asyncio.wait(
+            pending,
+            timeout=poll_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        # Retrieve exceptions as soon as a drainer finishes; otherwise a
+        # decoder/pipe failure would look like an idle process until timeout.
+        for task in done:
+            await task
+        idle_seconds = loop.time() - last_activity()
+        if pending and idle_seconds >= idle_timeout_seconds:
+            raise ClaudeStreamStalled(
+                f"claude exec produced no stdout/stderr bytes for "
+                f"{idle_seconds:.1f}s (limit {idle_timeout_seconds:g}s) "
+                f"for agent {agent_id}"
+            )
+
+
+def _signal_process_group(
+    proc: asyncio.subprocess.Process, sig: signal.Signals,
+) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            if sig == signal.SIGKILL:
+                proc.kill()
+            else:
+                proc.terminate()
+        except (ProcessLookupError, OSError):
+            pass
+
+
+async def _stop_cli_process(
+    proc: asyncio.subprocess.Process,
+    *,
+    heartbeat_id: str,
+) -> None:
+    """Stop the complete Claude process group, escalating after five seconds."""
+    if proc.returncode is not None:
+        return
+    signalled = process_registry.cancel(heartbeat_id) if heartbeat_id else False
+    if not signalled:
+        _signal_process_group(proc, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except asyncio.TimeoutError:
+        _signal_process_group(proc, signal.SIGKILL)
+        await proc.wait()
 
 
 def _find_claude_bin() -> str:
@@ -563,6 +655,12 @@ class ClaudeCliDriver:
 
             stdout_chunks: list[str] = []
             stderr_chunks: list[str] = []
+            loop = asyncio.get_running_loop()
+            last_activity_at = loop.time()
+
+            def _record_activity(_chunk: bytes) -> None:
+                nonlocal last_activity_at
+                last_activity_at = loop.time()
 
             # Emit a synthetic event so the operator sees which auth mode
             # was used (helps when debugging "is this even using my Max plan?").
@@ -575,7 +673,9 @@ class ClaudeCliDriver:
                     _warn("event_sink.auth", e)
 
             async def _drain_stdout(stream: asyncio.StreamReader) -> None:
-                async for line in iter_subprocess_lines(stream):
+                async for line in iter_subprocess_lines(
+                    stream, on_chunk=_record_activity,
+                ):
                     try:
                         text = line.decode("utf-8")
                     except UnicodeDecodeError as e:
@@ -595,7 +695,9 @@ class ClaudeCliDriver:
                                 _warn("event_sink.stdout", e)
 
             async def _drain_stderr(stream: asyncio.StreamReader) -> None:
-                async for line in iter_subprocess_lines(stream):
+                async for line in iter_subprocess_lines(
+                    stream, on_chunk=_record_activity,
+                ):
                     try:
                         text = line.decode("utf-8")
                     except UnicodeDecodeError as e:
@@ -611,12 +713,29 @@ class ClaudeCliDriver:
                         except Exception as e:
                             _warn("event_sink.stderr", e)
 
+            cli_tasks = [
+                asyncio.create_task(_drain_stdout(proc.stdout)),
+                asyncio.create_task(_drain_stderr(proc.stderr)),
+                asyncio.create_task(proc.wait()),
+            ]
             try:
-                await asyncio.gather(
-                    _drain_stdout(proc.stdout),
-                    _drain_stderr(proc.stderr),
+                await _await_cli_activity(
+                    cli_tasks,
+                    last_activity=lambda: last_activity_at,
+                    idle_timeout_seconds=_claude_idle_timeout_seconds(),
+                    agent_id=blueprint.id,
                 )
-                exit_code = await proc.wait()
+                exit_code = int(proc.returncode or 0)
+            except BaseException:
+                # A timeout, cancellation, or stream-reader failure must not
+                # leave Claude (or a child shell/SSH process) running after its
+                # activation task has gone away.
+                await _stop_cli_process(proc, heartbeat_id=hb_id)
+                for task in cli_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*cli_tasks, return_exceptions=True)
+                raise
             finally:
                 if hb_id:
                     process_registry.unregister(hb_id)
