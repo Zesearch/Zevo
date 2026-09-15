@@ -66,6 +66,10 @@ export function NewFileSetModal({
   // the dataset already holds is what this dialog is mostly for.
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Upload and remote-source endpoints materialize the directory immediately.
+  // Until Save is clicked, a newly materialized set is a modal-owned draft and
+  // must be removed if the user closes or cancels the form.
+  const [createdName, setCreatedName] = useState("");
   const picker = useRef<HTMLInputElement>(null);
   const managing = !!existing;
 
@@ -73,6 +77,11 @@ export function NewFileSetModal({
     if (!open) return;
     setError(null);
     setBusy("");
+    setProgress("");
+    setDragDepth(0);
+    setFolder("");
+    setAdding(false);
+    setCreatedName("");
     if (!existing) {
       setName("");
       setNote("");
@@ -96,6 +105,39 @@ export function NewFileSetModal({
     })();
   }, [open, existing]);
 
+  async function availableNewName(target: string): Promise<boolean> {
+    if (managing || createdName) return true;
+    const canonical = target.replaceAll(" ", "_");
+    try {
+      const all = await api<FileSetDTO[]>("/files");
+      if (!all.some((item) => item.name === canonical)) return true;
+      setError(`A file set named "${canonical}" already exists. Open it with Manage instead.`);
+      return false;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  }
+
+  async function cancelNewFile() {
+    if (busy) return;
+    if (managing || !createdName) {
+      onClose();
+      return;
+    }
+    setBusy("cancel");
+    setError(null);
+    try {
+      await api(`/files/${encodeURIComponent(createdName)}`, { method: "DELETE" });
+      onChanged();
+      onClose();
+    } catch (e) {
+      setError(`Could not discard the draft: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy("");
+    }
+  }
+
   /** Upload into `name`, creating the dataset on the first file.
    *
    *  One at a time rather than one request with all of them: the endpoint takes
@@ -110,6 +152,7 @@ export function NewFileSetModal({
       setError("Name this set of files first, because that is the folder they go into.");
       return;
     }
+    if (!await availableNewName(target)) return;
     setBusy("upload");
     setError(null);
     const failed: string[] = [];
@@ -121,8 +164,12 @@ export function NewFileSetModal({
         fd.append("file", f);
         fd.append("name", target);
         if (folder) fd.append("folder", folder);
-        const d = await api<{ files?: string[] }>("/files", { method: "POST", body: fd });
+        const d = await api<FileSetDTO>("/files", { method: "POST", body: fd });
         latest = d.files ?? [];
+        if (!managing && !createdName) {
+          setCreatedName(d.name);
+          setName(d.name);
+        }
       } catch (e) {
         failed.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -143,6 +190,7 @@ export function NewFileSetModal({
       setError("Name this set of files first.");
       return;
     }
+    if (!await availableNewName(target)) return;
     setBusy("remote");
     setError(null);
     try {
@@ -153,6 +201,10 @@ export function NewFileSetModal({
         }),
       });
       setRemote(d.source?.remote ?? []);
+      if (!managing && !createdName) {
+        setCreatedName(d.name);
+        setName(d.name);
+      }
       setHubId("");
       setHubSplit("");
       setHubConfig("");
@@ -223,7 +275,7 @@ export function NewFileSetModal({
     <Modal
       open={open}
       title={managing ? `Manage ${existing}` : "New file"}
-      onClose={onClose}
+      onClose={() => void cancelNewFile()}
       width="max-w-2xl"
     >
       <div className="max-h-[70vh] space-y-4 overflow-y-auto pr-1">
@@ -232,7 +284,7 @@ export function NewFileSetModal({
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            disabled={managing}
+            disabled={managing || !!createdName}
             spellCheck={false}
             placeholder="Name this file set, e.g. medqa-usmle"
             className={`${field} font-mono disabled:opacity-60`}
@@ -458,7 +510,9 @@ export function NewFileSetModal({
           {files.length + remote.length} file{files.length + remote.length === 1 ? "" : "s"}
         </Kicker>
         <div className="flex gap-2">
-          <button onClick={onClose} className="btn">close</button>
+          <button onClick={() => void cancelNewFile()} disabled={!!busy} className="btn disabled:opacity-40">
+            {busy === "cancel" ? "cancelling…" : managing ? "close" : "cancel"}
+          </button>
           <button
             onClick={() => void saveNote()}
             disabled={!!busy || !name.trim() || (files.length === 0 && remote.length === 0)}

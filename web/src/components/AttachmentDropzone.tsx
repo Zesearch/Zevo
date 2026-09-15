@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ChevronRight, Paperclip, X, Upload, Loader2 } from "lucide-react";
+import { CheckCircle2, ChevronRight, Paperclip, X, Upload, Loader2 } from "lucide-react";
 import { api } from "../lib/api";
 import { bytes } from "../lib/format";
 
@@ -114,31 +114,37 @@ export function AttachmentDropzone({
         </div>
       )}
       {attachments.length > 0 && (
-        <ul className="stagger mt-2 space-y-1.5">
-          {attachments.map((a, i) => (
-            <li
-              key={a.path}
-              className="bezel-flat flex items-center justify-between gap-2 px-3 py-2 text-2xs"
-            >
-              <div className="flex min-w-0 items-center gap-2">
-                <Paperclip size={13} className="shrink-0 text-brass-400/70" />
-                <span className="truncate font-mono text-slate-300">{a.name}</span>
-                <span className="readout text-slate-600">{bytes(a.size_bytes)}</span>
-              </div>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  remove(i);
-                }}
-                className="rounded p-0.5 text-slate-500 transition hover:text-coral-300"
-                title="remove"
+        <div className="mt-2">
+          <div className="mb-1.5 flex items-center gap-1.5 font-mono text-2xs text-phosphor-300">
+            <CheckCircle2 size={13} />
+            {attachments.length} {attachments.length === 1 ? "file" : "files"} uploaded
+          </div>
+          <ul className="stagger space-y-1.5">
+            {attachments.map((a, i) => (
+              <li
+                key={a.path}
+                className="bezel-flat flex items-center justify-between gap-2 px-3 py-2 text-2xs"
               >
-                <X size={13} />
-              </button>
-            </li>
-          ))}
-        </ul>
+                <div className="flex min-w-0 items-center gap-2">
+                  <Paperclip size={13} className="shrink-0 text-brass-400/70" />
+                  <span className="truncate font-mono text-slate-300">{a.name}</span>
+                  <span className="readout text-slate-600">{bytes(a.size_bytes)}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    remove(i);
+                  }}
+                  className="rounded p-0.5 text-slate-500 transition hover:text-coral-300"
+                  title="remove"
+                >
+                  <X size={13} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );
