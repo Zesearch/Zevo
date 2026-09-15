@@ -682,7 +682,7 @@ function HubInput({
 /** The upload route, as a box beside the picker rather than a bare button —
  *  the two ways in should look like two ways in. Shows what was uploaded. */
 function UploadBox({
-  onChange, className = "", buttonClassName = "", label = "Upload files",
+  onChange, className = "", buttonClassName = "", label = "Upload file",
 }: {
   onChange: (v: string) => void; className?: string; buttonClassName?: string;
   label?: string;
@@ -690,11 +690,6 @@ function UploadBox({
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  // Opened, not assumed. The button used to go straight to the system file
-  // dialog, which is one way in and hides the other — you cannot discover that
-  // dropping works from a control that never mentions it.
-  const [open, setOpen] = useState(false);
-  const [dragDepth, setDragDepth] = useState(0);
 
   async function pick(f: File | undefined) {
     if (!f) return;
@@ -702,7 +697,6 @@ function UploadBox({
     setErr("");
     try {
       onChange(await uploadFile(f));
-      setOpen(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -714,47 +708,12 @@ function UploadBox({
     <div className={className}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => input.current?.click()}
         disabled={busy}
         className={`btn !text-[13px] disabled:opacity-50 ${buttonClassName}`}
       >
         <Upload size={12} /> {busy ? "Uploading…" : label}
       </button>
-      {open && (
-        <div
-          onDragEnter={(e) => { e.preventDefault(); setDragDepth((d) => d + 1); }}
-          onDragOver={(e) => e.preventDefault()}
-          onDragLeave={() => setDragDepth((d) => Math.max(0, d - 1))}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragDepth(0);
-            void pick(e.dataTransfer.files?.[0]);
-          }}
-          className="mt-2 space-y-2 rounded-md border border-hair bg-raised/40 p-3"
-        >
-          <div
-            className={`flex flex-col items-center justify-center gap-1 rounded-md border border-dashed py-5 font-mono text-2xs transition ${
-              dragDepth > 0
-                ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
-                : "border-hair/70 text-slate-500"
-            }`}
-          >
-            <Upload size={16} />
-            {dragDepth > 0 ? "Release to upload" : "Drag files here"}
-          </div>
-          <div className="flex items-center justify-center gap-2">
-            <span className="font-mono text-2xs text-slate-600">or</span>
-            <button
-              type="button"
-              onClick={() => input.current?.click()}
-              disabled={busy}
-              className="btn !text-[13px] disabled:opacity-50"
-            >
-              Select from your computer
-            </button>
-          </div>
-        </div>
-      )}
       <input
         ref={input}
         type="file"
@@ -1376,8 +1335,6 @@ export function MultiFileSlot({
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [showUpload, setShowUpload] = useState(false);
-  const [dragDepth, setDragDepth] = useState(0);
 
   const add = (v: string) => {
     const p = v.trim();
@@ -1386,13 +1343,17 @@ export function MultiFileSlot({
     setDraft("");
   };
 
-  async function upload(f: File | undefined) {
-    if (!f) return;
+  async function upload(files: FileList | File[] | null) {
+    const selected = Array.from(files ?? []);
+    if (!selected.length) return;
     setBusy(true);
     setErr("");
     try {
-      add(await uploadFile(f));
-      setShowUpload(false);
+      const uploaded = await Promise.all(selected.map(uploadFile));
+      const additions = uploaded
+        .map((value) => value.trim())
+        .filter((value) => value && !values.includes(value));
+      if (additions.length) onChange([...values, ...additions]);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1415,7 +1376,7 @@ export function MultiFileSlot({
         />
         <button
           type="button"
-          onClick={() => setShowUpload((v) => !v)}
+          onClick={() => input.current?.click()}
           disabled={busy}
           className="btn shrink-0 !text-[13px] disabled:opacity-50"
         >
@@ -1424,38 +1385,11 @@ export function MultiFileSlot({
         <input
           ref={input}
           type="file"
+          multiple
           className="hidden"
-          onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ""; }}
+          onChange={(e) => { void upload(e.target.files); e.target.value = ""; }}
         />
       </div>
-      {showUpload && (
-        <div
-          onDragEnter={(e) => { e.preventDefault(); setDragDepth((d) => d + 1); }}
-          onDragOver={(e) => e.preventDefault()}
-          onDragLeave={() => setDragDepth((d) => Math.max(0, d - 1))}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragDepth(0);
-            void upload(e.dataTransfer.files?.[0]);
-          }}
-          className="mt-2 space-y-2 rounded-md border border-hair bg-raised/40 p-3"
-        >
-          <div className={`flex flex-col items-center justify-center gap-1 rounded-md border border-dashed py-5 font-mono text-2xs transition ${
-            dragDepth > 0
-              ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
-              : "border-hair/70 text-slate-500"
-          }`}>
-            <Upload size={16} />
-            {dragDepth > 0 ? "Release to upload" : "Drag files here"}
-          </div>
-          <div className="flex items-center justify-center gap-2">
-            <span className="font-mono text-2xs text-slate-600">or</span>
-            <button type="button" onClick={() => input.current?.click()} className="btn !text-[13px]">
-              Select from your computer
-            </button>
-          </div>
-        </div>
-      )}
       {values.length > 0 && (
         <div className="mt-1.5 space-y-1">
           {values.map((v) => (
