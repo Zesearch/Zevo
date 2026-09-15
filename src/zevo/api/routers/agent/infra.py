@@ -58,6 +58,27 @@ def _reject_engine_owned_submission_meta(meta: dict) -> None:
         )
 
 
+def _merge_instance_meta(current: dict | None, incoming: dict) -> dict:
+    """Merge an Agent PATCH without erasing watcher-owned lifecycle state.
+
+    Agents report provider facts such as the final scheduler state through the
+    same ``meta`` object that the engine uses for its submission/collection
+    handshake.  Treating PATCH as replacement meant an otherwise-valid Agent
+    update could silently remove ``collect_wakeup_queued``; the reconciler then
+    scheduled a second collect activation while the first one was still live.
+
+    Omitted keys therefore retain their current value.  The submission
+    handshake remains immutable even when an Agent includes a same-named key
+    (the public endpoint rejects those keys before this helper is called).
+    """
+    existing = dict(current or {})
+    merged = {**existing, **incoming}
+    for key in _ENGINE_OWNED_SUBMISSION_META:
+        if key in existing:
+            merged[key] = existing[key]
+    return merged
+
+
 # ─────────────────────────── DTOs ────────────────────────────────────────────
 
 
@@ -132,16 +153,9 @@ async def patch_instance(
         if v is not None:
             if field == "meta":
                 _reject_engine_owned_submission_meta(v)
-                # An unrelated metadata update must not erase the engine's
-                # already-committed submit/watcher ownership boundary.
-                v = {
-                    **v,
-                    **{
-                        key: (r.meta or {})[key]
-                        for key in _ENGINE_OWNED_SUBMISSION_META
-                        if key in (r.meta or {})
-                    },
-                }
+                # PATCH is additive.  Provider bookkeeping must not erase the
+                # engine's scheduler watcher/collection handshake.
+                v = _merge_instance_meta(r.meta, v)
             setattr(r, field, v)
 
     if body.status is not None:

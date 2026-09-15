@@ -624,6 +624,52 @@ async def test_committed_fast_job_queues_collect_after_submit_heartbeat(
 
 
 @pytest.mark.asyncio
+async def test_slurm_watcher_does_not_queue_beside_live_collect(session) -> None:
+    ticket = Ticket(
+        id="data-live-collect", run_id="r1", agent_id="data",
+        status="running", payload={}, inputs={},
+    )
+    job = InfraInstance(
+        id="infra-live-collect", instance_id="62347", provider="cluster",
+        status="released", run_id="r1", ticket_id=ticket.id,
+        released_at=_ago(1),
+        meta={
+            "stage_job": True,
+            "scheduler_state": "COMPLETED",
+            "submission_committed": True,
+            # Deliberately absent: this is the legacy/concurrent-PATCH shape
+            # that used to make the watcher schedule collect twice.
+        },
+    )
+    heartbeat = HeartbeatRun(
+        id="hb-live-collect", ticket_id=ticket.id, agent_id="data",
+        driver="claude_cli", model="m", activation_phase="collect",
+        started_at=_ago(30), stdout_path="", stderr_path="",
+    )
+    session.add_all([ticket, job, heartbeat])
+    await session.commit()
+
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 0)
+    await session.refresh(ticket)
+    assert ticket.status == "running"
+    wakeups = (await session.execute(
+        select(AgentWakeupRequest).where(
+            AgentWakeupRequest.ticket_id == ticket.id,
+        )
+    )).scalars().all()
+    assert wakeups == []
+
+    # Once the live collector really ends, the watcher remains the recovery
+    # path for a ticket whose result was not terminalized.
+    heartbeat.finished_at = _ago(1)
+    heartbeat.exit_code = 1
+    await session.commit()
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 1)
+    await session.refresh(ticket)
+    assert ticket.status == "queued"
+
+
+@pytest.mark.asyncio
 async def test_slurm_watcher_honors_persisted_backoff(session, monkeypatch) -> None:
     import zevo.engine.run.scheduler.reconciler as reconciler
 

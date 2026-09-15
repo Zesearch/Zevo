@@ -781,6 +781,17 @@ async def _reconcile_slurm_stage_jobs(
             )
 
     now = datetime.now(timezone.utc)
+    # A terminal Slurm row can be patched by the collecting Agent while that
+    # same collect activation is still validating artifacts.  If watcher
+    # metadata was absent (legacy row) or concurrently repaired, ticket.status
+    # alone is insufficient: changing ``running`` back to ``queued`` here
+    # creates a duplicate collect wakeup beside the live one.
+    active_collect_ticket_ids = set((await session.execute(
+        select(HeartbeatRun.ticket_id).where(
+            HeartbeatRun.finished_at.is_(None),
+            HeartbeatRun.activation_phase == "collect",
+        )
+    )).scalars().all())
     checked = 0
     resumed = 0
     for row, run, ticket in newest:
@@ -893,6 +904,7 @@ async def _reconcile_slurm_stage_jobs(
             can_queue_collect = (
                 bool(meta.get("submission_committed"))
                 and ticket.status in {"waiting_external", "running"}
+                and ticket.id not in active_collect_ticket_ids
             )
             if can_queue_collect and not bool(meta.get("collect_wakeup_queued")):
                 ticket.status = "queued"
