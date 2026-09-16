@@ -9,6 +9,7 @@ import pytest
 from zevo.engine.artifact_validation import (
     materialize_system_scoring_artifacts,
     sanitize_training_against_scoring,
+    semantic_record_fingerprints,
     validate_data_artifacts,
     validate_prediction_artifacts,
 )
@@ -180,6 +181,9 @@ def test_engine_materializes_csv_with_field_above_legacy_limit(tmp_path: Path) -
     previous_limit = csv.field_size_limit()
     csv.field_size_limit(131_072)
     try:
+        fingerprints = semantic_record_fingerprints(
+            source, excluded_fields=["answer"],
+        )
         prepared = materialize_system_scoring_artifacts(
             scoring_source=source,
             answer_fields=["answer"],
@@ -194,6 +198,7 @@ def test_engine_materializes_csv_with_field_above_legacy_limit(tmp_path: Path) -
         csv.field_size_limit(previous_limit)
 
     assert questions[0]["test"] == long_test
+    assert len(fingerprints) == 1
     assert "answer" not in questions[0]
     assert len(long_test) > 131_072
 

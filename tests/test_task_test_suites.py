@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -383,6 +384,7 @@ async def test_independent_validation_suite_keeps_all_test_rows(
     qa, qa_sample = write_set("test-qa", 500)
     gsm, gsm_sample = write_set("validation-gsm", 200)
     arc, arc_sample = write_set("validation-arc", 240)
+    monkeypatch.chdir(tmp_path)
     tests = [
         TaskTestSet(**{
             **_member("math"), "test_set": math,
@@ -395,7 +397,7 @@ async def test_independent_validation_suite_keeps_all_test_rows(
     ]
     validation = [
         TaskTestSet(**{
-            **_member("GSM8K"), "test_set": gsm,
+            **_member("GSM8K"), "test_set": Path(gsm).name,
             "sample_submission": gsm_sample,
         }),
         TaskTestSet(**{
@@ -433,6 +435,7 @@ async def test_independent_validation_suite_keeps_all_test_rows(
     assert holdout["validation_rows"] == 440
     assert holdout["validation_source"] == "independent_validation_suite"
     assert holdout["validation_suite_policy"] == "supplied"
+    assert holdout["validation_sets"][0]["validation_set"] == gsm
     assert holdout["validation_final_test_only"] == []
     assert {
         item["name"]: sum(
@@ -734,6 +737,7 @@ async def test_run_overview_reports_current_benchmark_and_suite_progress() -> No
 @pytest.mark.asyncio
 async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
     from zevo.engine.run.runner import (
+        _build_evaluation_suite_members,
         _build_holdout_suite_members,
         _spawn_holdout_infer,
         _spawn_holdout_suite_evals,
@@ -814,13 +818,17 @@ async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
         evaluations = await _spawn_holdout_suite_evals(
             db, run, ticket, enqueue=False,
         )
-        assert [item.payload["test_set_name"] for item in evaluations] == [
-            "math", "qa",
-        ]
+        assert [item.payload["test_set_name"] for item in evaluations] == ["math"]
+        scoring_members = await _build_evaluation_suite_members(
+            evaluations[0], dict(evaluations[0].payload or {}),
+            dict(evaluations[0].inputs or {}), run, db,
+        )
+        assert [member.name for member in scoring_members] == ["qa"]
         assert [
             item.inputs["predictions"]["work_product_id"]
             for item in evaluations
-        ] == [item.id for item in predictions]
+        ] == [predictions[0].id]
+        assert scoring_members[0].predictions_path == predictions[1].path
 
     async with Session() as db:
         tickets = (await db.execute(
@@ -839,6 +847,44 @@ async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
             item["inference_query"] for item in suite if item["name"] == "math"
         )
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_heldout_suite_creates_one_data_ticket() -> None:
+    from zevo.engine.run.runner import _build_data_input, _spawn_holdout_data
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    suite = [_member("math"), _member("qa", "exact_match")]
+    async with Session() as db:
+        run = Run(
+            id="one-data-run", task_name="suite", status="running",
+            metric="suite_average", metric_direction="max",
+            holdout={"test_sets": suite},
+            started_at=datetime.now(timezone.utc),
+        )
+        source = Ticket(
+            id="source-infer", run_id=run.id, agent_id="inference",
+            status="succeeded", lane="optimization", iteration=0,
+            payload={},
+        )
+        db.add_all([run, source])
+        await db.commit()
+        ticket = await _spawn_holdout_data(db, run, source, enqueue=False)
+        assert ticket is not None
+        inp = _build_data_input(
+            ticket, dict(ticket.payload or {}), {}, "/work/data", run,
+        )
+        assert inp.test_set_name == "math"
+        assert [member.name for member in inp.suite_members] == ["qa"]
+        rows = (await db.execute(select(Ticket).where(
+            Ticket.run_id == run.id, Ticket.lane == "held_out_test",
+            Ticket.agent_id == "data",
+        ))).scalars().all()
+        assert len(rows) == 1
     await engine.dispose()
 
 
@@ -865,41 +911,36 @@ async def test_heldout_suite_publishes_one_unweighted_average() -> None:
             history=[{"iteration": 0, "source": "baseline", "score": 0.5}],
             started_at=datetime.now(timezone.utc),
         )
-        infers = [
-            Ticket(
-                id=f"infer-{name}", run_id=run.id, agent_id="inference",
-                status="succeeded", lane="held_out_test", iteration=0,
-                payload={
-                    "model_source": "base_model", "base_model": "owner/model",
-                    "test_set_name": name,
+        inference = Ticket(
+            id="infer-suite", run_id=run.id, agent_id="inference",
+            status="succeeded", lane="held_out_test", iteration=0,
+            payload={"model_source": "base_model", "base_model": "owner/model"},
+        )
+        evaluation = Ticket(
+            id="eval-suite", run_id=run.id, agent_id="evaluation",
+            status="succeeded", lane="held_out_test", iteration=0,
+            payload={"test_set_name": "math", "metric": "accuracy"},
+            inputs={
+                "predictions": {
+                    "source_ticket_id": inference.id,
+                    "artifact_role": "predictions", "work_product_id": "", "path": "",
                 },
-            )
-            for name in ("math", "qa")
-        ]
-        evals = [
-            Ticket(
-                id=f"eval-{name}", run_id=run.id, agent_id="evaluation",
-                status="succeeded", lane="held_out_test", iteration=0,
-                payload={"test_set_name": name, "metric": metric},
-                inputs={
-                    "predictions": {
-                        "source_ticket_id": f"infer-{name}",
-                        "artifact_role": "predictions", "work_product_id": "", "path": "",
-                    },
-                },
-            )
-            for name, metric in (("math", "accuracy"), ("qa", "exact_match"))
-        ]
-        db.add_all([run, *infers, *evals])
+            },
+        )
+        db.add_all([run, inference, evaluation])
         await db.commit()
 
-        await _record_holdout_score(db, run, evals[0], 0.4)
+        await _record_holdout_score(
+            db, run, evaluation, 0.4, member_name="math",
+        )
         count = (await db.execute(
             select(func.count()).select_from(ScoreEvent)
         )).scalar_one()
         assert count == 0
 
-        await _record_holdout_score(db, run, evals[1], 0.8)
+        await _record_holdout_score(
+            db, run, evaluation, 0.8, member_name="qa",
+        )
         event = (await db.execute(select(ScoreEvent))).scalar_one()
         assert event.metric_name == "suite_average"
         assert event.score == pytest.approx(0.6)

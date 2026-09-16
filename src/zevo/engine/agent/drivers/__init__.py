@@ -11,6 +11,7 @@ _KNOWN_DRIVER_NAMES = {
     "bedrock", "aws", "aws_bedrock",
     "openrouter", "open_router",
     "evaluation_runner", "evaluation-runner",
+    "holdout_data_runner",
     "stub",
 }
 
@@ -61,6 +62,10 @@ def get_driver(name: str) -> Driver:
     if n in ("evaluation_runner", "evaluation-runner"):
         from zevo.engine.agent.drivers.evaluation_runner import EvaluationRunnerDriver
         return EvaluationRunnerDriver()
+
+    if n == "holdout_data_runner":
+        from zevo.engine.agent.drivers.holdout_data_runner import HoldoutDataRunnerDriver
+        return HoldoutDataRunnerDriver()
 
     if n in ("claude_cli", "claude-cli", "claude"):
         claude_bin = os.environ.get("ZEVO_CLAUDE_BIN", "").strip()

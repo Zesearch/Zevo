@@ -3,7 +3,7 @@ import useSWR from "swr";
 import { ChevronRight, X } from "lucide-react";
 import type { RunDetail } from "../lib/api";
 import { assignIterations, iterationOrder } from "../lib/iterations";
-import { fmtMetric, fmtScore } from "../lib/format";
+import { fmtMetric, fmtScore, metricScoreRange } from "../lib/format";
 import { Kicker } from "./zevo/primitives";
 
 type Artifact = {
@@ -550,6 +550,10 @@ function PerformanceSuite({
             <p className={`mt-1 font-mono text-lg tabular-nums ${accent}`}>
               {fmtScore(aggregate, aggregateMetric)}
             </p>
+            <p className="mt-0.5 font-mono text-2xs text-slate-500">
+              Scale: {rows.every((row) => metricScoreRange(row.metric) !== "Task-defined")
+                ? "0–1 (0–100%)" : "Task-defined"}
+            </p>
           </div>
         )}
       </div>
@@ -560,6 +564,7 @@ function PerformanceSuite({
               <tr className="text-2xs uppercase tracking-[0.12em] text-slate-500">
                 <th className="border-b border-hair px-4 py-2 font-medium">Benchmark</th>
                 <th className="border-b border-hair px-4 py-2 font-medium">Metric</th>
+                <th className="border-b border-hair px-4 py-2 font-medium">Scale</th>
                 <th className="border-b border-hair px-4 py-2 text-right font-medium">Performance</th>
               </tr>
             </thead>
@@ -570,6 +575,9 @@ function PerformanceSuite({
                   <td className="border-b border-hair px-4 py-3 text-slate-400">
                     {fmtMetric(row.metric)}
                     <span className="ml-1.5 text-slate-600">{row.direction === "min" ? "↓" : "↑"}</span>
+                  </td>
+                  <td className="border-b border-hair px-4 py-3 text-slate-500">
+                    {metricScoreRange(row.metric)}
                   </td>
                   <td className={`border-b border-hair px-4 py-3 text-right text-sm tabular-nums ${accent}`}>
                     {fmtScore(row.score, row.metric)}

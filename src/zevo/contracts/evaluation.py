@@ -16,13 +16,36 @@ This runner does NOT modify or interpret the custom evaluator.
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from zevo.contracts._base import AgentResult, AgentTaskInput
 from zevo.code_benchmarks import CodeExecutionAdapter
 
 
 # ---------- Input ----------
+
+class EvaluationSuiteMemberInput(BaseModel):
+    """A separately scored benchmark in one deterministic Evaluation ticket."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    predictions_path: str = Field(min_length=1)
+    scoring_set: str = Field(min_length=1)
+    sample_submission: str = Field(min_length=1)
+    metric: str = Field(min_length=1)
+    evaluation_script: str = ""
+    evaluator_sha256: str = Field("", pattern=r"^(?:|[0-9a-f]{64})$")
+    answer_fields: list[str] = Field(default_factory=list)
+    evaluation_config: dict[str, object] = Field(default_factory=dict)
+    code_execution_adapter: CodeExecutionAdapter = ""
+
+
+class EvaluationSuiteMemberResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    metrics_path: str = Field(min_length=1)
+    score: float
+
 
 class EvaluationTaskInput(AgentTaskInput):
     """Mirror of orchestrator.EvaluatePayload."""
@@ -94,6 +117,14 @@ class EvaluationTaskInput(AgentTaskInput):
             "is non-empty because the task scorer owns metric semantics."
         ),
     )
+    suite_members: list[EvaluationSuiteMemberInput] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_suite_names(self) -> "EvaluationTaskInput":
+        names = [member.name for member in self.suite_members]
+        if len(names) != len(set(names)):
+            raise ValueError("Evaluation suite member names must be unique")
+        return self
 
 
 # ---------- Output ----------
@@ -114,3 +145,4 @@ class EvaluationResult(AgentResult):
             "failure. Evaluation tickets must return this durable file path."
         ),
     )
+    suite_members: list[EvaluationSuiteMemberResult] = Field(default_factory=list)

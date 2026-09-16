@@ -8,7 +8,8 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    NLTK_DATA=/opt/nltk_data
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -19,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         rsync \
         ca-certificates \
         gnupg \
+        git \
         procps \
     && rm -rf /var/lib/apt/lists/*
 
@@ -41,6 +43,8 @@ WORKDIR /app
 # `pip install -e .` because setuptools.packages verifies each dir exists.
 COPY . .
 RUN pip install --upgrade pip && pip install -e .
+RUN mkdir -p /opt/nltk_data && python -m nltk.downloader -d /opt/nltk_data \
+    punkt punkt_tab stopwords averaged_perceptron_tagger_eng
 
 # The daemon never serves HTTP; just polls Postgres + spawns runners
 # (which shell out to `codex exec`). The host login is authoritative; an API

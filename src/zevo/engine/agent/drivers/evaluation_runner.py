@@ -19,7 +19,9 @@ from typing import Any, Callable
 
 from pydantic import BaseModel
 
-from zevo.contracts.evaluation import EvaluationResult, EvaluationTaskInput
+from zevo.contracts.evaluation import (
+    EvaluationResult, EvaluationSuiteMemberResult, EvaluationTaskInput,
+)
 from zevo.engine.agent.drivers.base import DriverRunResult
 from zevo.engine.method.eval_metrics import score_default
 from zevo.engine.run import process_registry
@@ -97,6 +99,97 @@ class EvaluationRunnerDriver:
             raise TypeError("evaluation_runner accepts typed EvaluationTaskInput only")
 
         inp = input_payload
+        if inp.suite_members:
+            # Each member retains its own immutable scorer and ground truth.
+            # The parent ticket publishes only after all members succeed.
+            entries = [
+                (inp.test_set_name, inp.model_copy(update={"suite_members": []})),
+                *[
+                    (
+                        member.name,
+                        inp.model_copy(update={
+                            "suite_members": [],
+                            "test_set_name": member.name,
+                            "predictions_path": member.predictions_path,
+                            "scoring_set": member.scoring_set,
+                            "sample_submission": member.sample_submission,
+                            "metric": member.metric,
+                            "evaluation_script": member.evaluation_script,
+                            "evaluator_sha256": member.evaluator_sha256,
+                            "answer_fields": member.answer_fields,
+                            "evaluation_config": member.evaluation_config,
+                            "code_execution_adapter": member.code_execution_adapter,
+                        }),
+                    )
+                    for member in inp.suite_members
+                ],
+            ]
+            suite_results: list[EvaluationSuiteMemberResult] = []
+            for index, (name, member_input) in enumerate(entries):
+                if event_sink is not None:
+                    event_sink({
+                        "type": "phase",
+                        "payload": {
+                            "owner": inp.ticket_id,
+                            "phase": f"scoring {index + 1}/{len(entries)}: {name}",
+                        },
+                    })
+                member_dir = Path(workspace_dir).resolve() / "suite" / f"{index:03d}"
+                child = await self.run_agent(
+                    blueprint=None,
+                    input_payload=member_input,
+                    workspace_dir=str(member_dir),
+                    stdout_sink=stdout_sink,
+                    event_sink=event_sink,
+                )
+                child_output = child.output
+                if not isinstance(child_output, EvaluationResult) or child_output.status != "succeeded":
+                    detail = (
+                        child_output.error_message
+                        if isinstance(child_output, EvaluationResult)
+                        else "invalid evaluator result"
+                    )
+                    return DriverRunResult(
+                        output=_failed(inp.ticket_id, f"{name}: {detail}"),
+                        exit_code=child.exit_code or 1,
+                        driver=self.name,
+                    )
+                try:
+                    _metrics, member_score = _validated_score(Path(child_output.metrics_path))
+                except (OSError, ValueError) as exc:
+                    return DriverRunResult(
+                        output=_failed(inp.ticket_id, f"{name}: {exc}"),
+                        exit_code=1,
+                        driver=self.name,
+                    )
+                suite_results.append(EvaluationSuiteMemberResult(
+                    name=name,
+                    metrics_path=child_output.metrics_path,
+                    score=member_score,
+                ))
+            aggregate = sum(member.score for member in suite_results) / len(suite_results)
+            root = Path(workspace_dir).resolve()
+            root.mkdir(parents=True, exist_ok=True)
+            metrics_path = root / "metrics.json"
+            metrics_path.write_text(json.dumps({
+                "score": aggregate,
+                "metric": "suite_average",
+                "components": {
+                    member.name: member.score for member in suite_results
+                },
+            }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            return DriverRunResult(
+                output=EvaluationResult(
+                    ticket_id=inp.ticket_id,
+                    status="succeeded",
+                    metrics_path=str(metrics_path),
+                    error_message="",
+                    suite_members=suite_results,
+                    notes=f"Scored {len(suite_results)} benchmarks in one ticket",
+                ),
+                exit_code=0,
+                driver=self.name,
+            )
         work_dir = Path(workspace_dir).resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
         predictions = Path(inp.predictions_path).resolve()

@@ -439,6 +439,26 @@ DataOperation = Literal["prepare_run_data", "prepare_holdout_data", "scope_probl
 SCOPING_ONLY_FIELDS = ("task_objective", "test_query", "constraints")
 
 
+class HoldoutDataSuiteMemberInput(BaseModel):
+    """Another private Test set prepared by the same held-out Data ticket."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    scoring_set: str = Field(min_length=1)
+    answer_fields: list[str] = Field(min_length=1)
+    sample_submission: str = Field(min_length=1)
+
+
+class HoldoutDataSuiteMemberResult(BaseModel):
+    """Answer-free artifacts for one additional Test suite member."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    scoring_public_path: str = Field(min_length=1)
+    inference_data_profile_path: str = Field(min_length=1)
+    sample_submission_path: str = Field(min_length=1)
+
+
 class DataTaskInput(AgentTaskInput):
     operation: DataOperation
     run_id: str = Field(min_length=1)
@@ -538,6 +558,7 @@ class DataTaskInput(AgentTaskInput):
     evaluation_script: str = ""
     evaluator_sha256: str = Field("", pattern=r"^(?:|[0-9a-f]{64})$")
     sample_submission: str = ""
+    suite_members: list[HoldoutDataSuiteMemberInput] = Field(default_factory=list)
 
     configuration_suggestions: dict[str, Any] = Field(default_factory=dict)
     configuration_pins: dict[str, Any] = Field(default_factory=dict)
@@ -608,6 +629,7 @@ class DataTaskInput(AgentTaskInput):
                 or self.scoring_set or self.answer_fields or self.metric
                 or self.evaluation_script or self.evaluator_sha256
                 or self.sample_submission or self.configuration_suggestions
+                or self.suite_members
                 or self.configuration_pins or self.expected_source_identity
                 or self.data_intent_signature or self.expected_source_fingerprint
                 or self.recipe_intent != DataRecipeIntent()
@@ -632,6 +654,10 @@ class DataTaskInput(AgentTaskInput):
             )
         if self.operation == "prepare_holdout_data" and not self.metric.strip():
             raise ValueError("prepare_holdout_data requires metric")
+        if self.operation != "prepare_holdout_data" and self.suite_members:
+            raise ValueError("only held-out Data may prepare a Test suite")
+        if len({member.name for member in self.suite_members}) != len(self.suite_members):
+            raise ValueError("held-out Data suite member names must be unique")
         if self.operation == "prepare_run_data" and not (
             self.dataset or self.data_query
         ):
@@ -829,6 +855,7 @@ class DataResult(AgentResult):
     scoring_public_path: str = ""
     inference_data_profile_path: str = ""
     sample_submission_path: str = ""
+    suite_members: list[HoldoutDataSuiteMemberResult] = Field(default_factory=list)
     prepare_script_path: str = ""
     data_recipe_path: str = ""
 
@@ -896,6 +923,7 @@ class DataResult(AgentResult):
                 or self.synthesis_teacher_model or self.decontamination_checked
                 or self.decontamination_removed_rows
                 or self.system_scoring_duplicates_removed
+                or self.suite_members
             ):
                 raise ValueError(
                     "scope_problem produces only scoping_result_path; training, "
@@ -907,6 +935,8 @@ class DataResult(AgentResult):
         if self.scoping_result_path:
             raise ValueError("scoping_result_path is valid only for scope_problem")
         if self.operation == "prepare_run_data":
+            if self.suite_members:
+                raise ValueError("prepare_run_data cannot return held-out suite members")
             if (
                 self.system_scoring_duplicates_removed
                 or self.decontamination_checked
@@ -975,6 +1005,8 @@ class DataResult(AgentResult):
                 "validation_source_path and validation_answer_fields must be "
                 "reported together"
             )
+        if len({member.name for member in self.suite_members}) != len(self.suite_members):
+            raise ValueError("held-out Data result suite member names must be unique")
         # Data owns teacher provenance. The engine attaches held-out
         # decontamination evidence only after this Agent result is accepted.
         if self.synthesis_generated_rows:

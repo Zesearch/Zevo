@@ -226,10 +226,14 @@ async def settle_splits(
                 raise SplitSettlementError(
                     f"cannot settle Validation set {item.name!r}: {exc}"
                 ) from exc
+            # A Setting may point at a repository-bundled local asset. Store
+            # its absolute path, since downstream fingerprinting and artifact
+            # validation deliberately reject relative scoring paths.
+            validation_source_path = str(Path(resolved.validation_set).resolve())
             if not materialized_rows:
                 try:
                     _columns, explicit_rows = _read_rows(
-                        Path(resolved.validation_set),
+                        Path(validation_source_path),
                     )
                     materialized_rows = len(explicit_rows)
                 except (OSError, ValueError) as exc:
@@ -245,7 +249,7 @@ async def settle_splits(
                 )
             validation_suite.append({
                 "name": item.name,
-                "validation_set": resolved.validation_set,
+                "validation_set": validation_source_path,
                 "inference_query": item.inference_query,
                 "sample_submission": item.sample_submission,
                 "metric_type": item.metric_type,
@@ -390,28 +394,38 @@ async def settle_splits(
     try:
         from zevo.engine.artifact_validation import semantic_record_fingerprints
 
-        # Decontaminate Training against every final Test and every derived
-        # Validation member. The latter are no longer necessarily a subset of
-        # every benchmark contract.
-        test_semantic_fingerprints = sorted({
+        # Independent Validation must not reuse a final Test question. The
+        # comparison is input-only, so different answer schemas cannot hide
+        # an overlap. The same identities then decontaminate Training.
+        final_test_fingerprints = {
             fingerprint
             for source, answers in (
-                [
-                    (resolve_asset(item.test_set), list(item.answer_fields))
-                    for item in suite
-                ]
-                + [
-                    (
-                        str(item["validation_set"]),
-                        list(item.get("answer_fields") or []),
-                    )
-                    for item in validation_suite
-                ]
+                (resolve_asset(item.test_set), list(item.answer_fields))
+                for item in suite
             )
             for fingerprint in semantic_record_fingerprints(
                 source, excluded_fields=answers,
             )
-        })
+        }
+        validation_fingerprints = {
+            fingerprint
+            for item in validation_suite
+            for fingerprint in semantic_record_fingerprints(
+                str(item["validation_set"]),
+                excluded_fields=list(item.get("answer_fields") or []),
+            )
+        }
+        shared = final_test_fingerprints & validation_fingerprints
+        if shared:
+            raise SplitSettlementError(
+                f"Validation and final Test share {len(shared)} question(s); "
+                "choose an independent Validation set or remove the duplicates"
+            )
+        test_semantic_fingerprints = sorted(
+            final_test_fingerprints | validation_fingerprints
+        )
+    except SplitSettlementError:
+        raise
     except (OSError, ValueError) as exc:
         raise SplitSettlementError(
             f"cannot fingerprint the held-out Test population: {exc}"
