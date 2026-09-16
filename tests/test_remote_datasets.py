@@ -289,3 +289,213 @@ async def test_partial_parquet_manifest_falls_back_without_truncation(
     assert paths == ["/splits", "/parquet", "/rows", "/rows"]
     assert result[2] == 1
     assert "via rows API" in result[3]
+
+
+@pytest.mark.asyncio
+async def test_rows_fallback_streams_pages_and_keeps_late_columns(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zevo.engine.remote_datasets as remote
+
+    monkeypatch.setattr(remote, "_cache_root", lambda: tmp_path / "cache")
+    records = [
+        {"row": {
+            "question": f"question {index}", "context": "x" * 1024,
+            "answer": index,
+            **({"late_field": "present"} if index == 100 else {}),
+        }}
+        for index in range(101)
+    ]
+    pages: list[tuple[int, int]] = []
+
+    class StreamingOnlyResponse(httpx.Response):
+        def json(self, **kwargs):  # type: ignore[override]
+            raise AssertionError("rows response must not be decoded as one JSON object")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/splits":
+            return httpx.Response(200, json={
+                "splits": [{"config": "default", "split": "test"}],
+            }, request=request)
+        if request.url.path == "/parquet":
+            return httpx.Response(200, json={
+                "partial": True, "parquet_files": [],
+            }, request=request)
+        assert request.url.path == "/rows"
+        offset = int(request.url.params["offset"])
+        length = int(request.url.params["length"])
+        pages.append((offset, length))
+        return StreamingOnlyResponse(
+            200, content=json.dumps({"rows": records[offset:offset + length]}),
+            request=request,
+        )
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    result = await remote.materialize(
+        hub_id="owner/benchmark", split="test", config="default",
+        out_dir=str(tmp_path / "run"), limit=101,
+    )
+
+    assert pages == [(0, 100), (100, 1)]
+    assert result[1:3] == (["question", "context", "answer", "late_field"], 101)
+    with Path(result[0]).open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["question"] == "question 0"
+    assert rows[-1]["late_field"] == "present"
+    assert not list((tmp_path / "run").glob("*.tmp"))
+    assert not list((tmp_path / "run").glob(".*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_rows_fallback_retries_interrupted_page_without_duplicates(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zevo.engine.remote_datasets as remote
+
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"rows":[{"row":{"question":"one"}},'
+            raise httpx.ReadError("connection dropped mid-page")
+
+        async def aclose(self) -> None:
+            pass
+
+    calls = 0
+    slept: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.url.params["offset"] == "0"
+        assert request.url.params["length"] == "2"
+        if calls == 1:
+            return httpx.Response(200, stream=BrokenStream(), request=request)
+        return httpx.Response(200, json={"rows": [
+            {"row": {"question": "one"}},
+            {"row": {"question": "two"}},
+        ]}, request=request)
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(remote.asyncio, "sleep", fake_sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        path, columns, count = await remote._materialize_rows(
+            client=client, hub_id="owner/benchmark", config="default",
+            split="test", out_dir=str(tmp_path / "run"), limit=2,
+        )
+
+    assert (columns, count) == (["question"], 2)
+    assert calls == 2
+    assert slept == [1.0]
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        assert [row["question"] for row in csv.DictReader(handle)] == ["one", "two"]
+    assert not list((tmp_path / "run").glob("*.tmp"))
+    assert not list((tmp_path / "run").glob(".*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_rows_fallback_retries_truncated_json_page(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zevo.engine.remote_datasets as remote
+
+    calls = 0
+    slept: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200, content=b'{"rows":[{"row":{"question":"one"}},',
+                request=request,
+            )
+        return httpx.Response(200, json={"rows": [
+            {"row": {"question": "one"}},
+            {"row": {"question": "two"}},
+        ]}, request=request)
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(remote.asyncio, "sleep", fake_sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        path, _columns, count = await remote._materialize_rows(
+            client=client, hub_id="owner/benchmark", config="default",
+            split="test", out_dir=str(tmp_path / "run"), limit=2,
+        )
+
+    assert count == 2
+    assert calls == 2
+    assert slept == [1.0]
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        assert [row["question"] for row in csv.DictReader(handle)] == ["one", "two"]
+
+
+@pytest.mark.asyncio
+async def test_rows_fallback_retries_429_with_retry_after(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zevo.engine.remote_datasets as remote
+
+    calls = 0
+    slept: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                429, headers={"Retry-After": "0.25"}, request=request,
+            )
+        return httpx.Response(200, json={"rows": [
+            {"row": {"question": "one"}},
+        ]}, request=request)
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(remote.asyncio, "sleep", fake_sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        _path, _columns, count = await remote._materialize_rows(
+            client=client, hub_id="owner/benchmark", config="default",
+            split="test", out_dir=str(tmp_path / "run"), limit=1,
+        )
+
+    assert count == 1
+    assert calls == 2
+    assert slept == [0.25]
+
+
+@pytest.mark.asyncio
+async def test_rows_fallback_preserves_code_answer_sidecars(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from zevo.code_benchmarks import resolve_code_answer
+    import zevo.engine.remote_datasets as remote
+
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "holdout"))
+    hidden = {"input": ["secret" * 1000], "output": ["answer"]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["length"] == "1"
+        return httpx.Response(200, json={"rows": [{"row": {
+            "description": "Solve this", "private_tests": hidden,
+        }}]}, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        path, columns, count = await remote._materialize_rows(
+            client=client, hub_id="deepmind/code_contests", config="default",
+            split="train", out_dir=str(tmp_path / "run"), limit=1,
+        )
+
+    assert (columns, count) == (["description", "private_tests"], 1)
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["private_tests"].startswith("zevo-code-answer:v1:")
+    assert json.loads(resolve_code_answer(row["private_tests"])) == hidden
