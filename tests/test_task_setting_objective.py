@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from zevo.api.routers.ui.tasks import autonomy_level, compose_objective
 
 
@@ -200,6 +202,31 @@ def test_absent_and_zero_are_the_same_cap() -> None:
     assert setting_identity(base) == setting_identity({**base, "max_cost_usd": 0})
     assert setting_identity(base) == setting_identity({**base, "max_cost_usd": ""})
     assert setting_identity(base) == setting_identity({**base, "max_cost_usd": None})
+
+
+@pytest.mark.asyncio
+async def test_setting_with_own_validation_set_checks_builtin_metric() -> None:
+    """Saving a Setting with independent Validation must not raise NameError."""
+    from fastapi import HTTPException
+
+    from zevo.api.routers.ui.tasks import SettingBody, _freeze_validation_metric
+
+    body = SettingBody(
+        validation_set="validation.jsonl",
+        validation_answer_fields=["answer"],
+        validation_sample_submission="submission.csv",
+        validation_metric_type="builtin",
+        validation_metric="ACCURACY",
+    )
+    resolved, digest = await _freeze_validation_metric(body)
+    assert resolved.validation_metric == "accuracy"
+    assert digest == ""
+
+    with pytest.raises(HTTPException) as exc:
+        await _freeze_validation_metric(body.model_copy(update={
+            "validation_metric": "not_a_metric",
+        }))
+    assert exc.value.status_code == 400
 
 
 def test_a_row_and_a_form_describing_it_agree() -> None:
