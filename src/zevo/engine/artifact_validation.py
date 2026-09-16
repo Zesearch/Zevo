@@ -413,6 +413,7 @@ def semantic_record_fingerprints(
     if path.suffix.lower() == ".csv":
         # Stream large held-out sets instead of retaining every row (or every
         # private test vector) during Run setup.
+        _allow_large_csv_fields()
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
                 semantic = {

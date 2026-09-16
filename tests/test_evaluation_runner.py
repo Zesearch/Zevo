@@ -5,7 +5,7 @@ import csv
 import json
 from pathlib import Path
 
-from zevo.contracts.evaluation import EvaluationTaskInput
+from zevo.contracts.evaluation import EvaluationSuiteMemberInput, EvaluationTaskInput
 from zevo.engine.agent.drivers.evaluation_runner import EvaluationRunnerDriver
 from zevo.evaluator_storage import file_sha256
 
@@ -86,6 +86,67 @@ def test_builtin_evaluator_is_deterministic_and_writes_metrics(tmp_path: Path) -
 
     assert result.output.status == "succeeded"
     assert json.loads(Path(result.output.metrics_path).read_text())["score"] == 0.5
+
+
+def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -> None:
+    first_prediction = tmp_path / "first_predictions.csv"
+    first_gold = tmp_path / "first_gold.csv"
+    second_prediction = tmp_path / "second_predictions.csv"
+    second_gold = tmp_path / "second_gold.csv"
+    _write_csv(first_prediction, [{"id": "1", "prediction": "A"}])
+    _write_csv(first_gold, [{"id": "1", "answer": "A"}])
+    _write_csv(second_prediction, [{"id": "2", "prediction": "B"}])
+    _write_csv(second_gold, [{"id": "2", "answer": "C"}])
+    result, _events = _run(EvaluationTaskInput(
+        ticket_id="eval-suite-001",
+        test_set_name="first",
+        predictions_path=str(first_prediction),
+        scoring_set=str(first_gold),
+        sample_submission=str(first_prediction),
+        evaluation_script="",
+        answer_fields=["answer"],
+        metric="accuracy",
+        suite_members=[EvaluationSuiteMemberInput(
+            name="second",
+            predictions_path=str(second_prediction),
+            scoring_set=str(second_gold),
+            sample_submission=str(second_prediction),
+            metric="accuracy",
+            answer_fields=["answer"],
+        )],
+    ), tmp_path / "suite_work")
+    assert result.output.status == "succeeded"
+    assert [(m.name, m.score) for m in result.output.suite_members] == [
+        ("first", 1.0), ("second", 0.0),
+    ]
+    assert json.loads(Path(result.output.metrics_path).read_text())["score"] == 0.5
+
+
+def test_suite_failure_names_the_member(tmp_path: Path) -> None:
+    prediction = tmp_path / "predictions.csv"
+    gold = tmp_path / "gold.csv"
+    _write_csv(prediction, [{"id": "1", "prediction": "A"}])
+    _write_csv(gold, [{"id": "1", "answer": "A"}])
+    result, _events = _run(EvaluationTaskInput(
+        ticket_id="eval-suite-002",
+        test_set_name="first",
+        predictions_path=str(prediction),
+        scoring_set=str(gold),
+        sample_submission=str(prediction),
+        metric="accuracy",
+        evaluation_script="",
+        answer_fields=["answer"],
+        suite_members=[EvaluationSuiteMemberInput(
+            name="broken-second",
+            predictions_path=str(tmp_path / "missing.csv"),
+            scoring_set=str(gold),
+            sample_submission=str(prediction),
+            metric="accuracy",
+            answer_fields=["answer"],
+        )],
+    ), tmp_path / "suite_fail")
+    assert result.output.status == "failed"
+    assert result.output.error_message.startswith("broken-second:")
 
 
 def test_pass_at_one_uses_shared_code_execution_route(tmp_path: Path) -> None:

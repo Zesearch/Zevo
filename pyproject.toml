@@ -41,6 +41,9 @@ dependencies = [
   # (bearer-token) auth via $AWS_BEARER_TOKEN_BEDROCK.
   "boto3>=1.40",
   "huggingface_hub>=0.30",
+  # Pin the official deterministic verifier implementation for reproducible
+  # scoring; only audited classic keys are used by Zevo's IF validation asset.
+  "ifbench @ git+https://github.com/allenai/IFBench.git@1c40f0c10d9b5c5c2f10a175a28007ebb64f7f4d",
 
   "pandas>=2.0",
   "pypdf>=4.0",

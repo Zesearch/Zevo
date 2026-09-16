@@ -11,7 +11,8 @@ FROM python:3.11-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NLTK_DATA=/opt/nltk_data
 
 # OS deps: build essentials for the few wheels that need them + ssh client
 # (the Infrastructure, Train, Inference, and Registry agents use ssh/scp).
@@ -24,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         rsync \
         ca-certificates \
         gnupg \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # Node 22 + OpenAI Codex CLI + Anthropic Claude Code CLI. Each agent
@@ -47,6 +49,8 @@ WORKDIR /app
 # to a requirements.txt.
 COPY . .
 RUN pip install --upgrade pip && pip install -e .
+RUN mkdir -p /opt/nltk_data && python -m nltk.downloader -d /opt/nltk_data \
+    punkt punkt_tab stopwords averaged_perceptron_tagger_eng
 
 # Default port matches the rest of the stack.
 EXPOSE 8000

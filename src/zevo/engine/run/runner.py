@@ -128,11 +128,14 @@ from zevo.contracts.data import (
     DataRecipe,
     DataTaskInput,
     DataResult,
+    HoldoutDataSuiteMemberInput,
     InferenceDataProfile,
     data_recipe_signature,
     load_data_recipe,
 )
-from zevo.contracts.evaluation import EvaluationTaskInput, EvaluationResult
+from zevo.contracts.evaluation import (
+    EvaluationTaskInput, EvaluationResult, EvaluationSuiteMemberInput,
+)
 from zevo.contracts.train import (
     LossSeriesSummary,
     TrainingDiagnostics,
@@ -362,6 +365,8 @@ def _build_data_input(
             " --training-dataset <absolute-training-dataset-path>"
         )
     remote_spec_validation_command = ""
+    if held_out:
+        from zevo.holdout_storage import resolve_asset
     if remote_huggingface:
         remote_spec_validation_command = (
             "python -m zevo.engine.remote_training_data validate-spec "
@@ -418,6 +423,20 @@ def _build_data_input(
         ),
         sample_submission=(
             str(payload.get("sample_submission") or "") if held_out else ""
+        ),
+        suite_members=(
+            [
+                HoldoutDataSuiteMemberInput(
+                    name=str(item["name"]),
+                    scoring_set=resolve_asset(str(item["test_set"])),
+                    answer_fields=list(item["answer_fields"]),
+                    sample_submission=resolve_asset(str(item["sample_submission"])),
+                )
+                for item in _heldout_test_sets(run)
+                if not item.get("public")
+                and item["name"] != str(payload.get("test_set_name") or "")
+            ]
+            if held_out else []
         ),
         configuration_suggestions=(
             {} if held_out else dict(payload.get("configuration_suggestions") or {})
@@ -1190,38 +1209,102 @@ async def _build_inference_input(
     )
 
 
+async def _build_evaluation_suite_members(
+    ticket: Ticket, payload: dict, inputs: dict, run: Run,
+    session: AsyncSession,
+) -> list[EvaluationSuiteMemberInput]:
+    suite = (
+        _heldout_test_sets(run)
+        if ticket.lane == "held_out_test" else _validation_sets(run)
+    )
+    primary_name = str((payload.get("test_set_name") or ""))
+    if ticket.lane != "held_out_test":
+        primary_name = _validation_member_name(ticket) or (
+            str(suite[0].get("name") or "Validation") if suite else ""
+        )
+    pred_binding = dict(inputs.get("predictions") or {})
+    source_id = str(pred_binding.get("source_ticket_id") or "")
+    members: list[EvaluationSuiteMemberInput] = []
+    if len(suite) > 1 and source_id:
+        products = (await session.execute(
+            select(WorkProduct).where(
+                WorkProduct.ticket_id == source_id,
+                WorkProduct.role == "predictions",
+            )
+        )).scalars().all()
+        if ticket.lane == "held_out_test":
+            from zevo.holdout_storage import resolve_asset
+        for item in suite:
+            name = str(item.get("name") or "")
+            if name == primary_name:
+                continue
+            product = next((
+                candidate for candidate in products
+                if str((candidate.meta or {}).get("suite_member_name") or "") == name
+            ), None)
+            if product is None:
+                raise ValueError(f"Evaluation suite has no predictions for {name!r}")
+            member_scoring = str(item.get(
+                "test_set" if ticket.lane == "held_out_test" else "validation_set"
+            ) or "")
+            member_script = str(item.get("evaluation_script") or "")
+            member_submission = str(item.get("sample_submission") or "")
+            if ticket.lane == "held_out_test":
+                member_scoring = resolve_asset(member_scoring)
+                member_script = resolve_asset(member_script) if member_script else ""
+                member_submission = resolve_asset(member_submission)
+            members.append(EvaluationSuiteMemberInput(
+                name=name,
+                predictions_path=product.path,
+                scoring_set=member_scoring,
+                sample_submission=member_submission,
+                metric=str(item.get("metric") or ""),
+                evaluation_script=member_script,
+                evaluator_sha256=str(item.get("evaluator_sha256") or ""),
+                answer_fields=list(item.get("answer_fields") or []),
+                evaluation_config={},
+                code_execution_adapter=str(item.get("code_execution_adapter") or ""),
+            ))
+    return members
+
+
 def _build_evaluation_input(
     ticket: Ticket, payload: dict, inputs: dict, work_dir: str, run: Run,
+    *, suite_members: list[EvaluationSuiteMemberInput] | None = None,
 ) -> EvaluationTaskInput:
-    # EvaluationTaskInput has no work_dir field. Evaluation gets the FULL set
-    # — the half with the answers — whichever split this ticket is scoring.
-    #
-    # Ticket creation stamps the owning lane's full set, evaluator, sample, and answer fields.
-    # The persisted payload is therefore sufficient to reproduce this stage.
+    # Each member is scored with its own frozen full set, evaluator and schema.
+    del work_dir
     if ticket.customization:
         raise ValueError(
             "Evaluation is a deterministic system stage and cannot carry "
             "Agent customization"
         )
-    scoring_set = _eval_set_of(payload, ticket)
-    script = str(payload.get("evaluation_script") or "")
-    answer_fields = list(payload.get("answer_fields") or [])
+    suite = (
+        _heldout_test_sets(run)
+        if ticket.lane == "held_out_test" else _validation_sets(run)
+    )
+    primary_name = str(payload.get("test_set_name") or "")
+    if ticket.lane != "held_out_test":
+        primary_name = _validation_member_name(ticket) or (
+            str(suite[0].get("name") or "Validation") if suite else ""
+        )
     return EvaluationTaskInput(
         ticket_id=ticket.id,
         **_customization_kwargs(ticket.customization or {}),
         predictions_path=input_path(inputs, "predictions"),
-        test_set_name=str(payload.get("test_set_name") or ""),
+        test_set_name=primary_name,
         code_execution_adapter=str(payload.get("code_execution_adapter") or ""),
-        scoring_set=scoring_set,
-        evaluation_script=script,
+        scoring_set=_eval_set_of(payload, ticket),
+        evaluation_script=str(payload.get("evaluation_script") or ""),
         evaluator_sha256=str(payload.get("evaluator_sha256") or ""),
         sample_submission=str(payload.get("sample_submission") or ""),
-        answer_fields=answer_fields,
+        answer_fields=list(payload.get("answer_fields") or []),
         # Task-owned metric, stamped on every evaluation invocation. The script
         # emits this metric's stable top-level `score`, or the built-in scorer
         # computes the named metric when no script is supplied.
         metric=_require(payload, "metric", ticket),
         evaluation_config=dict(payload.get("evaluation_config") or {}),
+        suite_members=list(suite_members or []),
     )
 
 
@@ -1371,7 +1454,12 @@ async def _build_input(
             session, specialist_context,
         )
     if agent_id == "evaluation":
-        return _build_evaluation_input(ticket, payload, inputs, work_dir, run)
+        return _build_evaluation_input(
+            ticket, payload, inputs, work_dir, run,
+            suite_members=await _build_evaluation_suite_members(
+                ticket, payload, inputs, run, session,
+            ),
+        )
     if agent_id == "registry":
         return _build_registry_input(ticket, payload, inputs, work_dir)
     raise ValueError(f"no input builder for agent_id={agent_id!r}")
@@ -3675,6 +3763,8 @@ async def run_ticket(
     log_dir = str(run_dir / "_logs")
 
     is_evaluation_runner = tk.agent_id == "evaluation"
+    is_holdout_data_runner = tk.agent_id == "data" and tk.lane == "held_out_test"
+    is_system_runner = is_evaluation_runner or is_holdout_data_runner
 
     # Ticket input format selects the matching invocation contract. Run.mode is
     # a separate, run-level axis.
@@ -3692,10 +3782,23 @@ async def run_ticket(
             identity_path=REPO_ROOT / "playbook" / "runners" / "evaluation.md",
         )
         if is_evaluation_runner
+        else AgentBlueprint(
+            id="data",
+            name="Held-out Data Runner",
+            title="Private Test Data Preparer",
+            reports_to="system",
+            default_driver="holdout_data_runner",
+            default_model="no-llm",
+            output_schema=DataResult,
+            tools=[],
+            instructions="",
+            identity_path=REPO_ROOT / "playbook" / "agents" / "data" / "identity.md",
+        )
+        if is_holdout_data_runner
         else load_agent(tk.agent_id, input_format=tk.input_format)
     )
     specialist_context = (
-        {} if is_evaluation_runner
+        {} if is_system_runner
         else await _build_specialist_context(
             session, run=run, ticket=tk, payload=resolved_payload,
         )
@@ -3731,7 +3834,7 @@ async def run_ticket(
     # that belong to this Run, Agent, lane, and current semantic identity.
     # Transient runtime state is deliberately excluded; a new Run always
     # begins with an empty context.
-    if hasattr(inp, "memory") and not is_evaluation_runner:
+    if hasattr(inp, "memory") and not is_system_runner:
         inp = inp.model_copy(update={
             "memory": await load_memory_context(
                 session,
@@ -3751,7 +3854,7 @@ async def run_ticket(
     db_agent = (await session.execute(
         select(_AgentRow).where(_AgentRow.id == tk.agent_id)
     )).scalar_one_or_none()
-    if is_evaluation_runner and tk.input_format != "typed":
+    if is_system_runner and tk.input_format != "typed":
         raise ValueError(
             "evaluation is a deterministic system stage and accepts typed tickets only"
         )
@@ -3761,13 +3864,15 @@ async def run_ticket(
     effective_driver = (
         "evaluation_runner"
         if is_evaluation_runner
+        else "holdout_data_runner"
+        if is_holdout_data_runner
         else driver_name
         or (db_agent.default_driver if db_agent else "")
         or blueprint.default_driver
     )
     effective_model = (
         "no-llm"
-        if is_evaluation_runner
+        if is_system_runner
         else model_override
         or (db_agent.default_model if db_agent else "")
         or blueprint.default_model
@@ -3777,7 +3882,7 @@ async def run_ticket(
     # combination instead of silently claiming that an unsandboxed run was
     # isolated.
     effective_sandbox = (
-        "none" if is_evaluation_runner
+        "none" if is_system_runner
         else getattr(db_agent, "sandbox", "none") if db_agent else "none"
     )
     if effective_sandbox == "openshell" \
@@ -5208,6 +5313,28 @@ async def run_ticket(
                     "validation_rows": report.validation_rows,
                     "question_rows": report.question_rows,
                 })
+                if is_private:
+                    expected_members = {member.name: member for member in inp.suite_members}
+                    actual_members = {member.name: member for member in output.suite_members}
+                    if set(actual_members) != set(expected_members):
+                        raise ValueError(
+                            "held-out Data suite results differ from assigned members: "
+                            f"expected {sorted(expected_members)}, got {sorted(actual_members)}"
+                        )
+                    total_rows = report.question_rows
+                    for name, member in expected_members.items():
+                        produced = actual_members[name]
+                        member_report = validate_data_artifacts(
+                            operation="prepare_holdout_data",
+                            scoring_source=member.scoring_set,
+                            questions=produced.scoring_public_path,
+                            sample_submission=produced.sample_submission_path,
+                            answer_fields=member.answer_fields,
+                            profile_path=produced.inference_data_profile_path,
+                        )
+                        total_rows += member_report.question_rows
+                    artifact_meta["suite_member_count"] = 1 + len(expected_members)
+                    artifact_meta["suite_question_rows"] = total_rows
             except (OSError, ValueError) as exc:
                 runtime_contract_mismatches["data_artifacts"] = {
                     "declared": "valid, source-faithful Data artifacts",
@@ -5442,6 +5569,17 @@ async def run_ticket(
                     candidate = str(Path(work_dir) / name)
                     if not _artifact_problem(candidate):
                         items.append((candidate, role, {}))
+                if output.suite_members:
+                    for member in output.suite_members:
+                        items.append((
+                            member.metrics_path,
+                            "metrics",
+                            {
+                                "suite_member_name": member.name,
+                                "score": member.score,
+                                "suite_primary": False,
+                            },
+                        ))
             elif isinstance(output, RegisterResult):
                 # The manifest owns the selected version, score, retention
                 # decision, and model path. RegisterResult deliberately reports
@@ -5541,6 +5679,40 @@ async def run_ticket(
                                     "suite_primary": False,
                                 },
                             ),
+                        ])
+                if (
+                    isinstance(output, DataResult)
+                    and output.operation == "prepare_holdout_data"
+                    and isinstance(inp, DataTaskInput)
+                ):
+                    primary_name = str(inp.test_set_name or "Test")
+                    for item_index, (item_path, item_role, item_meta) in enumerate(items):
+                        items[item_index] = (
+                            item_path, item_role,
+                            {**item_meta, "suite_member_name": primary_name, "suite_primary": True},
+                        )
+                    for member in output.suite_members:
+                        member_input = next(
+                            assigned for assigned in inp.suite_members
+                            if assigned.name == member.name
+                        )
+                        member_report = validate_data_artifacts(
+                            operation="prepare_holdout_data",
+                            scoring_source=member_input.scoring_set,
+                            questions=member.scoring_public_path,
+                            sample_submission=member.sample_submission_path,
+                            answer_fields=member_input.answer_fields,
+                            profile_path=member.inference_data_profile_path,
+                        )
+                        member_meta = {
+                            "suite_member_name": member.name,
+                            "suite_primary": False,
+                            "question_rows": member_report.question_rows,
+                        }
+                        items.extend([
+                            (member.scoring_public_path, "scoring_questions", member_meta),
+                            (member.inference_data_profile_path, "inference_data_profile", member_meta),
+                            (member.sample_submission_path, "sample_submission", member_meta),
                         ])
                 if isinstance(output, TrainResult):
                     # The primary final model is the default checkpoint for
@@ -5897,23 +6069,34 @@ async def _record_prepared_scoring_data(
     if is_held_out_test:
         test_set_name = str((ticket.payload or {}).get("test_set_name") or "test")
         suite = _heldout_test_sets(run)
+        prepared_members = {
+            test_set_name: (
+                path,
+                str(getattr(result, "inference_data_profile_path", "") or ""),
+            ),
+            **{
+                member.name: (
+                    member.scoring_public_path,
+                    member.inference_data_profile_path,
+                )
+                for member in getattr(result, "suite_members", [])
+            },
+        }
         for item in suite:
-            if item["name"] != test_set_name:
+            prepared = prepared_members.get(item["name"])
+            if prepared is None:
                 continue
-            if path and not item.get("public"):
-                item["public"] = path
+            public_path, profile_path = prepared
+            if public_path and not item.get("public"):
+                item["public"] = public_path
                 changed = True
-            profile_path = str(
-                getattr(result, "inference_data_profile_path", "") or ""
-            )
             if profile_path and not item.get("inference_data_profile"):
                 item["inference_data_profile"] = profile_path
                 changed = True
-            break
         if changed:
             holdout["test_sets"] = suite
             # The scalar projection keeps old dashboard/run readers useful.
-            if suite and suite[0]["name"] == test_set_name:
+            if suite:
                 holdout["test_public"] = suite[0].get("public", "")
     else:
         if path and not holdout.get("validation_public"):
@@ -6156,14 +6339,17 @@ async def _spawn_holdout_data(
     session: AsyncSession, run: Run, source: Ticket, *, test_set_name: str = "",
     enqueue: bool = True,
 ) -> Ticket | None:
-    """Create answer-stripping tickets for missing members of the Test suite."""
+    """Prepare every missing Test member in one private Data ticket."""
     from zevo.engine.run.wakeup import queue_wakeup
 
     suite = _heldout_test_sets(run)
-    selected = [
-        item for item in suite
-        if not test_set_name or item["name"] == test_set_name
-    ]
+    missing = [item for item in suite if not item.get("public")]
+    if not missing:
+        return None
+    primary = next(
+        (item for item in missing if item["name"] == test_set_name),
+        missing[0],
+    )
     existing = (await session.execute(
         select(Ticket).where(
             Ticket.run_id == run.id,
@@ -6171,56 +6357,44 @@ async def _spawn_holdout_data(
             Ticket.agent_id == "data",
         )
     )).scalars().all()
-    created: list[Ticket] = []
-    for item in selected:
-        if item.get("public"):
-            continue
-        active = next((
-            ticket for ticket in existing
-            if (ticket.payload or {}).get("test_set_name") == item["name"]
-            and ticket.status not in ("failed", "cancelled", "skipped")
-        ), None)
-        if active is not None:
-            created.append(active)
-            continue
-        tid = f"holdout-data-{run.id[:8]}-{len(existing) + len(created) + 1:03d}"
-        payload = validate_stored_payload(
-            agent_id="data", input_format="typed", payload={
-                "operation": "prepare_holdout_data",
-                "test_set_name": item["name"],
-                "dataset_source": "", "dataset": "",
-                "dataset_split": "", "dataset_config": "",
-                "data_query": "", "training_method": "",
-                "scoring_set": item["test_set"],
-                "answer_fields": list(item["answer_fields"]),
-                "metric_type": str(item.get("metric_type") or "builtin"),
-                "metric": item["metric"],
-                "evaluation_script": str(item.get("evaluation_script") or ""),
-                "evaluator_sha256": str(item.get("evaluator_sha256") or ""),
-                "sample_submission": item["sample_submission"],
-                "configuration_suggestions": {}, "configuration_pins": {},
-            },
-        )
-        ticket = Ticket(
-            id=tid, run_id=run.id, agent_id="data", status="queued",
-            input_format="typed", lane="held_out_test",
-            iteration=int(source.iteration or 0), payload=payload,
-            customization={}, inputs={}, summary="",
-        )
-        session.add(ticket)
-        created.append(ticket)
-    if not created:
-        return None
+    active = next((
+        ticket for ticket in existing
+        if ticket.status in ("queued", "running", "repairing", "awaiting_input", "waiting_external")
+    ), None)
+    if active is not None:
+        return active
+    tid = f"holdout-data-{run.id[:8]}-{len(existing) + 1:03d}"
+    payload = validate_stored_payload(
+        agent_id="data", input_format="typed", payload={
+            "operation": "prepare_holdout_data",
+            "test_set_name": primary["name"],
+            "dataset_source": "", "dataset": "",
+            "dataset_split": "", "dataset_config": "",
+            "data_query": "", "training_method": "",
+            "scoring_set": primary["test_set"],
+            "answer_fields": list(primary["answer_fields"]),
+            "metric_type": str(primary.get("metric_type") or "builtin"),
+            "metric": primary["metric"],
+            "evaluation_script": str(primary.get("evaluation_script") or ""),
+            "evaluator_sha256": str(primary.get("evaluator_sha256") or ""),
+            "sample_submission": primary["sample_submission"],
+            "configuration_suggestions": {}, "configuration_pins": {},
+        },
+    )
+    ticket = Ticket(
+        id=tid, run_id=run.id, agent_id="data", status="queued",
+        input_format="typed", lane="held_out_test",
+        iteration=int(source.iteration or 0), payload=payload,
+        customization={}, inputs={}, summary="",
+    )
+    session.add(ticket)
     await session.commit()
     if enqueue:
-        for ticket in created:
-            if ticket.status == "queued":
-                await queue_wakeup(
-                    session, agent_id="data", ticket_id=ticket.id,
-                    source="handoff",
-                    reason=f"preparing held-out Test set {ticket.payload['test_set_name']}",
-                )
-    return created[0]
+        await queue_wakeup(
+            session, agent_id="data", ticket_id=ticket.id,
+            source="handoff", reason=f"preparing {len(missing)} held-out Test sets",
+        )
+    return ticket
 
 
 async def _spawn_holdout_infer(
@@ -6238,13 +6412,8 @@ async def _spawn_holdout_infer(
         if not item.get("public")
     ]
     if missing:
-        # Preparation is answer stripping/profiling and may proceed per member;
-        # GPU inference waits at the barrier until every member is ready.
-        for item in missing:
-            await _spawn_holdout_data(
-                session, run, source, test_set_name=str(item["name"]),
-                enqueue=enqueue,
-            )
+        # One deterministic Data ticket prepares the entire missing suite.
+        await _spawn_holdout_data(session, run, source, enqueue=enqueue)
         return None
 
     iteration = int(source.iteration or 0)
@@ -6434,43 +6603,35 @@ async def _spawn_holdout_eval(
 async def _spawn_holdout_suite_evals(
     session: AsyncSession, run: Run, source: Ticket, *, enqueue: bool = True,
 ) -> list[Ticket]:
-    """Fan one completed Test-suite inference into deterministic scorers."""
+    """Score the completed Test suite in one deterministic Evaluation ticket."""
     products = (await session.execute(
         select(WorkProduct).where(
             WorkProduct.ticket_id == source.id,
             WorkProduct.role == "predictions",
         ).order_by(WorkProduct.created_at.asc())
     )).scalars().all()
-    created: list[Ticket] = []
-    for item in _heldout_test_sets(run):
-        name = str(item.get("name") or "")
-        product = next((
-            candidate for candidate in products
-            if str((candidate.meta or {}).get("suite_member_name") or "") == name
-        ), None)
-        if product is None:
-            if len(_heldout_test_sets(run)) == 1:
-                evaluation = await _spawn_holdout_eval(
-                    session, run, source, test_set_name=name,
-                    enqueue=enqueue,
-                )
-                if evaluation is not None:
-                    created.append(evaluation)
-                continue
-            raise ValueError(
-                f"held-out Inference suite did not register predictions for {name!r}"
-            )
-        evaluation = await _spawn_holdout_eval(
-            session, run, source, test_set_name=name,
-            predictions_product=product, enqueue=enqueue,
+    suite = _heldout_test_sets(run)
+    if not suite:
+        return []
+    primary_name = str(suite[0].get("name") or "")
+    product = next((
+        candidate for candidate in products
+        if str((candidate.meta or {}).get("suite_member_name") or "") == primary_name
+    ), None)
+    if product is None and len(suite) > 1:
+        raise ValueError(
+            f"held-out Inference suite did not register predictions for {primary_name!r}"
         )
-        if evaluation is not None:
-            created.append(evaluation)
-    return created
+    evaluation = await _spawn_holdout_eval(
+        session, run, source, test_set_name=primary_name,
+        predictions_product=product, enqueue=enqueue,
+    )
+    return [evaluation] if evaluation is not None else []
 
 
 async def _record_holdout_score(
     session: AsyncSession, run: Run, ticket: Ticket, score: float,
+    *, member_name: str = "",
 ) -> None:
     """File one Test member, then publish the suite average once complete.
 
@@ -6490,7 +6651,9 @@ async def _record_holdout_score(
     infer_payload = dict(heldout_infer.payload or {}) if heldout_infer else {}
     source = "baseline" if infer_payload.get("model_source") == "base_model" else "trained"
     base_model = str(infer_payload.get("base_model") or "")
-    test_set_name = str((ticket.payload or {}).get("test_set_name") or "test")
+    test_set_name = member_name or str(
+        (ticket.payload or {}).get("test_set_name") or "test"
+    )
     suite = _heldout_test_sets(run)
     suite_names = [str(item["name"]) for item in suite]
     if test_set_name not in suite_names:
@@ -6506,7 +6669,11 @@ async def _record_holdout_score(
     suite_item = next(item for item in suite if item["name"] == test_set_name)
     candidate_results[test_set_name] = {
         "score": float(score),
-        "metric": str((ticket.payload or {}).get("metric") or ""),
+        "metric": str(
+            suite_item.get("metric")
+            if member_name else (ticket.payload or {}).get("metric")
+            or suite_item.get("metric") or ""
+        ),
         "metric_direction": str(suite_item.get("metric_direction") or "max"),
         "evaluation_ticket_id": ticket.id,
     }
@@ -6841,6 +7008,7 @@ async def _record_validation_score(
 
 async def _record_validation_component(
     session: AsyncSession, run: Run, ticket: Ticket, score: float,
+    *, member_name: str = "",
 ) -> tuple[bool, Ticket | None]:
     """Record a component and publish exactly one suite-average point.
 
@@ -6867,7 +7035,9 @@ async def _record_validation_component(
         "baseline" if source_payload.get("model_source") == "base_model" else "trained"
     )
     base_model = str(source_payload.get("base_model") or "")
-    name = _validation_member_name(ticket) or str(suite[0].get("name") or "validation")
+    name = member_name or _validation_member_name(ticket) or str(
+        suite[0].get("name") or "validation"
+    )
     names = [str(item.get("name") or "") for item in suite]
     if name not in names:
         raise ValueError(f"Unknown Validation suite member {name!r}")
@@ -6879,7 +7049,10 @@ async def _record_validation_component(
     item = next(member for member in suite if member.get("name") == name)
     candidate[name] = {
         "score": float(score),
-        "metric": str((ticket.payload or {}).get("metric") or item.get("metric") or ""),
+        "metric": str(
+            item.get("metric") if member_name
+            else (ticket.payload or {}).get("metric") or item.get("metric") or ""
+        ),
         "metric_direction": str(item.get("metric_direction") or "max"),
         "evaluation_ticket_id": ticket.id,
     }
@@ -6965,16 +7138,27 @@ async def _advance_measurements(
     ):
         await _spawn_validation_eval(session, run, tk)
     elif score is not None and not is_held_out_test and tk.agent_id == "evaluation":
-        complete, source = await _record_validation_component(
-            session, run, tk, score,
+        suite_results = (
+            result.suite_members if isinstance(result, EvaluationResult) else []
         )
+        if suite_results:
+            complete = False
+            source = None
+            for member in suite_results:
+                complete, source = await _record_validation_component(
+                    session, run, tk, member.score, member_name=member.name,
+                )
+        else:
+            complete, source = await _record_validation_component(
+                session, run, tk, score,
+            )
         if complete:
             # Strict order: the complete Validation suite lands first. Only
             # then does the engine start the private held-out mirror for the
             # exact candidate that produced those predictions.
             if source is not None and source.agent_id == "inference":
                 await _spawn_holdout_infer(session, run, source)
-        elif not _is_validation_suite_mirror(tk):
+        elif not suite_results and not _is_validation_suite_mirror(tk):
             # The ordinary pipeline Evaluation is the primary member. The
             # remaining members are engine-created mirrors and deliberately do
             # not require one Orchestrator decision per benchmark.
@@ -6983,7 +7167,16 @@ async def _advance_measurements(
     elif is_held_out_test and tk.agent_id == "inference":
         await _spawn_holdout_suite_evals(session, run, tk)
     elif score is not None and is_held_out_test and tk.agent_id == "evaluation":
-        await _record_holdout_score(session, run, tk, score)
+        suite_results = (
+            result.suite_members if isinstance(result, EvaluationResult) else []
+        )
+        if suite_results:
+            for member in suite_results:
+                await _record_holdout_score(
+                    session, run, tk, member.score, member_name=member.name,
+                )
+        else:
+            await _record_holdout_score(session, run, tk, score)
 
 
 def _agent_history(history: list) -> list:
