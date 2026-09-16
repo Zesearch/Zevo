@@ -27,6 +27,7 @@ from zevo.engine.method.score_direction import is_better
 from zevo.db import Task, TaskSetting
 from zevo.db.models import Run
 from zevo.contracts.orchestrator import (
+    BUILTIN_METRICS,
     TaskTestSet,
     UserRequest,
     validate_test_suite,
