@@ -1,8 +1,8 @@
-"""Deterministic, coarse GPU planning for finite cluster stages.
+"""Coarse GPU planning for cluster stages using current scheduler capacity.
 
 Infrastructure discovers what a cluster permits.  This module turns that
-capability envelope plus a deliberately rough workload estimate into the exact
-GPU shape stamped on a Train or Inference work order.  It intentionally avoids
+capability envelope, current free capacity, and a rough workload estimate into
+the exact GPU shape stamped on a stage work order. It intentionally avoids
 false precision: estimates are rounded up to a small set of roomy tiers.
 """
 from __future__ import annotations
@@ -41,6 +41,19 @@ class StageResourceSelection:
     gpus_per_node: int
     source: str
     rationale: str
+
+
+@dataclass(frozen=True)
+class SlurmCapacitySnapshot:
+    """Immediately free GPUs on eligible nodes and within the selected QoS."""
+
+    free_gpus_by_node: tuple[int, ...]
+    qos_free_gpus: int | None = None
+
+    @property
+    def immediately_free_gpus(self) -> int:
+        physical = sum(self.free_gpus_by_node)
+        return min(physical, self.qos_free_gpus) if self.qos_free_gpus is not None else physical
 
 
 def model_parameter_billions(model_name: str) -> float | None:
@@ -87,23 +100,10 @@ def _inference_estimate(
     )
 
 
-def _constraints_for(info: InfrastructureDeviceInfo) -> tuple[ClusterGpuConstraints, str]:
+def _constraints_for(info: InfrastructureDeviceInfo) -> ClusterGpuConstraints:
     if info.cluster is None:
         raise ValueError("cluster stage has no cluster execution route")
-    if info.cluster.gpu_constraints is not None:
-        return info.cluster.gpu_constraints, "discovered cluster constraints"
-
-    # Older device artifacts did not separate route capability from the Train
-    # envelope.  Preserve their known-valid per-node geometry rather than
-    # guessing that a site (notably a whole-node site) accepts smaller jobs.
-    per_node = info.resource_plan.gpus_per_node
-    return ClusterGpuConstraints(
-        min_gpus_per_job=per_node,
-        allocation_step=per_node,
-        gpus_per_node=per_node,
-        whole_node=True,
-        source="legacy resource-plan geometry",
-    ), "legacy conservative constraints"
+    return info.cluster.gpu_constraints
 
 
 def _shape_for(
@@ -139,11 +139,39 @@ def _tier_candidates(required: int, maximum: int) -> list[int]:
     return [value for value in candidates if value >= required and (not maximum or value <= maximum)]
 
 
+def _live_shape_for(
+    total_gpus: int,
+    constraints: ClusterGpuConstraints,
+    *,
+    single_node: bool,
+    capacity: SlurmCapacitySnapshot,
+) -> tuple[int, int] | None:
+    """Choose an equal-per-node shape that fits the current node snapshot."""
+    if total_gpus > capacity.immediately_free_gpus:
+        return None
+    for nodes in range(1, total_gpus + 1):
+        if single_node and nodes > 1:
+            break
+        if total_gpus % nodes:
+            continue
+        per_node = total_gpus // nodes
+        if per_node > constraints.gpus_per_node:
+            continue
+        if constraints.whole_node and per_node != constraints.gpus_per_node:
+            continue
+        if sum(free >= per_node for free in capacity.free_gpus_by_node) >= nodes:
+            return nodes, per_node
+    return None
+
+
 def plan_stage_resources(
     *,
     stage: StageKind,
     base_model: str,
     info: InfrastructureDeviceInfo,
+    training_method: str = "",
+    live_capacity: SlurmCapacitySnapshot | None = None,
+    capacity_error: str = "",
     maximum_gpus: int = 0,
     registered_gpus: int = 0,
     registered_nodes: int = 0,
@@ -156,7 +184,7 @@ def plan_stage_resources(
     """
     if info.provider != "cluster":
         raise ValueError("Slurm stage resource planning requires provider='cluster'")
-    constraints, constraint_source = _constraints_for(info)
+    constraints = _constraints_for(info)
 
     if registered_gpus or registered_nodes:
         if registered_gpus < 1 or registered_nodes < 1:
@@ -179,7 +207,7 @@ def plan_stage_resources(
 
     if stage == "train":
         estimated = int(info.resource_plan.num_gpus)
-        estimate_reason = "used Infrastructure's model/method-aware Train envelope"
+        estimate_reason = "used Infrastructure's model/method-aware Train minimum"
     elif stage == "data":
         # Ordinary preparation is CPU-heavy. Some sites nevertheless require a
         # GPU GRES to enter their container/QoS path; start at the smallest tier
@@ -192,31 +220,71 @@ def plan_stage_resources(
         )
 
     single_node = stage in {"data", "inference"}
-    for tier in _tier_candidates(estimated, maximum_gpus):
-        shape = _shape_for(tier, constraints, single_node=single_node)
-        if shape is None:
-            continue
-        nodes, per_node = shape
-        return StageResourceSelection(
-            stage=stage,
-            estimated_gpus=estimated,
-            num_gpus=tier,
-            nodes=nodes,
-            gpus_per_node=per_node,
-            source=constraint_source,
-            rationale=(
-                f"{estimate_reason}; rounded the rough {estimated}-GPU estimate "
-                f"up to tier {tier}, then applied {constraints.source}"
-            ),
+    candidates = _tier_candidates(estimated, maximum_gpus)
+    baseline = next(
+        ((tier, shape) for tier in candidates
+         if (shape := _shape_for(tier, constraints, single_node=single_node)) is not None),
+        None,
+    )
+    if baseline is None:
+        cap = str(maximum_gpus) if maximum_gpus else "unlimited"
+        raise ValueError(
+            f"no valid {stage} GPU tier can cover estimate {estimated} within Run maximum "
+            f"{cap}; cluster constraints are minimum={constraints.min_gpus_per_job}, "
+            f"step={constraints.allocation_step}, gpus_per_node={constraints.gpus_per_node}, "
+            f"whole_node={constraints.whole_node}"
         )
 
-    cap = str(maximum_gpus) if maximum_gpus else "unlimited"
-    topology = (
-        f"minimum={constraints.min_gpus_per_job}, step={constraints.allocation_step}, "
-        f"gpus_per_node={constraints.gpus_per_node}, whole_node={constraints.whole_node}"
+    # Extra Train GPUs can shorten a large-model/full-parameter job. They are
+    # never a substitute for the minimum envelope, and Data/Inference do not
+    # consume extra cards merely because the cluster has them.
+    model_size = model_parameter_billions(base_model)
+    can_scale_train = stage == "train" and (
+        training_method == "full_sft"
+        or (not training_method and model_size is not None and model_size >= 30)
     )
-    extra = " and the current Inference executor is single-node" if single_node else ""
-    raise ValueError(
-        f"no valid {stage} GPU tier can cover estimate {estimated} within Run maximum "
-        f"{cap}; cluster constraints are {topology}{extra}"
+    useful_ceiling = baseline[0] * 2 if can_scale_train else baseline[0]
+    selected_tier, selected_shape = baseline
+    if live_capacity is not None:
+        for tier in reversed(candidates):
+            if tier < baseline[0] or tier > useful_ceiling:
+                continue
+            if _shape_for(tier, constraints, single_node=single_node) is None:
+                continue
+            live_shape = _live_shape_for(
+                tier, constraints, single_node=single_node, capacity=live_capacity,
+            )
+            if live_shape is not None:
+                selected_tier, selected_shape = tier, live_shape
+                break
+
+    nodes, per_node = selected_shape
+    if live_capacity is None:
+        capacity_reason = (
+            f"live Slurm probe unavailable ({capacity_error}); requested the safe minimum"
+            if capacity_error else "live Slurm probe not requested; requested the safe minimum"
+        )
+    elif _live_shape_for(
+        selected_tier, constraints, single_node=single_node, capacity=live_capacity,
+    ) is None:
+        capacity_reason = (
+            f"only {live_capacity.immediately_free_gpus} GPUs free now; "
+            "submitted the safe minimum to wait in Slurm"
+        )
+    else:
+        capacity_reason = (
+            f"{live_capacity.immediately_free_gpus} GPUs free now; "
+            f"selected {selected_tier} across {nodes} node(s)"
+        )
+    return StageResourceSelection(
+        stage=stage,
+        estimated_gpus=estimated,
+        num_gpus=selected_tier,
+        nodes=nodes,
+        gpus_per_node=per_node,
+        source="live Slurm capacity" if live_capacity is not None else "static cluster constraints",
+        rationale=(
+            f"{estimate_reason}; rounded minimum to tier {baseline[0]} using "
+            f"{constraints.source}; {capacity_reason}"
+        ),
     )

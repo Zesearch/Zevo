@@ -558,7 +558,7 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                 {/* Real Orchestrator heartbeat actions and sequential Specialist
                     Tickets share one chronological rail. */}
                 {open && (g.tickets.length > 0 || groupOrchestrator.length > 0 || g.mirror.length > 0) && (() => {
-                  const planRow = (heartbeat: HeartbeatDTO) => {
+                  const planRow = (heartbeat: HeartbeatDTO, showConnector: boolean) => {
                     const wake = wakeIndex.get(heartbeat.id) ?? 0;
                     const selId = supervisorId ? `${supervisorId}#${wake}` : "";
                     const active = !!selId && selectedId === selId;
@@ -608,7 +608,9 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                     );
                     return (
                       <li key={`orchestrator-${heartbeat.id}`} className="relative">
-                        <span className="absolute left-[18px] top-6 h-[calc(100%-12px)] w-px bg-hair" />
+                        {showConnector && (
+                          <span className="absolute left-[18px] top-6 h-[calc(100%-12px)] w-px bg-hair" />
+                        )}
                         <button
                           onClick={() => selId && setSel(selId)}
                           className={`group flex w-full items-start gap-3 rounded-lg px-2 py-1.5 text-left transition ${
@@ -656,9 +658,10 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                       kind: "orchestrator" as const, ts: heartbeat.started_at, heartbeat,
                     })),
                   ].sort((a, b) => a.ts.localeCompare(b.ts));
-                  mainItems.forEach((item) => {
+                  mainItems.forEach((item, index) => {
+                    const showConnector = index < mainItems.length - 1 || g.mirror.length > 0;
                     if (item.kind === "orchestrator") {
-                      rows.push(planRow(item.heartbeat));
+                      rows.push(planRow(item.heartbeat, showConnector));
                       return;
                     }
                     const t = item.ticket;
@@ -677,7 +680,9 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                     const dot = statusToneFor(t.status).dot;
                     rows.push(
                       <li key={t.id} className="relative">
-                        <span className="absolute left-[18px] top-7 h-[calc(100%-12px)] w-px bg-hair" />
+                        {showConnector && (
+                          <span className="absolute left-[18px] top-7 h-[calc(100%-12px)] w-px bg-hair" />
+                        )}
                         <button
                           onClick={() => setSel(t.id)}
                           className={`flex w-full items-start gap-3 rounded-lg px-2 py-1.5 text-left transition ${

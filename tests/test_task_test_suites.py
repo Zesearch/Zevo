@@ -448,6 +448,129 @@ async def test_independent_validation_suite_keeps_all_test_rows(
 
 
 @pytest.mark.asyncio
+async def test_run_setup_normalizes_relative_validation_and_private_test_paths(
+    tmp_path, monkeypatch,
+) -> None:
+    from zevo.contracts.orchestrator import TaskTestSet, UserRequest
+    from zevo.engine.run.split_settlement import settle_splits
+    from zevo.holdout_storage import private_mirror, protect_asset
+
+    files = tmp_path / "data" / "files"
+    test_dir = files / "test"
+    validation_dir = files / "validation"
+    test_dir.mkdir(parents=True)
+    validation_dir.mkdir(parents=True)
+    (test_dir / "rows.csv").write_text(
+        "id,question,answer\n1,test-question,yes\n", encoding="utf-8",
+    )
+    (test_dir / "submission.csv").write_text(
+        "id,prediction\n1,yes\n", encoding="utf-8",
+    )
+    (validation_dir / "rows.csv").write_text(
+        "id,question,answer\n" + "".join(
+            f"{index},validation-question-{index},yes\n"
+            for index in range(200)
+        ),
+        encoding="utf-8",
+    )
+    (validation_dir / "submission.csv").write_text(
+        "id,prediction\n1,yes\n", encoding="utf-8",
+    )
+    monkeypatch.setenv("ZEVO_FILES_DIR", str(files))
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "private"))
+    monkeypatch.chdir(tmp_path)
+    test_path = "data/files/test/rows.csv"
+    test_sample = "data/files/test/submission.csv"
+    protect_asset(test_path)
+    protect_asset(test_sample)
+
+    test = TaskTestSet(**{
+        **_member("test"), "test_set": test_path,
+        "sample_submission": test_sample,
+    })
+    validation = TaskTestSet(**{
+        **_member("validation"),
+        "test_set": "data/files/validation/rows.csv",
+        "sample_submission": "data/files/validation/submission.csv",
+    })
+    request = UserRequest(
+        task_objective="Improve quality.", test_sets=[test],
+        validation_sets=[validation], metric="accuracy",
+        metric_direction="max", training_method="", dataset="",
+        base_model="owner/model", test_set=test_path,
+        test_answer_fields=["answer"],
+        test_sample_submission=test_sample, constraints=[],
+    )
+    run = Run(
+        id="relative-scoring-paths", task_name="suite", status="running",
+        metric="accuracy", metric_direction="max",
+        started_at=datetime.now(timezone.utc),
+    )
+
+    _agent_request, holdout, _note = await settle_splits(
+        run, request, work_dir_root=str(tmp_path / "work"),
+    )
+
+    assert holdout["test_sets"][0]["test_set"] == str(private_mirror(test_path))
+    assert holdout["test_sets"][0]["sample_submission"] == str(
+        private_mirror(test_sample)
+    )
+    assert holdout["validation_sets"][0]["sample_submission"] == str(
+        validation_dir / "submission.csv"
+    )
+    assert holdout["validation_sample_submission"] == str(
+        validation_dir / "submission.csv"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_setup_rejects_missing_validation_submission_before_data(
+    tmp_path, monkeypatch,
+) -> None:
+    from zevo.contracts.orchestrator import TaskTestSet, UserRequest
+    from zevo.engine.run.split_settlement import SplitSettlementError, settle_splits
+
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "private"))
+    test_set = tmp_path / "test.csv"
+    test_set.write_text("id,question,answer\n1,test,yes\n", encoding="utf-8")
+    test_sample = tmp_path / "test-submission.csv"
+    test_sample.write_text("id,prediction\n1,yes\n", encoding="utf-8")
+    validation_set = tmp_path / "validation.csv"
+    validation_set.write_text(
+        "id,question,answer\n" + "".join(
+            f"{index},validation-{index},yes\n" for index in range(200)
+        ),
+        encoding="utf-8",
+    )
+    test = TaskTestSet(**{
+        **_member("test"), "test_set": str(test_set),
+        "sample_submission": str(test_sample),
+    })
+    validation = TaskTestSet(**{
+        **_member("validation"), "test_set": str(validation_set),
+        "sample_submission": str(tmp_path / "missing-submission.csv"),
+    })
+    request = UserRequest(
+        task_objective="Improve quality.", test_sets=[test],
+        validation_sets=[validation], metric="accuracy",
+        metric_direction="max", training_method="", dataset="",
+        base_model="owner/model", test_set=str(test_set),
+        test_answer_fields=["answer"],
+        test_sample_submission=str(test_sample), constraints=[],
+    )
+    run = Run(
+        id="missing-validation-sample", task_name="suite", status="running",
+        metric="accuracy", metric_direction="max",
+        started_at=datetime.now(timezone.utc),
+    )
+
+    with pytest.raises(
+        SplitSettlementError, match="Validation set 'validation' sample submission is invalid",
+    ):
+        await settle_splits(run, request, work_dir_root=str(tmp_path / "work"))
+
+
+@pytest.mark.asyncio
 async def test_validation_suite_publishes_one_unweighted_average(tmp_path) -> None:
     from zevo.engine.run.runner import _record_validation_component
 

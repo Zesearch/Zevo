@@ -31,6 +31,11 @@ def test_failure_ownership_is_deterministic() -> None:
     assert classify_failure(
         "held-out test isolation violated", agent_id="inference"
     ).route == "terminal"
+    assert classify_failure(
+        "engine could not prepare frozen Validation artifacts: "
+        "Validation sample submission must be an absolute path",
+        agent_id="data",
+    ).route == "terminal"
 
 
 @pytest.mark.asyncio
@@ -77,5 +82,26 @@ async def test_terminal_failure_never_enters_repairing(session: AsyncSession) ->
     )
     assert scheduled is False
     assert ticket.status == "cancelled"
+    assert ticket.repair_attempts == 0
+    assert ticket.repair_route == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_engine_scoring_failure_does_not_retry_data_agent(
+    session: AsyncSession,
+) -> None:
+    ticket = Ticket(
+        id="data-r-001", run_id="r", agent_id="data", status="running",
+        repair_attempts=0,
+    )
+    scheduled = await _apply_ticket_failure_policy(
+        session, ticket,
+        error_message=(
+            "engine could not prepare frozen Validation artifacts: "
+            "Validation sample submission does not exist"
+        ),
+    )
+    assert scheduled is False
+    assert ticket.status == "failed"
     assert ticket.repair_attempts == 0
     assert ticket.repair_route == "terminal"

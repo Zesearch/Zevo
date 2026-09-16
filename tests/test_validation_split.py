@@ -975,6 +975,8 @@ async def test_a_hub_validation_set_is_fetched_before_the_run_starts(
         property(lambda self: str(tmp_path / "work")),
     )
 
+    validation_sample = tmp_path / "validation-submission.csv"
+    validation_sample.write_text("id,prediction\n1,answer\n", encoding="utf-8")
     run = Run(metric="accuracy", id="r-hub", task_name="t", started_at=datetime.now(timezone.utc))
     request = UserRequest(metric="accuracy",
         task_objective="o", metric_direction="max",
@@ -989,7 +991,9 @@ async def test_a_hub_validation_set_is_fetched_before_the_run_starts(
         # Left blank it would inherit both and be refused, which is the point of
         # the check — see the field-existence test above.
         validation_answer_fields=["gold"],
-        test_sample_submission="", metric_type="builtin", evaluation_script="",
+        validation_sample_submission=str(validation_sample),
+        test_sample_submission=str(task_dir / "sample_submission.csv"),
+        metric_type="builtin", evaluation_script="",
         constraints=[],
     )
     agent_request, holdout, _ = await _settle_splits(run, request)
@@ -1092,6 +1096,8 @@ async def test_a_hub_validation_set_that_cannot_be_fetched_stops_the_run(
         property(lambda self: str(tmp_path / "work")),
     )
 
+    validation_sample = tmp_path / "validation-submission.csv"
+    validation_sample.write_text("id,prediction\n1,answer\n", encoding="utf-8")
     run = Run(metric="accuracy", id="r-hub-bad", task_name="t", started_at=datetime.now(timezone.utc))
     request = UserRequest(metric="accuracy",
         task_objective="o", metric_direction="max",
@@ -1101,7 +1107,9 @@ async def test_a_hub_validation_set_that_cannot_be_fetched_stops_the_run(
         data_query="", base_model="m",
         test_set=str(task_dir / "test.csv"), test_answer_fields=["gold"],
         validation_set="x/y", validation_split="validation",
-        test_sample_submission="", metric_type="builtin", evaluation_script="", constraints=[],
+        validation_sample_submission=str(validation_sample),
+        test_sample_submission=str(task_dir / "sample_submission.csv"),
+        metric_type="builtin", evaluation_script="", constraints=[],
     )
     with pytest.raises(HTTPException) as e:
         await _settle_splits(run, request)

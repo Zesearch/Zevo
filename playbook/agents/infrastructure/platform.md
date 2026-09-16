@@ -6,9 +6,9 @@ Infrastructure contract ┼─> Inference
                          └─> Registry (remote winner copy)
 ```
 
-Infrastructure establishes resource ownership and writes the connection
-contract. Downstream agents consume it exactly; they do not provision a second
-resource or rediscover a different allocation.
+Infrastructure verifies the cluster route and writes its stable capability
+contract. Downstream jobs reuse that route; Zevo refreshes only scheduler
+headroom when a new stage job needs a GPU allocation.
 
 ## Initial resource planning
 
@@ -33,6 +33,10 @@ Resolve one `resource_plan` before searching, submitting, or leasing anything:
 - use the selected site Skill and live Slurm state to resolve partition,
   account, QOS, and wall time. Deployment hints are evidence, not permission to
   invent a site value;
+- on a cluster, use live availability only to verify the route and scheduler
+  rules. Do not shrink the model's safe GPU minimum to today's idle capacity or
+  treat today's idle/QoS headroom as a durable allocation. Zevo refreshes that
+  headroom before each new Data, Train, or Inference job;
 - choose a positive `resource_plan.num_gpus`; when Run `num_gpus` is positive,
   do not exceed it, and when it is zero there is no user-imposed GPU-count cap.
   Make a deliberately rough estimate with safety room, then prefer a coarse
@@ -352,16 +356,19 @@ Run/cache directories are available without submitting any job. A login-node
 environment check may import lightweight dependencies, but it must not load a
 model or claim compute-node GPU/CUDA facts.
 
-Resolve a bounded resource plan for the downstream stage. Record the exact
-partition/account/QOS, CPU, RAM, requested GPU type/count, and walltime that the
-stage must render as `#SBATCH` directives. If a requested GPU mapping or account
+Resolve a bounded minimum resource plan for the downstream stage. Record the
+partition/account/QOS, CPU, RAM, GPU type/minimum count, and walltime. The
+downstream stage may request a larger legal GPU tier after refreshing live
+Slurm capacity; it must never request fewer GPUs than this safe minimum.
+If a requested GPU mapping or account
 association cannot be established from live read-only state, fail visibly.
 Also record `cluster.gpu_constraints` from that same evidence: the minimum GPUs
 per job, legal cluster-wide allocation increment, maximum GPUs per node,
 approximate VRAM per GPU (zero only when genuinely unknown), whether partial
 nodes are forbidden, and a short evidence label. These are reusable scheduler
 capabilities, not the Train allocation. Downstream engine planning uses them to
-round every Data/Inference/Train request independently. For example, a site
+round every Data/Inference/Train request independently against fresh node and
+QoS headroom. For example, a site
 that allows partial eight-GPU nodes records `1/1/8/false`; a whole four-GPU
 node site records `4/4/4/true`. Never copy the current Train GPU count into
 these capability fields unless the live scheduler really imposes it.

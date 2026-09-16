@@ -104,6 +104,7 @@ from zevo.engine.run.failure_policy import (
     repair_instruction,
 )
 from zevo.engine.run.resource_planning import plan_stage_resources
+from zevo.engine.run.slurm_capacity import probe_slurm_capacity
 from zevo.engine.observe import transcript_bus
 from zevo.engine.artifact_validation import (
     materialize_system_scoring_artifacts,
@@ -757,20 +758,25 @@ async def _slurm_stage_job_contract(
     if cluster:
         registered_gpus = int(job_row.gpu_count or 0) if job_row is not None else 0
         registered_nodes = int(meta.get("nodes") or 0) if job_row is not None else 0
-        if job_row is not None and registered_nodes < 1 and registered_gpus > 0:
-            registered_per_node = int(meta.get("gpus_per_node") or 0)
-            if registered_per_node > 0 and registered_gpus % registered_per_node == 0:
-                registered_nodes = registered_gpus // registered_per_node
-            elif stage == "inference":
-                # Legacy Inference jobs were single-node in execution even when
-                # their copied Infrastructure envelope said otherwise.
-                registered_nodes = 1
-            else:
-                registered_nodes = int(info.resource_plan.nodes)
+        capacity = None
+        capacity_error = ""
+        if job_row is None:
+            try:
+                capacity = await probe_slurm_capacity(info)
+            except (OSError, ValueError) as exc:
+                # A snapshot is only a sizing hint. Slurm can still safely
+                # queue the minimum job when the read-only probe is unavailable.
+                capacity_error = str(exc)
         selection = plan_stage_resources(
             stage=stage,
             base_model=str((ticket.payload or {}).get("base_model") or ""),
+            training_method=str(
+                (ticket.payload or {}).get("training_method_pin")
+                or (ticket.payload or {}).get("training_method") or ""
+            ),
             info=info,
+            live_capacity=capacity,
+            capacity_error=capacity_error,
             maximum_gpus=maximum_gpus,
             registered_gpus=registered_gpus,
             registered_nodes=registered_nodes,
