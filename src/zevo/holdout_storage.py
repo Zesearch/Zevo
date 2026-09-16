@@ -92,6 +92,36 @@ def resolve_asset(path: str | Path) -> str:
     return value
 
 
+def resolve_scoring_file(path: str | Path, *, private: bool) -> str:
+    """Resolve a local scoring asset to an existing absolute execution path.
+
+    Saved Tasks may use repo-relative ``data/files`` or ``data/uploads`` paths.
+    Validation reads the public file; Test must read its protected mirror.  Do
+    this once at Run setup so later stages never depend on their working dir.
+    """
+    value = str(path or "").strip()
+    if not value:
+        raise ValueError("path is empty")
+
+    managed = _managed_source(value)
+    if managed is not None:
+        _kind, public_root, relative = managed
+        root = Path(holdout_root() if private else public_root).resolve()
+        candidate = (private_mirror(value) if private else public_root / relative)
+        assert candidate is not None
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(root):
+            raise ValueError(f"path escapes its configured data root: {value}")
+    else:
+        resolved = Path(value).resolve()
+
+    if not resolved.is_file():
+        raise ValueError(f"file does not exist: {value} (resolved to {resolved})")
+    if resolved.stat().st_size == 0:
+        raise ValueError(f"file is empty: {value}")
+    return str(resolved)
+
+
 def protect_asset(path: str | Path) -> str:
     """Move a managed local Test asset behind the private storage boundary.
 

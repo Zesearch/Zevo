@@ -1,6 +1,9 @@
 """Coarse stage sizing stays dynamic while honoring each cluster's rules."""
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 from zevo.contracts.infrastructure import (
@@ -8,9 +11,12 @@ from zevo.contracts.infrastructure import (
     InfrastructureResourcePlan,
 )
 from zevo.engine.run.resource_planning import (
+    SlurmCapacitySnapshot,
     model_parameter_billions,
     plan_stage_resources,
 )
+from zevo.engine.run.slurm_capacity import parse_slurm_capacity
+from zevo.engine.run import runner
 
 
 def _cluster_info(
@@ -147,15 +153,138 @@ def test_collect_preserves_the_registered_job_shape() -> None:
         maximum_gpus=8,
         registered_gpus=6,
         registered_nodes=2,
+        live_capacity=SlurmCapacitySnapshot((0, 0), 0),
     )
     assert (selected.num_gpus, selected.nodes, selected.gpus_per_node) == (6, 2, 3)
     assert selected.source == "registered scheduler job"
 
 
-def test_old_artifact_uses_known_valid_per_node_shape_conservatively() -> None:
-    info = _cluster_info(plan_gpus=8, plan_nodes=2, constraints=None)
-    selected = plan_stage_resources(
-        stage="inference", base_model="org/7B", info=info, maximum_gpus=8,
+def test_missing_cluster_constraints_are_not_silently_guessed() -> None:
+    with pytest.raises(ValueError, match="gpu_constraints"):
+        _cluster_info(plan_gpus=8, plan_nodes=2, constraints=None)
+
+
+def _partial_node_constraints() -> dict:
+    return {
+        "min_gpus_per_job": 1,
+        "allocation_step": 1,
+        "gpus_per_node": 8,
+        "gpu_vram_gib": 180,
+        "whole_node": False,
+        "source": "sinfo and QoS limits",
+    }
+
+
+def test_large_train_expands_only_when_live_capacity_allows_it() -> None:
+    info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
+    full = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="full_sft",
+        info=info, live_capacity=SlurmCapacitySnapshot((4, 4), 8),
     )
-    assert (selected.num_gpus, selected.nodes) == (4, 1)
-    assert selected.source == "legacy conservative constraints"
+    assert (full.num_gpus, full.nodes, full.gpus_per_node) == (8, 2, 4)
+    assert full.source == "live Slurm capacity"
+
+    reduced = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="full_sft",
+        info=info, live_capacity=SlurmCapacitySnapshot((4, 4), 6),
+    )
+    assert (reduced.num_gpus, reduced.nodes, reduced.gpus_per_node) == (6, 2, 3)
+
+    queued = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="full_sft",
+        info=info, live_capacity=SlurmCapacitySnapshot((2, 2), 2),
+    )
+    assert queued.num_gpus == 4
+    assert "wait in Slurm" in queued.rationale
+
+
+def test_lora_and_inference_do_not_take_extra_gpus_merely_because_they_are_free() -> None:
+    info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
+    capacity = SlurmCapacitySnapshot((8, 8), 16)
+    lora = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="lora_sft",
+        info=info, live_capacity=capacity,
+    )
+    inference = plan_stage_resources(
+        stage="inference", base_model="org/32B",
+        info=info, live_capacity=capacity,
+    )
+    assert lora.num_gpus == 4
+    assert inference.num_gpus == 1
+
+
+def test_probe_failure_keeps_minimum_safe_shape() -> None:
+    info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
+    selected = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="full_sft",
+        info=info, capacity_error="Slurm capacity probe timed out",
+    )
+    assert selected.num_gpus == 4
+    assert "timed out" in selected.rationale
+
+
+def test_slurm_snapshot_parses_node_and_qos_headroom() -> None:
+    raw = (
+        "node-a |gpu:b200:8(S:0-1)|gpu:b200:4(IDX:0-3)|mix-\n"
+        "node-b |gpu:b200:8(S:0-1)|gpu:b200:4(IDX:0-3)|mix-\n"
+        "cpu-only|(null)|(null)|idle\n"
+        "node-c |gpu:b200:8(S:0-1)|gpu:b200:0|drain\n"
+        "__ZEVO_QOS_LIMIT__\n"
+        "research|cpu=180,gres/gpu=10,mem=1440000M\n"
+        "__ZEVO_RUNNING_QOS_JOBS__\n"
+        "research cpu=16,mem=100G,node=1,gres/gpu=2,gres/gpu:b200=2\n"
+        "research cpu=8,mem=64G,node=1,gres/gpu=2,gres/gpu:b200=2\n"
+    )
+    snapshot = parse_slurm_capacity(raw, qos="research")
+    assert snapshot.free_gpus_by_node == (4, 4)
+    assert snapshot.qos_free_gpus == 6
+    assert snapshot.immediately_free_gpus == 6
+
+
+def test_incomplete_qos_snapshot_fails_closed_to_static_planning() -> None:
+    raw = "node-a|gpu:8|gpu:0|idle\n"
+    with pytest.raises(ValueError, match="QoS limits"):
+        parse_slurm_capacity(raw, qos="research")
+
+
+def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch) -> None:
+    info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
+    path = tmp_path / "device_info.json"
+    path.write_text(info.model_dump_json(), encoding="utf-8")
+    run = SimpleNamespace(gpu_provider="cluster", num_gpus=8, max_queue_wait_hours=24)
+    ticket = SimpleNamespace(
+        id="train-run-001", run_id="run-1",
+        payload={"base_model": "org/32B", "training_method_pin": "full_sft"},
+    )
+    observed = []
+    job_row = None
+
+    async def latest(*_args):
+        return job_row
+
+    async def probe(_info):
+        observed.append("probe")
+        return SlurmCapacitySnapshot((4, 4), 8)
+
+    monkeypatch.setattr(runner, "_latest_slurm_resource_request", latest)
+    monkeypatch.setattr(runner, "probe_slurm_capacity", probe)
+
+    async def contract():
+        return await runner._slurm_stage_job_contract(
+            run=run, ticket=ticket, work_dir=str(tmp_path), filename="train.sbatch",
+            device_info_path=str(path), session=None, stage="train",
+        )
+
+    submit = asyncio.run(contract())
+    assert submit.phase == "submit"
+    assert (submit.num_gpus, submit.nodes) == (8, 2)
+    assert observed == ["probe"]
+
+    job_row = SimpleNamespace(
+        id="request-1", gpu_count=6, instance_id="12345", status="RUNNING",
+        meta={"nodes": 2, "gpus_per_node": 3},
+    )
+    collect = asyncio.run(contract())
+    assert collect.phase == "collect"
+    assert (collect.num_gpus, collect.nodes) == (6, 2)
+    assert observed == ["probe"]

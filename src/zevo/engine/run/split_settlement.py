@@ -16,6 +16,7 @@ post-scoping path (``zevo.engine.run.scoping``) fails the Run with the message.
 """
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from zevo.contracts.orchestrator import (
     inherit_test_validation_contract,
 )
 from zevo.db import Run
+from zevo.holdout_storage import resolve_scoring_file
 
 
 class SplitSettlementError(ValueError):
@@ -34,6 +36,25 @@ class SplitSettlementError(ValueError):
 
     The message is user-facing and complete; callers surface it verbatim.
     """
+
+
+def _checked_scoring_file(
+    path: str, *, lane: str, member: str, field: str, private: bool,
+) -> str:
+    try:
+        resolved = resolve_scoring_file(path, private=private)
+        if field == "sample submission":
+            with Path(resolved).open("r", encoding="utf-8-sig", newline="") as handle:
+                columns = list(next(csv.reader(handle), []))
+            if not columns:
+                raise ValueError("CSV header is missing")
+            if len(columns) != len(set(columns)):
+                raise ValueError("CSV header contains duplicate columns")
+        return resolved
+    except (OSError, ValueError, csv.Error) as exc:
+        raise SplitSettlementError(
+            f"{lane} set {member!r} {field} is invalid: {exc}"
+        ) from exc
 
 
 async def settle_splits(
@@ -89,6 +110,24 @@ async def settle_splits(
     # to download and upload it. Materialize every suite member behind the
     # held-out boundary before deriving the Validation suite.
     suite = effective_test_suite(user_request)
+    # Freeze local Test references to their protected, absolute execution
+    # paths before any remote fetch. The Task's saved logical paths stay as-is.
+    suite = [
+        item.model_copy(update={
+            "test_set": (
+                item.test_set if looks_like_hub_id(item.test_set)
+                else _checked_scoring_file(
+                    item.test_set, lane="Test", member=item.name,
+                    field="data file", private=True,
+                )
+            ),
+            "sample_submission": _checked_scoring_file(
+                item.sample_submission, lane="Test", member=item.name,
+                field="sample submission", private=True,
+            ),
+        })
+        for item in suite
+    ]
     code_execution_adapters = {
         item.name.casefold(): code_execution_adapter_for(item.test_set)
         for item in suite
@@ -188,6 +227,10 @@ async def settle_splits(
                 phase="validation", completed=index, total=total, label=item.name,
             )
             member_out = str(Path(out_dir) / f"validation-suite-{index:03d}")
+            sample_submission = _checked_scoring_file(
+                item.sample_submission, lane="Validation", member=item.name,
+                field="sample submission", private=False,
+            )
             source = item.test_set
             fetched_note = ""
             materialized_rows = 0
@@ -251,7 +294,7 @@ async def settle_splits(
                 "name": item.name,
                 "validation_set": validation_source_path,
                 "inference_query": item.inference_query,
-                "sample_submission": item.sample_submission,
+                "sample_submission": sample_submission,
                 "metric_type": item.metric_type,
                 "metric": item.metric,
                 "metric_direction": item.metric_direction,

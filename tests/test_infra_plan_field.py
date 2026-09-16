@@ -46,6 +46,12 @@ def _cluster_device_info() -> dict:
             "requested_gpus": 1,
             "workdir": "/scratch/zevo/run",
             "hf_cache": "/scratch/zevo/hf_cache",
+            "gpu_constraints": {
+                "min_gpus_per_job": 1,
+                "allocation_step": 1,
+                "gpus_per_node": 8,
+                "source": "test scheduler geometry",
+            },
         },
         "instance": None,
         "gpu": None,

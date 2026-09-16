@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from zevo.holdout_storage import protect_asset, private_mirror, resolve_asset
+import pytest
+
+from zevo.holdout_storage import (
+    protect_asset, private_mirror, resolve_asset, resolve_scoring_file,
+)
 
 
 def test_managed_test_asset_moves_to_private_root(tmp_path, monkeypatch):
@@ -52,3 +56,36 @@ def test_repo_relative_managed_path_is_protected(tmp_path, monkeypatch):
     assert protect_asset(logical) == logical
     assert not source.exists()
     assert Path(resolve_asset(logical)).read_text() == '{"question":"q","answer":"a"}\n'
+
+
+def test_scoring_paths_resolve_public_validation_and_private_test(tmp_path, monkeypatch):
+    files = tmp_path / "data" / "files"
+    public = files / "validation" / "submission.csv"
+    protected = files / "test" / "submission.csv"
+    public.parent.mkdir(parents=True)
+    protected.parent.mkdir(parents=True)
+    public.write_text("id,prediction\n1,answer\n", encoding="utf-8")
+    protected.write_text("id,prediction\n1,answer\n", encoding="utf-8")
+    monkeypatch.setenv("ZEVO_FILES_DIR", str(files))
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "private"))
+
+    protect_asset("data/files/test/submission.csv")
+
+    assert resolve_scoring_file(
+        "data/files/validation/submission.csv", private=False,
+    ) == str(public)
+    assert resolve_scoring_file(
+        "data/files/test/submission.csv", private=True,
+    ) == str(private_mirror("data/files/test/submission.csv"))
+    with pytest.raises(ValueError, match="file does not exist"):
+        resolve_scoring_file("data/files/test/submission.csv", private=False)
+
+
+def test_scoring_path_rejects_missing_private_copy_and_root_escape(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEVO_FILES_DIR", str(tmp_path / "data" / "files"))
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "private"))
+
+    with pytest.raises(ValueError, match="file does not exist"):
+        resolve_scoring_file("data/files/test/missing.csv", private=True)
+    with pytest.raises(ValueError, match="escapes its configured data root"):
+        resolve_scoring_file("data/files/../../outside.csv", private=False)

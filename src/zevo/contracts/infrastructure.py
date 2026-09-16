@@ -635,13 +635,8 @@ class DeviceClusterRoute(BaseModel):
     env_setup: str = ""
     workdir: str = Field(min_length=1)
     hf_cache: str = Field(min_length=1)
-    gpu_constraints: ClusterGpuConstraints | None = Field(
-        default=None,
-        description=(
-            "Live scheduler GPU minimum, allocation step, and node capacity. "
-            "New provisions must record it. None is accepted only for older "
-            "device artifacts, which downstream planning handles conservatively."
-        ),
+    gpu_constraints: ClusterGpuConstraints = Field(
+        description="Scheduler GPU minimum, allocation step, and node capacity.",
     )
 
 
@@ -722,25 +717,24 @@ class InfrastructureDeviceInfo(BaseModel):
                     "cluster requested_gpus must be an exact multiple of nodes"
                 )
             constraints = self.cluster.gpu_constraints
-            if constraints is not None:
-                selected = self.cluster.requested_gpus
-                selected_per_node = selected // self.cluster.nodes
-                if selected < constraints.min_gpus_per_job:
-                    raise ValueError(
-                        "cluster requested_gpus is below gpu_constraints minimum"
-                    )
-                if selected % constraints.allocation_step:
-                    raise ValueError(
-                        "cluster requested_gpus violates gpu_constraints allocation_step"
-                    )
-                if selected_per_node > constraints.gpus_per_node:
-                    raise ValueError(
-                        "cluster plan exceeds gpu_constraints gpus_per_node"
-                    )
-                if constraints.whole_node and selected_per_node != constraints.gpus_per_node:
-                    raise ValueError(
-                        "whole-node cluster plan must request every GPU on each node"
-                    )
+            selected = self.cluster.requested_gpus
+            selected_per_node = selected // self.cluster.nodes
+            if selected < constraints.min_gpus_per_job:
+                raise ValueError(
+                    "cluster requested_gpus is below gpu_constraints minimum"
+                )
+            if selected % constraints.allocation_step:
+                raise ValueError(
+                    "cluster requested_gpus violates gpu_constraints allocation_step"
+                )
+            if selected_per_node > constraints.gpus_per_node:
+                raise ValueError(
+                    "cluster plan exceeds gpu_constraints gpus_per_node"
+                )
+            if constraints.whole_node and selected_per_node != constraints.gpus_per_node:
+                raise ValueError(
+                    "whole-node cluster plan must request every GPU on each node"
+                )
             if self.auto_release:
                 raise ValueError("cluster access has no resource to auto-release")
         else:

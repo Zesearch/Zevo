@@ -48,6 +48,9 @@ class FailureDisposition:
 _TERMINAL: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("cancelled", re.compile(r"cancel(?:led|ed) by user|received sigterm", re.I),
      "the user cancelled this execution"),
+    ("engine_scoring", re.compile(
+        r"engine could not prepare frozen (?:Validation|Test) artifacts", re.I,
+    ), "the engine-owned scoring artifacts or configuration must be corrected"),
     ("held_out_access", re.compile(r"held[-_ ]out test isolation violated", re.I),
      "held-out Test isolation was violated"),
     ("authentication", re.compile(
