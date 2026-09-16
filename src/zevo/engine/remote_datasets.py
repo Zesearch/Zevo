@@ -116,6 +116,9 @@ class _ParquetShard:
 # datasets whose Parquet conversion is pending or unavailable.
 _SERVER = "https://datasets-server.huggingface.co"
 _PAGE = 100
+# The rows endpoint may return large records for any dataset. Stream its JSON
+# body instead of sizing requests according to a particular benchmark name.
+_JSON_STREAM_CHUNK = 64 * 1024
 # Not a policy on validation-set size — that is the user's call, and a cap here
 # used to silently make it for them by taking a prefix. This is a runaway guard:
 # the rows API pages 100 at a time, so a million-row split is ten thousand
@@ -230,6 +233,32 @@ async def _get_json(client, url: str, *, params: dict[str, object]) -> dict:
             )
             await asyncio.sleep(delay)
     raise AssertionError("unreachable")
+
+
+class _AsyncChunkReader:
+    """Expose an HTTP byte iterator as the bounded async ``read`` ijson needs."""
+
+    def __init__(self, chunks: AsyncIterator[bytes]) -> None:
+        self._chunks = chunks.__aiter__()
+        self._buffer = bytearray()
+        self._done = False
+
+    async def read(self, size: int = _JSON_STREAM_CHUNK) -> bytes:
+        if size == 0:
+            return b""
+        if size < 0:
+            size = _JSON_STREAM_CHUNK
+        size = min(size, _JSON_STREAM_CHUNK)
+        while len(self._buffer) < size and not self._done:
+            try:
+                chunk = await self._chunks.__anext__()
+            except StopAsyncIteration:
+                self._done = True
+            else:
+                self._buffer.extend(chunk)
+        result = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return result
 
 
 def _cache_root() -> Path:
@@ -741,55 +770,129 @@ async def _materialize_rows(
 ) -> tuple[str, list[str], int]:
     """Compatibility path for datasets without a complete Parquet export."""
     import csv as _csv
+    import httpx
+    import ijson
 
-    rows: list[dict] = []
-    ceiling = limit if limit > 0 else _MAX_FETCH
-    offset = 0
-    while len(rows) < ceiling:
-        n = min(_PAGE, ceiling - len(rows))
-        try:
-            document = await _get_json(client, f"{_SERVER}/rows", params={
-                "dataset": hub_id, "config": config, "split": split,
-                "offset": offset, "length": n,
-            })
-            batch = [x.get("row") or {} for x in (document.get("rows") or [])]
-        except Exception as exc:
-            raise MaterializeError(
-                f"cannot read rows of {hub_id!r} ({config}/{split}): {exc}"
-            ) from exc
-        if not batch:
-            break
-        rows.extend(batch)
-        offset += len(batch)
-    if limit <= 0 and len(rows) >= _MAX_FETCH:
-        raise MaterializeError(
-            f"{hub_id!r} ({config}/{split}) has at least {_MAX_FETCH:,} rows, "
-            "which is too many to pull into a validation set at run creation. "
-            "Point at a smaller split, or upload the rows you want as a file."
-        )
-    if not rows:
-        raise MaterializeError(f"{hub_id!r} ({config}/{split}) returned no rows")
-
-    columns: list[str] = []
-    for row in rows:
-        for key in row:
-            if key not in columns:
-                columns.append(key)
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    path = out / "validation.csv"
     from zevo.code_benchmarks import (
         code_execution_adapter_for,
         externalize_code_answers,
     )
+
     adapter = code_execution_adapter_for(hub_id)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = _csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            row = externalize_code_answers(adapter, row)
-            writer.writerow({c: _cell(row.get(c)) for c in columns})
-    return str(path), columns, len(rows)
+    ceiling = limit if limit > 0 else _MAX_FETCH
+    offset = 0
+    count = 0
+    columns: list[str] = []
+    seen_columns: set[str] = set()
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "validation.csv"
+    spool = out / f".rows.{uuid4().hex}.tmp"
+    temporary = out / f"validation.{uuid4().hex}.tmp"
+    try:
+        # Column names can appear after the first page. Spool already-
+        # projected rows so the CSV header includes every field without
+        # retaining an entire dataset (or even one HTTP page) in memory.
+        with spool.open("w", encoding="utf-8") as handle:
+            while count < ceiling:
+                n = min(_PAGE, ceiling - count)
+                params = {
+                    "dataset": hub_id, "config": config, "split": split,
+                    "offset": offset, "length": n,
+                }
+                for attempt in range(len(_RETRY_DELAYS) + 1):
+                    start = handle.tell()
+                    page_count = 0
+                    page_columns: list[str] = []
+                    page_seen: set[str] = set()
+                    try:
+                        async with client.stream(
+                            "GET", f"{_SERVER}/rows", params=params,
+                        ) as response:
+                            response.raise_for_status()
+                            reader = _AsyncChunkReader(response.aiter_bytes(
+                                chunk_size=_JSON_STREAM_CHUNK,
+                            ))
+                            async for item in ijson.items_async(
+                                reader, "rows.item", use_float=True,
+                            ):
+                                row = (item or {}).get("row") or {}
+                                if not isinstance(row, dict):
+                                    raise ValueError("Dataset Viewer row is not an object")
+                                for key in row:
+                                    if key not in seen_columns and key not in page_seen:
+                                        page_seen.add(key)
+                                        page_columns.append(key)
+                                projected = externalize_code_answers(adapter, row)
+                                json.dump(
+                                    projected, handle, ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                                handle.write("\n")
+                                page_count += 1
+                                if page_count >= n:
+                                    break
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        handle.seek(start)
+                        handle.truncate()
+                        if (
+                            exc.response.status_code not in _RETRYABLE_STATUS
+                            or attempt >= len(_RETRY_DELAYS)
+                        ):
+                            raise MaterializeError(
+                                f"cannot read rows of {hub_id!r} ({config}/{split}): {exc}"
+                            ) from exc
+                        delay = _retry_delay(exc.response, _RETRY_DELAYS[attempt])
+                    except (httpx.TransportError, ijson.IncompleteJSONError) as exc:
+                        handle.seek(start)
+                        handle.truncate()
+                        if attempt >= len(_RETRY_DELAYS):
+                            raise MaterializeError(
+                                f"cannot read rows of {hub_id!r} ({config}/{split}): {exc}"
+                            ) from exc
+                        delay = _RETRY_DELAYS[attempt]
+                    except Exception as exc:
+                        handle.seek(start)
+                        handle.truncate()
+                        raise MaterializeError(
+                            f"cannot read rows of {hub_id!r} ({config}/{split}): {exc}"
+                        ) from exc
+                    log.warning(
+                        "Hugging Face rows stream failed; retrying in %.1fs "
+                        "(%d/%d)", delay, attempt + 1, len(_RETRY_DELAYS),
+                    )
+                    await asyncio.sleep(delay)
+                if not page_count:
+                    break
+                for key in page_columns:
+                    seen_columns.add(key)
+                    columns.append(key)
+                count += page_count
+                offset += page_count
+
+        if limit <= 0 and count >= _MAX_FETCH:
+            raise MaterializeError(
+                f"{hub_id!r} ({config}/{split}) has at least {_MAX_FETCH:,} rows, "
+                "which is too many to pull into a validation set at run creation. "
+                "Point at a smaller split, or upload the rows you want as a file."
+            )
+        if not count:
+            raise MaterializeError(f"{hub_id!r} ({config}/{split}) returned no rows")
+
+        with spool.open("r", encoding="utf-8") as source, temporary.open(
+            "w", newline="", encoding="utf-8",
+        ) as handle:
+            writer = _csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for line in source:
+                row = json.loads(line)
+                writer.writerow({column: _cell(row.get(column)) for column in columns})
+        os.replace(temporary, path)
+        return str(path), columns, count
+    finally:
+        spool.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 async def materialize(
