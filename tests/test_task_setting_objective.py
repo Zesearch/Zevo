@@ -204,29 +204,25 @@ def test_absent_and_zero_are_the_same_cap() -> None:
     assert setting_identity(base) == setting_identity({**base, "max_cost_usd": None})
 
 
-@pytest.mark.asyncio
-async def test_setting_with_own_validation_set_checks_builtin_metric() -> None:
-    """Saving a Setting with independent Validation must not raise NameError."""
+def test_setting_rejects_legacy_single_validation_input() -> None:
     from fastapi import HTTPException
 
-    from zevo.api.routers.ui.tasks import SettingBody, _freeze_validation_metric
-
-    body = SettingBody(
-        validation_set="validation.jsonl",
-        validation_answer_fields=["answer"],
-        validation_sample_submission="submission.csv",
-        validation_metric_type="builtin",
-        validation_metric="ACCURACY",
-    )
-    resolved, digest = await _freeze_validation_metric(body)
-    assert resolved.validation_metric == "accuracy"
-    assert digest == ""
+    from zevo.api.routers.ui.tasks import SettingBody, _validate_named_validation_assets
 
     with pytest.raises(HTTPException) as exc:
-        await _freeze_validation_metric(body.model_copy(update={
-            "validation_metric": "not_a_metric",
-        }))
+        _validate_named_validation_assets(SettingBody(validation_set="validation.jsonl"))
     assert exc.value.status_code == 400
+    assert "validation_sets" in str(exc.value.detail)
+
+    _validate_named_validation_assets(SettingBody(validation_sets=[{
+        "name": "Validation 1",
+        "test_set": "validation.jsonl",
+        "inference_query": "Answer {question}.",
+        "sample_submission": "submission.csv",
+        "metric": "accuracy",
+        "answer_fields": ["answer"],
+        "metric_direction": "max",
+    }]))
 
 
 def test_a_row_and_a_form_describing_it_agree() -> None:

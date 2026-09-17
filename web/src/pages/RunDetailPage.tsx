@@ -1732,7 +1732,7 @@ function JournalPanel({ run }: { run: RunDetail }) {
       : run.best_validation_score >= run.stop_threshold
   );
   return (
-    <Bezel className="p-6">
+    <div className="rounded-bezel border border-hair bg-panel/40 p-6">
       <div className="mb-4 flex items-center justify-between gap-2">
         <Kicker strong className="!text-sm">Run journal</Kicker>
         {targetReached && (
@@ -1742,6 +1742,6 @@ function JournalPanel({ run }: { run: RunDetail }) {
         )}
       </div>
       <RunJournal history={run.history} metricDirection={run.validation_metric_direction} />
-    </Bezel>
+    </div>
   );
 }

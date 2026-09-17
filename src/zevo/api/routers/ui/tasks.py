@@ -27,7 +27,6 @@ from zevo.engine.method.score_direction import is_better
 from zevo.db import Task, TaskSetting
 from zevo.db.models import Run
 from zevo.contracts.orchestrator import (
-    BUILTIN_METRICS,
     TaskTestSet,
     UserRequest,
     validate_test_suite,
@@ -603,14 +602,14 @@ class SettingBody(BaseModel):
     # Only meaningful when dataset is a hub id.
     dataset_split: str = ""
     dataset_config: str = ""
-    # What runs on this setting TUNE against. A suite leaves every Test member
-    # intact. The scalar fields below remain the one-upload form and primary
-    # compatibility projection. When both are empty, Run setup derives 20%
-    # from eligible Test members with at least 200 resulting Validation rows.
+    # What runs on this setting TUNE against. One independent Validation set is
+    # a one-member suite. An empty suite derives Validation from eligible Test
+    # members when that yields at least 200 rows.
     validation_sets: list[TaskTestSet] = Field(default_factory=list)
+    # Storage projections only. _validate_named_validation_assets rejects
+    # these as request inputs; new Settings express every Validation member in
+    # validation_sets, including a single uploaded file.
     validation_set: str = ""
-    # Only meaningful when validation_set is a hub id: which slice, and which
-    # named subset. Run creation fetches that slice to a file.
     validation_split: str = ""
     validation_config: str = ""
     validation_answer_fields: list[str] = Field(default_factory=list)
@@ -1069,63 +1068,14 @@ async def match_task_setting(
 
 
 def _validate_named_validation_assets(body: SettingBody) -> None:
-    if body.validation_sets and body.validation_set.strip():
-        raise HTTPException(
-            400,
-            "use validation_sets or the single validation_set upload, not both",
-        )
-    if body.validation_sets:
-        return
-    if not body.validation_set.strip():
-        return
-    missing = []
-    if not body.validation_answer_fields:
-        missing.append("validation_answer_fields")
-    if not body.validation_sample_submission.strip():
-        missing.append("validation_sample_submission")
-    if missing:
-        raise HTTPException(
-            400,
-            "validation_set requires " + ", ".join(missing),
-        )
-
-
-async def _freeze_validation_metric(
-    body: SettingBody,
-) -> tuple[SettingBody, str]:
-    """Validate one Setting-owned metric and freeze custom evaluator bytes."""
-    metric = body.validation_metric.strip().lower()
-    if body.validation_metric_type == "builtin":
-        if metric not in BUILTIN_METRICS:
-            raise HTTPException(
-                400,
-                f"unknown built-in Validation metric {body.validation_metric!r}; "
-                "built-ins are " + ", ".join(sorted(BUILTIN_METRICS)),
-            )
-        if body.validation_evaluation_script.strip():
-            raise HTTPException(
-                400, "built-in Validation metric cannot include an evaluator script",
-            )
-        return body.model_copy(update={
-            "validation_metric": metric,
-            "validation_evaluation_script": "",
-        }), ""
-
-    if not body.validation_evaluation_script.strip():
-        raise HTTPException(
-            400, "custom Validation metric requires an evaluator script",
-        )
-    from zevo.evaluator_storage import freeze_evaluator
-    try:
-        script, digest = await run_in_threadpool(
-            freeze_evaluator, body.validation_evaluation_script.strip(),
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return body.model_copy(update={
-        "validation_metric": body.validation_metric.strip(),
-        "validation_evaluation_script": script,
-    }), digest
+    legacy_fields = {
+        "validation_set", "validation_split", "validation_config",
+        "validation_answer_fields", "validation_sample_submission",
+        "validation_metric_type", "validation_metric",
+        "validation_metric_direction", "validation_evaluation_script",
+    }
+    if legacy_fields & body.model_fields_set:
+        raise HTTPException(400, "use validation_sets; one Validation set is a one-item suite")
 
 
 async def _resolve_setting_validation_contract(
@@ -1168,8 +1118,6 @@ async def _resolve_setting_validation_contract(
                 "" if len(frozen) > 1 else primary.evaluation_script
             ),
         }), "" if len(frozen) > 1 else primary.evaluator_sha256
-    if body.validation_set.strip():
-        return await _freeze_validation_metric(body)
     return body.model_copy(update={
         "validation_sets": [],
         "validation_answer_fields": [],

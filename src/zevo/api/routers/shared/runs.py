@@ -1085,6 +1085,14 @@ class CreateRunRequest(BaseModel):
                 "test_sample_submission, training_method, dataset, base_model, "
                 "constraints); use mode=auto to have Zevo derive the Test contract"
             )
+        elif isinstance(self.user_request, UserRequest) and (
+            self.user_request.validation_set.strip()
+            or self.user_request.validation_split.strip()
+            or self.user_request.validation_config.strip()
+        ):
+            raise ValueError(
+                "use validation_sets; one Validation set is a one-item suite"
+            )
         return self
 
     @model_validator(mode="after")
@@ -2021,9 +2029,7 @@ async def create_run(
     user_request = user_request.model_copy(update={
         "method_config": normalize_method_config(user_request.method_config),
     })
-    derived_validation = not (
-        user_request.validation_sets or user_request.validation_set.strip()
-    )
+    derived_validation = not user_request.validation_sets
     user_request = inherit_test_validation_contract(user_request)
 
     # Test bytes must not share a path with anything on the optimization lane.
@@ -2051,13 +2057,6 @@ async def create_run(
         str(v).strip() for v in (user_request.dataset,) if str(v).strip()
     }
     if not derived_validation:
-        optimization_assets.update({
-            str(v).strip() for v in (
-                user_request.validation_set,
-                user_request.validation_sample_submission,
-                user_request.validation_evaluation_script,
-            ) if str(v).strip()
-        })
         optimization_assets.update({
             str(value).strip()
             for item in user_request.validation_sets

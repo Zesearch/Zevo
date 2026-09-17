@@ -189,25 +189,6 @@ export function CustomizedRunForm({
   }, [predefined?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function applySetting(s: TaskSettingDTO) {
-    const validationSets = s.validation_sets?.length
-      ? s.validation_sets
-      : s.validation_set ? [{
-          name: "Validation",
-          test_set: s.validation_set,
-          split: s.validation_split,
-          config: s.validation_config,
-          max_rows: 0,
-          source_rows: 0,
-          inference_query: predefined?.test_sets?.[0]?.inference_query
-            || "Answer each validation example.",
-          sample_submission: s.validation_sample_submission,
-          metric_type: s.validation_metric_type,
-          metric: s.validation_metric,
-          answer_fields: s.validation_answer_fields,
-          metric_direction: s.validation_metric_direction,
-          evaluation_script: s.validation_evaluation_script,
-          evaluator_sha256: s.validation_evaluator_sha256,
-        }] : [];
     setPickedSetting(s.id);
     setTouched(true);
     setInputs((v) => ({
@@ -218,16 +199,7 @@ export function CustomizedRunForm({
       dataQuery: s.data_query || "",
       modelQuery: s.model_query || "",
       methodQuery: s.method_query || "",
-      validationSets,
-      validationSet: "",
-      validationSplit: "",
-      validationConfig: "",
-      validationAnswerFields: "",
-      validationSampleSubmission: "",
-      validationMetricType: s.validation_metric_type,
-      validationMetric: s.validation_metric,
-      validationMetricDirection: s.validation_metric_direction,
-      validationEvaluationScript: s.validation_evaluation_script || "",
+      validationSets: s.validation_sets,
       baseModel: s.base_model || "",
       trainingMethod: s.training_method || "",
       teacherModel: String(s.method_config?.teacher_model || ""),
@@ -374,8 +346,6 @@ export function CustomizedRunForm({
     ? predefined.test_sets : normalizeScoringSuite(inputs.testSets);
   const primaryTest = testSuite[0];
   const validationSuite = normalizeScoringSuite(inputs.validationSets);
-  const primaryValidation = validationSuite[0];
-  const hasValidationSuite = validationSuite.length > 0;
 
   const userRequest: UserRequest = {
     task_objective: objective.trim(),
@@ -406,13 +376,6 @@ export function CustomizedRunForm({
     base_model: inputs.baseModel.trim(),
     test_set: primaryTest?.test_set ?? "",
     test_answer_fields: primaryTest?.answer_fields ?? [],
-    validation_set: hasValidationSuite ? "" : inputs.validationSet.trim(),
-    validation_split: hasValidationSuite ? "" : inputs.validationSplit.trim(),
-    validation_config: hasValidationSuite ? "" : inputs.validationConfig.trim(),
-    validation_answer_fields: hasValidationSuite
-      ? primaryValidation?.answer_fields ?? []
-      : validationContract.answerFields.split(",").map((field) => field.trim()).filter(Boolean),
-    validation_sample_submission: validationContract.sampleSubmission,
     test_sample_submission: primaryTest?.sample_submission ?? "",
     constraints: [],
   };

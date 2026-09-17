@@ -250,22 +250,17 @@ class TaskSetting(Base):
     validation_sets: Mapped[list[dict[str, Any]]] = mapped_column(
         JsonCol, default=list, server_default="[]"
     )
-    # Scalar fields remain the primary projection for old clients and the
-    # one-upload form. A non-empty validation_sets suite takes precedence.
+    # Scalar fields are a runtime/storage projection; new Setting inputs use
+    # validation_sets exclusively, including for a one-member suite.
     validation_set: Mapped[str] = mapped_column(Text, default="", server_default="")
-    # When `validation_set` is a HuggingFace id rather than a path: which slice
-    # of the repo, and which named subset. A hub repo is not one table, and the
-    # split that is a validation set is exactly the thing that has to be said —
-    # defaulting to `train` here would tune on training rows. Empty split lets
-    # run creation pick the repo's validation-like split, and fail if it has
-    # none rather than guess.
+    # Kept for the scalar storage projection. New suite members carry their own
+    # HuggingFace split/config instead of using these columns as inputs.
     validation_split: Mapped[str] = mapped_column(String(64), default="", server_default="")
     validation_config: Mapped[str] = mapped_column(String(64), default="", server_default="")
-    # Required when a named validation_set is stored. Empty only accompanies
-    # the carve path, whose shape is resolved by the Data Agent.
+    # Shape projection of the primary Validation member; empty for auto-derived
+    # Validation until run settlement resolves its suite.
     validation_answer_fields: Mapped[list[str]] = mapped_column(JsonCol, default=list)
-    # The submission template for THIS validation set: the columns inference has
-    # to emit. Required for a named set; a carve gets one from the Data Agent.
+    # Submission-template projection of the primary Validation member.
     validation_sample_submission: Mapped[str] = mapped_column(Text, default="", server_default="")
     # Validation belongs to the Setting/Run. It may use a different metric
     # implementation and scale from that Run's held-out Test metric.

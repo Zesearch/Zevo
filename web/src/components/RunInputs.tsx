@@ -980,25 +980,12 @@ export type RunInputValues = {
   evaluationScript: string;
   /** Test score direction. A predefined Task may supply the initial value. */
   metricDirection: "" | "max" | "min";
-  /** Independent Validation evaluator used only with a supplied Validation set. */
-  validationMetricType: "" | "builtin" | "custom";
-  validationMetric: string;
-  validationEvaluationScript: string;
-  validationMetricDirection: "" | "max" | "min";
-  /** Saved independent Validation suite. Launch shows it compactly; replacing
-   * it with one uploaded set clears this list. */
+  /** Independent Validation benchmarks; one benchmark is a one-item suite. */
   validationSets: TaskTestSet[];
   dataset: string;
   testSet: string;
   /** Comma-separated ground-truth column names of the test set. */
   answerFields: string;
-  validationSet: string;
-  /** Same, for the validation set. Required when validationSet is named. */
-  validationAnswerFields: string;
-  /** Only when validationSet is a hub id: which slice of the repo. */
-  validationSplit: string;
-  validationConfig: string;
-  validationSampleSubmission: string;
   /** Only when dataset is a hub id: which slice of the repo to train on. */
   datasetSplit: string;
   datasetConfig: string;
@@ -1049,12 +1036,8 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   testSets: [],
   metricType: "", metric: "", evaluationScript: "",
   metricDirection: "",
-  validationMetricType: "", validationMetric: "",
-  validationEvaluationScript: "", validationMetricDirection: "",
   validationSets: [],
-  dataset: "", testSet: "", answerFields: "", validationSet: "", validationAnswerFields: "",
-  validationSplit: "", validationConfig: "",
-  validationSampleSubmission: "",
+  dataset: "", testSet: "", answerFields: "",
   datasetSplit: "", datasetConfig: "", dataQuery: "",
   testSampleSubmission: "",
   baseModel: "", modelQuery: "", trainingMethod: "", methodQuery: "",
@@ -1079,32 +1062,26 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
 /** The effective Validation scorer shown and sent by both launch modes. */
 export function validationContractFromInputs(inputs: RunInputValues) {
   const primary = inputs.validationSets[0];
-  const independent = !!primary || !!inputs.validationSet.trim();
+  const independent = !!primary;
   // Every member keeps its own evaluator, but the Run needs one scalar for
   // champion selection.  The backend freezes a multi-member suite as the
   // built-in suite average; projecting the first member here made a Setting
   // loaded from storage look different from itself (and offered to save it
   // again) until Run creation canonicalized the request.
   const aggregate = inputs.validationSets.length > 1;
-  const metricType = aggregate
-    ? "builtin"
-    : primary?.metric_type ?? (independent ? inputs.validationMetricType : "");
+  const metricType = aggregate ? "builtin" : primary?.metric_type ?? "";
   return {
     independent,
     metricType,
-    metric: aggregate
-      ? "suite_average"
-      : primary?.metric ?? (independent ? inputs.validationMetric.trim() : ""),
-    metricDirection: primary?.metric_direction ?? (independent ? inputs.validationMetricDirection : ""),
+    metric: aggregate ? "suite_average" : primary?.metric ?? "",
+    metricDirection: primary?.metric_direction ?? "",
     evaluationScript: aggregate
       ? ""
       : primary
       ? (primary.metric_type === "custom" ? primary.evaluation_script : "")
-      : metricType === "custom" ? inputs.validationEvaluationScript.trim() : "",
-    answerFields: primary?.answer_fields.join(", ")
-      ?? (independent ? inputs.validationAnswerFields : ""),
-    sampleSubmission: primary?.sample_submission
-      ?? (independent ? inputs.validationSampleSubmission.trim() : ""),
+      : "",
+    answerFields: primary?.answer_fields.join(", ") ?? "",
+    sampleSubmission: primary?.sample_submission ?? "",
   };
 }
 
@@ -1197,113 +1174,6 @@ export function contractPreferencesFromInputs(inputs: RunInputValues) {
   };
 }
 
-
-/**
- * The validation set — the one field that can be a path, a hub id, or an
- * upload, and that needs a follow-up question when it is a hub id.
- *
- * One component rather than one per form: Launch run, a task's settings and a
- * Customized Pipeline all ask for the same thing, and three copies of a control this
- * fiddly drift apart on the first change. Which slice of a repo you tune
- * against is not a detail that should be sayable in one form and not another.
- */
-export function ValidationSetField({
-  value, onChange, split, onSplit, config, onConfig,
-  answerFields, onAnswerFields,
-  sampleSubmission, onSampleSubmission, required = [], note = "", tag = true,
-  showHints = true,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  split: string;
-  onSplit: (v: string) => void;
-  config: string;
-  onConfig: (v: string) => void;
-  /** Comma-separated ground-truth columns. Omit the pair to hide the input. */
-  answerFields?: string;
-  onAnswerFields?: (v: string) => void;
-  /** Columns inference must emit. Required when a validation set is named. */
-  sampleSubmission?: string;
-  onSampleSubmission?: (v: string) => void;
-  /** Which of the three are still blank while a set IS named — the caller
-   *  decides whether that is allowed; this only marks them. */
-  required?: string[];
-  note?: string;
-  /** False where the surrounding group already says the field is optional. */
-  tag?: boolean;
-  showHints?: boolean;
-}) {
-  return (
-    <div>
-      <TrainingDataField
-        label="Validation set"
-        value={value}
-        onChange={onChange}
-        tag={tag}
-        split={split}
-        onSplit={onSplit}
-        config={config}
-        onConfig={onConfig}
-        // Blank derives Validation from Test before the run starts.
-        splitPlaceholder="validation"
-        note={note || "empty = 20% from each eligible Test set when that yields at least 200 Validation rows"}
-        showHints={showHints}
-      />
-      {/* The other three sit beside the set they describe rather than at the
-          far end of the form: they are facts ABOUT that file. Which is why
-          they wait for one to be named — with the field still blank there is
-          no file for them to be about, and what the run does instead (move
-          20% of each eligible Test set to Validation and hold out the remaining 80%) is one
-              sentence, said once, above.
-
-          One hint under the three rather than one each: they fall back the
-          same way, and repeating it three times says nothing the first line
-          did not. */}
-      {value.trim() && (
-        <>
-          {/* The same TextField the TEST answer fields use. It was a bare input
-              on `hubBoxCls` — the compact style meant for the split/config
-              boxes that sit inline beside a HuggingFace id — so this one field
-              rendered a size smaller than the two FileSlots under it and than
-              its opposite number on the test side, for no reason a reader could
-              infer. It asks for the same kind of thing; it should look it. */}
-          {onAnswerFields && (
-            <div className="mt-2">
-              <TextField
-                label="Answer fields"
-                value={answerFields ?? ""}
-                onChange={onAnswerFields}
-                required
-                placeholder=""
-                hint="Columns containing the validation ground truth."
-              />
-            </div>
-          )}
-          {onSampleSubmission && (
-            <div className="mt-2">
-              <FileSlot
-                label="Sample submission"
-                value={sampleSubmission ?? ""}
-                onChange={onSampleSubmission}
-                required
-                tag={false}
-                hint="Defines the required validation prediction format."
-              />
-            </div>
-          )}
-          {showHints && required.length > 0 && (
-            // A named set with the others blank is the pairing that silently
-            // ships the answers to inference; say so where it is being made.
-            <p className="mt-1 text-2xs text-coral-300">
-              a validation set of your own needs its own {required.join(", ")};
-              Validation never falls back to the held-out Test contract
-            </p>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
 
 /** An optional choice with a named default. */
 export function ChoiceField({

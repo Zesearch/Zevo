@@ -4,13 +4,10 @@ import { ChevronRight, Folder, Pencil, Plus, Trash2, X } from "lucide-react";
 import { Note } from "./zevo/primitives";
 import { shortModel, splitDatasetPath } from "../lib/format";
 import {
-  BUILTIN_METRICS,
-  FileSlot,
   MODEL_ID_HINT,
   ScoringSuiteEditor,
   ScoringSuiteManifest,
   TrainingDataField,
-  ValidationSetField,
   emptyScoringSet,
   normalizeScoringSuite,
   scoringSuiteMissing,
@@ -133,151 +130,17 @@ function dataRows(s: TaskSettingDTO): {
     packaged: false,
     file: "",
     title: validationSuite.map((item) => `${item.name}: ${item.test_set}`).join("\n"),
-  } : of(
-    "val", s.validation_set, s.validation_split, s.validation_config,
-    s.validation_data_source,
-    // Kept in step with zevo.engine.method.validation_split constants.
-    "From Test suite · 20% per eligible set · minimum 200 Validation rows",
-  );
+  } : {
+    label: "val" as const,
+    value: "From Test suite · 20% per eligible set · minimum 200 Validation rows",
+    slice: "", split: "", folder: "", packaged: false, file: "",
+    title: "From Test suite · 20% per eligible set · minimum 200 Validation rows",
+  };
   return [
     of("train", s.dataset, s.dataset_split, s.dataset_config, s.data_source,
        "Zevo decides"),
     validation,
   ];
-}
-
-/** The Validation binding fields that sit under the set itself.
- *
- *  A scoring set is four things, not one: the rows, which of their columns hold
- *  the answers, the script that grades them, and the template saying what
- *  inference must emit. The test side has said so for a while; validation said
- *  only which file, which made the other three look like they did not exist.
- *
- *  Folded away by default, because the ordinary setting leaves all three empty
- *  and the row would then be three lines of "derived from what you already
- *  see". What each empty one MEANS is the value shown, since that is the fact
- *  someone opening this is actually after.
- */
-/** Shared key column for the Validation setup facts. */
-const valKeyCls =
-  "w-28 shrink-0 whitespace-nowrap font-mono text-2xs text-slate-100";
-
-function ValidationRest({
-  s, onOpenDataset,
-}: {
-  s: TaskSettingDTO;
-  onOpenDataset?: (name: string, file?: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const validationSuite = s.validation_sets ?? [];
-  const carved = !validationSuite.length && !s.validation_set.trim();
-  // A derived Validation lane is a Test-suite-owned contract, not four separately
-  // configured values. The table states that contract on its data row above.
-  if (carved) return null;
-  if (validationSuite.length) {
-    return (
-      <div className="mt-3">
-        <ScoringSuiteManifest
-          items={validationSuite}
-          title={`${validationSuite.length} ${validationSuite.length === 1 ? "dataset" : "datasets"}`}
-          note="independent Validation · Test remains 100%"
-          setLabel="Validation set"
-          summaryLayout="inline"
-        />
-      </div>
-    );
-  }
-  // The same four keys the task card lists its test files under, so the two
-  // blocks can be read against each other. Which set this is comes from the
-  // column heading; `data` is the first row there and the set itself here.
-  //
-  // `file: true` marks the rows that ARE files, and they are drawn the way
-  // `data` is: catalogue name, folder mark, and a click that opens it. They
-  // used to print a bare leaf — `val_eval.py` with no folder and nothing to
-  // click — which both hid which bundle it came from and read as a different
-  // kind of thing from the row directly above it.
-  const rows = [
-    {
-      label: "metric",
-      file: false,
-      value: carved
-        ? `inherited from Test · ${s.validation_metric_type} · ${s.validation_metric} · ${s.validation_metric_direction}`
-        : `${s.validation_metric_type} · ${s.validation_metric} · ${s.validation_metric_direction}`,
-      empty: "built-in · token_f1 · max",
-    },
-    ...(s.validation_metric_type === "custom" ? [{
-      label: "evaluation script",
-      file: true,
-      value: s.validation_evaluation_script || "",
-      empty: "missing",
-    }] : []),
-    {
-      label: "answer fields",
-      file: false,
-      value: (s.validation_answer_fields ?? []).join(", "),
-      empty: carved ? "inherited from the Test contract" : "required for named Validation data",
-    },
-    {
-      label: "sample submission",
-      file: true,
-      value: s.validation_sample_submission || "",
-      empty: carved ? "inherited from the Test contract" : "required for named Validation data",
-    },
-  ];
-  return (
-    // `text-left`: the table centres its cells, which reads fine for one value
-    // and badly for a label-and-value list, where the eye needs one left edge.
-    <span className="block text-left">
-      {/* One line per file, key then value. */}
-      {open && (
-        <span className="mt-0.5 block space-y-0.5">
-          {rows.map((r) => {
-            const inCatalogue = r.file ? splitDatasetPath(r.value) : null;
-            return (
-              <span key={r.label} className="flex min-w-0 items-baseline gap-1.5">
-                <span className={valKeyCls}>{r.label}</span>
-                {inCatalogue ? (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenDataset?.(inCatalogue.dataset, inCatalogue.file);
-                    }}
-                    title={r.value}
-                    className="flex min-w-0 items-baseline gap-1 text-slate-300 transition hover:text-brass-300"
-                  >
-                    <Folder size={11} className="shrink-0 translate-y-px text-slate-500" />
-                    <span className="min-w-0 truncate font-mono text-2xs hover:underline">
-                      {inCatalogue.label}
-                    </span>
-                  </button>
-                ) : (
-                  <span
-                    title={r.value || r.empty}
-                    className={`min-w-0 truncate font-mono text-2xs ${
-                      r.value ? "text-slate-300" : "text-slate-500"
-                    }`}
-                  >
-                    {r.value
-                      ? (r.file ? (r.value.split("/").pop() || r.value) : r.value)
-                      : r.empty}
-                  </span>
-                )}
-              </span>
-            );
-          })}
-        </span>
-      )}
-      {/* Under the rows, not above them: it is what the list ends with on the
-          task card, and a control that sits above what it reveals reads as a
-          heading for it. */}
-      <button
-        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        className="mt-1 font-mono text-2xs text-slate-500 transition hover:text-brass-300"
-      >
-        {open ? "show less" : `show ${rows.length} more`}
-      </button>
-    </span>
-  );
 }
 
 /** One `label value` pair inside a setting row — used where the settings are a
@@ -443,11 +306,15 @@ function SettingValidationCard({
       </button>
       {open && (
         <div className="mt-3 border-t border-hair/70 pt-3">
-          {!count && <SettingDatasetValue row={row} onOpenDataset={onOpenDataset} />}
-          <ValidationRest
-            s={setting}
-            onOpenDataset={(name, file) => onOpenDataset?.(name, file, "")}
-          />
+          {count ? (
+            <ScoringSuiteManifest
+              items={setting.validation_sets}
+              title={`${count} ${count === 1 ? "dataset" : "datasets"}`}
+              note="independent Validation · Test remains 100%"
+              setLabel="Validation set"
+              summaryLayout="inline"
+            />
+          ) : <SettingDatasetValue row={row} onOpenDataset={onOpenDataset} />}
         </div>
       )}
     </div>
@@ -752,15 +619,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
     model_query: existing?.model_query ?? "",
     method_query: existing?.method_query ?? "",
     validation_sets: (existing?.validation_sets ?? []) as TaskTestSet[],
-    validation_set: existing?.validation_set ?? "",
-    validation_split: existing?.validation_split ?? "",
-    validation_config: existing?.validation_config ?? "",
-    validation_answer_fields: (existing?.validation_answer_fields ?? []).join(", "),
-    validation_sample_submission: existing?.validation_sample_submission ?? "",
-    validation_metric_type: existing?.validation_metric_type ?? "builtin",
-    validation_metric: existing?.validation_metric ?? "token_f1",
-    validation_metric_direction: existing?.validation_metric_direction ?? "max",
-    validation_evaluation_script: existing?.validation_evaluation_script ?? "",
     base_model: existing?.base_model ?? "",
     training_method: existing?.training_method ?? "",
     teacher_model: String(existing?.method_config?.teacher_model ?? ""),
@@ -776,70 +634,13 @@ function SettingForm({ task, existing, onDone, onCancel }: {
   const set = (k: keyof typeof v) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setV((x) => ({ ...x, [k]: e.target.value }));
   const cls = "w-full min-w-0 rounded border border-hair bg-canvas px-2 py-1 font-mono text-2xs text-slate-200 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none";
-  const updateValidationSet = (value: string) => setV((x) => ({
-    ...x,
-    validation_set: value,
-    ...(value.trim() ? { validation_sets: [] } : {}),
-  }));
-  const updateValidationSuite = (items: TaskTestSet[]) => setV((x) => ({
-    ...x,
-    validation_sets: items,
-    validation_set: "",
-    validation_split: "",
-    validation_config: "",
-  }));
-  const useValidationSuite = () => setV((x) => ({
-    ...x,
-    validation_sets: [x.validation_set.trim() ? {
-      ...emptyScoringSet(),
-      name: "Validation 1",
-      test_set: x.validation_set.trim(),
-      split: x.validation_split.trim(),
-      config: x.validation_config.trim(),
-      answer_fields: x.validation_answer_fields.split(",").map((field) => field.trim()).filter(Boolean),
-      sample_submission: x.validation_sample_submission.trim(),
-      metric_type: x.validation_metric_type,
-      metric: x.validation_metric.trim(),
-      metric_direction: x.validation_metric_direction as "max" | "min",
-      evaluation_script: x.validation_evaluation_script.trim(),
-    } : emptyScoringSet()],
-    validation_set: "",
-    validation_split: "",
-    validation_config: "",
-  }));
-  const useAutomaticValidation = () => setV((x) => ({
-    ...x,
-    validation_sets: [],
-    validation_set: "",
-    validation_split: "",
-    validation_config: "",
-  }));
-
-  // A named validation set must declare its answer fields and submission
-  // shape. Its metric contract is independent from the Run's Test scoring
-  // values and is validated separately below.
-  //
-  // Reusing the test side implicitly is unsafe when shapes differ. Point this
-  // at a set that does not match and the run can get IFEval's answer fields
-  // against conversation records:
-  // the data agent is asked to drop `instruction_id_list` and `kwargs` from a
-  // file whose keys are id/instruction/response, dropping them is a no-op, and
-  // the "questions-only" copy handed to inference still carries every answer.
-  // That is a real failure this cost a run, and the form is where it is cheap
-  // to prevent.
-  const missingValidationFiles = !!v.validation_set.trim() && [
-    ["answer fields", v.validation_answer_fields],
-    ["sample submission", v.validation_sample_submission],
-  ].filter(([, x]) => !String(x).trim()).map(([k]) => k) as string[];
-  const validationGaps = Array.isArray(missingValidationFiles) ? missingValidationFiles : [];
+  const updateValidationSuite = (items: TaskTestSet[]) =>
+    setV((x) => ({ ...x, validation_sets: items }));
+  const useValidationSuite = () => updateValidationSuite([emptyScoringSet()]);
+  const useAutomaticValidation = () => updateValidationSuite([]);
   const auxiliaryModelMissing =
     (v.training_method === "gkd" && !v.teacher_model.trim())
     || (v.training_method === "online_dpo" && !v.reward_model.trim());
-  const validationMetricMissing = !!v.validation_set.trim() && (
-    !v.validation_metric.trim()
-    || !v.validation_metric_direction
-    || (v.validation_metric_type === "custom" && !v.validation_evaluation_script.trim())
-  );
   const validationSuiteGaps = v.validation_sets.length
     ? scoringSuiteMissing(v.validation_sets, "Validation") : [];
 
@@ -869,18 +670,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           model_query: v.model_query.trim(),
           method_query: v.method_query.trim(),
           validation_sets: normalizeScoringSuite(v.validation_sets),
-          validation_set: v.validation_sets.length ? "" : v.validation_set.trim(),
-          validation_split: v.validation_split.trim(),
-          validation_config: v.validation_config.trim(),
-          validation_answer_fields: v.validation_answer_fields
-            .split(",").map((c) => c.trim()).filter(Boolean),
-          validation_sample_submission: v.validation_sample_submission.trim(),
-          validation_metric_type: v.validation_metric_type,
-          validation_metric: v.validation_metric.trim(),
-          validation_metric_direction: v.validation_metric_direction,
-          validation_evaluation_script: v.validation_metric_type === "custom"
-            ? v.validation_evaluation_script.trim()
-            : "",
           base_model: v.base_model.trim(),
           training_method: v.training_method.trim(),
           method_config,
@@ -944,49 +733,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
             >
               Use automatic Validation from Test instead
             </button>
-            <details className="group mt-3 border-t border-hair pt-2">
-              <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
-                <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
-                Replace with one uploaded Validation set
-              </summary>
-              <div className="mt-3">
-                <ValidationSetField
-                  value={v.validation_set}
-                  onChange={updateValidationSet}
-                  split={v.validation_split}
-                  onSplit={put("validation_split")}
-                  config={v.validation_config}
-                  onConfig={put("validation_config")}
-                  answerFields={v.validation_answer_fields}
-                  onAnswerFields={put("validation_answer_fields")}
-                  sampleSubmission={v.validation_sample_submission}
-                  onSampleSubmission={put("validation_sample_submission")}
-                  tag={false}
-                  note="This replaces the complete suite for future runs using this setting."
-                />
-              </div>
-            </details>
-          </div>
-        ) : v.validation_set.trim() ? (
-          <div className="space-y-3">
-            <ValidationSetField
-              value={v.validation_set}
-              onChange={updateValidationSet}
-              split={v.validation_split}
-              onSplit={put("validation_split")}
-              config={v.validation_config}
-              onConfig={put("validation_config")}
-              answerFields={v.validation_answer_fields}
-              onAnswerFields={put("validation_answer_fields")}
-              sampleSubmission={v.validation_sample_submission}
-              onSampleSubmission={put("validation_sample_submission")}
-              required={validationGaps}
-              tag={false}
-              note="Independent Validation data and scoring contract."
-            />
-            <button type="button" onClick={useValidationSuite} className="font-mono text-2xs text-slate-500 transition hover:text-brass-300">
-              Use multiple independent Validation sets instead
-            </button>
           </div>
         ) : (
           <div className="self-start rounded-md border border-brass-500/25 bg-brass-500/[0.04] px-4 py-3">
@@ -999,28 +745,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
             <button type="button" onClick={useValidationSuite} className="btn mt-3 !py-1 !text-2xs">
               <Plus size={12} /> use independent Validation sets
             </button>
-            <details className="group mt-3 border-t border-hair pt-2">
-              <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
-                <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
-                Use an independent Validation set
-              </summary>
-              <div className="mt-3">
-                <ValidationSetField
-                  value={v.validation_set}
-                  onChange={updateValidationSet}
-                  split={v.validation_split}
-                  onSplit={put("validation_split")}
-                  config={v.validation_config}
-                  onConfig={put("validation_config")}
-                  answerFields={v.validation_answer_fields}
-                  onAnswerFields={put("validation_answer_fields")}
-                  sampleSubmission={v.validation_sample_submission}
-                  onSampleSubmission={put("validation_sample_submission")}
-                  tag={false}
-                  note="Choose a fixed Validation set with its own scoring contract."
-                />
-              </div>
-            </details>
           </div>
         )}
         <div className="space-y-3">
@@ -1044,73 +768,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           </label>
         </div>
       </div>
-
-      {!v.validation_sets.length && v.validation_set.trim() && (<section className="space-y-3">
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-          <label className="block">
-            <span className="field-label mb-1 block">Metric type</span>
-            <ThemedSelect
-              value={v.validation_metric_type}
-              onChange={(value) => setV((x) => ({
-                ...x,
-                validation_metric_type: value as "builtin" | "custom",
-                ...(value === "builtin" ? { validation_evaluation_script: "" } : {}),
-              }))}
-              options={[
-                { value: "builtin", label: "Built-in" },
-                { value: "custom", label: "Custom" },
-              ]}
-              ariaLabel="Validation metric type"
-              buttonClassName={cls}
-            />
-          </label>
-          <label className="block">
-            <span className="field-label mb-1 block">Metric</span>
-            {v.validation_metric_type === "builtin" ? (
-              <ThemedSelect
-                value={v.validation_metric}
-                onChange={put("validation_metric")}
-                options={BUILTIN_METRICS.map((value) => ({
-                  value,
-                  label: value === "pass_at_1" ? "pass@1 · code execution" : value,
-                }))}
-                placeholder="Choose metric"
-                ariaLabel="Built-in Validation metric"
-                buttonClassName={cls}
-              />
-            ) : (
-              <input
-                className={cls}
-                value={v.validation_metric}
-                onChange={set("validation_metric")}
-                placeholder="metric key written to metrics.json"
-              />
-            )}
-          </label>
-          <label className="block">
-            <span className="field-label mb-1 block">Target</span>
-            <ThemedSelect
-              value={v.validation_metric_direction}
-              onChange={put("validation_metric_direction")}
-              options={[
-                { value: "max", label: "Max" },
-                { value: "min", label: "Min" },
-              ]}
-              ariaLabel="Validation metric direction"
-              buttonClassName={cls}
-            />
-          </label>
-        </div>
-        {v.validation_metric_type === "custom" && (
-          <FileSlot
-            label="Validation evaluation script"
-            tag={false}
-            value={v.validation_evaluation_script}
-            onChange={put("validation_evaluation_script")}
-            hint="Frozen for this setting and run only after sample-submission validation."
-          />
-        )}
-      </section>)}
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <label className="block">
@@ -1202,18 +859,14 @@ function SettingForm({ task, existing, onDone, onCancel }: {
         <button
           type="button"
           onClick={() => void submit()}
-          disabled={busy || !v.name.trim() || validationGaps.length > 0 || validationSuiteGaps.length > 0 || auxiliaryModelMissing || validationMetricMissing}
+          disabled={busy || !v.name.trim() || validationSuiteGaps.length > 0 || auxiliaryModelMissing}
           title={
             !v.name.trim()
               ? "Name it first"
-              : validationGaps.length
-              ? `A named validation set needs its own ${validationGaps.join(", ")}`
               : validationSuiteGaps.length
               ? `Complete the Validation suite: ${validationSuiteGaps.join(", ")}`
               : auxiliaryModelMissing
               ? `${v.training_method} needs its Hugging Face auxiliary model id`
-              : validationMetricMissing
-              ? "Complete the Validation metric fields"
               : ""
           }
           className="rounded-md border border-brass-500/40 bg-brass-500/10 px-2.5 py-1 font-mono text-2xs text-brass-300 transition hover:bg-brass-500/20 disabled:opacity-50"

@@ -13,7 +13,7 @@ from zevo.api.routers.shared.runs import (
     _summary,
     create_run,
 )
-from zevo.contracts.orchestrator import UserRequest
+from zevo.contracts.orchestrator import TaskTestSet, UserRequest
 from zevo.db.models import Agent, Base, Run, SshHost, Task, TaskSetting, Ticket
 
 
@@ -35,6 +35,20 @@ def _request() -> UserRequest:
         evaluation_script="",
         constraints=[],
     )
+
+
+def test_run_and_preflight_reject_legacy_single_validation_input() -> None:
+    from zevo.api.routers.ui.preflight import PreflightBody
+
+    legacy_request = _request().model_copy(update={
+        "validation_set": "/data/validation.csv",
+    })
+    with pytest.raises(ValidationError, match="use validation_sets"):
+        CreateRunRequest(
+            task_name="t", run_name="r", user_request=legacy_request,
+        )
+    with pytest.raises(ValidationError, match="use validation_sets"):
+        PreflightBody(user_request=legacy_request)
 
 
 def test_selection_queries_are_empty_guidance_not_decision_pins() -> None:
@@ -562,9 +576,16 @@ async def test_predefined_task_test_suite_cannot_be_overridden_for_one_run(tmp_p
             "evaluator_sha256": "",
             "test_set": str(test_set),
             "test_sample_submission": str(test_sample),
-            "validation_set": str(validation_set),
-            "validation_answer_fields": ["answer"],
-            "validation_sample_submission": str(validation_sample),
+            "validation_sets": [TaskTestSet.model_validate({
+                "name": "validation",
+                "test_set": str(validation_set),
+                "inference_query": "Answer {question}.",
+                "sample_submission": str(validation_sample),
+                "metric_type": "builtin",
+                "metric": "accuracy",
+                "answer_fields": ["answer"],
+                "metric_direction": "max",
+            })],
         })
         response = await create_run(CreateRunRequest(
             task_name="lower-is-better",
@@ -661,11 +682,10 @@ async def test_saving_first_custom_setting_creates_task_and_setting(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_selected_multi_validation_setting_clears_legacy_head_location(
+async def test_selected_multi_validation_setting_matches_suite_only_request(
     tmp_path, monkeypatch,
 ) -> None:
-    """A suite selected by id must not 409 because its first member was also
-    copied into the legacy one-set location fields by a launch client."""
+    """Selecting a saved suite must match the same suite sent by Launch Run."""
     from zevo.api.routers.shared import runs as runs_router
 
     monkeypatch.setenv("ZEVO_WORK_DIR", str(tmp_path / "runs"))
@@ -749,12 +769,6 @@ async def test_selected_multi_validation_setting_clears_legacy_head_location(
             metric_type="builtin", metric="accuracy", metric_direction="max",
             dataset="train.jsonl", base_model="owner/model",
             training_method="full_sft", validation_sets=validation_suite,
-            # Exact shape emitted by the faulty browser: the complete suite
-            # plus a duplicate of its first member in the legacy fields.
-            validation_set="/data/validation-a.csv",
-            validation_split="validation", validation_config="main",
-            validation_answer_fields=["answer"],
-            validation_sample_submission="/data/validation-a-submission.csv",
             validation_metric_type="builtin", validation_metric="suite_average",
             validation_metric_direction="max", constraints=[],
         )
@@ -1052,37 +1066,25 @@ def test_run_summary_derives_best_validation_from_validation_history() -> None:
     assert summary.best_validation_score == 0.4
 
 
-def test_a_setting_naming_a_validation_set_must_name_its_shape() -> None:
-    """The API enforces what the form enforces, or the form is only advice.
-
-    A setting with a validation set and no answer fields sends the harness to
-    the TEST side for them — different columns and a different binding — and
-    the data agent fails one ticket in, after an hour
-    and a GPU rental. That run exists; it is data-021. The dialog started
-    refusing to save it, but `POST /tasks/{n}/settings` still accepted it, so
-    anything that was not the dialog could still create one.
-    """
+def test_setting_rejects_legacy_single_validation_fields() -> None:
+    """A single Validation benchmark uses one validation_sets member."""
     import pytest
     from fastapi import HTTPException
     from zevo.api.routers.ui.tasks import SettingBody, _validate_named_validation_assets
 
-    complete = SettingBody(
-        name="s1", validation_set="/data/val.csv",
-        validation_answer_fields=["response"],
-        validation_sample_submission="/data/val_sample.csv",
-    )
-    _validate_named_validation_assets(complete)  # does not raise
-
-    # No validation set at all is the carve path; Data prepares its binding.
+    # No independent suite uses auto-derived Validation.
     _validate_named_validation_assets(SettingBody(name="s2"))
-
-    for missing in ("validation_answer_fields", "validation_sample_submission"):
-        blank = complete.model_copy(update={
-            missing: [] if missing.endswith("fields") else ""})
+    for field, value in (
+        ("validation_set", "/data/val.csv"),
+        ("validation_split", "validation"),
+        ("validation_answer_fields", ["response"]),
+        ("validation_metric", "accuracy"),
+    ):
+        legacy = SettingBody.model_validate({"name": "s1", field: value})
         with pytest.raises(HTTPException) as e:
-            _validate_named_validation_assets(blank)
+            _validate_named_validation_assets(legacy)
         assert e.value.status_code == 400
-        assert missing in e.value.detail
+        assert "validation_sets" in e.value.detail
 
 
 def test_task_and_agent_objectives_need_no_string_reverse_parsing() -> None:

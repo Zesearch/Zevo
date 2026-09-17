@@ -736,9 +736,6 @@ _UR_DEFAULTS = {
     "method_query": "",
     "test_set": "",
     "test_answer_fields": [],
-    "validation_set": "",
-    "validation_answer_fields": [],
-    "validation_sample_submission": "",
     "test_sample_submission": "",
     "constraints": [],
 }
@@ -835,32 +832,9 @@ def run_create(
              "column of a CSV, a key of a JSON record. The data agent drops "
              "these to build the questions-only copy inference is given.",
     ),
-    validation_set: str = typer.Option(
-        "", "--validation-set",
-        help="validation set WITH the answers — what the run TUNES on. When "
-             "empty, Zevo derives 20% from each sufficiently large Test-suite "
-             "member only when that yields at least 200 Validation rows; "
-             "smaller benchmarks remain final-test-only.",
-    ),
     validation_sets: str = typer.Option(
         "", "--validation-sets",
-        help="Independent Validation benchmarks as a JSON array or @file.json; use instead of --validation-set.",
-    ),
-    validation_split: str = typer.Option(
-        "", "--validation-split", help="HuggingFace validation-like split.",
-    ),
-    validation_config: str = typer.Option(
-        "", "--validation-config", help="Named HuggingFace validation dataset configuration.",
-    ),
-    validation_answer_fields: str = typer.Option(
-        "", "--validation-answer-fields",
-        help="where the ground truth lives in the validation set. Required "
-             "when --validation-set is supplied.",
-    ),
-    validation_sample_submission: str = typer.Option(
-        "", "--validation-sample-submission",
-        help="submission template for the validation set: the columns inference "
-             "must emit. Required when --validation-set is supplied.",
+        help="Independent Validation benchmarks as a JSON array or @file.json; one benchmark is a one-item array. Blank derives Validation from Test.",
     ),
     test_sample_submission: str = typer.Option(
         "", "--test-sample-submission", help="held-out submission-template CSV path (defines output columns).",
@@ -872,22 +846,6 @@ def run_create(
     evaluation_script: str = typer.Option(
         "", "--evaluation-script",
         help="Custom Python evaluator used only for held-out Test.",
-    ),
-    validation_metric_type: str = typer.Option(
-        "", "--validation-metric-type",
-        help="Validation metric implementation: builtin or custom. A saved Setting supplies it when omitted.",
-    ),
-    validation_metric: str = typer.Option(
-        "", "--validation-metric",
-        help="Validation metric value name used to compare iterations.",
-    ),
-    validation_target: str = typer.Option(
-        "", "--validation-target",
-        help="Validation direction: Max or Min.",
-    ),
-    validation_evaluation_script: str = typer.Option(
-        "", "--validation-evaluation-script",
-        help="Custom Python evaluator used only for Validation.",
     ),
     training_method: str = typer.Option(
         "", "--training-method", help="pin an installed Train Skill method id (empty = Zevo owns the hierarchical Method branch).",
@@ -1037,19 +995,10 @@ def run_create(
             test_set=test_set,
             test_sets=test_sets,
             answer_fields=answer_fields,
-            validation_set=validation_set,
             validation_sets=validation_sets,
-            validation_split=validation_split,
-            validation_config=validation_config,
-            validation_answer_fields=validation_answer_fields,
-            validation_sample_submission=validation_sample_submission,
             test_sample_submission=test_sample_submission,
             metric_type=metric_type,
             evaluation_script=evaluation_script,
-            validation_metric_type=validation_metric_type,
-            validation_metric=validation_metric,
-            validation_metric_direction=validation_target,
-            validation_evaluation_script=validation_evaluation_script,
             training_method=training_method,
             method_query=method_query,
             teacher_model=teacher_model,
@@ -1095,13 +1044,8 @@ async def _run_create(
     base_model: str, model_query: str = "", gpu_provider: str, num_gpus: int,
     dataset: str, test_set: str, test_sets: str,
     dataset_split: str, dataset_config: str, data_query: str,
-    answer_fields: str, validation_set: str, validation_sets: str,
-    validation_answer_fields: str,
-    validation_split: str, validation_config: str,
-    validation_sample_submission: str,
+    answer_fields: str, validation_sets: str,
     test_sample_submission: str, metric_type: str, evaluation_script: str,
-    validation_metric_type: str, validation_metric: str,
-    validation_metric_direction: str, validation_evaluation_script: str,
     training_method: str, method_query: str = "",
     teacher_model: str, reward_model: str, use_peft: Optional[bool],
     prompt_framing: str, system_prompt: str,
@@ -1207,18 +1151,6 @@ async def _run_create(
         if metric_type == "custom" and not evaluation_script.strip():
             console.print("[red]custom Test metric requires --evaluation-script.[/]")
             raise typer.Exit(1)
-        validation_metric_type = (validation_metric_type or "").strip().lower()
-        validation_metric = (validation_metric or "").strip()
-        validation_metric_direction = (validation_metric_direction or "").strip().lower()
-        if validation_metric_type not in ("", "builtin", "custom"):
-            console.print("[red]--validation-metric-type must be builtin or custom.[/]")
-            raise typer.Exit(1)
-        if validation_metric_direction not in ("", "max", "min"):
-            console.print("[red]--validation-target must be Max or Min.[/]")
-            raise typer.Exit(1)
-        if validation_metric_type == "custom" and not validation_evaluation_script.strip():
-            console.print("[red]custom Validation metric requires --validation-evaluation-script.[/]")
-            raise typer.Exit(1)
         method_config: dict[str, object] = {}
         if teacher_model.strip():
             method_config["teacher_model"] = teacher_model.strip()
@@ -1282,12 +1214,6 @@ async def _run_create(
                                metric, metric_direction, metric_type, evaluation_script)):
             console.print("[red]--test-sets cannot be combined with single-Test scoring flags.[/]")
             raise typer.Exit(1)
-        if validation_suite and any((validation_set, validation_split, validation_config,
-                                     validation_answer_fields, validation_sample_submission,
-                                     validation_metric_type, validation_metric,
-                                     validation_metric_direction, validation_evaluation_script)):
-            console.print("[red]--validation-sets cannot be combined with single-Validation flags.[/]")
-            raise typer.Exit(1)
         if test_suite:
             primary_test = test_suite[0]
             metric = "suite_average" if len(test_suite) > 1 else str(primary_test.get("metric") or "")
@@ -1311,20 +1237,11 @@ async def _run_create(
             "method_query": method_query.strip(),
             "test_set": _resolve_data_ref(test_set),
             "test_answer_fields": _columns(answer_fields),
-            "validation_set": _resolve_data_ref(validation_set),
-            "validation_split": validation_split.strip(),
-            "validation_config": validation_config.strip(),
-            "validation_answer_fields": _columns(validation_answer_fields),
-            "validation_sample_submission": _resolve_data_ref(validation_sample_submission),
             "test_sample_submission": _resolve_data_ref(test_sample_submission),
             "metric": metric,
             "metric_direction": metric_direction,
             "metric_type": metric_type,
             "evaluation_script": _resolve_data_ref(evaluation_script),
-            "validation_metric_type": validation_metric_type,
-            "validation_metric": validation_metric,
-            "validation_metric_direction": validation_metric_direction,
-            "validation_evaluation_script": _resolve_data_ref(validation_evaluation_script),
             "base_model": base_model,
             "training_method": training_method,
             "method_config": method_config,
@@ -1344,7 +1261,7 @@ async def _run_create(
                 "evaluation_script": "" if len(test_suite) > 1 else primary_test.get("evaluation_script", ""),
             })
         if validation_suite:
-            overrides.update({"validation_sets": validation_suite, "validation_set": ""})
+            overrides["validation_sets"] = validation_suite
 
         selected_setting = None
         if setting_ref:
@@ -1399,11 +1316,6 @@ async def _run_create(
                     "model_query": selected_setting.model_query or "",
                     "method_query": selected_setting.method_query or "",
                     "validation_sets": list(selected_setting.validation_sets or []),
-                    "validation_set": selected_setting.validation_set or "",
-                    "validation_split": selected_setting.validation_split or "",
-                    "validation_config": selected_setting.validation_config or "",
-                    "validation_answer_fields": list(selected_setting.validation_answer_fields or []),
-                    "validation_sample_submission": selected_setting.validation_sample_submission or "",
                     "validation_metric_type": selected_setting.validation_metric_type,
                     "validation_metric": selected_setting.validation_metric,
                     "validation_metric_direction": selected_setting.validation_metric_direction,
@@ -2665,13 +2577,12 @@ def _setting_json(path: str) -> dict:
     if not isinstance(value, dict):
         console.print("[red]setting JSON must be an object.[/]")
         raise typer.Exit(1)
+    if str(value.get("validation_set") or "").strip():
+        console.print("[red]use validation_sets; one Validation set is a one-item suite.[/]")
+        raise typer.Exit(1)
     editable = {
         "name", "dataset", "dataset_split", "dataset_config",
-        "validation_sets", "validation_set", "validation_split", "validation_config",
-        "validation_answer_fields",
-        "validation_sample_submission", "validation_metric_type",
-        "validation_metric", "validation_metric_direction",
-        "validation_evaluation_script", "base_model", "training_method",
+        "validation_sets", "base_model", "training_method",
         "method_config", "data_query", "model_query", "method_query",
         "iteration_budget", "max_cost_usd",
         "stop_threshold",
