@@ -825,6 +825,10 @@ def run_create(
         help="test set WITH the answers — what evaluation scores against. "
              "A path, or a catalogue shorthand like medqa-usmle/test.csv.",
     ),
+    test_sets: str = typer.Option(
+        "", "--test-sets",
+        help="Custom task Test benchmarks as a JSON array or @file.json; use instead of single Test flags.",
+    ),
     answer_fields: str = typer.Option(
         "", "--answer-fields",
         help="where the ground truth lives in the test set, comma-separated: a "
@@ -837,6 +841,10 @@ def run_create(
              "empty, Zevo derives 20% from each sufficiently large Test-suite "
              "member only when that yields at least 200 Validation rows; "
              "smaller benchmarks remain final-test-only.",
+    ),
+    validation_sets: str = typer.Option(
+        "", "--validation-sets",
+        help="Independent Validation benchmarks as a JSON array or @file.json; use instead of --validation-set.",
     ),
     validation_split: str = typer.Option(
         "", "--validation-split", help="HuggingFace validation-like split.",
@@ -1027,8 +1035,10 @@ def run_create(
             dataset_config=dataset_config,
             data_query=data_query,
             test_set=test_set,
+            test_sets=test_sets,
             answer_fields=answer_fields,
             validation_set=validation_set,
+            validation_sets=validation_sets,
             validation_split=validation_split,
             validation_config=validation_config,
             validation_answer_fields=validation_answer_fields,
@@ -1083,9 +1093,10 @@ def run_create(
 async def _run_create(
     *, objective: str, task: str, run_name: str,
     base_model: str, model_query: str = "", gpu_provider: str, num_gpus: int,
-    dataset: str, test_set: str,
+    dataset: str, test_set: str, test_sets: str,
     dataset_split: str, dataset_config: str, data_query: str,
-    answer_fields: str, validation_set: str, validation_answer_fields: str,
+    answer_fields: str, validation_set: str, validation_sets: str,
+    validation_answer_fields: str,
     validation_split: str, validation_config: str,
     validation_sample_submission: str,
     test_sample_submission: str, metric_type: str, evaluation_script: str,
@@ -1259,6 +1270,28 @@ async def _run_create(
         # invisible here and `--task <it>` demanded an objective.
         task_row = await _task_by_name(task)
         predefined = task_row is not None
+        test_suite = _task_test_sets(test_sets) if test_sets.strip() else []
+        validation_suite = (
+            _task_test_sets(validation_sets, flag="--validation-sets")
+            if validation_sets.strip() else []
+        )
+        if test_suite and predefined:
+            console.print("[red]A predefined Task owns its Test suite; edit the Task instead.[/]")
+            raise typer.Exit(1)
+        if test_suite and any((test_set, answer_fields, test_sample_submission,
+                               metric, metric_direction, metric_type, evaluation_script)):
+            console.print("[red]--test-sets cannot be combined with single-Test scoring flags.[/]")
+            raise typer.Exit(1)
+        if validation_suite and any((validation_set, validation_split, validation_config,
+                                     validation_answer_fields, validation_sample_submission,
+                                     validation_metric_type, validation_metric,
+                                     validation_metric_direction, validation_evaluation_script)):
+            console.print("[red]--validation-sets cannot be combined with single-Validation flags.[/]")
+            raise typer.Exit(1)
+        if test_suite:
+            primary_test = test_suite[0]
+            metric = "suite_average" if len(test_suite) > 1 else str(primary_test.get("metric") or "")
+            metric_direction = "max" if len(test_suite) > 1 else str(primary_test.get("metric_direction") or "")
         if not predefined and not metric:
             console.print("[red]--metric is required for a custom task.[/]")
             raise typer.Exit(1)
@@ -1298,6 +1331,20 @@ async def _run_create(
             **decision_pin_overrides,
         }
         overrides = {k: v for k, v in overrides.items() if v}
+        if test_suite:
+            primary_test = test_suite[0]
+            overrides.update({
+                "test_sets": test_suite,
+                "test_set": primary_test.get("test_set", ""),
+                "test_answer_fields": primary_test.get("answer_fields", []),
+                "test_sample_submission": primary_test.get("sample_submission", ""),
+                "metric": metric,
+                "metric_direction": metric_direction,
+                "metric_type": "builtin" if len(test_suite) > 1 else primary_test.get("metric_type", "builtin"),
+                "evaluation_script": "" if len(test_suite) > 1 else primary_test.get("evaluation_script", ""),
+            })
+        if validation_suite:
+            overrides.update({"validation_sets": validation_suite, "validation_set": ""})
 
         selected_setting = None
         if setting_ref:
@@ -1351,6 +1398,7 @@ async def _run_create(
                     "data_query": selected_setting.data_query or "",
                     "model_query": selected_setting.model_query or "",
                     "method_query": selected_setting.method_query or "",
+                    "validation_sets": list(selected_setting.validation_sets or []),
                     "validation_set": selected_setting.validation_set or "",
                     "validation_split": selected_setting.validation_split or "",
                     "validation_config": selected_setting.validation_config or "",
@@ -2486,7 +2534,7 @@ def task_show(name: str = typer.Argument(..., help="Task name.")) -> None:
     console.print(t)
 
 
-def _task_test_sets(raw: str) -> list[dict]:
+def _task_test_sets(raw: str, *, flag: str = "--test-sets") -> list[dict]:
     """Read the compact CLI suite value: JSON inline, or ``@file.json``."""
     value = (raw or "").strip()
     try:
@@ -2495,15 +2543,15 @@ def _task_test_sets(raw: str) -> list[dict]:
             if value.startswith("@") else json.loads(value)
         )
     except (OSError, json.JSONDecodeError) as exc:
-        console.print(f"[red]--test-sets must be JSON or @file.json:[/] {exc}")
+        console.print(f"[red]{flag} must be JSON or @file.json:[/] {exc}")
         raise typer.Exit(1)
     if not isinstance(parsed, list) or not parsed:
-        console.print("[red]--test-sets must decode to a non-empty JSON array.[/]")
+        console.print(f"[red]{flag} must decode to a non-empty JSON array.[/]")
         raise typer.Exit(1)
     suite = []
     for index, item in enumerate(parsed, 1):
         if not isinstance(item, dict):
-            console.print(f"[red]Test set {index} must be a JSON object.[/]")
+            console.print(f"[red]{flag} item {index} must be a JSON object.[/]")
             raise typer.Exit(1)
         normalized = dict(item)
         normalized["test_set"] = _resolve_data_ref(str(item.get("test_set") or ""))
@@ -2619,7 +2667,7 @@ def _setting_json(path: str) -> dict:
         raise typer.Exit(1)
     editable = {
         "name", "dataset", "dataset_split", "dataset_config",
-        "validation_set", "validation_split", "validation_config",
+        "validation_sets", "validation_set", "validation_split", "validation_config",
         "validation_answer_fields",
         "validation_sample_submission", "validation_metric_type",
         "validation_metric", "validation_metric_direction",

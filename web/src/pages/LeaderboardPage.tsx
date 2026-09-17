@@ -6,7 +6,9 @@ import { Bezel, Detail, Kicker, PageHead } from "../components/zevo/primitives";
 import { Modal } from "../components/Modal";
 import { FileSetView } from "../components/FileSetView";
 import { TaskSettingHistory } from "../components/TaskSettings";
-import { fmtMetric, fmtScore, shortModel } from "../lib/format";
+import { ScoringSuiteManifest } from "../components/RunInputs";
+import type { TaskTestSet } from "../lib/api";
+import { fmtScore, shortModel } from "../lib/format";
 
 /**
  * Leaderboard — pick a task from the pool, see how every entrant that ran it
@@ -60,12 +62,7 @@ type ScoreCell = {
 type TaskDef = {
   name: string;
   task_objective: string;
-  test_set: string;
-  test_answer_fields: string[];
-  metric_type: "builtin" | "custom";
-  evaluation_script: string;
-  test_sample_submission: string;
-  metric: string;
+  test_sets: TaskTestSet[];
   metric_direction: "max" | "min";
 };
 
@@ -612,24 +609,9 @@ export function LeaderboardPage() {
             </div>
             <div>
               <div className="section-title">Test setup</div>
-            <dl className="mt-1.5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-hair pt-4">
-              {([
-                ["Metric", fmtMetric(task.metric)],
-                ["Metric type", task.metric_type],
-                ["Target", task.metric_direction === "min" ? "Min" : "Max"],
-                ["Test set", task.test_set],
-                ["Test answer fields", (task.test_answer_fields ?? []).join(", ")],
-                ["Evaluation script", task.evaluation_script],
-                ["Sample submission", task.test_sample_submission],
-              ] as [string, string][]).map(([k, v]) => (
-                <div key={k} className="min-w-0">
-                  <dt className="field-label">{k}</dt>
-                  <dd className="mt-1 truncate font-mono text-sm text-slate-100" title={v}>
-                    {v ? v.split("/").slice(-2).join("/") : "\u2014"}
-                  </dd>
-                </div>
-              ))}
-            </dl>
+              <div className="mt-3">
+                <ScoringSuiteManifest items={task.test_sets} setLabel="Test set" summaryLayout="inline" />
+              </div>
             </div>
           </div>
         )}

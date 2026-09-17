@@ -7,9 +7,13 @@ import {
   BUILTIN_METRICS,
   FileSlot,
   MODEL_ID_HINT,
+  ScoringSuiteEditor,
   ScoringSuiteManifest,
   TrainingDataField,
   ValidationSetField,
+  emptyScoringSet,
+  normalizeScoringSuite,
+  scoringSuiteMissing,
 } from "./RunInputs";
 import { api } from "../lib/api";
 import type { TaskSettingDTO, TaskTestSet } from "../lib/api";
@@ -777,6 +781,39 @@ function SettingForm({ task, existing, onDone, onCancel }: {
     validation_set: value,
     ...(value.trim() ? { validation_sets: [] } : {}),
   }));
+  const updateValidationSuite = (items: TaskTestSet[]) => setV((x) => ({
+    ...x,
+    validation_sets: items,
+    validation_set: "",
+    validation_split: "",
+    validation_config: "",
+  }));
+  const useValidationSuite = () => setV((x) => ({
+    ...x,
+    validation_sets: [x.validation_set.trim() ? {
+      ...emptyScoringSet(),
+      name: "Validation 1",
+      test_set: x.validation_set.trim(),
+      split: x.validation_split.trim(),
+      config: x.validation_config.trim(),
+      answer_fields: x.validation_answer_fields.split(",").map((field) => field.trim()).filter(Boolean),
+      sample_submission: x.validation_sample_submission.trim(),
+      metric_type: x.validation_metric_type,
+      metric: x.validation_metric.trim(),
+      metric_direction: x.validation_metric_direction as "max" | "min",
+      evaluation_script: x.validation_evaluation_script.trim(),
+    } : emptyScoringSet()],
+    validation_set: "",
+    validation_split: "",
+    validation_config: "",
+  }));
+  const useAutomaticValidation = () => setV((x) => ({
+    ...x,
+    validation_sets: [],
+    validation_set: "",
+    validation_split: "",
+    validation_config: "",
+  }));
 
   // A named validation set must declare its answer fields and submission
   // shape. Its metric contract is independent from the Run's Test scoring
@@ -803,6 +840,8 @@ function SettingForm({ task, existing, onDone, onCancel }: {
     || !v.validation_metric_direction
     || (v.validation_metric_type === "custom" && !v.validation_evaluation_script.trim())
   );
+  const validationSuiteGaps = v.validation_sets.length
+    ? scoringSuiteMissing(v.validation_sets, "Validation") : [];
 
   async function submit() {
     setBusy(true);
@@ -829,8 +868,8 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           data_query: v.data_query.trim(),
           model_query: v.model_query.trim(),
           method_query: v.method_query.trim(),
-          validation_sets: v.validation_sets,
-          validation_set: v.validation_set.trim(),
+          validation_sets: normalizeScoringSuite(v.validation_sets),
+          validation_set: v.validation_sets.length ? "" : v.validation_set.trim(),
           validation_split: v.validation_split.trim(),
           validation_config: v.validation_config.trim(),
           validation_answer_fields: v.validation_answer_fields
@@ -885,16 +924,26 @@ function SettingForm({ task, existing, onDone, onCancel }: {
         <LevelBadge level={levelOf(v.dataset, v.base_model, v.training_method)} />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className={`grid grid-cols-1 gap-4 ${v.validation_sets.length ? "" : "lg:grid-cols-2"}`}>
         {v.validation_sets.length ? (
-          <div className="min-w-0 self-start">
-            <ScoringSuiteManifest
+          <div className="min-w-0 self-start space-y-3">
+            <ScoringSuiteEditor
               items={v.validation_sets}
-              title={`${v.validation_sets.length} ${v.validation_sets.length === 1 ? "dataset" : "datasets"}`}
-              note="independent Validation · Test remains 100%"
-              setLabel="Validation set"
-              summaryLayout="inline"
+              lane="Validation"
+              onChange={updateValidationSuite}
             />
+            {validationSuiteGaps.length > 0 && (
+              <p className="font-mono text-2xs text-coral-300">
+                Complete the Validation suite: {validationSuiteGaps.join(", ")}.
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={useAutomaticValidation}
+              className="font-mono text-2xs text-slate-500 transition hover:text-brass-300"
+            >
+              Use automatic Validation from Test instead
+            </button>
             <details className="group mt-3 border-t border-hair pt-2">
               <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
                 <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
@@ -919,21 +968,26 @@ function SettingForm({ task, existing, onDone, onCancel }: {
             </details>
           </div>
         ) : v.validation_set.trim() ? (
-          <ValidationSetField
-            value={v.validation_set}
-            onChange={updateValidationSet}
-            split={v.validation_split}
-            onSplit={put("validation_split")}
-            config={v.validation_config}
-            onConfig={put("validation_config")}
-            answerFields={v.validation_answer_fields}
-            onAnswerFields={put("validation_answer_fields")}
-            sampleSubmission={v.validation_sample_submission}
-            onSampleSubmission={put("validation_sample_submission")}
-            required={validationGaps}
-            tag={false}
-            note="Independent Validation data and scoring contract."
-          />
+          <div className="space-y-3">
+            <ValidationSetField
+              value={v.validation_set}
+              onChange={updateValidationSet}
+              split={v.validation_split}
+              onSplit={put("validation_split")}
+              config={v.validation_config}
+              onConfig={put("validation_config")}
+              answerFields={v.validation_answer_fields}
+              onAnswerFields={put("validation_answer_fields")}
+              sampleSubmission={v.validation_sample_submission}
+              onSampleSubmission={put("validation_sample_submission")}
+              required={validationGaps}
+              tag={false}
+              note="Independent Validation data and scoring contract."
+            />
+            <button type="button" onClick={useValidationSuite} className="font-mono text-2xs text-slate-500 transition hover:text-brass-300">
+              Use multiple independent Validation sets instead
+            </button>
+          </div>
         ) : (
           <div className="self-start rounded-md border border-brass-500/25 bg-brass-500/[0.04] px-4 py-3">
             <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
@@ -942,6 +996,9 @@ function SettingForm({ task, existing, onDone, onCancel }: {
                 20% per eligible set · minimum 200 rows
               </span>
             </div>
+            <button type="button" onClick={useValidationSuite} className="btn mt-3 !py-1 !text-2xs">
+              <Plus size={12} /> use independent Validation sets
+            </button>
             <details className="group mt-3 border-t border-hair pt-2">
               <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-300">
                 <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
@@ -1145,12 +1202,14 @@ function SettingForm({ task, existing, onDone, onCancel }: {
         <button
           type="button"
           onClick={() => void submit()}
-          disabled={busy || !v.name.trim() || validationGaps.length > 0 || auxiliaryModelMissing || validationMetricMissing}
+          disabled={busy || !v.name.trim() || validationGaps.length > 0 || validationSuiteGaps.length > 0 || auxiliaryModelMissing || validationMetricMissing}
           title={
             !v.name.trim()
               ? "Name it first"
               : validationGaps.length
               ? `A named validation set needs its own ${validationGaps.join(", ")}`
+              : validationSuiteGaps.length
+              ? `Complete the Validation suite: ${validationSuiteGaps.join(", ")}`
               : auxiliaryModelMissing
               ? `${v.training_method} needs its Hugging Face auxiliary model id`
               : validationMetricMissing
