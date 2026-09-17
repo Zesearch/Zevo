@@ -23,6 +23,11 @@ the exact config/split. When `dataset` is empty, require a non-empty
 `data_query`; it is natural-language search guidance and may rely on the task
 objective in `run_context` for domain and output-shape context.
 
+On the initial iteration-0 Data Ticket, use the entire eligible source split:
+no `subset`, `filters`, `sampling`, or `weighting`. Reject only structurally
+unusable rows, then let the engine remove Validation/Test overlaps. Later Data
+revisions may select rows only through their explicit `recipe_intent`.
+
 Map only evidence genuinely present in the source into the method family:
 
 - `lora_sft`, `full_sft`: `messages`, `prompt`/`completion`, or `text`, choosing
@@ -185,7 +190,9 @@ When `slurm_job.enabled=true`, treat it as a finite external resource request;
 the lifecycle does not depend on this Ticket being called Data. On
 `phase="submit"`, write `data.sbatch` at the exact `script_path`; render the
 exact `nodes`, `num_gpus`/`gpus_per_node`, job name, stdout, stderr, and matched
-site directives; embed `lifecycle_prologue`; and run `prepare_data.py` in the
+site directives; embed `runtime_prologue` byte-for-byte before environment
+activation and `prepare_data.py`, embed `lifecycle_prologue`, and run
+`prepare_data.py` in the
 foreground. Validate and upload it, then submit only the remote file with
 `sbatch --parsable`.
 

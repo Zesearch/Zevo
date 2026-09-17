@@ -223,7 +223,7 @@ export function TasksPage() {
   // The row being edited, or null. Held as the row itself rather than a name so
   // the dialog opens already filled from what the list holds — no second fetch.
   const [editing, setEditing] = useState<TaskSummary | null>(null);
-  // The task whose card was clicked, by name rather than by row: the list
+  // The task whose settings link was clicked, by name rather than by row: the list
   // refreshes every five seconds, and a held object would go stale.
   const [detail, setDetail] = useState<string | null>(null);
   const [addingSetting, setAddingSetting] = useState(false);
@@ -378,17 +378,15 @@ export function TasksPage() {
             {shown.map((t) => (
               <Bezel
                 key={t.name}
-                onClick={() => { setAddingSetting(false); setDetail(t.name); }}
-                className="group flex cursor-pointer flex-col gap-4 p-5 transition hover:border-brass-500/40 hover:shadow-glow-brass"
+                className="flex flex-col gap-4 p-5"
               >
                 {/* Header: what it is, and what you can do to it. No `run`
-                    button: a run needs a SETTING, which is what opening the
-                    card is for. */}
+                    button: a run needs a SETTING, opened by the link below. */}
                 <div className="flex min-w-0 items-center justify-between gap-2">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <ListChecks size={14} className="shrink-0 text-brass-400/70" />
-                    {/* The name goes to this task's runs — the question a card
-                        raises. The card itself opens its settings. */}
+                    {/* The name goes to this task's runs. The settings link below
+                        is the only control that opens settings. */}
                     <Link
                       to={`/runs?q=${encodeURIComponent(t.name)}`}
                       onClick={(e) => e.stopPropagation()}
@@ -415,9 +413,6 @@ export function TasksPage() {
                     >
                       <Trash2 size={13} />
                     </button>
-                    {/* No chevron: the settings row below already says the card
-                        opens, and says it with a count. Two affordances for one
-                        action read as two actions. */}
                   </span>
                 </div>
 
@@ -446,7 +441,14 @@ export function TasksPage() {
 
                 <div className="mt-auto flex items-center justify-between border-t border-hair pt-3 font-mono text-2xs text-slate-300">
                   <span>created {fmtDate(t.created_at)}</span>
-                  <span className="transition group-hover:text-brass-300">settings →</span>
+                  <button
+                    type="button"
+                    onClick={() => { setAddingSetting(false); setDetail(t.name); }}
+                    className="rounded-sm text-slate-300 transition hover:text-brass-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brass-400"
+                    aria-label={`Open settings for ${t.name}`}
+                  >
+                    settings →
+                  </button>
                 </div>
               </Bezel>
             ))}

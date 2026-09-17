@@ -44,6 +44,7 @@ from zevo.contracts.infrastructure import (
     SLURM_STATUS_EVENT_PREFIX,
     SLURM_STATUS_FILENAME,
 )
+from zevo.engine.run.benchmark_telemetry import benchmark_progress_phase
 from zevo.engine.observe.run_metrics import incomplete_journal_entries
 from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
 from zevo.engine.observe.markers import scan_text
@@ -53,6 +54,7 @@ from zevo.db import (
     AgentWakeupRequest,
     ExecutionEvent,
     GpuLease,
+    HeartbeatResult,
     HeartbeatRun,
     InfraInstance,
     Run,
@@ -282,6 +284,8 @@ async def _persist_slurm_execution_marker(
     extras = {key: value for key, value in payload.items() if key not in reserved}
     benchmark_name = str(payload.get("benchmark_name") or "").strip()
     if benchmark_name:
+        name = benchmark_progress_phase(name, benchmark_name)
+    if benchmark_name:
         ticket = await session.get(Ticket, ticket_id)
         if ticket is not None and ticket.agent_id == "inference":
             try:
@@ -436,8 +440,6 @@ async def _record_slurm_status_event(
         ):
             return False
         meta = dict(row.meta or {})
-        if not bool(meta.get("submission_committed")):
-            return False
         if _normalise_slurm_state(
             str(meta.get("scheduler_state") or "")
         ) in _SLURM_TERMINAL_STATES:
@@ -461,10 +463,16 @@ async def _record_slurm_status_event(
             meta["monitor_next_at"] = (
                 now + _dt.timedelta(seconds=interval)
             ).isoformat()
-            _mark_slurm_job_running(
-                session=session, row=row, ticket=ticket, meta=meta,
-                observed_at=occurred_at,
-            )
+            if bool(meta.get("submission_committed")):
+                _mark_slurm_job_running(
+                    session=session, row=row, ticket=ticket, meta=meta,
+                    observed_at=occurred_at,
+                )
+            else:
+                # The submit activation still owns the Ticket. Only its
+                # resource row becomes visible as running at this point.
+                row.status = "ready"
+                row.ready_at = occurred_at
         elif event == "EXITED":
             # The job-local trap knows the process exit code immediately, but
             # sacct remains authoritative for TIMEOUT/PREEMPTED/NODE_FAIL. Ask
@@ -504,7 +512,6 @@ async def _record_slurm_execution_marker(
             or ticket.id != ticket_id
             or heartbeat.ticket_id != ticket_id
             or str(meta.get("submission_heartbeat_id") or "") != heartbeat_id
-            or not bool(meta.get("submission_committed"))
             or (owner and owner != ticket_id)
         ):
             return False
@@ -773,7 +780,7 @@ async def _reconcile_slurm_stage_jobs(
         if _normalise_slurm_state(
             str((row.meta or {}).get("scheduler_state") or "")
         ) not in _SLURM_TERMINAL_STATES
-        and bool((row.meta or {}).get("submission_committed"))
+        and bool((row.meta or {}).get("submission_heartbeat_id"))
         and not bool((row.meta or {}).get("scheduler_event_exit_pending"))
         and bool(_slurm_status_path(dict(row.meta or {})))
     }
@@ -810,10 +817,37 @@ async def _reconcile_slurm_stage_jobs(
     resumed = 0
     for row, run, ticket in newest:
         meta = dict(row.meta or {})
-        # Registering a JOBID can happen while its submit activation is still
-        # validating generated files and the typed Result. Until the runner
-        # commits that handoff, the activation—not this watcher—owns the Ticket.
-        if not bool(meta.get("submission_committed")):
+        if not meta.get("submission_committed"):
+            # The submit Result and the handoff marker are committed together,
+            # but a concurrent status observation can later replace the JSON
+            # metadata with a snapshot taken before that commit.  The durable
+            # deferred Result is authoritative evidence that validation passed;
+            # recover its marker so a finished job is collected rather than
+            # mistaken for a runner that disappeared.
+            submit_heartbeat_id = str(meta.get("submission_heartbeat_id") or "")
+            if submit_heartbeat_id:
+                deferred_result = (await session.execute(
+                    select(HeartbeatResult).where(
+                        HeartbeatResult.ticket_id == ticket.id,
+                        HeartbeatResult.heartbeat_id == submit_heartbeat_id,
+                        HeartbeatResult.status == "deferred",
+                    ).limit(1)
+                )).scalar_one_or_none()
+                if deferred_result is not None:
+                    meta["submission_committed"] = True
+                    meta["submission_committed_at"] = _aware(
+                        deferred_result.created_at
+                    ).isoformat()
+                    row.meta = meta
+                    log.warning(
+                        "[slurm] recovered submission handoff for ticket %s job %s",
+                        ticket.id, row.instance_id,
+                    )
+        # Observe registered jobs immediately. Before the runner validates
+        # the submission, observations update only the resource row; they
+        # cannot alter Ticket ownership or schedule collect.
+        committed = bool(meta.get("submission_committed"))
+        if not committed and not str(meta.get("submission_heartbeat_id") or ""):
             continue
         state = _normalise_slurm_state(str(meta.get("scheduler_state") or ""))
         previous_state = state
@@ -895,14 +929,18 @@ async def _reconcile_slurm_stage_jobs(
             meta["monitor_next_at"] = (now + _dt.timedelta(seconds=interval)).isoformat()
 
         if state == "RUNNING":
-            _mark_slurm_job_running(
-                session=session, row=row, ticket=ticket, meta=meta,
-                observed_at=row.ready_at or now,
-            )
+            if committed:
+                _mark_slurm_job_running(
+                    session=session, row=row, ticket=ticket, meta=meta,
+                    observed_at=row.ready_at or now,
+                )
+            else:
+                row.status = "ready"
+                row.ready_at = row.ready_at or now
         elif state == "PENDING":
             row.status = "provisioning"
 
-        if terminal:
+        if terminal and committed:
             meta.pop("scheduler_event_exit_pending", None)
             # If a very short job completed between two checks, do not label its
             # whole lifetime as queue wait. Regular jobs get the actual first

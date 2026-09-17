@@ -97,7 +97,7 @@ def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -
     _write_csv(first_gold, [{"id": "1", "answer": "A"}])
     _write_csv(second_prediction, [{"id": "2", "prediction": "B"}])
     _write_csv(second_gold, [{"id": "2", "answer": "C"}])
-    result, _events = _run(EvaluationTaskInput(
+    result, events = _run(EvaluationTaskInput(
         ticket_id="eval-suite-001",
         test_set_name="first",
         predictions_path=str(first_prediction),
@@ -120,6 +120,13 @@ def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -
         ("first", 1.0), ("second", 0.0),
     ]
     assert json.loads(Path(result.output.metrics_path).read_text())["score"] == 0.5
+    completed = [
+        event["payload"]["benchmark_name"]
+        for event in events
+        if event.get("type") == "progress"
+        and event.get("payload", {}).get("phase") == "benchmark_complete"
+    ]
+    assert completed == ["first", "second"]
 
 
 def test_suite_failure_names_the_member(tmp_path: Path) -> None:

@@ -24,6 +24,23 @@ function shortBenchmarkName(name: string): string {
   return (pieces.length > 1 ? pieces.slice(1).join("·") : name).trim();
 }
 
+const TERMINAL_SLURM_STATES = new Set([
+  "BOOT_FAIL", "CANCELLED", "COMPLETED", "DEADLINE", "FAILED",
+  "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "TIMEOUT",
+]);
+
+function slurmState(instance: InfraInstanceDTO): string {
+  return String(instance.meta?.scheduler_state || "")
+    .trim().toUpperCase().split(/\s+/)[0].replace(/\+$/, "");
+}
+
+function isTerminalResourceRequest(instance: InfraInstanceDTO): boolean {
+  return !!instance.released_at
+    || ["released", "failed"].includes(instance.status)
+    || (instance.provider === "cluster"
+      && TERMINAL_SLURM_STATES.has(slurmState(instance)));
+}
+
 // Aggregate a run's tickets into the six loop stations by Ticket.agent_id.
 function stationsFrom(
   detail: RunDetail | undefined,
@@ -166,7 +183,7 @@ function operationCaption(t: {
   const testSetName = t.test_set_name || String(t.payload?.test_set_name || "");
   const phase = activationPhase.trim().toLowerCase();
   const inferenceName = t.lane === "held_out_test"
-    ? `Held-Out Inference${testSetName ? ` · ${testSetName}` : ""}`
+    ? "Held-Out Inference"
     : modelSource === "base_model"
       ? "Baseline Inference"
       : "Candidate Inference";
@@ -205,7 +222,7 @@ function operationCaption(t: {
     }`,
     train: "Select config and train candidate",
     run_inference: t.lane === "held_out_test"
-      ? `Run held-out inference${testSetName ? ` · ${testSetName}` : ""}`
+      ? "Run Held-Out Inference"
       : modelSource === "base_model"
         ? "Run Baseline Inference"
         : "Run Candidate Inference",
@@ -473,6 +490,28 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
     }
     return byGroup;
   }, [orchestratorWakes, run.tickets, ticketById]);
+  // Input/binding validation can fail before a heartbeat is created. The
+  // supervisor Ticket still becomes failed, so represent that terminal event
+  // explicitly instead of letting the Timeline end with an old successful wake.
+  const latestOrchestratorWake = orchestratorWakes.at(-1);
+  const unrecordedOrchestratorFailure = supervisor?.status === "failed"
+    && (!latestOrchestratorWake || (
+      latestOrchestratorWake.exit_code === 0
+      && latestOrchestratorWake.action !== "mark_failed"
+    ));
+  const unrecordedFailureAt = supervisor?.updated_at || run.finished_at
+    || latestOrchestratorWake?.finished_at || supervisor?.created_at || "";
+  const failureGroupKey = (() => {
+    if (!unrecordedOrchestratorFailure) return "";
+    const info = assignIterations(run.tickets);
+    const lastStage = run.tickets
+      .filter((ticket) => agentIdOf(ticket) !== "orchestrator"
+        && ticket.lane !== "held_out_test"
+        && ticket.created_at <= unrecordedFailureAt)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+      .at(-1);
+    return (lastStage && info.get(lastStage.id)?.key) || groups.at(-1)?.key || "baseline";
+  })();
   const allTickets = groups.flatMap((g) => [...g.tickets, ...g.mirror]);
   const running = allTickets.find((t) => t.status === "running" || t.status === "repairing");
   const runningOrchestrator = orchestratorWakes.find((heartbeat) => heartbeat.is_live);
@@ -485,12 +524,12 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
   useEffect(() => {
     if (running?.id) setSel("");
   }, [running?.id]);
-  // Auto-show the running stage while the run is live; once it finishes, the
-  // right panel stays blank until the user clicks a stage on the left.
+  // Auto-show the running stage, or a terminal supervisor failure that had no
+  // activation. Successful finished Runs still leave selection to the user.
   const selectedId = sel || running?.id || (
     runningOrchestrator
       ? `${supervisorId}#${wakeIndex.get(runningOrchestrator.id) ?? 0}`
-      : ""
+      : unrecordedOrchestratorFailure ? `${supervisorId}#failed` : ""
   );
   // Track EXPANDED groups; empty by default → the timeline starts fully collapsed.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -499,8 +538,8 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
   // moves to the next block.
   const liveKey = liveIterationKey(run.tickets);
   useEffect(() => {
-    if (liveKey) setExpanded(new Set([liveKey]));
-  }, [liveKey]);
+    if (liveKey || failureGroupKey) setExpanded(new Set([liveKey || failureGroupKey]));
+  }, [liveKey, failureGroupKey]);
 
   const toggle = (k: string) =>
     setExpanded((prev) => {
@@ -509,7 +548,7 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
       return next;
     });
 
-  if (allTickets.length === 0 && orchestratorWakes.length === 0) {
+  if (allTickets.length === 0 && orchestratorWakes.length === 0 && !unrecordedOrchestratorFailure) {
     return <div className="text-xs text-dim">No stages yet.</div>;
   }
 
@@ -521,10 +560,13 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
           const open = expanded.has(g.key);
           const groupTickets = [...g.tickets, ...g.mirror];
           const groupOrchestrator = orchestratorByGroup.get(g.key) || [];
+          const groupHasUnrecordedFailure = unrecordedOrchestratorFailure
+            && failureGroupKey === g.key;
           const groupRunning = groupTickets.some((t) => t.status === "running" || t.status === "repairing")
             || groupOrchestrator.some((heartbeat) => heartbeat.is_live);
           const groupFailed = groupTickets.some((t) => t.status === "failed")
-            || groupOrchestrator.some((heartbeat) => heartbeat.action === "mark_failed");
+            || groupOrchestrator.some((heartbeat) => heartbeat.action === "mark_failed")
+            || groupHasUnrecordedFailure;
           const groupDegraded = groupTickets.some((t) => t.status === "degraded");
           const groupDone = groupTickets.length > 0
             && groupTickets.every((t) => ["succeeded", "skipped"].includes(t.status));
@@ -557,7 +599,7 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                 </button>
                 {/* Real Orchestrator heartbeat actions and sequential Specialist
                     Tickets share one chronological rail. */}
-                {open && (g.tickets.length > 0 || groupOrchestrator.length > 0 || g.mirror.length > 0) && (() => {
+                {open && (g.tickets.length > 0 || groupOrchestrator.length > 0 || g.mirror.length > 0 || groupHasUnrecordedFailure) && (() => {
                   const planRow = (heartbeat: HeartbeatDTO, showConnector: boolean) => {
                     const wake = wakeIndex.get(heartbeat.id) ?? 0;
                     const selId = supervisorId ? `${supervisorId}#${wake}` : "";
@@ -659,7 +701,8 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                     })),
                   ].sort((a, b) => a.ts.localeCompare(b.ts));
                   mainItems.forEach((item, index) => {
-                    const showConnector = index < mainItems.length - 1 || g.mirror.length > 0;
+                    const showConnector = index < mainItems.length - 1
+                      || g.mirror.length > 0 || groupHasUnrecordedFailure;
                     if (item.kind === "orchestrator") {
                       rows.push(planRow(item.heartbeat, showConnector));
                       return;
@@ -768,6 +811,32 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                       </li>,
                     );
                   }
+                  if (groupHasUnrecordedFailure && supervisor) {
+                    const active = selectedId === `${supervisorId}#failed`;
+                    rows.push(
+                      <li key={`orchestrator-failure-${supervisor.id}`} className="relative">
+                        <button
+                          onClick={() => setSel(`${supervisorId}#failed`)}
+                          className={`group flex w-full items-start gap-3 rounded-lg px-2 py-1.5 text-left transition ${
+                            active ? "bg-coral-500/10" : "hover:bg-raised/40"
+                          }`}
+                        >
+                          <span className="relative mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center">
+                            <span className="relative h-2 w-2 rotate-45 bg-coral-500" />
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center justify-between gap-2">
+                              <span className="text-sm italic text-coral-300">Orchestrator setup failed</span>
+                              <StatusBadge status="failed" />
+                            </span>
+                            <span className="block truncate text-[12px] text-dim">
+                              {supervisor.summary || supervisor.error_message}
+                            </span>
+                          </span>
+                        </button>
+                      </li>,
+                    );
+                  }
                   return <ol className="relative border-t border-hair/60 p-2">{rows}</ol>;
                 })()}
               </div>
@@ -780,16 +849,19 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
           may carry a wake suffix (see planRow) — split it back apart here. */}
       <StageDetail
         ticketId={selectedId.split("#")[0]}
-        wake={selectedId.includes("#") ? Number(selectedId.split("#")[1]) : undefined}
+        wake={selectedId.includes("#") && !selectedId.endsWith("#failed")
+          ? Number(selectedId.split("#")[1]) : undefined}
+        showUnrecordedFailure={selectedId.endsWith("#failed")}
         benchmarkProgress={run.benchmark_progress}
       />
     </div>
   );
 }
 
-function StageDetail({ ticketId, wake, benchmarkProgress }: {
+function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkProgress }: {
   ticketId: string;
   wake?: number;
+  showUnrecordedFailure?: boolean;
   benchmarkProgress?: BenchmarkProgress;
 }) {
   const { data: t } = useSWR<TicketDetail>(
@@ -810,7 +882,7 @@ function StageDetail({ ticketId, wake, benchmarkProgress }: {
   // queue wait independently from the Run duration (which deliberately pauses
   // while queued).
   const { data: infraInstances = [] } = useSWR<InfraInstanceDTO[]>(
-    t?.run_id ? `/api/infra/instances?run_id=${encodeURIComponent(t.run_id)}` : null,
+    t?.run_id ? `/api/infra/instances?active_only=false&run_id=${encodeURIComponent(t.run_id)}` : null,
     { refreshInterval: 3000 },
   );
   // The API returns heartbeats newest-first; the timeline counts activations
@@ -825,7 +897,9 @@ function StageDetail({ ticketId, wake, benchmarkProgress }: {
   const [selectedActivation, setSelectedActivation] = useState<number | undefined>(wake);
   const chronological = [...heartbeats].sort((a, b) => a.started_at.localeCompare(b.started_at));
   const effectiveWake = selectedActivation;
-  const picked = effectiveWake !== undefined ? chronological[effectiveWake] : heartbeats[0];
+  const picked = showUnrecordedFailure
+    ? undefined
+    : effectiveWake !== undefined ? chronological[effectiveWake] : heartbeats[0];
   const hbId = picked?.id;
   useEffect(() => {
     setSelectedActivation(wake);
@@ -855,6 +929,7 @@ function StageDetail({ ticketId, wake, benchmarkProgress }: {
   // scope them to the picked wake's window; the summary has no per-wake
   // equivalent, so it is shown only when you are looking at the latest wake.
   const executionEvents = (() => {
+    if (showUnrecordedFailure) return [];
     // Scope to `picked` whenever there IS one -- NOT only when a wake index was
     // passed. Clicking a stage on the timeline gives no wake, and `picked` then
     // falls back to the newest heartbeat, which is the one the transcript below
@@ -884,9 +959,37 @@ function StageDetail({ ticketId, wake, benchmarkProgress }: {
   // get the same Waiting -> Running card as Inference and Train.
   const activeResourceRequest = infraInstances.find((instance) =>
     instance.ticket_id === ticketId
-    && !instance.released_at
-    && !["released", "failed"].includes(instance.status),
+    && !isTerminalResourceRequest(instance),
   );
+  const submittedResourceRequest = infraInstances.find((instance) =>
+    instance.ticket_id === ticketId
+    && !!instance.instance_id
+    && !!instance.meta?.resource_request,
+  );
+  const benchmarkWorkStarted = t.agent_id === "inference" && (
+    t.status === "succeeded"
+    || t.execution_events.some((event) => !!event.extras?.benchmark_name)
+    || (submittedResourceRequest !== undefined
+      && (slurmState(submittedResourceRequest) === "RUNNING"
+        || isTerminalResourceRequest(submittedResourceRequest)))
+  );
+  const latestInferenceProgress = [...executionEvents].reverse().find((event) =>
+    event.event_type === "progress"
+    && typeof event.extras?.benchmark_name === "string"
+  );
+  // Remote progress belongs to the submit activation, while a successful
+  // ticket usually opens on its later collect activation. Keep the ticket's
+  // final benchmark name when the active progress window is empty.
+  const lastInferenceBenchmark = [...t.execution_events].reverse().find((event) =>
+    event.event_type === "progress"
+    && typeof event.extras?.benchmark_name === "string"
+  );
+  const activeBenchmarks = Array.isArray(latestInferenceProgress?.extras?.active_benchmarks)
+    ? latestInferenceProgress.extras.active_benchmarks.filter(
+      (name): name is string => typeof name === "string",
+    )
+    : [];
+  const parallelWorkers = Number(latestInferenceProgress?.extras?.parallel_workers || 0);
   return (
     <Bezel className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hair p-4">
@@ -933,16 +1036,30 @@ function StageDetail({ ticketId, wake, benchmarkProgress }: {
       <div className="space-y-4 p-4">
         <div className="rounded-bezel border border-hair bg-canvas/40 p-3">
           <div className="mb-2"><Kicker strong>Overview</Kicker></div>
-          <BenchmarkStageProgress ticket={t} progress={benchmarkProgress} />
+          {showUnrecordedFailure && (
+            <div className="mb-3 rounded-bezel border border-coral-500/30 bg-coral-500/[0.07] p-3 text-sm text-coral-200">
+              <div className="font-semibold">The next Orchestrator activation failed before the agent started</div>
+              <p className="mt-1 break-words font-mono text-xs">
+                {t.error_message || t.summary || "Input validation failed before a heartbeat could be recorded."}
+              </p>
+            </div>
+          )}
+          <BenchmarkStageProgress
+            ticket={t} progress={benchmarkProgress} started={benchmarkWorkStarted}
+            activeBenchmarks={activeBenchmarks} parallelWorkers={parallelWorkers}
+            lastBenchmarkName={String(lastInferenceBenchmark?.extras?.benchmark_name || "")}
+          />
           {activeResourceRequest && (
             <ResourceRequestStatus instance={activeResourceRequest} />
           )}
           {/* What it did, in order, read off the feed below — so a step appears
               because it happened, not because a script remembered to say so. */}
           <StepTimeline
-            events={events}
+            events={showUnrecordedFailure ? [] : events}
             executionEvents={executionEvents}
-            empty="No activity recorded for this heartbeat yet."
+            empty={showUnrecordedFailure
+              ? "No agent activation was recorded for this failure."
+              : "No activity recorded for this heartbeat yet."}
             onSeek={hbId ? (ts) => setSeek((s) => ({ ts, n: s.n + 1 })) : undefined}
           />
           {/* Loss chart is a TRAIN-only thing (inference has no loss); guard on the
@@ -974,17 +1091,24 @@ function StageDetail({ ticketId, wake, benchmarkProgress }: {
   );
 }
 
-/** Put suite progress beside the work it describes. A run-level banner made
- * the counter look like general run telemetry; here it identifies the exact
- * Benchmark whose Inference/Evaluation transcript the reader opened. */
+/** Show benchmark progress only while viewing Inference. Evaluation keeps its
+ * ordinary status and results, without a second progress bar. */
 function BenchmarkStageProgress({
   ticket,
   progress,
+  started,
+  activeBenchmarks,
+  parallelWorkers,
+  lastBenchmarkName,
 }: {
   ticket: TicketDetail;
   progress?: BenchmarkProgress;
+  started: boolean;
+  activeBenchmarks: string[];
+  parallelWorkers: number;
+  lastBenchmarkName: string;
 }) {
-  if (!progress || !["inference", "evaluation"].includes(ticket.agent_id)) return null;
+  if (!started || !progress || ticket.agent_id !== "inference") return null;
 
   const rawName = String(ticket.payload.test_set_name || "");
   const validation = ticket.lane === "optimization";
@@ -996,26 +1120,37 @@ function BenchmarkStageProgress({
   const name = validation && rawName.startsWith("validation:")
     ? rawName.slice("validation:".length)
     : rawName;
+  const isSuiteTicket = /^Inference suite · /.test(ticket.summary || "");
   const current = progress.current.find((item) => (
     item.suite === (validation ? "validation" : "test")
-    && (!name || item.name === name)
+    && item.stage === "inference"
+    && (isSuiteTicket || !name || item.name === name)
     && item.iteration === ticket.iteration
   ));
-  const displayName = name || current?.name || (validation ? "Validation" : "Final Test");
-  const stage = ticket.agent_id === "inference" ? "Inference" : "Evaluation";
-  const ratio = Math.min(100, (suite.completed / suite.total) * 100);
+  const displayName = activeBenchmarks.length > 0
+    ? (
+      activeBenchmarks.slice(0, 2).map(shortBenchmarkName).join(" · ")
+      + (activeBenchmarks.length > 2 ? ` +${activeBenchmarks.length - 2}` : "")
+    )
+    : (current?.name || lastBenchmarkName || name
+      || (validation ? "Validation" : "Final Test"));
+  const completed = suite.inference_completed ?? 0;
+  const ratio = Math.min(100, (completed / suite.total) * 100);
 
   return (
     <div className="mb-3 rounded-bezel border border-brass-500/25 bg-brass-500/[0.05] px-3 py-2.5">
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
         <span className="min-w-0 font-mono text-xs text-slate-200">
-          <span className="text-brass-300">{stage}</span>
+          <span className="text-brass-300">Inference</span>
           <span className="text-dim"> · </span>
-          <span>{shortBenchmarkName(displayName)}</span>
+          <span>{activeBenchmarks.length > 0 ? displayName : shortBenchmarkName(displayName)}</span>
+          {parallelWorkers > 1 && (
+            <span className="ml-2 text-dim">· {parallelWorkers} replicas</span>
+          )}
         </span>
         <span className="font-mono text-xs tabular-nums text-brass-300">
-          {validation ? "Validation" : "Final Test"} {suite.completed} / {suite.total}
-          <span className="ml-1.5 text-dim">evaluated</span>
+          {validation ? "Validation" : "Final Test"} {completed} / {suite.total}
+          <span className="ml-1.5 text-dim">inferred</span>
           {suite.failed > 0 && (
             <span className="ml-2 text-coral-300">· {suite.failed} failed</span>
           )}
@@ -1040,9 +1175,10 @@ function ResourceRequestStatus({ instance }: { instance: InfraInstanceDTO }) {
     return () => window.clearInterval(timer);
   }, [instance.id, instance.created_at]);
 
-  const schedulerState = String(instance.meta?.scheduler_state || "").toUpperCase();
-  const running = schedulerState === "RUNNING" || instance.status === "ready" || !!instance.ready_at;
-  const pending = !running && !["released", "failed"].includes(instance.status);
+  const schedulerState = slurmState(instance);
+  const running = !isTerminalResourceRequest(instance)
+    && (schedulerState === "RUNNING" || instance.status === "ready" || !!instance.ready_at);
+  const pending = !running && !isTerminalResourceRequest(instance);
   const timerStartedAt = Date.parse(
     running ? (instance.ready_at || instance.created_at) : instance.created_at,
   );
@@ -1187,22 +1323,6 @@ export function RunDetailPage() {
 
   const live = !["success", "degraded", "failed", "halted", "cancelled"].includes(run.status);
   const stations = stationsFrom(run, wakesByTicket);
-  const measuredCandidates = (run.history ?? []).filter(
-    (entry) => entry.test_scores && Object.keys(entry.test_scores).length > 1,
-  );
-  const trainedCandidates = measuredCandidates.filter((entry) => entry.source !== "baseline");
-  const championCandidates = trainedCandidates.length ? trainedCandidates : measuredCandidates;
-  const championBreakdown = championCandidates.reduce<
-    (typeof championCandidates)[number] | undefined
-  >(
-    (best, entry) => {
-      if (!best) return entry;
-      return run.validation_metric_direction === "min"
-        ? entry.score < best.score ? entry : best
-        : entry.score > best.score ? entry : best;
-    },
-    undefined,
-  );
 
   return (
     <div className="w-full px-[max(1.5rem,1.5vw)] py-8">
@@ -1284,21 +1404,6 @@ export function RunDetailPage() {
                   bounded={isPercentageMetric(run.metric)}
                 />
               </div>
-              {championBreakdown?.test_scores && (
-                <div className="mx-auto mt-2 w-full max-w-[15rem] divide-y divide-hair border-y border-hair">
-                  {Object.entries(championBreakdown.test_scores).map(([name, value]) => (
-                    <div key={name} className="flex items-center justify-between gap-3 py-1.5 font-mono text-2xs">
-                      <span className="min-w-0 truncate text-slate-400" title={name}>{name}</span>
-                      <span className="shrink-0 tabular-nums text-phosphor-300">
-                        {fmtScore(value, championBreakdown.test_metrics?.[name] ?? "")}
-                        <span className="ml-1 text-slate-600">
-                          {championBreakdown.test_metric_directions?.[name] === "min" ? "↓" : "↑"}
-                        </span>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
 
             <div className="grid grid-cols-2 gap-x-6 gap-y-5 pt-5 sm:col-span-2 sm:pl-6 sm:pt-0">

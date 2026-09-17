@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from zevo.db.models import (
-    AgentWakeupRequest, Base, ExecutionEvent, HeartbeatRun, InfraInstance, Run,
+    AgentWakeupRequest, Base, ExecutionEvent, HeartbeatResult, HeartbeatRun, InfraInstance, Run,
     Ticket, TicketMessage, TranscriptEvent, WorkProduct,
 )
 from zevo.api.routers.shared.runs import _finish_run_heartbeats
@@ -428,6 +428,7 @@ async def test_slurm_watcher_exposes_running_until_collect(session, monkeypatch)
         "outputs after it finishes."
     ]
 
+
     # A finished submission heartbeat is normal while Slurm owns the work.
     session.add(HeartbeatRun(
         id="hb-slurm-running", ticket_id=ticket.id, agent_id="inference",
@@ -460,6 +461,159 @@ async def test_slurm_watcher_exposes_running_until_collect(session, monkeypatch)
         TicketMessage.ticket_id == ticket.id,
     ))).scalars().all()
     assert not any(message.body.startswith("Done:") for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_slurm_watcher_observes_before_handoff_without_waking_ticket(
+    session, monkeypatch,
+) -> None:
+    import zevo.engine.run.scheduler.reconciler as reconciler
+    from zevo.engine.run.runner import _commit_slurm_submission
+
+    ticket = Ticket(
+        id="infer-early-observation", run_id="r1", agent_id="inference",
+        status="running", payload={}, inputs={},
+    )
+    job = InfraInstance(
+        instance_id="12348", provider="cluster", status="provisioning",
+        run_id="r1", ticket_id=ticket.id,
+        meta={
+            "resource_request": True, "scheduler_state": "PENDING",
+            "submission_heartbeat_id": "submit-activation",
+        },
+    )
+    session.add_all([ticket, job])
+    await session.commit()
+
+    async def connection(*_args, **_kwargs):
+        return {"host": "cluster", "port": 22, "user": "u"}
+
+    async def running(*_args, **_kwargs):
+        return "RUNNING", "", "", _ago(5)
+
+    monkeypatch.setattr(reconciler, "_slurm_connection", connection)
+    monkeypatch.setattr(reconciler, "_query_slurm_job", running)
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 0)
+    await session.refresh(job)
+    await session.refresh(ticket)
+    assert job.status == "ready"
+    assert ticket.status == "running"
+    assert not (await session.execute(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == ticket.id,
+    ))).scalars().all()
+
+    async def completed(*_args, **_kwargs):
+        return "COMPLETED", "0:0", "", _ago(5)
+
+    monkeypatch.setattr(reconciler, "_query_slurm_job", completed)
+    job.meta = {**job.meta, "monitor_next_at": "2000-01-01T00:00:00+00:00"}
+    await session.commit()
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 0)
+    await session.refresh(job)
+    assert job.meta["scheduler_state"] == "COMPLETED"
+    assert job.released_at is None
+
+    _commit_slurm_submission(
+        job, heartbeat_id="submit-activation",
+        stdout_path="/remote/ticket/slurm-%j.out",
+        stderr_path="/remote/ticket/slurm-%j.err",
+    )
+    ticket.status = "waiting_external"
+    await session.commit()
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 1)
+    await session.refresh(ticket)
+    assert ticket.status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_slurm_watcher_recovers_lost_handoff_from_deferred_result(session) -> None:
+    ticket = Ticket(
+        id="infer-lost-handoff", run_id="r1", agent_id="inference",
+        status="running", payload={}, inputs={},
+    )
+    heartbeat = HeartbeatRun(
+        id="infer-submit-heartbeat", ticket_id=ticket.id,
+        agent_id="inference", driver="codex_cli", model="m",
+        started_at=_ago(100), finished_at=_ago(90), exit_code=0,
+    )
+    result = HeartbeatResult(
+        ticket_id=ticket.id, heartbeat_id=heartbeat.id,
+        agent_id="inference", status="deferred",
+        output={"status": "deferred", "ticket_id": ticket.id},
+    )
+    job = InfraInstance(
+        instance_id="12349", provider="cluster", status="ready",
+        run_id="r1", ticket_id=ticket.id, ready_at=_ago(80),
+        meta={
+            "resource_request": True,
+            "scheduler_state": "COMPLETED",
+            "scheduler_exit_code": "0:0",
+            "submission_heartbeat_id": heartbeat.id,
+        },
+    )
+    session.add_all([ticket, heartbeat, result, job])
+    await session.commit()
+
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 1)
+    await session.refresh(ticket)
+    await session.refresh(job)
+    assert ticket.status == "queued"
+    assert job.status == "released"
+    assert job.released_at is not None
+    assert job.meta["submission_committed"] is True
+    assert job.meta["collect_wakeup_queued"] is True
+    assert await _sweep_stuck_tickets(session, CUTOFF) == 0
+
+
+@pytest.mark.asyncio
+async def test_slurm_watcher_recovers_handoff_before_job_starts(
+    session, monkeypatch,
+) -> None:
+    import zevo.engine.run.scheduler.reconciler as reconciler
+
+    ticket = Ticket(
+        id="train-lost-handoff", run_id="r1", agent_id="train",
+        status="waiting_external", payload={}, inputs={},
+    )
+    heartbeat = HeartbeatRun(
+        id="train-submit-heartbeat", ticket_id=ticket.id,
+        agent_id="train", driver="codex_cli", model="m",
+        started_at=_ago(100), finished_at=_ago(90), exit_code=0,
+    )
+    job = InfraInstance(
+        instance_id="12350", provider="cluster", status="provisioning",
+        run_id="r1", ticket_id=ticket.id,
+        meta={
+            "resource_request": True,
+            "scheduler_state": "PENDING",
+            "submission_heartbeat_id": heartbeat.id,
+        },
+    )
+    session.add_all([
+        ticket, heartbeat, job,
+        HeartbeatResult(
+            ticket_id=ticket.id, heartbeat_id=heartbeat.id,
+            agent_id="train", status="deferred",
+            output={"status": "deferred", "ticket_id": ticket.id},
+        ),
+    ])
+    await session.commit()
+
+    async def connection(*_args, **_kwargs):
+        return {"host": "cluster", "port": 22, "user": "u"}
+
+    async def running(*_args, **_kwargs):
+        return "RUNNING", "0:0", "None", _ago(5)
+
+    monkeypatch.setattr(reconciler, "_slurm_connection", connection)
+    monkeypatch.setattr(reconciler, "_query_slurm_job", running)
+
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 0)
+    await session.refresh(ticket)
+    await session.refresh(job)
+    assert job.meta["submission_committed"] is True
+    assert ticket.status == "running"
+    assert job.status == "ready"
 
 
 @pytest.mark.asyncio

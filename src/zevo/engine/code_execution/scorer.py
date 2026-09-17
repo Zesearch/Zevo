@@ -239,6 +239,8 @@ def score_code_benchmark(
     if adapter not in _SUPPORTED:
         raise ValueError(f"unsupported code execution adapter: {adapter!r}")
     _columns, rows = _read_records(scoring_set, label="code scoring set")
+    if not rows:
+        raise ValueError("code scoring set has no rows")
     with predictions.open("r", encoding="utf-8-sig", newline="") as handle:
         prediction_rows = list(csv.DictReader(handle))
     if len(rows) != len(prediction_rows):
@@ -252,17 +254,25 @@ def score_code_benchmark(
     passed = 0
     for index, (row, prediction) in enumerate(zip(rows, prediction_rows)):
         code = extract_python_code(prediction.get(prediction_column, ""))
-        if not code:
-            result = {"passed": False, "reason": "missing_prediction"}
-        else:
-            try:
-                result = _run_job(_job(adapter, row, code), case_timeout=timeout)
-            except (OSError, ValueError, TypeError) as exc:
-                result = {
-                    "passed": False,
-                    "reason": "harness_error",
-                    "detail": str(exc)[:500],
-                }
+        try:
+            # Validate answer sidecars even when the model returned nothing:
+            # a missing scorer input must never masquerade as model accuracy 0.
+            job = _job(adapter, row, code)
+            if job.get("kind") == "livecodebench" and not job.get("tests"):
+                raise ValueError("no executable test cases are available")
+            if not code:
+                result = {"passed": False, "reason": "missing_prediction"}
+            else:
+                result = _run_job(job, case_timeout=timeout)
+        except (OSError, ValueError, TypeError) as exc:
+            raise ValueError(
+                f"code evaluator infrastructure failed at row {index}: {exc}"
+            ) from exc
+        if result.get("reason") == "harness_error":
+            raise ValueError(
+                f"code evaluator infrastructure failed at row {index}: "
+                f"{result.get('detail') or 'invalid worker result'}"
+            )
         ok = result.get("passed") is True
         passed += int(ok)
         reason = "passed" if ok else str(result.get("reason") or "wrong_answer")

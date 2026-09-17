@@ -162,6 +162,7 @@ async def settle_splits(
                     split=split,
                     config=config,
                     out_dir=str(Path(private_out_dir) / f"suite-{index:03d}"),
+                    answer_scope="test",
                 )
             except MaterializeError as exc:
                 raise SplitSettlementError(
@@ -250,6 +251,7 @@ async def settle_splits(
                             config=config,
                             out_dir=member_out,
                             limit=item.max_rows,
+                            answer_scope="validation",
                         )
                     )
                 except MaterializeError as exc:

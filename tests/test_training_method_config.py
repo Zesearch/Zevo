@@ -41,6 +41,10 @@ def _train_payload(**updates):
         "method_config": method_config,
         "loss_contract": loss,
         "training": {
+            "data_selection": {
+                "mode": "all", "source_rows": 100,
+                "selected_source_rows": 100, "rationale": "",
+            },
             "num_epochs": 1,
             "max_seq_len": 2048,
             "batch_size": 1,
@@ -194,6 +198,24 @@ def test_training_example_sequence_targets_are_closed_and_present() -> None:
         "<INPUT><TARGET_RESPONSE>"
     )
     with pytest.raises(ValidationError, match="omits rendered sequences"):
+        TrainRunConfig.model_validate(payload)
+
+
+def test_first_train_uses_all_prepared_rows_but_later_subset_is_allowed() -> None:
+    payload = _train_payload()
+    selection = payload["training"]["data_selection"]
+    selection.update({
+        "mode": "subset", "selected_source_rows": 40,
+        "rationale": "Test a smaller, seeded training branch.",
+    })
+    with pytest.raises(ValidationError, match="iteration 1 must use every"):
+        TrainRunConfig.model_validate(payload)
+
+    payload["iteration"] = 2
+    assert TrainRunConfig.model_validate(payload).training.data_selection.selected_source_rows == 40
+
+    selection["mode"] = "all"
+    with pytest.raises(ValidationError, match="all-data training must select every"):
         TrainRunConfig.model_validate(payload)
 
 

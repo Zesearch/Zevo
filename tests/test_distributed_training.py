@@ -251,6 +251,10 @@ def test_empty_train_script_rejected() -> None:
 
 def _base_training_values(**overrides: object) -> dict:
     values: dict = {
+        "data_selection": {
+            "mode": "all", "source_rows": 100,
+            "selected_source_rows": 100, "rationale": "",
+        },
         "num_epochs": 1,
         "max_seq_len": 2048,
         "batch_size": 1,

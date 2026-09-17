@@ -12,6 +12,7 @@ import pytest
 from zevo.code_benchmarks import (
     code_execution_adapter_for,
     externalize_code_answers,
+    rehome_code_answers_csv,
     resolve_code_answer,
     store_code_answer_buffer,
 )
@@ -111,6 +112,82 @@ def test_code_contests_hidden_answers_are_content_addressed(
     token = row["private_tests"]
     assert isinstance(token, str) and token.startswith("zevo-code-answer:v1:")
     assert json.loads(str(resolve_code_answer(token))) == hidden
+
+
+def test_validation_code_answers_have_a_separate_root(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    holdout = tmp_path / "holdout"
+    validation = tmp_path / "validation-code-answers"
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(holdout))
+    monkeypatch.setenv("ZEVO_VALIDATION_CODE_ANSWERS_ROOT", str(validation))
+    hidden = {"input": ["2 3\n"], "output": ["5\n"]}
+    row = externalize_code_answers(
+        "code_contests", {"private_tests": hidden}, scope="validation",
+    )
+    token = row["private_tests"]
+    assert isinstance(token, str)
+    assert token.startswith("zevo-code-answer:validation:v1:")
+    assert json.loads(str(resolve_code_answer(token))) == hidden
+    assert not (holdout / "code-execution-answers").exists()
+    assert len(list(validation.glob("*.txt.gz"))) == 1
+
+
+def test_cached_test_sidecars_are_rehomed_without_redownloading(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    holdout = tmp_path / "holdout"
+    validation = tmp_path / "validation-code-answers"
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(holdout))
+    monkeypatch.setenv("ZEVO_VALIDATION_CODE_ANSWERS_ROOT", str(validation))
+    hidden = {"input": ["2 3\n"], "output": ["5\n"]}
+    row = externalize_code_answers(
+        "code_contests", {"id": "cc/0", "private_tests": hidden},
+    )
+    cached = tmp_path / "cached.csv"
+    _write(cached, [row])
+    assert rehome_code_answers_csv(
+        "code_contests", cached, scope="validation",
+    ) == 1
+    with cached.open(newline="") as handle:
+        migrated = next(csv.DictReader(handle))
+    assert migrated["private_tests"].startswith("zevo-code-answer:validation:v1:")
+    assert json.loads(str(resolve_code_answer(migrated["private_tests"]))) == hidden
+    # A scoring container without the held-out Test mount still resolves it.
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "unmounted"))
+    assert json.loads(str(resolve_code_answer(migrated["private_tests"]))) == hidden
+    metrics = _score(
+        tmp_path,
+        adapter="code_contests",
+        scoring={
+            "id": "cc/0",
+            "public_tests": json.dumps({"input": ["8 7\n"], "output": ["15\n"]}),
+            "private_tests": migrated["private_tests"],
+            "generated_tests": "",
+        },
+        prediction="a, b = map(int, input().split())\nprint(a + b)",
+    )
+    assert metrics["pass_at_1"] == 1.0
+
+
+@pytest.mark.parametrize("prediction", ["print(input())", ""])
+def test_missing_code_sidecar_fails_evaluation_instead_of_scoring_zero(
+    tmp_path: Path, monkeypatch, prediction: str,
+) -> None:
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "unmounted"))
+    missing = "zevo-code-answer:v1:" + "a" * 64
+    with pytest.raises(ValueError, match="code-answer sidecar is unavailable"):
+        _score(
+            tmp_path,
+            adapter="code_contests",
+            scoring={
+                "id": "cc/missing",
+                "public_tests": json.dumps({"input": ["1\n"], "output": ["1\n"]}),
+                "private_tests": missing,
+                "generated_tests": "",
+            },
+            prediction=prediction,
+        )
 
 
 def test_humaneval_and_mbpp_use_same_worker(tmp_path: Path) -> None:

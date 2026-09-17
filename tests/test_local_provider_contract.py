@@ -1,6 +1,7 @@
 """The runtime has exactly three GPU provider categories."""
 from __future__ import annotations
 
+import subprocess
 from typing import get_args
 
 from zevo.contracts.infrastructure import (
@@ -10,6 +11,7 @@ from zevo.contracts.infrastructure import (
     InfrastructureDeviceInfo,
     SlurmStageJobContract,
     slurm_lifecycle_prologue,
+    slurm_runtime_prologue,
 )
 from zevo.contracts.data import DataResult
 from zevo.db.models import InfraInstance
@@ -37,6 +39,7 @@ def test_cluster_stage_contract_names_a_finite_sbatch_artifact() -> None:
         stdout_path="/remote/run/train-001/slurm-%j.out",
         stderr_path="/remote/run/train-001/slurm-%j.err",
         lifecycle_prologue=slurm_lifecycle_prologue(status_path),
+        runtime_prologue=slurm_runtime_prologue(),
         num_gpus=2,
         infra_instance_create_schema={"type": "object"},
         infra_instance_patch_schema={"type": "object"},
@@ -48,6 +51,11 @@ def test_cluster_stage_contract_names_a_finite_sbatch_artifact() -> None:
     assert contract.stderr_path.endswith("/slurm-%j.err")
     assert "zevo_slurm_event RUNNING" in contract.lifecycle_prologue
     assert "zevo_slurm_event EXITED" in contract.lifecycle_prologue
+    assert 'export TMPDIR="$zevo_tmp_candidate"' in contract.runtime_prologue
+    assert subprocess.run(
+        ["bash", "-n"], input=contract.runtime_prologue,
+        text=True, capture_output=True, check=False,
+    ).returncode == 0
 
 
 def test_runner_commits_watcher_ownership_only_after_deferred_validation() -> None:

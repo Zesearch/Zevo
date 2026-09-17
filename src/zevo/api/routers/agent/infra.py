@@ -20,6 +20,7 @@ Endpoints:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from zevo.contracts._base import StrictBody
@@ -32,7 +33,8 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.database import get_db
-from zevo.db import InfraInstance
+from zevo.db import HeartbeatRun, InfraInstance
+from zevo.contracts.infrastructure import SLURM_STATUS_FILENAME
 
 
 router = APIRouter()
@@ -87,8 +89,12 @@ def _merge_instance_meta(current: dict | None, incoming: dict) -> dict:
 
 def _to_dto(r: InfraInstance) -> InfraInstanceDTO:
     now = datetime.now(timezone.utc)
-    start = r.created_at if r.created_at else now
-    end = r.released_at if r.released_at else now
+    start = r.created_at or now
+    end = r.released_at or now
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
     uptime = max(0, int((end - start).total_seconds()))
     # Cost = dph * uptime_hours (only meaningful for paid providers)
     cost = round((r.dph or 0.0) * (uptime / 3600.0), 6)
@@ -118,12 +124,41 @@ async def create_instance(
     be empty if provider is still spinning up — the agent calls PATCH
     later to fill it in."""
     _reject_engine_owned_submission_meta(body.meta)
+    meta = dict(body.meta)
+    if (
+        body.provider == "cluster"
+        and body.instance_id
+        and bool(meta.get("resource_request"))
+        and body.ticket_id
+    ):
+        # Observation begins at registration, not minutes later when an Agent
+        # finally returns its typed Result. This does not commit ticket
+        # ownership: terminal wakeups still require the runner's validation.
+        heartbeat = (await db.execute(
+            select(HeartbeatRun).where(
+                HeartbeatRun.ticket_id == body.ticket_id,
+                HeartbeatRun.finished_at.is_(None),
+            ).order_by(desc(HeartbeatRun.started_at)).limit(1)
+        )).scalar_one_or_none()
+        status_path = str(meta.get("status_path") or "")
+        if (
+            heartbeat is not None
+            and status_path.startswith("/")
+            and "\n" not in status_path
+            and "\r" not in status_path
+            and status_path.endswith("/" + SLURM_STATUS_FILENAME)
+            and body.instance_id.isdecimal()
+        ):
+            ticket_dir = PurePosixPath(status_path).parent
+            meta["submission_heartbeat_id"] = heartbeat.id
+            meta["log_path"] = str(ticket_dir / f"slurm-{body.instance_id}.out")
+            meta["stderr_path"] = str(ticket_dir / f"slurm-{body.instance_id}.err")
     row = InfraInstance(
         instance_id=body.instance_id, provider=body.provider,
         status=body.status, run_id=body.run_id, ticket_id=body.ticket_id,
         gpu_name=body.gpu_name, gpu_count=body.gpu_count, vram_gb=body.vram_gb,
         dph=body.dph, ssh_host=body.ssh_host, ssh_port=body.ssh_port,
-        ssh_user=body.ssh_user, meta=body.meta,
+        ssh_user=body.ssh_user, meta=meta,
     )
     if body.status == "ready":
         row.ready_at = datetime.now(timezone.utc)

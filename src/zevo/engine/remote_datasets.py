@@ -32,7 +32,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 from uuid import uuid4
 
 from zevo.paths import files_root as _files_root
@@ -625,6 +625,7 @@ async def _download_parquet_shard(
 
 def _write_parquet_csv(
     *, shard_paths: list[Path], out_dir: str, limit: int, hub_id: str,
+    answer_scope: Literal["test", "validation"] = "test",
 ) -> tuple[str, list[str], int]:
     """Stream downloaded Parquet shards into Zevo's existing CSV contract."""
     import csv as _csv
@@ -692,7 +693,7 @@ def _write_parquet_csv(
                                 if name == "private_test_cases" and scalar.is_valid:
                                     buffer = scalar.as_buffer()
                                     row[name] = (
-                                        store_code_answer_buffer(buffer)
+                                        store_code_answer_buffer(buffer, scope=answer_scope)
                                         if buffer.size else ""
                                     )
                                 else:
@@ -701,7 +702,9 @@ def _write_parquet_csv(
                     else:
                         rows = batch.to_pylist()
                     for row in rows:
-                        row = externalize_code_answers(adapter, row)
+                        row = externalize_code_answers(
+                            adapter, row, scope=answer_scope,
+                        )
                         writer.writerow({c: _cell(row.get(c)) for c in columns})
                         written += 1
                         if written >= requested:
@@ -722,6 +725,7 @@ def _write_parquet_csv(
 async def _materialize_parquet(
     *, client, hub_id: str, config: str, split: str, out_dir: str,
     cache_entry: Path, limit: int,
+    answer_scope: Literal["test", "validation"] = "test",
 ) -> tuple[str, list[str], int]:
     shards = await _parquet_shards(client, hub_id, config, split)
     persistent = _cache_ttl_seconds() > 0
@@ -748,6 +752,7 @@ async def _materialize_parquet(
             out_dir=out_dir,
             limit=limit,
             hub_id=hub_id,
+            answer_scope=answer_scope,
         )
         completed = True
         return result
@@ -766,7 +771,7 @@ async def _materialize_parquet(
 
 async def _materialize_rows(
     *, client, hub_id: str, config: str, split: str, out_dir: str,
-    limit: int,
+    limit: int, answer_scope: Literal["test", "validation"] = "test",
 ) -> tuple[str, list[str], int]:
     """Compatibility path for datasets without a complete Parquet export."""
     import csv as _csv
@@ -823,7 +828,9 @@ async def _materialize_rows(
                                     if key not in seen_columns and key not in page_seen:
                                         page_seen.add(key)
                                         page_columns.append(key)
-                                projected = externalize_code_answers(adapter, row)
+                                projected = externalize_code_answers(
+                                    adapter, row, scope=answer_scope,
+                                )
                                 json.dump(
                                     projected, handle, ensure_ascii=False,
                                     separators=(",", ":"),
@@ -898,6 +905,7 @@ async def _materialize_rows(
 async def materialize(
     *, hub_id: str, split: str = "", config: str = "", out_dir: str,
     limit: int = 0,
+    answer_scope: Literal["test", "validation"] = "test",
 ) -> tuple[str, list[str], int, str]:
     """Fetch a hub split to a local CSV. Returns (path, columns, n_rows, note).
 
@@ -905,6 +913,9 @@ async def materialize(
     settled at run creation, before any agent — and therefore before anything
     has downloaded anything. Rather than refuse hub ids outright, the backend
     pulls the rows itself.
+
+    ``answer_scope`` keeps coding Validation sidecars outside the held-out Test
+    root while preserving one materialization and cache path for both lanes.
 
     `limit=0` means the whole split. Naming a split is naming a set of rows, and
     quietly keeping the first N of them would be measuring something the caller
@@ -916,6 +927,8 @@ async def materialize(
     ident = (hub_id or "").strip()
     if not ident:
         raise MaterializeError("no hub id given")
+    if answer_scope not in {"test", "validation"}:
+        raise MaterializeError(f"unknown code-answer scope: {answer_scope!r}")
     requested_split = split.strip()
     requested_config = config.strip()
     token = _hf_token()
@@ -932,6 +945,22 @@ async def materialize(
         out_dir=out_dir,
     )
     if cached is not None:
+        from zevo.code_benchmarks import (
+            code_execution_adapter_for, rehome_code_answers_csv,
+        )
+
+        adapter = code_execution_adapter_for(ident)
+        if adapter:
+            try:
+                await asyncio.to_thread(
+                    rehome_code_answers_csv,
+                    adapter, cached[0], scope=answer_scope,
+                )
+            except (OSError, ValueError, TypeError) as exc:
+                raise MaterializeError(
+                    f"cannot make cached code answers available for "
+                    f"{answer_scope} scoring: {exc}"
+                ) from exc
         return cached
 
     async with httpx.AsyncClient(
@@ -949,6 +978,7 @@ async def materialize(
                 out_dir=out_dir,
                 cache_entry=cache_entry,
                 limit=limit,
+                answer_scope=answer_scope,
             )
             route = "Parquet"
         except _ParquetUnavailable as exc:
@@ -967,6 +997,7 @@ async def materialize(
                 split=spl,
                 out_dir=out_dir,
                 limit=limit,
+                answer_scope=answer_scope,
             )
             route = "rows API"
 

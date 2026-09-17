@@ -26,15 +26,23 @@
    a ticket-specific remote directory, using the `remote_transfer` helper by
    default or correctly constructed direct SCP when needed. Run directly for
    cloud/instance or use the finite cluster job below.
-   When `suite_members` is non-empty, initialize the model engine exactly once
-   and loop over the primary plus every member inside that same process. Never
-   submit another GPU job for a suite member. Atomically persist each member
-   before moving on so a repaired/preempted execution can validate and skip
-   completed members. During every member emit progress with exact
+   For one model replica, initialize the engine once and loop over the primary
+   plus every member in that process. A cluster allocation can instead run
+   independent replicas via `parallel_runner_path` below. Never submit
+   another GPU job for a suite member. Atomically persist each member before
+   moving on so a repaired execution can skip completed members. During every
+   member emit progress with exact
    `benchmark_name`, one-based `benchmark_index`, and `benchmark_total`, in
    addition to row `step` / `total`; this drives the live Overview label.
-6. Copy back `predict.py`, the execution log, `predictions.csv`, and
-   `generation_diagnostics.json` through the
+   Put the first benchmark's config, predictions, and diagnostics in
+   `primary_member_work_dir` (`work_dir/suite/000`) for every Inference ticket,
+   including one-benchmark runs. Additional members use their assigned
+   `suite/001`, `suite/002`, etc. directories. Keep ticket-wide `predict.py`,
+   batch script, and execution logs in the top-level `work_dir`. An older work
+   order without `primary_member_work_dir` keeps its original artifact paths.
+6. Copy back `predict.py`, the execution log, the primary benchmark's
+   `predictions.csv` and `generation_diagnostics.json` from its assigned
+   directory through the
    helper or correctly constructed direct SCP. Direct cloud/instance execution
    uses `infer.log`; cluster execution preserves the exact successful
    `slurm-<JOBID>.out` and sibling `slurm-<JOBID>.err`, and reports the `.out`
@@ -65,12 +73,44 @@ Inference execution. Put `slurm_job.nodes` and `slurm_job.num_gpus` /
 `slurm_job.gpus_per_node` into `#SBATCH` directives, use exactly
 `slurm_job.job_name`, activate
 `cluster.env_setup`, and, when `memory_helper_path` is supplied, import the
-copied `zevo_inference_memory` helper to select an allocated GPU using the
-recorded absolute target. Run `predict.py` in the foreground with the complete
-suite and exit with it. One suite is one `sbatch`, one allocation, and one
-model load. The file is the actual inference job, not an
+copied `zevo_inference_memory` helper to check allocated GPUs using the
+recorded absolute target. Run the inference workload in the foreground and
+exit with it. One suite is one `sbatch` and one allocation; parallel replicas
+may each load the model once inside that allocation. The file is the actual inference job, not an
 empty allocation. Never use `sleep infinity`, `salloc`, `srun --overlap`,
 `--wrap`, or resource flags on the `sbatch` command line.
+Size `#SBATCH --cpus-per-task` and `--mem` for simultaneous replicas using the
+site limits and Infrastructure host-memory envelope. If host RAM/CPU can only
+support one replica, run one even if a whole-node minimum reserves more GPUs.
+
+For useful parallel work and `slurm_job.num_gpus >= 2 *
+recommended_gpus_per_replica`, keep the YAML
+`implementation_config.llm_kwargs.tensor_parallel_size` at the smallest
+model-fitting size (normally `recommended_gpus_per_replica`), not the whole
+allocation. Respect a larger frozen baseline YAML in reuse mode. Copy
+`parallel_runner_path` beside the remote `predict.py`. Upload the normal
+ordered `suite.json` manifest; each member has `name`, `config`, `questions`,
+`sample_submission`, `output`, and `diagnostics`. `predict.py` must accept
+`--model`, `--suite`, `--summary`, `--ticket-id` and emit per-member progress.
+After validating every YAML, run the system helper in the batch foreground:
+
+```
+python zevo_parallel_inference.py --predict predict.py --model MODEL_PATH \
+  --suite suite.json --summary suite_summary.json --ticket-id TICKET_ID \
+  --allocated-gpus SLURM_JOB_GPU_COUNT --gpus-per-worker YAML_TENSOR_PARALLEL_SIZE
+```
+
+Use absolute paths in the real script. The helper isolates each worker's GPUs
+and temp/cache directories, splits large prepared CSV benchmarks when useful,
+merges results in original row order, and reports aggregate benchmark progress.
+If available host RAM or CPU cannot support all possible replicas, pass
+`--max-workers N` with the safe limit derived from the site's allocation;
+never let the requested GPU count alone imply that many model copies fit.
+It never reads private answers. Do not preselect one `CUDA_VISIBLE_DEVICES`
+before calling it: it needs Slurm's complete device mask. Run the system-owned
+`required_free_memory_gib` preflight for every GPU group that will run a
+replica. When only one replica fits, direct `predict.py --suite ...` remains
+valid.
 Use exactly `#SBATCH --output=<slurm_job.stdout_path>` and
 `#SBATCH --error=<slurm_job.stderr_path>`. Keep stdout and stderr separate;
 never write a cluster job directly to `infer.log`, reuse one filename across
@@ -83,6 +123,9 @@ disposable process state. Preserve a configured persistent model-download cache
 when the site Skill requires one. Validate the resulting batch script and the
 allocated runtime; do not copy a hard-coded cache-management implementation
 between clusters.
+After the site policy, render `slurm_job.runtime_prologue` byte-for-byte before
+environment activation or the workload. It enforces a writable, short
+job-private temp root for process state; do not override its TMPDIR later.
 
 Embed `slurm_job.lifecycle_prologue` byte-for-byte in the executable body
 before model loading. Do not rewrite its functions, event format, trap, or

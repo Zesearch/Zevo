@@ -301,6 +301,11 @@ class IterationHistoryEntry(BaseModel):
     training_method: str = ""
     base_model: str = ""
     score: float | None = None
+    validation_scores: dict[str, float] = Field(default_factory=dict)
+    validation_metrics: dict[str, str] = Field(default_factory=dict)
+    validation_metric_directions: dict[str, Literal["max", "min"]] = Field(
+        default_factory=dict
+    )
     training_diagnostics: TrainingDiagnostics | None = Field(
         None,
         description=(

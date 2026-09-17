@@ -27,10 +27,12 @@ def test_settings_secret_entry_has_no_preview() -> None:
     from zevo.api.routers.ui.settings import PLAIN_KEYS
     assert "ANTHROPIC_API_KEY" not in PLAIN_KEYS
     assert "OPENAI_API_KEY" not in PLAIN_KEYS
+    assert "GOOGLE_CLOUD_VERTEX_API_KEY" not in PLAIN_KEYS
     assert "AWS_BEARER_TOKEN_BEDROCK" not in PLAIN_KEYS
     # non-secret config that is intentionally shown in full
     assert "AWS_REGION" in PLAIN_KEYS
     assert "ZEVO_DEFAULT_COMPUTE" in PLAIN_KEYS
+    assert "ZEVO_EVALUATION_JUDGE_PROVIDER" in PLAIN_KEYS
 
 
 def test_default_compute_setting_names_one_concrete_picker_target() -> None:
@@ -45,3 +47,18 @@ def test_default_compute_setting_names_one_concrete_picker_target() -> None:
     assert pattern.fullmatch("connection:1843b8b3-6090-4221-b318-5f58299e9104")
     assert not pattern.fullmatch("cluster")
     assert not pattern.fullmatch("connection:")
+
+
+@pytest.mark.asyncio
+async def test_vertex_judge_settings_accept_express_key_without_echoing_it(tmp_path, monkeypatch) -> None:
+    from zevo.api.routers.ui import settings as settings_module
+
+    monkeypatch.setattr(settings_module, "ENV_PATH", tmp_path / ".env")
+    key = "AIza" + "A" * 35
+    result = await settings_module.set_secrets(settings_module.SetSecretsBody(values={
+        "ZEVO_EVALUATION_JUDGE_PROVIDER": "vertex_ai",
+        "GOOGLE_CLOUD_VERTEX_API_KEY": key,
+    }))
+    assert set(result.updated) == {"ZEVO_EVALUATION_JUDGE_PROVIDER", "GOOGLE_CLOUD_VERTEX_API_KEY"}
+    assert key not in result.model_dump_json()
+    assert settings_module._read_env(tmp_path / ".env")["GOOGLE_CLOUD_VERTEX_API_KEY"] == key

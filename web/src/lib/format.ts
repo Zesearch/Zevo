@@ -20,6 +20,7 @@ export function metricScoreRange(metric: string | null | undefined): string {
   const key = (metric ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (isPercentageMetric(key) || new Set([
     "portable_constraint_proxy", "reference_token_f1_proxy", "refusal_rate_proxy",
+    "refusal_alignment_proxy", "python_syntax_validity",
     "constraint_accuracy", "instruction_following_accuracy",
   ]).has(key)) return "0–1 (0–100%)";
   return "Task-defined";

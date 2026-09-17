@@ -29,6 +29,8 @@ x-zevo-env: &zevo-env
   # Engine-private Test assets. Only backend + holdout-scheduler mount it;
   # the ordinary optimization scheduler sees no directory at this path.
   ZEVO_HOLDOUT_ROOT: /run/zevo-holdout
+  # Validation code-test sidecars are separate from held-out Test answers.
+  ZEVO_VALIDATION_CODE_ANSWERS_ROOT: /run/zevo-validation-code-answers
   # Where this repo lives ON THE HOST. The container only knows /app, so
   # without this it can only ever offer repo-RELATIVE paths, and a command
   # to copy a model somewhere else needs the absolute one.
@@ -46,6 +48,10 @@ x-zevo-env: &zevo-env
   # into the persistent Codex volume below. An API key remains an optional
   # usage-billed fallback.
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GOOGLE_CLOUD_VERTEX_API_KEY: ${GOOGLE_CLOUD_VERTEX_API_KEY:-}
+  ZEVO_EVALUATION_JUDGE_PROVIDER: ${ZEVO_EVALUATION_JUDGE_PROVIDER:-openai}
+  ZEVO_EVALUATION_JUDGE_MODEL: ${ZEVO_EVALUATION_JUDGE_MODEL:-}
+  ZEVO_EVALUATION_JUDGE_WORKERS: ${ZEVO_EVALUATION_JUDGE_WORKERS:-6}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
   VASTAI_API_KEY: ${VASTAI_API_KEY:-}
   # gpu_provider=cloud has two backends; ZEVO_CLOUD_BACKEND picks one
@@ -131,6 +137,8 @@ x-zevo-volumes: &zevo-volumes
   # ./data/files (the Files page), ./data/uploads (attachments) and
   # ./data/runs (per-run artifacts, browsable on the host).
   - ./data:/app/data
+  # The optimization scorer can read Validation cases, never held-out Test.
+  - ./.zevo-private/validation-code-answers:/run/zevo-validation-code-answers:ro
   - ./playbook:/app/playbook
   # Live source mount -- edits to src/zevo/ (api, engine, cli, contracts,
   # providers) on the host take effect without rebuilding the image. The
@@ -213,6 +221,7 @@ services:
     # volume shared only with the Web proxy. Agents never receive this mount.
     volumes:
       - ./data:/app/data
+      - ./.zevo-private/validation-code-answers:/run/zevo-validation-code-answers
       - ./playbook:/app/playbook
       - ./src:/app/src
       - ./alembic:/app/alembic

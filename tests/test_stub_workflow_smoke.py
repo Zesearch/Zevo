@@ -57,6 +57,12 @@ def test_stub_baseline_and_one_training_iteration(tmp_path: Path) -> None:
         },
         tmp_path / "infer0",
     )
+    assert Path(baseline.inference_config_path).parent == (
+        tmp_path / "infer0" / "suite" / "000"
+    )
+    assert Path(baseline.predictions_path).parent == (
+        tmp_path / "infer0" / "suite" / "000"
+    )
     baseline_eval = _stub_eval(
         {"ticket_id": "eval-smoke-0", "metric": "token_f1"},
         tmp_path / "eval0",
@@ -169,6 +175,10 @@ def test_stub_inference_suite_keeps_member_outputs_separate(tmp_path: Path) -> N
 
     assert result.status == "succeeded"
     assert [member.name for member in result.suite_members] == ["qa"]
+    primary_dir = tmp_path / "infer" / "suite" / "000"
+    assert Path(result.inference_config_path).parent == primary_dir
+    assert Path(result.predictions_path).parent == primary_dir
+    assert Path(result.generation_diagnostics_path).parent == primary_dir
     member = result.suite_members[0]
     assert Path(member.predictions_path).parent == member_dir
     assert Path(member.inference_config_path).parent == member_dir

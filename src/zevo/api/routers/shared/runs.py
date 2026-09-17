@@ -44,6 +44,7 @@ from zevo.providers import resolve_ssh_key
 from zevo.api.database import get_db
 from zevo.api.ui_access import is_trusted_ui_request
 from zevo.db import (
+    ExecutionEvent,
     HeartbeatResult,
     HeartbeatRun,
     RegistryModel,
@@ -262,12 +263,13 @@ _BENCHMARK_STAGE_ORDER = {"data": 0, "inference": 1, "evaluation": 2}
 
 def _benchmark_progress(
     run: Run, tickets: list[Ticket], *, reveal_holdout: bool,
+    completion_events: list[ExecutionEvent] | None = None,
 ) -> dict[str, Any]:
     """Describe the candidate's current per-Benchmark measurement progress.
 
-    A Benchmark is complete only after its deterministic Evaluation ticket is
-    complete. Inference and Evaluation tickets are grouped by candidate so a
-    prior iteration cannot make a new candidate's progress appear finished.
+    Inference and Evaluation have separate counters. A combined suite ticket
+    can finish many members, so ticket count is never used as benchmark count.
+    Group by candidate so an earlier iteration cannot finish a newer one.
     """
     holdout = dict(run.holdout or {})
     validation_members = list(holdout.get("validation_sets") or [])
@@ -308,41 +310,45 @@ def _benchmark_progress(
 
     def benchmark_name(ticket: Ticket, suite: str, names: list[str]) -> str:
         raw = str((ticket.payload or {}).get("test_set_name") or "")
+        stage_prefix = (
+            "Inference suite · " if ticket.agent_id == "inference"
+            else "Evaluation suite · " if ticket.agent_id == "evaluation"
+            else ""
+        )
+        summary = str(ticket.summary or "")
+        current = next((
+            name for name in names
+            if stage_prefix and (
+                summary == f"{stage_prefix}{name}"
+                or summary.startswith(f"{stage_prefix}{name} (")
+            )
+        ), "")
         if suite == "validation":
+            if current:
+                return current
             prefix = "validation:"
             if raw.startswith(prefix):
                 return raw[len(prefix):]
             if ticket.lane == "optimization" and ticket.agent_id in {
                 "inference", "evaluation",
             }:
-                if ticket.agent_id == "inference":
-                    summary = str(ticket.summary or "")
-                    current = next((
-                        name for name in names
-                        if summary.startswith(f"Inference suite · {name}")
-                    ), "")
-                    if current:
-                        return current
                 return names[0] if names else ""
             return ""
         if ticket.lane == "held_out_test" and ticket.agent_id in {
             "data", "inference", "evaluation",
         }:
-            if ticket.agent_id == "inference":
-                summary = str(ticket.summary or "")
-                current = next((
-                    name for name in names
-                    if summary.startswith(f"Inference suite · {name}")
-                ), "")
-                if current:
-                    return current
+            if current:
+                return current
             return raw or (names[0] if len(names) == 1 else "")
         return ""
 
     def suite_progress(suite: str, names: list[str]) -> dict[str, Any]:
         relevant = [
             ticket for ticket in tickets
-            if benchmark_name(ticket, suite, names)
+            if (
+                (suite == "validation" and ticket.lane == "optimization")
+                or (suite == "test" and ticket.lane == "held_out_test")
+            ) and ticket.agent_id in {"data", "inference", "evaluation"}
         ]
         candidate_tickets = [
             ticket for ticket in relevant
@@ -355,7 +361,7 @@ def _benchmark_progress(
         ]
         focus_source = max(
             live_candidates or candidate_tickets,
-            key=lambda ticket: ticket.created_at,
+            key=lambda ticket: ticket.created_at or datetime.min.replace(tzinfo=timezone.utc),
             default=None,
         )
         focus_key = candidate_key(focus_source) if focus_source is not None else None
@@ -372,7 +378,7 @@ def _benchmark_progress(
 
         latest_by_name: dict[str, Ticket] = {}
         for ticket in focused:
-            name = benchmark_name(ticket, suite, names)
+            name = benchmark_name(ticket, suite, names) or "__suite__"
             current = latest_by_name.get(name)
             if current is None or (
                 _BENCHMARK_STAGE_ORDER.get(ticket.agent_id, -1),
@@ -383,11 +389,51 @@ def _benchmark_progress(
             ):
                 latest_by_name[name] = ticket
 
-        completed = sum(
-            ticket.agent_id == "evaluation"
-            and ticket.status in _BENCHMARK_SUCCESS_STATUSES
-            for ticket in latest_by_name.values()
+        inference_done: set[str] = set()
+        evaluation_done: set[str] = set()
+        combined_inference = (
+            len(names) > 1
+            and len({ticket.id for ticket in focused if ticket.agent_id == "inference"}) == 1
         )
+        combined_evaluation = (
+            combined_inference
+            and len({ticket.id for ticket in focused if ticket.agent_id == "evaluation"}) == 1
+        )
+        for ticket in focused:
+            if ticket.status not in _BENCHMARK_SUCCESS_STATUSES:
+                continue
+            if ticket.agent_id not in {"inference", "evaluation"}:
+                continue
+            raw_name = str((ticket.payload or {}).get("test_set_name") or "")
+            if raw_name.startswith("validation:"):
+                raw_name = raw_name[len("validation:"):]
+            # The one candidate-scoped ticket covers the whole suite even
+            # when its primary member is pinned in test_set_name. A successful
+            # combined Evaluation means every member was scored and validated.
+            combined = (
+                combined_inference if ticket.agent_id == "inference"
+                else combined_evaluation
+            )
+            finished = set(names) if combined else (
+                {raw_name} if raw_name in names else {names[0]} if names else set()
+            )
+            if ticket.agent_id == "inference":
+                inference_done.update(finished)
+            else:
+                evaluation_done.update(finished)
+        focused_inference_ids = {
+            ticket.id for ticket in focused if ticket.agent_id == "inference"
+        }
+        focused_evaluation_ids = {
+            ticket.id for ticket in focused if ticket.agent_id == "evaluation"
+        }
+        for event in completion_events or []:
+            name = str((event.extras or {}).get("benchmark_name") or "")
+            if name in names and event.ticket_id in focused_inference_ids:
+                inference_done.add(name)
+            if name in names and event.ticket_id in focused_evaluation_ids:
+                evaluation_done.add(name)
+        completed = len(evaluation_done)
         failed = sum(
             ticket.status == "failed" for ticket in latest_by_name.values()
         )
@@ -431,6 +477,7 @@ def _benchmark_progress(
         ]
         return {
             "completed": int(completed),
+            "inference_completed": len(inference_done),
             "total": len(names),
             "failed": int(failed),
             "iteration": int(focus_key[0]) if focus_key is not None else 0,
@@ -870,6 +917,17 @@ async def get_run(
     if not reveal_holdout:
         stmt = stmt.where(Ticket.lane != "held_out_test")
     tickets = (await db.execute(stmt.order_by(Ticket.created_at))).scalars().all()
+    measurement_ids = [
+        t.id for t in tickets if t.agent_id in {"inference", "evaluation"}
+    ]
+    completion_events = (await db.execute(
+        select(ExecutionEvent).where(
+            ExecutionEvent.ticket_id.in_(measurement_ids),
+            ExecutionEvent.event_type == "progress",
+            ExecutionEvent.total_steps > 0,
+            ExecutionEvent.current_step == ExecutionEvent.total_steps,
+        )
+    )).scalars().all() if measurement_ids else []
     _cost, _dur = await _cost_and_duration(db, r)
     from zevo.engine.cost.budget import snapshot_for_run
     snap = await snapshot_for_run(db, run_id)
@@ -895,6 +953,7 @@ async def get_run(
         history=history,
         benchmark_progress=_benchmark_progress(
             r, tickets, reveal_holdout=reveal_holdout,
+            completion_events=completion_events,
         ),
         tickets=[
             {
@@ -910,6 +969,7 @@ async def get_run(
                 "summary": t.summary or "",
                 "error_message": t.error_message or "",
                 "created_at": t.created_at.isoformat() if t.created_at else "",
+                "updated_at": t.updated_at.isoformat() if t.updated_at else "",
             }
             for t in tickets
         ],

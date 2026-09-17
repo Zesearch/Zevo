@@ -340,6 +340,12 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
     )
     training_values = (
         previous.training.model_dump() if previous else {
+            "data_selection": {
+                "mode": "all",
+                "source_rows": max(1, int(payload.get("dataset_rows") or 1)),
+                "selected_source_rows": max(1, int(payload.get("dataset_rows") or 1)),
+                "rationale": "",
+            },
             "num_epochs": 1,
             "max_seq_len": 2048,
             "batch_size": 1,
@@ -378,6 +384,11 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
             },
         }
     )
+    source_rows = max(1, int(payload.get("dataset_rows") or 1))
+    training_values["data_selection"] = {
+        "mode": "all", "source_rows": source_rows,
+        "selected_source_rows": source_rows, "rationale": "",
+    }
     uses_peft = method == "lora_sft" or bool(method_config.get("use_peft", False))
     if uses_peft:
         training_values["software_versions"]["peft"] = "stub"
@@ -579,6 +590,10 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
     from zevo.contracts.prompting import InferenceContract, PromptContract
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    primary_dir = Path(str(
+        payload.get("primary_member_work_dir") or work_dir / "suite" / "000"
+    ))
+    primary_dir.mkdir(parents=True, exist_ok=True)
     supplied_path = str(payload.get("inference_config_path") or "")
     if supplied_path:
         config = load_inference_config(supplied_path)
@@ -713,7 +728,7 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
             ),
             suggestion_decisions=decisions,
         )
-        config_path = work_dir / "inference_config.yaml"
+        config_path = primary_dir / "inference_config.yaml"
         config_path.write_text(
             yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False),
             encoding="utf-8",
@@ -722,9 +737,9 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
     predict_script = Path(supplied_script) if supplied_script else work_dir / "predict.py"
     if not supplied_script:
         predict_script.write_text("# stub predict\n", encoding="utf-8")
-    preds = work_dir / "predictions.csv"
+    preds = primary_dir / "predictions.csv"
     preds.write_text("id,prediction\n1,A\n2,B\n3,A\n", encoding="utf-8")
-    generation_diagnostics = work_dir / "generation_diagnostics.json"
+    generation_diagnostics = primary_dir / "generation_diagnostics.json"
     generation_diagnostics.write_text(json.dumps({
         "schema_version": 1,
         "records": [

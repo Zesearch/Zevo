@@ -81,6 +81,12 @@ Rules:
    not force it — when `verifiable_reward_available` is false, keep the ordinary
    exhaustion order unchanged; and a user method pin removes this transition
    level entirely (rule 4), so never promote over a pin.
+   The initial Data recipe (iteration 0) and the first Train candidate
+   (iteration 1) must use every eligible prepared Training row. Structural
+   rejection and engine-owned Validation/Test decontamination still apply.
+   Do not request an initial subset, sampling, filter, weighting, or a hidden
+   trainer-side row/sequence cap. Later iterations may test a reasoned subset
+   or other Data selection as a distinct experiment.
 7. Select and retain models by final Validation score in the Task direction.
    Improvement over baseline is reported alongside final score, not substituted
    for it. Use engine-derived training/Validation loss trends only as diagnostic
