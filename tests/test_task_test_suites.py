@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from zevo.db.models import Base, Run, ScoreEvent, Ticket, WorkProduct
+from zevo.db.models import Base, ExecutionEvent, Run, ScoreEvent, Ticket, WorkProduct
 
 
 def _member(name: str, metric: str = "accuracy") -> dict:
@@ -178,9 +178,10 @@ async def test_remote_test_member_uses_its_explicit_split_without_catalogue(
     monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "private"))
     fetched: list[dict] = []
 
-    async def fake_materialize(*, hub_id, split, config, out_dir, limit=0):
+    async def fake_materialize(*, hub_id, split, config, out_dir, limit=0, answer_scope="test"):
         fetched.append({
             "hub_id": hub_id, "split": split, "config": config, "limit": limit,
+            "answer_scope": answer_scope,
         })
         path = tmp_path / "aime.csv"
         path.write_text(
@@ -252,6 +253,7 @@ async def test_remote_test_member_uses_its_explicit_split_without_catalogue(
         "split": "train",
         "config": "default",
         "limit": 0,
+        "answer_scope": "test",
     }]
     assert holdout["test_sets"][0]["name"] == "AIME 2024"
 
@@ -808,6 +810,7 @@ async def test_run_overview_reports_current_benchmark_and_suite_progress() -> No
             status="succeeded", lane="optimization", iteration=0,
             payload={
                 "model_source": "base_model", "base_model": "owner/model",
+                "test_set_name": "validation:math",
             },
         )
         primary_eval = Ticket(
@@ -831,6 +834,7 @@ async def test_run_overview_reports_current_benchmark_and_suite_progress() -> No
         )
         assert progress["validation"] == {
             "completed": 1,
+            "inference_completed": 1,
             "total": 2,
             "failed": 0,
             "iteration": 0,
@@ -855,6 +859,84 @@ async def test_run_overview_reports_current_benchmark_and_suite_progress() -> No
         }]
 
     await engine.dispose()
+
+
+def test_combined_suite_progress_counts_completed_members_not_tickets() -> None:
+    from zevo.api.routers.shared.runs import _benchmark_progress
+
+    run = Run(
+        id="combined-progress", task_name="suite", status="running",
+        holdout={"validation_sets": [
+            {"name": "math"}, {"name": "qa"}, {"name": "code"},
+        ]},
+    )
+    inference = Ticket(
+        id="combined-infer", run_id=run.id, agent_id="inference",
+        status="running", lane="optimization", iteration=0,
+        payload={"model_source": "base_model", "base_model": "owner/model"},
+        summary="Inference suite · code (3/3)",
+        created_at=datetime.now(timezone.utc),
+    )
+    finished = [
+        ExecutionEvent(
+            ticket_id=inference.id, heartbeat_id="submit", attempt_id="one",
+            event_type="progress", phase="complete", current_step=10,
+            total_steps=10, extras={"benchmark_name": name},
+        ) for name in ("math", "qa")
+    ]
+    progress = _benchmark_progress(
+        run, [inference], reveal_holdout=False, completion_events=finished,
+    )
+    assert progress["validation"]["inference_completed"] == 2
+    assert progress["validation"]["completed"] == 0
+    assert progress["validation"]["current"][0]["name"] == "code"
+
+    evaluation_in_progress = Ticket(
+        id="combined-eval", run_id=run.id, agent_id="evaluation",
+        status="running", lane="optimization", iteration=0,
+        inputs={"predictions": {"source_ticket_id": inference.id}},
+        summary="Evaluation suite · code (3/3)",
+        created_at=datetime.now(timezone.utc),
+    )
+    scored = [
+        ExecutionEvent(
+            ticket_id=evaluation_in_progress.id, heartbeat_id="score",
+            attempt_id="one", event_type="progress", phase="benchmark_complete",
+            current_step=1, total_steps=1, extras={"benchmark_name": name},
+        ) for name in ("math", "qa")
+    ]
+    progress = _benchmark_progress(
+        run, [inference, evaluation_in_progress], reveal_holdout=False,
+        completion_events=[*finished, *scored],
+    )
+    assert progress["validation"]["completed"] == 2
+    assert progress["validation"]["current"][0]["name"] == "code"
+
+    inference.status = "succeeded"
+    evaluation = evaluation_in_progress
+    evaluation.status = "succeeded"
+    progress = _benchmark_progress(
+        run, [inference, evaluation], reveal_holdout=False,
+        completion_events=finished,
+    )
+    assert progress["validation"]["inference_completed"] == 3
+    assert progress["validation"]["completed"] == 3
+
+    heldout = Ticket(
+        id="combined-heldout", run_id=run.id, agent_id="inference",
+        status="succeeded", lane="held_out_test", iteration=0,
+        payload={
+            "model_source": "base_model", "base_model": "owner/model",
+            "test_set_name": "math",
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+    run.holdout = {
+        **run.holdout,
+        "test_sets": [{"name": name} for name in ("math", "qa", "code")],
+    }
+    progress = _benchmark_progress(run, [heldout], reveal_holdout=True)
+    assert progress["test"]["inference_completed"] == 3
 
 
 @pytest.mark.asyncio

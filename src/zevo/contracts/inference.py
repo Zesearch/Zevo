@@ -176,6 +176,26 @@ class InferenceTaskInput(AgentTaskInput):
             "default generation mode."
         ),
     )
+    parallel_runner_path: str = Field(
+        "",
+        description=(
+            "System-owned suite sharding and worker launcher. Copy beside predict.py "
+            "for cluster jobs with more than one model replica; it preserves "
+            "each benchmark's output and diagnostics contract."
+        ),
+    )
+    recommended_gpus_per_replica: int = Field(
+        1, ge=1,
+        description=(
+            "Minimum model-parallel GPU group estimated for one independent "
+            "inference engine. Extra allocated GPUs should run replicas, not "
+            "silently increase tensor_parallel_size."
+        ),
+    )
+    parallel_workload_rows: int = Field(
+        0, ge=0,
+        description="Known prepared row count across the whole benchmark suite.",
+    )
     configuration_suggestions: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -198,13 +218,22 @@ class InferenceTaskInput(AgentTaskInput):
         ),
     )
     work_dir: str = Field(min_length=1)
+    primary_member_work_dir: str = Field(
+        "",
+        description=(
+            "Durable artifacts for the first benchmark go here "
+            "(work_dir/suite/000), whether the suite has one member or many. "
+            "The top-level work_dir holds ticket-wide scripts and logs."
+        ),
+    )
     generation_backend: Literal["hf", "vllm"] = "vllm"
     suite_members: list[InferenceSuiteMemberInput] = Field(
         default_factory=list,
         description=(
-            "Additional benchmark contracts executed sequentially by the same "
-            "finite job and already-loaded model. The top-level fields are the "
-            "primary member."
+            "Additional benchmark contracts owned by the same finite job. "
+            "The top-level fields are the primary member; when resources "
+            "permit, independent model replicas may process members or row "
+            "shards concurrently."
         ),
     )
 

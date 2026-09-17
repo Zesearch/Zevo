@@ -173,6 +173,9 @@ def plan_stage_resources(
     live_capacity: SlurmCapacitySnapshot | None = None,
     capacity_error: str = "",
     maximum_gpus: int = 0,
+    inference_rows: int = 0,
+    inference_members: int = 1,
+    inference_gpus_per_replica: int = 0,
     registered_gpus: int = 0,
     registered_nodes: int = 0,
 ) -> StageResourceSelection:
@@ -218,6 +221,7 @@ def plan_stage_resources(
         estimated, estimate_reason = _inference_estimate(
             base_model=base_model, info=info, constraints=constraints,
         )
+        estimated = max(estimated, inference_gpus_per_replica)
 
     single_node = stage in {"data", "inference"}
     candidates = _tier_candidates(estimated, maximum_gpus)
@@ -235,19 +239,29 @@ def plan_stage_resources(
             f"whole_node={constraints.whole_node}"
         )
 
-    # Extra Train GPUs can shorten a large-model/full-parameter job. They are
-    # never a substitute for the minimum envelope, and Data/Inference do not
-    # consume extra cards merely because the cluster has them.
+    # Extra Train GPUs can shorten a large-model/full-parameter job. Inference
+    # scales only for a sizeable scoring workload: each replica gets the full
+    # minimum model envelope, and a single ticket still owns the whole job.
     model_size = model_parameter_billions(base_model)
     can_scale_train = stage == "train" and (
         training_method == "full_sft"
         or (not training_method and model_size is not None and model_size >= 30)
     )
     useful_ceiling = baseline[0] * 2 if can_scale_train else baseline[0]
+    replica_gpus = max(1, estimated)
+    if stage == "inference":
+        by_members = math.ceil(max(1, inference_members) / 3)
+        by_rows = math.ceil(max(0, inference_rows) / 2000)
+        useful_replicas = min(4, max(by_members, by_rows, 1))
+        if inference_members < 2 and inference_rows < 2000:
+            useful_replicas = 1
+        useful_ceiling = max(baseline[0], replica_gpus * useful_replicas)
     selected_tier, selected_shape = baseline
     if live_capacity is not None:
         for tier in reversed(candidates):
             if tier < baseline[0] or tier > useful_ceiling:
+                continue
+            if stage == "inference" and tier > baseline[0] and tier % replica_gpus:
                 continue
             if _shape_for(tier, constraints, single_node=single_node) is None:
                 continue
@@ -285,6 +299,13 @@ def plan_stage_resources(
         source="live Slurm capacity" if live_capacity is not None else "static cluster constraints",
         rationale=(
             f"{estimate_reason}; rounded minimum to tier {baseline[0]} using "
-            f"{constraints.source}; {capacity_reason}"
+            f"{constraints.source}; "
+            + (
+                f"inference workload {inference_members} member(s), {inference_rows} "
+                f"known row(s), at most {max(1, selected_tier // replica_gpus)} "
+                "model replica(s); "
+                if stage == "inference" else ""
+            )
+            + capacity_reason
         ),
     )

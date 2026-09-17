@@ -3,7 +3,7 @@ import useSWR from "swr";
 import { ChevronRight, X } from "lucide-react";
 import type { RunDetail } from "../lib/api";
 import { assignIterations, iterationOrder } from "../lib/iterations";
-import { fmtMetric, fmtScore, metricScoreRange } from "../lib/format";
+import { fmtMetric, fmtScore, isPercentageMetric, metricScoreRange } from "../lib/format";
 import { Kicker } from "./zevo/primitives";
 
 type Artifact = {
@@ -54,12 +54,6 @@ const TRAIN_PARAMETERS = [
   "weight_decay", "precision", "world_size", "lora_r", "lora_alpha", "lora_dropout",
 ];
 
-const INFERENCE_PARAMETERS = [
-  "generation_backend", "batch_size", "max_new_tokens", "temperature", "top_p",
-  "top_k", "repetition_penalty", "seed", "prompt_framing", "model_reasoning_type",
-  "stop_token_ids", "max_model_len", "gpu_memory_utilization", "tensor_parallel_size",
-];
-
 function text(value: unknown): string {
   if (value == null || value === "") return "—";
   if (Array.isArray(value)) return value.map(String).join(", ") || "—";
@@ -89,9 +83,8 @@ function configValue(value: unknown, key: string): unknown {
   return undefined;
 }
 
-function importantParameters(value: unknown, kind: "train" | "inference") {
-  const keys = kind === "train" ? TRAIN_PARAMETERS : INFERENCE_PARAMETERS;
-  return keys.flatMap((key) => {
+function importantParameters(value: unknown) {
+  return TRAIN_PARAMETERS.flatMap((key) => {
     const found = configValue(value, key);
     return found == null || found === "" ? [] : [{ key, value: text(found) }];
   });
@@ -196,8 +189,8 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
   if (!groups.length) return <div className="rounded-bezel border border-dashed border-hair p-8 text-center text-sm text-dim">No iteration evidence yet.</div>;
 
   const ticketById = new Map(run.tickets.map((ticket) => [ticket.id, ticket]));
-  const selectedParameters = selection?.kind === "train" || selection?.kind === "inference"
-    ? importantParameters(selection.configuration, selection.kind)
+  const selectedParameters = selection?.kind === "train"
+    ? importantParameters(selection.configuration)
     : [];
   const selectedTotalRows = selection?.kind === "data"
     ? selection.dataRows
@@ -259,16 +252,34 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
         const testMeta = testEvidence?.meta || {};
         const model = text(trainMeta.base_model || inferMeta.base_model || journal?.base_model);
         const method = text(trainMeta.training_method || journal?.training_method);
-        const trainParameters = importantParameters(trainMeta.configuration, "train");
-        const inferenceParameters = importantParameters(inferMeta.configuration, "inference");
+        const trainParameters = importantParameters(trainMeta.configuration);
         const testArtifacts = testPredictions.map((item, index) => ({
           id: item.id,
           name: text(item.meta.suite_member_name || `Test ${index + 1}`),
           rows: item.meta.n_rows,
         }));
-        const testRows = testArtifacts.reduce(
+        // The held-out suite's prepared question artifacts exist before its
+        // Inference ticket publishes predictions. Count every named member,
+        // not just the newest scoring_questions artifact (one benchmark).
+        // Artifacts are newest-first, so a repeated preparation keeps only
+        // the latest count for each member.
+        const preparedRowsBySet = new Map<string, number>();
+        for (const item of group.artifacts) {
+          const ticket = ticketById.get(item.ticket_id);
+          if (ticket?.lane !== "held_out_test" || item.role !== "scoring_questions") continue;
+          const name = String(item.meta.suite_member_name || item.meta.test_set_name || item.id);
+          if (preparedRowsBySet.has(name)) continue;
+          const rows = Number(item.meta.question_rows ?? item.meta.n_rows ?? item.meta.n_rows_out);
+          if (Number.isFinite(rows) && rows > 0) preparedRowsBySet.set(name, rows);
+        }
+        const preparedTestRows = [...preparedRowsBySet.values()].reduce(
+          (total, rows) => total + rows, 0,
+        );
+        const predictionRows = testArtifacts.reduce(
           (total, item) => total + (Number(item.rows) || 0), 0,
-        ) || testMeta.n_rows || testMeta.question_rows || testMeta.n_rows_out;
+        );
+        const testRows = preparedTestRows || predictionRows
+          || testMeta.n_rows || testMeta.question_rows || testMeta.n_rows_out;
         const validationAggregate = numericScore(journal?.score);
         const testAggregate = numericScore(journal?.test_score);
         const validationPerformance = benchmarkPerformance(
@@ -320,8 +331,8 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
                 <span className="mr-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-slate-100">Val</span>
                 {fmtScore(journal?.score, run.validation_metric)}
               </span>
-              <span className="readout text-sm text-phosphor-300">
-                <span className="mr-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-phosphor-300">Test</span>
+              <span className="readout text-sm text-brass-300">
+                <span className="mr-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-brass-300">Test</span>
                 {fmtScore(journal?.test_score, run.metric)}
               </span>
             </button>
@@ -355,9 +366,9 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
                 }) : undefined}
               />
               <Fact
-                label="Inference / Prediction"
+                label="Predictions"
                 value={`Val ${numberText(validationRows || inferMeta.n_rows)} · Test ${numberText(testRows)}`}
-                onClick={inferenceParameters.length || infer || testPrediction ? () => {
+                onClick={infer || testPrediction ? () => {
                   setPreviewPage(1);
                   setResultLane(infer ? "validation" : "test");
                   setValidationArtifactId(infer?.id || null);
@@ -367,9 +378,8 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
                     testArtifactId: testPrediction?.id,
                     validationArtifacts,
                     testArtifacts,
-                    title: "Inference / Prediction",
+                    title: "Predictions",
                     kind: "inference",
-                    configuration: inferMeta.configuration,
                     validationRows: validationRows || inferMeta.n_rows,
                     testRows,
                   });
@@ -508,7 +518,6 @@ function EvaluationPerformancePanel({ value }: { value: EvaluationPerformance })
         rows={value.validation}
         aggregate={value.validationAggregate}
         aggregateMetric={value.validationMetric}
-        tone="validation"
         empty="Validation Evaluation has not finished."
       />
       <PerformanceSuite
@@ -516,25 +525,28 @@ function EvaluationPerformancePanel({ value }: { value: EvaluationPerformance })
         rows={value.test}
         aggregate={value.testAggregate}
         aggregateMetric={value.testMetric}
-        tone="test"
         empty="Final Test Evaluation has not finished."
       />
     </div>
   );
 }
 
+function displayedScoreScale(metric: string): string {
+  if (isPercentageMetric(metric)) return "0–100%";
+  return metricScoreRange(metric) === "Task-defined" ? "Decimal · task-defined" : "0–1";
+}
+
 function PerformanceSuite({
-  title, rows, aggregate, aggregateMetric, tone, empty,
+  title, rows, aggregate, aggregateMetric, empty,
 }: {
   title: string;
   rows: BenchmarkPerformance[];
   aggregate?: number;
   aggregateMetric: string;
-  tone: "validation" | "test";
   empty: string;
 }) {
-  const accent = tone === "test" ? "text-phosphor-300" : "text-brass-300";
-  const frame = tone === "test" ? "border-phosphor-500/25" : "border-brass-500/25";
+  const accent = "text-brass-300";
+  const frame = "border-brass-500/25";
   return (
     <section className={`overflow-hidden rounded-bezel border ${frame} bg-canvas/55`}>
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-hair bg-panel/55 px-4 py-3">
@@ -550,21 +562,16 @@ function PerformanceSuite({
             <p className={`mt-1 font-mono text-lg tabular-nums ${accent}`}>
               {fmtScore(aggregate, aggregateMetric)}
             </p>
-            <p className="mt-0.5 font-mono text-2xs text-slate-500">
-              Scale: {rows.every((row) => metricScoreRange(row.metric) !== "Task-defined")
-                ? "0–1 (0–100%)" : "Task-defined"}
-            </p>
           </div>
         )}
       </div>
       {rows.length ? (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[30rem] border-collapse text-left font-mono text-xs">
+          <table className="w-full min-w-[24rem] border-collapse text-left font-mono text-xs">
             <thead>
               <tr className="text-2xs uppercase tracking-[0.12em] text-slate-500">
                 <th className="border-b border-hair px-4 py-2 font-medium">Benchmark</th>
                 <th className="border-b border-hair px-4 py-2 font-medium">Metric</th>
-                <th className="border-b border-hair px-4 py-2 font-medium">Scale</th>
                 <th className="border-b border-hair px-4 py-2 text-right font-medium">Performance</th>
               </tr>
             </thead>
@@ -575,9 +582,9 @@ function PerformanceSuite({
                   <td className="border-b border-hair px-4 py-3 text-slate-400">
                     {fmtMetric(row.metric)}
                     <span className="ml-1.5 text-slate-600">{row.direction === "min" ? "↓" : "↑"}</span>
-                  </td>
-                  <td className="border-b border-hair px-4 py-3 text-slate-500">
-                    {metricScoreRange(row.metric)}
+                    <span className="mt-1 block font-mono text-2xs text-slate-500">
+                      {displayedScoreScale(row.metric)}
+                    </span>
                   </td>
                   <td className={`border-b border-hair px-4 py-3 text-right text-sm tabular-nums ${accent}`}>
                     {fmtScore(row.score, row.metric)}

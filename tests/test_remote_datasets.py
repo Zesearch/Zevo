@@ -108,6 +108,57 @@ async def test_materialize_uses_saved_token_then_reuses_private_cache(
 
 
 @pytest.mark.asyncio
+async def test_cached_coding_dataset_rehomes_answers_for_validation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import zevo.engine.remote_datasets as remote
+    from zevo.code_benchmarks import externalize_code_answers, resolve_code_answer
+
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "holdout"))
+    monkeypatch.setenv(
+        "ZEVO_VALIDATION_CODE_ANSWERS_ROOT",
+        str(tmp_path / "validation-code-answers"),
+    )
+    monkeypatch.setenv("ZEVO_HF_DATASET_CACHE_TTL_SECONDS", "86400")
+    monkeypatch.setattr(remote, "_cache_root", lambda: tmp_path / "cache")
+    monkeypatch.setattr(remote, "_hf_token", lambda: "")
+
+    row = externalize_code_answers(
+        "code_contests",
+        {"description": "Add two numbers", "private_tests": {
+            "input": ["2 3\n"], "output": ["5\n"],
+        }},
+    )
+    source = tmp_path / "source.csv"
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row))
+        writer.writeheader()
+        writer.writerow(row)
+    entry, identity = remote._cache_identity(
+        hub_id="deepmind/code_contests", split="train", config="default",
+        limit=1, token="",
+    )
+    remote._store_materialization(
+        entry=entry, identity=identity, source=source,
+        columns=list(row), n_rows=1, config="default", split="train",
+    )
+
+    path, _columns, n_rows, note = await remote.materialize(
+        hub_id="deepmind/code_contests", split="train", config="default",
+        out_dir=str(tmp_path / "run"), limit=1, answer_scope="validation",
+    )
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        migrated = next(csv.DictReader(handle))
+    assert n_rows == 1
+    assert "reused cached" in note
+    assert migrated["private_tests"].startswith("zevo-code-answer:validation:v1:")
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "unmounted"))
+    assert json.loads(resolve_code_answer(migrated["private_tests"])) == {
+        "input": ["2 3\n"], "output": ["5\n"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_materialize_prefers_one_parquet_shard_over_many_row_requests(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -180,8 +231,12 @@ async def test_materialize_prefers_one_parquet_shard_over_many_row_requests(
     assert not any(request.url.path == "/rows" for request in requests)
 
 
+@pytest.mark.parametrize("scope,prefix", [
+    ("test", "zevo-code-answer:v1:"),
+    ("validation", "zevo-code-answer:validation:v1:"),
+])
 def test_livecodebench_parquet_streams_private_answers_to_sidecars(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch, scope: str, prefix: str,
 ) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -190,6 +245,10 @@ def test_livecodebench_parquet_streams_private_answers_to_sidecars(
     import zevo.engine.remote_datasets as remote
 
     monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "holdout"))
+    monkeypatch.setenv(
+        "ZEVO_VALIDATION_CODE_ANSWERS_ROOT",
+        str(tmp_path / "validation-code-answers"),
+    )
     private = "encoded-private-case" * 150_000
     shard = tmp_path / "livecodebench.parquet"
     pq.write_table(pa.table({
@@ -203,13 +262,14 @@ def test_livecodebench_parquet_streams_private_answers_to_sidecars(
         out_dir=str(tmp_path / "converted"),
         limit=0,
         hub_id="sam-paech/livecodebench-code_generation_lite",
+        answer_scope=scope,
     )
 
     with Path(path).open(newline="", encoding="utf-8") as handle:
         converted = next(csv.DictReader(handle))
     assert columns == ["question_id", "question_content", "private_test_cases"]
     assert rows == 1
-    assert converted["private_test_cases"].startswith("zevo-code-answer:v1:")
+    assert converted["private_test_cases"].startswith(prefix)
     assert resolve_code_answer(converted["private_test_cases"]) == private
 
 
@@ -473,13 +533,21 @@ async def test_rows_fallback_retries_429_with_retry_after(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scope,prefix", [
+    ("test", "zevo-code-answer:v1:"),
+    ("validation", "zevo-code-answer:validation:v1:"),
+])
 async def test_rows_fallback_preserves_code_answer_sidecars(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch, scope: str, prefix: str,
 ) -> None:
     from zevo.code_benchmarks import resolve_code_answer
     import zevo.engine.remote_datasets as remote
 
     monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "holdout"))
+    monkeypatch.setenv(
+        "ZEVO_VALIDATION_CODE_ANSWERS_ROOT",
+        str(tmp_path / "validation-code-answers"),
+    )
     hidden = {"input": ["secret" * 1000], "output": ["answer"]}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -492,10 +560,11 @@ async def test_rows_fallback_preserves_code_answer_sidecars(
         path, columns, count = await remote._materialize_rows(
             client=client, hub_id="deepmind/code_contests", config="default",
             split="train", out_dir=str(tmp_path / "run"), limit=1,
+            answer_scope=scope,
         )
 
     assert (columns, count) == (["description", "private_tests"], 1)
     with Path(path).open(newline="", encoding="utf-8") as handle:
         row = next(csv.DictReader(handle))
-    assert row["private_tests"].startswith("zevo-code-answer:v1:")
+    assert row["private_tests"].startswith(prefix)
     assert json.loads(resolve_code_answer(row["private_tests"])) == hidden

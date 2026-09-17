@@ -544,6 +544,7 @@ export type BenchmarkActivity = {
 
 export type BenchmarkSuiteProgress = {
   completed: number;
+  inference_completed: number;
   total: number;
   failed: number;
   iteration: number;
@@ -580,6 +581,7 @@ export type RunDetail = RunSummary & {
     summary: string;
     error_message: string;
     created_at: string;
+    updated_at: string;
   }>;
   history: IterationHistoryEntry[];
 };

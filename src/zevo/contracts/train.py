@@ -52,6 +52,13 @@ class TrainTaskInput(AgentTaskInput):
             "dataset_is_remote=true and must not be copied through Zevo."
         ),
     )
+    dataset_rows: int = Field(
+        ge=1,
+        description=(
+            "Engine-bound count of prepared Training source rows after structural "
+            "validation and scoring exclusion. Iteration 1 must consume all of them."
+        ),
+    )
     dataset_is_remote: bool = False
     remote_data_receipt_path: str = Field(
         "",

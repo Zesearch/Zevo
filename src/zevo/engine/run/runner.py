@@ -164,8 +164,10 @@ from zevo.contracts.infrastructure import (
     SlurmStageJobContract,
     SLURM_STATUS_FILENAME,
     slurm_lifecycle_prologue,
+    slurm_runtime_prologue,
     validate_device_info,
 )
+from zevo.engine.run.benchmark_telemetry import benchmark_progress_phase
 from zevo.contracts.configuration import (
     InferenceRunConfig,
     TrainRunConfig,
@@ -281,6 +283,17 @@ def _build_data_input(
             f"Data payload operation={operation!r} conflicts with lane={ticket.lane!r}; "
             f"expected {expected_operation!r}"
         )
+    if not held_out and int(ticket.iteration or 0) == 0:
+        initial_intent = dict(payload.get("recipe_intent") or {})
+        selected = [
+            field for field in ("subset", "filters", "sampling", "weighting")
+            if initial_intent.get(field)
+        ]
+        if selected:
+            raise ValueError(
+                "initial Data must keep all eligible Training source rows; "
+                "selection can begin in later iterations: " + ", ".join(selected)
+            )
     dataset = "" if held_out else str(payload.get("dataset") or "")
     remote_huggingface = bool(not held_out and looks_like_hub_id(dataset))
     device_info_path = (
@@ -731,6 +744,7 @@ async def _slurm_stage_job_contract(
     *, run: Run, ticket: Ticket, work_dir: str, filename: str,
     device_info_path: str, session: AsyncSession,
     stage: Literal["data", "train", "inference"],
+    inference_config_path: str = "",
 ) -> SlurmStageJobContract:
     """Stamp a new submission or the newest backend-observed Slurm job."""
     cluster = str(run.gpu_provider or "instance") == "cluster"
@@ -767,6 +781,18 @@ async def _slurm_stage_job_contract(
                 # A snapshot is only a sizing hint. Slurm can still safely
                 # queue the minimum job when the read-only probe is unavailable.
                 capacity_error = str(exc)
+        inference_suite = (
+            _heldout_test_sets(run) if ticket.lane == "held_out_test"
+            else _validation_sets(run)
+        ) if stage == "inference" else []
+        configured_tp = 0
+        if stage == "inference" and inference_config_path:
+            configured = load_inference_config(inference_config_path)
+            configured_tp = int(
+                (configured.implementation_config.get("llm_kwargs") or {}).get(
+                    "tensor_parallel_size", 1,
+                )
+            )
         selection = plan_stage_resources(
             stage=stage,
             base_model=str((ticket.payload or {}).get("base_model") or ""),
@@ -778,6 +804,11 @@ async def _slurm_stage_job_contract(
             live_capacity=capacity,
             capacity_error=capacity_error,
             maximum_gpus=maximum_gpus,
+            inference_rows=sum(
+                max(0, int(item.get("n_rows") or 0)) for item in inference_suite
+            ),
+            inference_members=max(1, len(inference_suite)),
+            inference_gpus_per_replica=configured_tp,
             registered_gpus=registered_gpus,
             registered_nodes=registered_nodes,
         )
@@ -813,6 +844,7 @@ async def _slurm_stage_job_contract(
             if cluster else ""
         ),
         lifecycle_prologue=slurm_lifecycle_prologue(status_path) if cluster else "",
+        runtime_prologue=slurm_runtime_prologue() if cluster else "",
         bookkeeping_row_id=job_row.id if job_row is not None else "",
         job_id=job_row.instance_id if job_row is not None else "",
         scheduler_state=(
@@ -883,6 +915,11 @@ async def _build_train_input(
             WorkProduct, str(dataset_binding["work_product_id"])
         )
     dataset_meta = dict(dataset_product.meta or {}) if dataset_product else {}
+    dataset_rows = int(
+        dataset_meta.get("training_rows") or dataset_meta.get("n_rows_out") or 0
+    )
+    if dataset_rows < 1:
+        raise ValueError("bound Training dataset has no verified source-row count")
     dataset_is_remote = str(dataset_meta.get("location") or "") == "remote"
     remote_data_receipt_path = str(
         dataset_meta.get("remote_data_receipt_path") or ""
@@ -899,6 +936,7 @@ async def _build_train_input(
         run_id=str(ticket.run_id or ""),
         iteration=iteration,
         dataset_path=input_path(inputs, "training_dataset"),
+        dataset_rows=dataset_rows,
         dataset_is_remote=dataset_is_remote,
         remote_data_receipt_path=remote_data_receipt_path,
         validation_dataset_path=input_path(inputs, "validation_dataset"),
@@ -915,6 +953,7 @@ async def _build_train_input(
         config_validation_command=(
             "python -m zevo.contracts.configuration validate train "
             "<absolute-yaml-path>"
+            f" --source-rows {dataset_rows}"
             + (" --cluster" if slurm_job.enabled else "")
         ),
         telemetry_helper_path=str(Path(work_dir) / "zevo_train_telemetry.py"),
@@ -1143,6 +1182,21 @@ async def _build_inference_input(
     inference_config_path = input_path(
         inputs, "inference_config", required=False,
     )
+    suite_members = (
+        await _build_validation_suite_members(
+            ticket=ticket, payload=payload, work_dir=work_dir, run=run,
+            session=session,
+        )
+        or await _build_holdout_suite_members(
+            ticket=ticket, payload=payload, work_dir=work_dir, run=run,
+            session=session,
+        )
+    )
+    slurm_job = await _slurm_stage_job_contract(
+        run=run, ticket=ticket, work_dir=work_dir, filename="predict.sbatch",
+        device_info_path=device_info_path, session=session, stage="inference",
+        inference_config_path=inference_config_path,
+    )
     return InferenceTaskInput(
         ticket_id=ticket.id,
         **_customization_kwargs(ticket.customization or {}),
@@ -1181,6 +1235,15 @@ async def _build_inference_input(
             str(Path(work_dir) / "zevo_inference_memory.py")
             if generation_backend == "vllm" else ""
         ),
+        parallel_runner_path=str(Path(work_dir) / "zevo_parallel_inference.py"),
+        recommended_gpus_per_replica=max(1, slurm_job.estimated_gpus),
+        parallel_workload_rows=sum(
+            max(0, int(item.get("n_rows") or 0))
+            for item in (
+                _heldout_test_sets(run) if ticket.lane == "held_out_test"
+                else _validation_sets(run)
+            )
+        ),
         predictions_validation_command=(
             "python -m zevo.engine.artifact_validation validate-predictions "
             "--predictions <absolute-predictions-csv-path> "
@@ -1196,22 +1259,11 @@ async def _build_inference_input(
         configuration_suggestions=dict(payload.get("configuration_suggestions") or {}),
         configuration_pins=dict(payload.get("configuration_pins") or {}),
         device_info_path=device_info_path,
-        slurm_job=await _slurm_stage_job_contract(
-            run=run, ticket=ticket, work_dir=work_dir, filename="predict.sbatch",
-            device_info_path=device_info_path, session=session, stage="inference",
-        ),
+        slurm_job=slurm_job,
         work_dir=work_dir,
+        primary_member_work_dir=str(Path(work_dir) / "suite" / "000"),
         generation_backend=generation_backend,
-        suite_members=(
-            await _build_validation_suite_members(
-                ticket=ticket, payload=payload, work_dir=work_dir, run=run,
-                session=session,
-            )
-            or await _build_holdout_suite_members(
-                ticket=ticket, payload=payload, work_dir=work_dir, run=run,
-                session=session,
-            )
-        ),
+        suite_members=suite_members,
     )
 
 
@@ -1878,7 +1930,7 @@ def _validate_specialist_yaml(
             if member_runtime != shared_runtime:
                 raise ValueError(
                     f"suite member {name!r} changed the shared model runtime; "
-                    "one allocation must load one model engine exactly once"
+                    "all inference replicas must use the same model configuration"
                 )
             member_pins = dict(member.configuration_pins or {})
             for key in ("prompt_framing", "system_prompt"):
@@ -1931,6 +1983,11 @@ def _validate_specialist_yaml(
         inference = load_inference_config(inp.inference_config_path)
         if config.iteration != inp.iteration:
             raise ValueError("train_config.yaml iteration differs from Ticket iteration")
+        if config.training.data_selection.source_rows != inp.dataset_rows:
+            raise ValueError(
+                "train_config.yaml data_selection.source_rows differs from "
+                "the bound prepared Training row count"
+            )
         if config.data_signature != inp.data_signature:
             raise ValueError("train_config.yaml data_signature differs from bound Data")
         if inp.dataset_is_remote:
@@ -2223,12 +2280,15 @@ def _slurm_stage_result_problem(
     required = (
         "#SBATCH", contract.job_name, executable_name,
         contract.status_path, contract.lifecycle_prologue,
+        contract.runtime_prologue,
         f"#SBATCH --output={contract.stdout_path}",
         f"#SBATCH --error={contract.stderr_path}",
     )
     missing = [token for token in required if token not in body]
     if missing:
         return f"cluster stage Slurm script is missing {missing}"
+    if body.find(contract.runtime_prologue) > body.rfind(executable_name):
+        return "cluster stage must set its job-private temporary directory before the workload"
     declared_nodes = _slurm_gpu_value(_slurm_directive_value(body, "nodes"))
     if declared_nodes and declared_nodes != contract.nodes:
         return (
@@ -2269,9 +2329,8 @@ def _slurm_stage_result_problem(
                 "submission handoff"
             )
         try:
-            validate_adaptive_vllm_memory_config(
-                load_inference_config(configuration_path)
-            )
+            inference_config = load_inference_config(configuration_path)
+            validate_adaptive_vllm_memory_config(inference_config)
         except (OSError, ValueError) as exc:
             return f"cluster Inference memory configuration is invalid: {exc}"
         predict_problem = _python_memory_helper_problem(
@@ -2288,6 +2347,28 @@ def _slurm_stage_result_problem(
                 "zevo_inference_memory.required_free_memory_gib helper for "
                 "free-memory preflight"
             )
+        if isinstance(inp, InferenceTaskInput) and contract.phase == "submit":
+            tensor_parallel = int(
+                (inference_config.implementation_config.get("llm_kwargs") or {}).get(
+                    "tensor_parallel_size", 1,
+                )
+            )
+            useful_parallel_work = (
+                len(inp.suite_members) + 1 >= 4
+                or inp.parallel_workload_rows >= 2000
+            )
+            if useful_parallel_work and contract.num_gpus >= 2 * tensor_parallel:
+                required_parallel_tokens = (
+                    "zevo_parallel_inference.py",
+                    "--allocated-gpus",
+                    "--gpus-per-worker",
+                )
+                if not all(token in body for token in required_parallel_tokens):
+                    return (
+                        "cluster Inference has capacity for independent model "
+                        "replicas; submit the system-owned parallel inference "
+                        "helper with the full GPU mask and suite manifest"
+                    )
     return ""
 
 
@@ -3467,12 +3548,15 @@ async def _latest_slurm_resource_request(
     )
 
 
-def _slurm_job_is_live(row: InfraInstance | None) -> bool:
-    if row is None or row.released_at is not None:
-        return False
-    state = str((row.meta or {}).get("scheduler_state") or "").strip().upper()
-    state = state.split()[0].rstrip("+") if state else ""
-    return state not in _SLURM_TERMINAL_STATES
+def _slurm_job_was_submitted_by(
+    row: InfraInstance | None, heartbeat_id: str,
+) -> bool:
+    """Preserve even a quick terminal job if this submit activation owns it."""
+    return bool(
+        row is not None
+        and row.instance_id
+        and str((row.meta or {}).get("submission_heartbeat_id") or "") == heartbeat_id
+    )
 
 
 def _commit_slurm_submission(
@@ -3766,6 +3850,10 @@ async def run_ticket(
             option_scoring_source,
             Path(work_dir) / "zevo_option_scoring.py",
         )
+        parallel_source = REPO_ROOT / "playbook" / "runners" / "parallel_inference.py"
+        if not parallel_source.is_file():
+            raise ValueError(f"system parallel inference helper is missing: {parallel_source}")
+        shutil.copyfile(parallel_source, Path(work_dir) / "zevo_parallel_inference.py")
     log_dir = str(run_dir / "_logs")
 
     is_evaluation_runner = tk.agent_id == "evaluation"
@@ -4083,6 +4171,8 @@ async def run_ticket(
         tot = int(data.get("total", data.get("total_steps", 0)))
         name = phase or data.get("phase", "")
         benchmark_name = str(data.get("benchmark_name") or "").strip()
+        if tk.agent_id in {"inference", "evaluation"}:
+            name = benchmark_progress_phase(str(name), benchmark_name)
         if tk.agent_id == "inference" and benchmark_name:
             benchmark_index = int(data.get("benchmark_index") or 0)
             benchmark_total = int(data.get("benchmark_total") or 0)
@@ -4091,6 +4181,14 @@ async def run_ticket(
                 if benchmark_index > 0 and benchmark_total > 0 else ""
             )
             tk.summary = f"Inference suite · {benchmark_name}{position}"[:1000]
+        elif tk.agent_id == "evaluation" and benchmark_name:
+            benchmark_index = int(data.get("benchmark_index") or 0)
+            benchmark_total = int(data.get("benchmark_total") or 0)
+            position = (
+                f" ({benchmark_index}/{benchmark_total})"
+                if benchmark_index > 0 and benchmark_total > 0 else ""
+            )
+            tk.summary = f"Evaluation suite · {benchmark_name}{position}"[:1000]
         # Exact-tuple, not just consecutive: a replay re-emits the whole run of
         # steps, so the duplicates are not adjacent to their originals. Training
         # steps carry a distinct loss each, so real progress is never collapsed.
@@ -4818,7 +4916,7 @@ async def run_ticket(
         if (
             not cancelled_by_user
             and tk.agent_id in {"data", "train", "inference"}
-            and _slurm_job_is_live(deferred_stage_row)
+            and _slurm_job_was_submitted_by(deferred_stage_row, heartbeat_id)
         ):
             # Submission is already a durable side effect. A malformed
             # non-essential Result (for example an invalid memory update) must
@@ -4830,7 +4928,7 @@ async def run_ticket(
             tk.repair_route = ""
             tk.error_message = ""
             tk.summary = (
-                f"Slurm job {deferred_stage_row.instance_id} remains active; "
+                f"Slurm job {deferred_stage_row.instance_id} was registered; "
                 "waiting for collect despite an invalid submission Result"
             )[:400]
             session.add(TicketNotice(
@@ -4838,7 +4936,7 @@ async def run_ticket(
                 code="slurm.submission_result_discarded",
                 severity="warning",
                 body=(
-                    "The submission activation registered a live finite Slurm "
+                    "The submission activation registered a finite Slurm "
                     "job, but its typed Result was rejected. Zevo preserved the "
                     "job instead of cancelling/re-submitting it. The later "
                     f"collect activation must report a valid Result. Details: {summary}"
@@ -5021,6 +5119,21 @@ async def run_ticket(
                             f"job {inp.slurm_job.job_id}"
                         ),
                     }
+            if isinstance(output, TrainResult) and isinstance(inp, TrainTaskInput):
+                try:
+                    train_config = load_train_config(output.train_config_path)
+                    if train_config.iteration != inp.iteration:
+                        raise ValueError("iteration differs from the Train Ticket")
+                    if train_config.training.data_selection.source_rows != inp.dataset_rows:
+                        raise ValueError(
+                            "data_selection.source_rows differs from the bound "
+                            "prepared Training row count"
+                        )
+                except (OSError, ValueError) as exc:
+                    runtime_contract_mismatches["train_data_selection"] = {
+                        "declared": "valid, bound first-full Training selection",
+                        "reported": str(exc),
+                    }
         if heldout_access_hits and status in ("succeeded", "degraded"):
             status = "failed"
             summary = (
@@ -5056,6 +5169,16 @@ async def run_ticket(
                 if not isinstance(inp, DataTaskInput):
                     raise ValueError("DataResult received a non-Data input")
                 stored_recipe = load_data_recipe(output.data_recipe_path)
+                if int(tk.iteration or 0) == 0:
+                    selected = [
+                        field for field in ("subset", "filters", "sampling", "weighting")
+                        if getattr(stored_recipe, field)
+                    ]
+                    if selected:
+                        raise ValueError(
+                            "initial Data selected Training source rows: "
+                            + ", ".join(selected)
+                        )
                 if stored_recipe.source_identity != inp.expected_source_identity:
                     raise ValueError(
                         "data_recipe.source_identity must exactly copy "

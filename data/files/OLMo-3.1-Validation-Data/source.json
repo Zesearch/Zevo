@@ -1,0 +1,12 @@
+{
+  "note": "Independent, optimization-only Validation suite for OLMo-3.1. The current Task uses a local CSV of 2,302 Level 5 MATH-Hard train problems; two source rows with empty boxed reference answers were excluded. GSM8K remains declared for historical Tasks. ARC Challenge, OpenBookQA, and WildJailbreak use their full declared splits. WildJailbreak replaces BeaverTails-Evaluation because its benign/harmful labels can be compared to model-judged response outcomes, whereas BeaverTails-Evaluation's category/category_id cannot. CodeContests is capped at 500 rows. Dolly uses the first 500 train rows with its one AlpacaEval 2 overlap ('What is the meaning of life?') removed, leaving 499 pinned rows. Instruction following uses 500 pinned, independently sampled multi-constraint rows from AllenAI's IF source with official deterministic verifiers. Test benchmarks remain 100% held out.",
+  "remote": [
+    {"role": "validation", "kind": "huggingface", "id": "openai/gsm8k", "url": "https://huggingface.co/datasets/openai/gsm8k", "config": "main", "split": "test", "n_rows": 1319},
+    {"role": "validation", "kind": "huggingface", "id": "lighteval/MATH-Hard", "url": "https://huggingface.co/datasets/lighteval/MATH-Hard", "config": "default", "split": "train", "n_rows": 2304},
+    {"role": "validation", "kind": "huggingface", "id": "allenai/ai2_arc", "url": "https://huggingface.co/datasets/allenai/ai2_arc", "config": "ARC-Challenge", "split": "validation", "n_rows": 299},
+    {"role": "validation", "kind": "huggingface", "id": "deepmind/code_contests", "url": "https://huggingface.co/datasets/deepmind/code_contests", "config": "default", "split": "train", "n_rows": 13328},
+    {"role": "validation", "kind": "huggingface", "id": "allenai/openbookqa", "url": "https://huggingface.co/datasets/allenai/openbookqa", "config": "main", "split": "validation", "n_rows": 500},
+    {"role": "validation", "kind": "huggingface", "id": "databricks/databricks-dolly-15k", "url": "https://huggingface.co/datasets/databricks/databricks-dolly-15k", "config": "default", "split": "train", "n_rows": 15011},
+    {"role": "validation", "kind": "huggingface", "id": "walledai/WildJailbreak", "url": "https://huggingface.co/datasets/walledai/WildJailbreak", "config": "default", "split": "train", "n_rows": 2210}
+  ]
+}

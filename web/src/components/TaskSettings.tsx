@@ -351,6 +351,13 @@ function SettingChoice({
   zevo?: boolean;
   children?: React.ReactNode;
 }) {
+  const [queryExpanded, setQueryExpanded] = useState(false);
+  const compactQuery = query?.replace(/\s+/g, " ").trim() || "";
+  const queryTruncated = compactQuery.length > 120;
+  const queryPreview = queryTruncated
+    ? compactQuery.slice(0, 120).replace(/\s+\S*$/, "").trimEnd()
+    : compactQuery;
+
   return (
     <div className="min-w-0 rounded-md border border-hair bg-raised/55 p-3">
       <div className="table-label">{label}</div>
@@ -369,11 +376,25 @@ function SettingChoice({
           </span>
           <p
             title={query || "No query set"}
-            className={`mt-0.5 line-clamp-2 break-words font-mono text-[0.64rem] leading-relaxed ${
-              query ? "text-slate-400" : "text-slate-600"
-            }`}
+            className={`mt-0.5 break-words font-mono text-[0.64rem] leading-relaxed ${
+              queryExpanded ? "whitespace-pre-wrap" : ""
+            } ${query ? "text-slate-400" : "text-slate-600"}`}
           >
-            {query || "not set"}
+            {queryExpanded ? query : queryPreview || "not set"}
+            {queryTruncated && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setQueryExpanded((expanded) => !expanded);
+                }}
+                aria-expanded={queryExpanded}
+                aria-label={`${queryExpanded ? "Show less of" : "Show more of"} ${label} query`}
+                className="ml-1 whitespace-nowrap font-mono text-[0.62rem] text-brass-300 transition hover:text-brass-200"
+              >
+                {queryExpanded ? "less" : `${/[.!?。！？]$/.test(queryPreview) ? "" : "… "}more`}
+              </button>
+            )}
           </p>
         </div>
       )}

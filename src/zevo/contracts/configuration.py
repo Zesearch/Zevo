@@ -1002,6 +1002,29 @@ def build_launch_command(
     )
 
 
+class TrainingDataSelection(BaseModel):
+    """How many rows of the bound, prepared Training corpus are consumed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["all", "subset"]
+    source_rows: int = Field(ge=1)
+    selected_source_rows: int = Field(ge=1)
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "TrainingDataSelection":
+        if self.mode == "all" and self.selected_source_rows != self.source_rows:
+            raise ValueError("all-data training must select every prepared source row")
+        if self.mode == "subset" and (
+            self.selected_source_rows >= self.source_rows or not self.rationale.strip()
+        ):
+            raise ValueError(
+                "a training subset requires fewer source rows and a rationale"
+            )
+        return self
+
+
 class TrainingConfig(BaseModel):
     """Complete common trainer configuration selected for one iteration.
 
@@ -1013,6 +1036,7 @@ class TrainingConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    data_selection: TrainingDataSelection
     num_epochs: int = Field(ge=1)
     max_seq_len: int = Field(ge=1)
     batch_size: int = Field(ge=1, description="Per-device training batch size")
@@ -1245,6 +1269,8 @@ class TrainRunConfig(BaseModel):
         )
         if self.iteration == 1 and self.parent_kind != "baseline":
             raise ValueError("iteration 1 requires parent_kind='baseline'")
+        if self.iteration == 1 and self.training.data_selection.mode != "all":
+            raise ValueError("iteration 1 must use every prepared Training row")
         if (
             self.prompt.prompt_framing == "chat"
             or self.prompt.prompt_framing.startswith("chat:")
@@ -1482,6 +1508,11 @@ def _main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="require model/workload-sized vLLM memory planning",
     )
+    validate_parser.add_argument(
+        "--source-rows",
+        type=int,
+        help="require Train data selection to match the bound prepared row count",
+    )
     args = parser.parse_args(argv)
     model = _CONFIG_MODELS[args.kind]
     if args.command == "schema":
@@ -1489,6 +1520,16 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
     try:
         config = load_yaml_config(args.path, model)
+        if args.source_rows is not None:
+            if args.kind != "train":
+                raise ValueError("--source-rows is supported only for Train configuration")
+            if args.source_rows < 1 or (
+                config.training.data_selection.source_rows != args.source_rows
+            ):
+                raise ValueError(
+                    "training.data_selection.source_rows differs from the bound "
+                    "prepared Training row count"
+                )
         if args.cluster:
             if args.kind != "train":
                 raise ValueError("--cluster is supported only for Train configuration")

@@ -1,10 +1,11 @@
-"""Deterministic Evaluation executor.
+"""Evaluation executor with an immutable, task-owned scoring contract.
 
 Evaluation is a system stage, not an LLM agent.  For a task-owned scorer this
 driver writes an auditable ``evaluate.sh`` and lets Bash invoke the scorer's
 fixed file protocol directly.  When no scorer is supplied, it calls Zevo's
-deterministic built-in metric implementation.  No prompt, model, or provider is
-involved in either route.
+deterministic built-in metric implementation. A task-owned custom scorer may
+itself call a model judge; the runner does not select a model or silently fall
+back to another metric.
 """
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ def _timeout_seconds(*, code_execution: bool = False) -> float:
 
 
 class EvaluationRunnerDriver:
-    """Run the fixed evaluator without making an LLM call."""
+    """Run the fixed evaluator without making a runner-owned LLM call."""
 
     name = "evaluation_runner"
 
@@ -167,6 +168,19 @@ class EvaluationRunnerDriver:
                     metrics_path=child_output.metrics_path,
                     score=member_score,
                 ))
+                if event_sink is not None:
+                    event_sink({
+                        "type": "progress",
+                        "payload": {
+                            "owner": inp.ticket_id,
+                            "phase": "benchmark_complete",
+                            "step": 1,
+                            "total": 1,
+                            "benchmark_name": name,
+                            "benchmark_index": index + 1,
+                            "benchmark_total": len(entries),
+                        },
+                    })
             aggregate = sum(member.score for member in suite_results) / len(suite_results)
             root = Path(workspace_dir).resolve()
             root.mkdir(parents=True, exist_ok=True)

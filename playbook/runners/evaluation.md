@@ -10,7 +10,7 @@ output_schema: zevo.contracts.evaluation:EvaluationResult
 
 # Evaluation Runner
 
-Evaluation is a deterministic system stage, not an LLM Agent. It receives a
+Evaluation is a system stage, not an LLM Agent. It receives a
 typed `EvaluationTaskInput`; natural-language requests and Agent customization
 are invalid.
 
@@ -52,6 +52,12 @@ The command runs once in the foreground with a finite timeout. Stdout and
 stderr go to `evaluate.log`. A non-zero exit, timeout, missing output, invalid
 JSON, or invalid score is a failed Ticket. Never fall back after a custom
 scorer fails, because doing so would change the measurement.
+Task-owned scripts may call a versioned external model judge if their metric
+explicitly requires it. In that case the scorer, not this runner, controls its
+rubric, model, retry behavior, and API credential. A missing credential must
+fail the Ticket; it must never cause a fallback to a lexical proxy. Such API
+usage is billed by the provider and is not included in Zevo's Agent LLM cost
+ledger.
 
 ## Built-in scorer
 
@@ -71,5 +77,9 @@ Do not normalize, clamp, round, or substitute another metric key. Return an
 only score authority and the Result does not repeat `score`.
 
 The normal Ticket/Heartbeat surface records phases, Bash command, output,
-status, metrics, wrapper, and log. Model/token usage and LLM cost are always
-zero because no prompt or provider call exists in this stage.
+status, metrics, wrapper, and log. The runner itself makes no provider call;
+custom scorers may do so as described above.
+For a combined benchmark suite, emit one completion progress marker after each
+member's metrics are validated. The marker carries its exact benchmark name
+and one-based suite position; the dashboard counts these independently of the
+single Evaluation ticket.

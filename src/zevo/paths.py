@@ -7,9 +7,11 @@ Everything the system writes at run time sits under a single root:
     data/evaluators/ content-addressed custom evaluators
     data/runs/       per-run artifacts, one directory per run
 
-Held-out Test assets are the deliberate exception.  They live beneath
+Held-out Test assets are the deliberate exception. They live beneath
 ``.zevo-private/holdout`` (or ``ZEVO_HOLDOUT_ROOT``) so the ordinary
 optimization scheduler can run without that directory mounted at all.
+Validation code-test sidecars have their own separate root, which the
+optimization scorer may read without gaining access to held-out Test.
 
 and the root keeps its name across the container boundary: the host's `./data`
 is `/app/data`, so a path means the same thing on both sides and turning one
@@ -68,3 +70,15 @@ def holdout_root() -> str:
     held-out scheduler.  Optimization agents must not be able to traverse it.
     """
     return _override("ZEVO_HOLDOUT_ROOT", REPO_ROOT / ".zevo-private" / "holdout")
+
+
+def validation_code_answers_root() -> str:
+    """Validation-only code cases shared with the optimization scorer.
+
+    This is deliberately outside ``holdout_root``: mounting the Test root in
+    the optimization scheduler would expose held-out answers to agents.
+    """
+    return _override(
+        "ZEVO_VALIDATION_CODE_ANSWERS_ROOT",
+        REPO_ROOT / ".zevo-private" / "validation-code-answers",
+    )

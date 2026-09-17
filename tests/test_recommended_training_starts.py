@@ -81,6 +81,10 @@ def test_lora_sft_starts_realize_a_valid_training_config() -> None:
     """Guidance must be structurally realizable, not just documentation."""
     starts = RECOMMENDED_TRAINING_STARTS["lora_sft"]
     config = TrainingConfig.model_validate({
+        "data_selection": {
+            "mode": "all", "source_rows": 100,
+            "selected_source_rows": 100, "rationale": "",
+        },
         "num_epochs": starts["num_epochs"],
         "max_seq_len": 2048,
         "batch_size": 4,

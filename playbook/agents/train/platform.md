@@ -91,6 +91,9 @@ temporary root for disposable process state. Preserve a configured persistent
 model-download cache when the site Skill requires one. Validate the resulting
 batch script and allocated runtime; do not copy a hard-coded cache-management
 implementation between clusters.
+After the site policy, render `slurm_job.runtime_prologue` byte-for-byte before
+environment activation or the workload. It enforces a writable, short
+job-private temp root for process state; do not override its TMPDIR later.
 
 Embed `slurm_job.lifecycle_prologue` byte-for-byte in the executable body
 before model loading. Do not rewrite its functions, event format, trap, or
@@ -392,6 +395,16 @@ dataset. Never concatenate, sample, filter, or mine Validation/Test rows for
 training, and never revise configuration after inspecting it. A method-defined derived training set,
 such as RFT generate/filter output from training prompts, is allowed only when
 the Skill explicitly owns it.
+
+For iteration 1, set `training.data_selection` to `mode=all`, copy the bound
+`dataset_rows` into both row counts, and consume every prepared Training row.
+Do not take a seeded sample, stop expansion after a target number of examples,
+or cap training steps so the first pass silently omits rows. A source row may
+produce multiple method-specific sequences; record and count any structurally
+invalid or overlength sequences that cannot train. In later iterations a
+deterministic subset is permitted only with `mode=subset`, an exact selected
+source-row count, and a concrete experiment rationale. The train script must
+actually implement the YAML selection, not merely report it.
 
 Before GPU work, verify the record family required by the Skill, non-zero row
 counts, required columns/messages, tokenizer compatibility, max sequence

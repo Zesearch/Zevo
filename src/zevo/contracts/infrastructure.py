@@ -65,6 +65,27 @@ trap zevo_slurm_finish EXIT
 zevo_slurm_event RUNNING ""'''
 
 
+def slurm_runtime_prologue() -> str:
+    """Choose a writable, short job-private temp root before any workload starts.
+
+    A site may supply SLURM_TMPDIR, but it can be unwritable or too long for
+    AF_UNIX sockets (notably model-serving IPC). Fall back to a job-specific
+    directory under /tmp and fail immediately if neither location works.
+    """
+    return '''zevo_tmp_candidate="${SLURM_TMPDIR:-}"
+if [ -z "$zevo_tmp_candidate" ] || [ "${#zevo_tmp_candidate}" -gt 40 ] || [ ! -d "$zevo_tmp_candidate" ] || [ ! -w "$zevo_tmp_candidate" ]; then
+  zevo_tmp_candidate="/tmp/zevo-${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
+  (umask 077 && mkdir -p -- "$zevo_tmp_candidate") || exit 1
+fi
+if [ ! -d "$zevo_tmp_candidate" ] || [ ! -w "$zevo_tmp_candidate" ]; then
+  echo "Zevo: no writable short job temporary directory" >&2
+  exit 1
+fi
+export TMPDIR="$zevo_tmp_candidate" TMP="$zevo_tmp_candidate" TEMP="$zevo_tmp_candidate"
+mkdir -p -m 700 -- "$TMPDIR/xdg" || exit 1
+export XDG_RUNTIME_DIR="$TMPDIR/xdg"'''
+
+
 class GpuAllocationCandidate(BaseModel):
     """One fixed GPU host plus a fresh physical-device idle probe.
 
@@ -228,6 +249,7 @@ class SlurmStageJobContract(BaseModel):
     stdout_path: str = ""
     stderr_path: str = ""
     lifecycle_prologue: str = ""
+    runtime_prologue: str = ""
     bookkeeping_row_id: str = ""
     job_id: str = ""
     scheduler_state: str = ""
@@ -281,6 +303,7 @@ class SlurmStageJobContract(BaseModel):
                 self.job_id, self.scheduler_state, self.scheduler_exit_code,
                 self.scheduler_reason, self.status_path, self.stdout_path,
                 self.stderr_path, self.lifecycle_prologue,
+                self.runtime_prologue,
             )) or self.phase != "submit":
                 raise ValueError("disabled Slurm stage contract cannot carry job state")
             return self
@@ -310,6 +333,8 @@ class SlurmStageJobContract(BaseModel):
             )
         if self.lifecycle_prologue != slurm_lifecycle_prologue(self.status_path):
             raise ValueError("enabled Slurm stage contract requires the exact lifecycle prologue")
+        if self.runtime_prologue != slurm_runtime_prologue():
+            raise ValueError("enabled Slurm stage contract requires the exact runtime prologue")
         if not (
             self.infra_instance_create_schema
             and self.infra_instance_patch_schema

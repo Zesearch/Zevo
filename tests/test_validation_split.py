@@ -479,6 +479,30 @@ def test_agent_history_drops_the_held_out_column() -> None:
     assert out[0]["score"] == 0.5, "the validation score must survive"
 
 
+def test_multi_benchmark_history_is_valid_for_orchestrator_without_test_leak() -> None:
+    from zevo.contracts.orchestrator import IterationHistoryEntry
+    from zevo.engine.run.runner import _agent_history
+
+    history = _agent_history([{
+        "iteration": 0,
+        "source": "baseline",
+        "score": 0.6,
+        "validation_scores": {"math": 0.4, "qa": 0.8},
+        "validation_metrics": {"math": "answer_accuracy", "qa": "choice_accuracy"},
+        "validation_metric_directions": {"math": "max", "qa": "max"},
+        "test_score": 0.9,
+        "test_scores": {"math": 0.9},
+        "test_metrics": {"math": "answer_accuracy"},
+        "test_metric_directions": {"math": "max"},
+    }])
+
+    parsed = IterationHistoryEntry.model_validate(history[0])
+    assert parsed.validation_scores == {"math": 0.4, "qa": 0.8}
+    assert parsed.validation_metrics["qa"] == "choice_accuracy"
+    assert parsed.validation_metric_directions["math"] == "max"
+    assert not any(key.startswith("test_") for key in history[0])
+
+
 # ────────────────────── the held-out lane stays quiet ────────────────────────
 
 
@@ -962,8 +986,8 @@ async def test_a_hub_validation_set_is_fetched_before_the_run_starts(
 
     fetched: dict = {}
 
-    async def fake_materialize(*, hub_id, split, config, out_dir, limit=0):
-        fetched.update(hub_id=hub_id, split=split, config=config, limit=limit)
+    async def fake_materialize(*, hub_id, split, config, out_dir, limit=0, answer_scope="test"):
+        fetched.update(hub_id=hub_id, split=split, config=config, limit=limit, answer_scope=answer_scope)
         path = Path(out_dir) / "validation.csv"
         _write_csv(path, ["question", "gold"],
                    [{"question": f"h{i}", "gold": str(i)} for i in range(200)])
@@ -1002,6 +1026,7 @@ async def test_a_hub_validation_set_is_fetched_before_the_run_starts(
     assert fetched["split"] == "test", "the declared split, not a guessed one"
     assert fetched["config"] == "main"
     assert fetched["limit"] == 0, "the whole split, not a prefix of it"
+    assert fetched["answer_scope"] == "validation"
     # Only the engine keeps the materialized path; the loop is blind to it.
     assert agent_request.validation_set == ""
     assert holdout["validation_set"].endswith("validation.csv")
@@ -1025,7 +1050,7 @@ async def test_blank_validation_splits_test_without_fetching_hub_training(
 
     fetched: dict = {}
 
-    async def fake_materialize(*, hub_id, split, config, out_dir, limit=0):
+    async def fake_materialize(*, hub_id, split, config, out_dir, limit=0, answer_scope="test"):
         fetched.update(hub_id=hub_id, split=split, config=config, limit=limit)
         path = Path(out_dir) / "validation.csv"
         _write_csv(
@@ -1244,6 +1269,17 @@ def test_the_complete_stored_data_payload_is_the_only_runner_authority(tmp_path:
     assert built.remote_preparation_receipt_path == (
         f"/work/data/runs/r/prepared/{'a' * 64}/preparation_receipt.json"
     )
+    payload["recipe_intent"] = {"subset": "first 100 rows"}
+    with pytest.raises(ValueError, match="initial Data must keep all eligible"):
+        _build_data_input(
+            ticket, payload, {"device_info": {"path": str(device_info)}},
+            str(tmp_path), run,
+        )
+    ticket.iteration = 2
+    assert _build_data_input(
+        ticket, payload, {"device_info": {"path": str(device_info)}},
+        str(tmp_path), run,
+    ).recipe_intent.subset == "first 100 rows"
 
 
 @pytest.mark.asyncio
@@ -2369,6 +2405,12 @@ async def test_the_train_ticket_is_handed_the_raw_validation_set(
                      iteration=1, payload={}))
         await s.commit()
         tk = await s.get(Ticket, "train-1")
+        dataset_product = WorkProduct(
+            ticket_id=tk.id, role="training_dataset", path="/w/dataset.jsonl",
+            meta={"training_rows": 7},
+        )
+        s.add(dataset_product)
+        await s.commit()
 
         payload = {
             "base_model": "Qwen/Qwen3-0.6B",
@@ -2382,7 +2424,9 @@ async def test_the_train_ticket_is_handed_the_raw_validation_set(
         device_info = tmp_path / "device_info.json"
         _write_instance_device(device_info, run_id=run.id)
         inputs = {
-            "training_dataset": {"path": "/w/dataset.jsonl"},
+            "training_dataset": {
+                "path": "/w/dataset.jsonl", "work_product_id": dataset_product.id,
+            },
             "validation_dataset": {"path": "/w/validation_dataset.jsonl"},
             "inference_config": {"path": str(inference_config)},
             "device_info": {"path": str(device_info)},
@@ -2420,6 +2464,12 @@ async def test_train_receives_public_wandb_tracking_without_persisting_the_key(
         await session.commit()
         device_info = tmp_path / "device.json"
         _write_instance_device(device_info, run_id=run.id)
+        dataset_product = WorkProduct(
+            ticket_id=ticket.id, role="training_dataset", path="/w/train.jsonl",
+            meta={"training_rows": 7},
+        )
+        session.add(dataset_product)
+        await session.commit()
         built = await _build_train_input(
             ticket,
             {
@@ -2429,7 +2479,9 @@ async def test_train_receives_public_wandb_tracking_without_persisting_the_key(
                 "data_signature": "d" * 64,
             },
             {
-                "training_dataset": {"path": "/w/train.jsonl"},
+                "training_dataset": {
+                    "path": "/w/train.jsonl", "work_product_id": dataset_product.id,
+                },
                 "validation_dataset": {"path": "/w/validation.jsonl"},
                 "inference_config": {"path": str(inference_config)},
                 "device_info": {"path": str(device_info)},
