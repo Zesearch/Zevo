@@ -267,7 +267,7 @@ export function normalizeScoringSuite(items: TaskTestSet[]): TaskTestSet[] {
 /** Editable form for Test and independent Validation. Both lanes carry the
  * same prompt, output schema and evaluator contract, so they intentionally use
  * the same cards instead of unrelated single-file controls. */
-function ScoringSuiteEditor({
+export function ScoringSuiteEditor({
   items, lane, onChange,
 }: {
   items: TaskTestSet[];

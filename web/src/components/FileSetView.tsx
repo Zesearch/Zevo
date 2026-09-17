@@ -3,7 +3,7 @@ import useSWR from "swr";
 import { Link } from "react-router-dom";
 import { Kicker } from "./zevo/primitives";
 import { FILES_ROOT, groupByFolder } from "../lib/format";
-import type { FileSetDTO } from "../lib/api";
+import type { FileSetDTO, TaskTestSet } from "../lib/api";
 
 /**
  * One dataset, read from the inside: its files, whichever one you pick, and the
@@ -28,9 +28,7 @@ type Preview = {
 
 type TaskRef = {
   name: string;
-  test_set: string;
-  evaluation_script: string;
-  test_sample_submission: string;
+  test_sets: TaskTestSet[];
 };
 
 export function FileSetView({
@@ -80,8 +78,9 @@ export function FileSetView({
   // Task owns held-out scoring assets only. Training/validation dataset usage
   // belongs to Settings and is displayed there, never inferred from Task.
   const usedBy = tasks.filter((t) =>
-    [t.test_set, t.evaluation_script, t.test_sample_submission]
-      .some((p) => (p || "").startsWith(`${FILES_ROOT}/${name}/`)));
+    t.test_sets.some((set) =>
+      [set.test_set, set.evaluation_script, set.sample_submission]
+        .some((path) => path.startsWith(`${FILES_ROOT}/${name}/`))));
   const tabular = preview && ["csv", "jsonl", "json", "parquet"].includes(preview.kind);
 
   return (
