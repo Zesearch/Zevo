@@ -96,7 +96,7 @@ export type UserRequest = {
   metric_type: MetricType;
   evaluation_script: string;
   evaluator_sha256?: string;
-  /** Validation contract; inherited from Test when validation_set is blank. */
+  /** Run-level score projection; the input contract lives in validation_sets. */
   validation_metric: string;
   validation_metric_direction: MetricDirection | "";
   validation_metric_type: MetricType | "";
@@ -118,11 +118,6 @@ export type UserRequest = {
   base_model: string;
   test_set: string;
   test_answer_fields: string[];
-  validation_set?: string;
-  validation_split?: string;
-  validation_config?: string;
-  validation_answer_fields?: string[];
-  validation_sample_submission?: string;
   test_sample_submission: string;
   constraints: string[];
 };
@@ -204,18 +199,7 @@ export type TaskSettingDTO = {
   dataset_split: string;
   dataset_config: string;
   validation_sets: TaskTestSet[];
-  validation_set: string;
-  validation_split: string;
-  validation_config: string;
-  validation_answer_fields: string[];
-  validation_sample_submission: string;
-  validation_metric_type: MetricType;
-  validation_metric: string;
-  validation_metric_direction: MetricDirection;
-  validation_evaluation_script: string;
-  validation_evaluator_sha256: string;
   data_source: { kind: string; name: string; detail: string; remote: boolean; url: string };
-  validation_data_source: { kind: string; name: string; detail: string; remote: boolean; url: string };
   level: string;
   data_query: string;
   model_query: string;

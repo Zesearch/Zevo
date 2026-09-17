@@ -1009,13 +1009,20 @@ async def test_a_hub_validation_set_is_fetched_before_the_run_starts(
         training_method="", dataset=str(task_dir / "train.csv"),
         data_query="", base_model="m",
         test_set=str(task_dir / "test.csv"), test_answer_fields=["answer", "gold"],
-        validation_set="openai/gsm8k", validation_split="test", validation_config="main",
-        # Declared, because a fetched set does not have to share the test set's
-        # columns and this one does not: it carries `gold` and no `answer`.
-        # Left blank it would inherit both and be refused, which is the point of
-        # the check — see the field-existence test above.
-        validation_answer_fields=["gold"],
-        validation_sample_submission=str(validation_sample),
+        # Independent Validation is always a suite, even for one benchmark.
+        # Its `gold` column differs from Test's answer columns.
+        validation_sets=[{
+            "name": "GSM8K validation",
+            "test_set": "openai/gsm8k",
+            "split": "test",
+            "config": "main",
+            "inference_query": "Answer {question}.",
+            "sample_submission": str(validation_sample),
+            "metric_type": "builtin",
+            "metric": "token_f1",
+            "metric_direction": "max",
+            "answer_fields": ["gold"],
+        }],
         test_sample_submission=str(task_dir / "sample_submission.csv"),
         metric_type="builtin", evaluation_script="",
         constraints=[],
@@ -1131,8 +1138,17 @@ async def test_a_hub_validation_set_that_cannot_be_fetched_stops_the_run(
         training_method="", dataset=str(task_dir / "train.csv"),
         data_query="", base_model="m",
         test_set=str(task_dir / "test.csv"), test_answer_fields=["gold"],
-        validation_set="x/y", validation_split="validation",
-        validation_sample_submission=str(validation_sample),
+        validation_sets=[{
+            "name": "unavailable validation",
+            "test_set": "x/y",
+            "split": "validation",
+            "inference_query": "Answer {question}.",
+            "sample_submission": str(validation_sample),
+            "metric_type": "builtin",
+            "metric": "token_f1",
+            "metric_direction": "max",
+            "answer_fields": ["gold"],
+        }],
         test_sample_submission=str(task_dir / "sample_submission.csv"),
         metric_type="builtin", evaluation_script="", constraints=[],
     )

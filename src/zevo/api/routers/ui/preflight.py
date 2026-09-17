@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,6 +75,16 @@ class PreflightBody(BaseModel):
     num_gpus: int | None = Field(None, ge=0)
     generation_backend: Literal["hf", "vllm"] | None = None
     customizations: RunCustomizations | None = None
+
+    @model_validator(mode="after")
+    def validation_uses_suite(self) -> "PreflightBody":
+        request = self.user_request
+        if (request.validation_set.strip() or request.validation_split.strip()
+                or request.validation_config.strip()):
+            raise ValueError(
+                "use validation_sets; one Validation set is a one-item suite"
+            )
+        return self
 
 
 # Training-model families accepted by the backend. The frontend agent-model
@@ -173,11 +183,6 @@ def _check_eval(req: UserRequest, items: list[PreflightItem]) -> None:
             )
             for index, member in enumerate(req.validation_sets)
         ])
-    elif req.validation_set:
-        contracts.append((
-            "validation", "Validation", req.validation_metric_type,
-            req.validation_metric, req.validation_evaluation_script,
-        ))
     if any(metric.endswith("_model_judge") for _, _, _, metric, _ in contracts):
         from zevo.engine.method.model_judge import configured_provider_model
 
@@ -277,9 +282,7 @@ def _check_test_set(req: UserRequest, items: list[PreflightItem]) -> None:
     )
     from zevo.engine.remote_datasets import looks_like_hub_id
 
-    has_independent_validation = bool(
-        req.validation_sets or req.validation_set.strip()
-    )
+    has_independent_validation = bool(req.validation_sets)
     eligible = 0
     unknown_remote_sizes = 0
     for index, member in enumerate(suite):

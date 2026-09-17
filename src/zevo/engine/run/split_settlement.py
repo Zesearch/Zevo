@@ -22,7 +22,6 @@ from typing import Any
 
 from zevo.code_benchmarks import code_execution_adapter_for
 from zevo.contracts.orchestrator import (
-    TaskTestSet,
     UserRequest,
     effective_test_suite,
     inherit_test_validation_contract,
@@ -197,25 +196,6 @@ async def settle_splits(
     final_test_only: list[dict[str, Any]] = []
     notes: list[str] = []
     explicit_validation_suite = list(user_request.validation_sets)
-    if not explicit_validation_suite and user_request.validation_set.strip():
-        # Preserve the existing one-upload form as a one-member suite.
-        # model_construct keeps settlement's useful error ordering for an
-        # incomplete legacy draft: remote fetch errors surface before local
-        # field validation. Normal API creation rejects incomplete assets.
-        explicit_validation_suite = [TaskTestSet.model_construct(
-            name="validation",
-            test_set=user_request.validation_set,
-            split=user_request.validation_split,
-            config=user_request.validation_config,
-            inference_query=primary.inference_query,
-            sample_submission=user_request.validation_sample_submission,
-            metric_type=user_request.validation_metric_type or "builtin",
-            metric=user_request.validation_metric,
-            metric_direction=user_request.validation_metric_direction or "max",
-            answer_fields=list(user_request.validation_answer_fields),
-            evaluation_script=user_request.validation_evaluation_script,
-            evaluator_sha256=user_request.validation_evaluator_sha256,
-        )]
     has_explicit_validation = bool(explicit_validation_suite)
 
     if has_explicit_validation:

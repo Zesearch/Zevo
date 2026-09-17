@@ -81,8 +81,6 @@ function buildUserRequest(
   const primaryTest = testSets[0];
   const validationSets = normalizeScoringSuite(inputs.validationSets);
   const validation = validationContractFromInputs(inputs);
-  const primaryValidation = validationSets[0];
-  const hasValidationSuite = validationSets.length > 0;
   return {
     task_objective: nl,
     test_sets: testSets,
@@ -112,16 +110,6 @@ function buildUserRequest(
     dataset_config: inputs.datasetConfig.trim(),
     test_set: primaryTest.test_set,
     test_answer_fields: primaryTest.answer_fields,
-    // A suite and the legacy one-set location are mutually exclusive.  The
-    // first member still supplies the scalar answer/submission compatibility
-    // projection, but must not also masquerade as a separate Validation set.
-    validation_set: hasValidationSuite ? "" : inputs.validationSet.trim(),
-    validation_split: hasValidationSuite ? "" : inputs.validationSplit.trim(),
-    validation_config: hasValidationSuite ? "" : inputs.validationConfig.trim(),
-    validation_answer_fields: hasValidationSuite
-      ? primaryValidation?.answer_fields ?? []
-      : validation.answerFields.split(",").map((field) => field.trim()).filter(Boolean),
-    validation_sample_submission: validation.sampleSubmission,
     test_sample_submission: primaryTest.sample_submission,
     constraints: [],
   };
@@ -314,25 +302,6 @@ export function NewRunModal({
    *  belong to the task and are already filled in, and re-applying an old run's
    *  paths would undo a file the user has just swapped for this run. */
   function applySetting(s: TaskSettingDTO) {
-    const validationSets = s.validation_sets?.length
-      ? s.validation_sets
-      : s.validation_set ? [{
-          name: "Validation",
-          test_set: s.validation_set,
-          split: s.validation_split,
-          config: s.validation_config,
-          max_rows: 0,
-          source_rows: 0,
-          inference_query: tasks.find((task) => task.name === taskName.trim())
-            ?.test_sets?.[0]?.inference_query || "Answer each validation example.",
-          sample_submission: s.validation_sample_submission,
-          metric_type: s.validation_metric_type,
-          metric: s.validation_metric,
-          answer_fields: s.validation_answer_fields,
-          metric_direction: s.validation_metric_direction,
-          evaluation_script: s.validation_evaluation_script,
-          evaluator_sha256: s.validation_evaluator_sha256,
-        }] : [];
     setPickedSetting(s.id);
     setError(null);
     setTouched(true);
@@ -344,16 +313,7 @@ export function NewRunModal({
       dataQuery: s.data_query || "",
       modelQuery: s.model_query || "",
       methodQuery: s.method_query || "",
-      validationSets,
-      validationSet: "",
-      validationSplit: "",
-      validationConfig: "",
-      validationAnswerFields: "",
-      validationSampleSubmission: "",
-      validationMetricType: s.validation_metric_type,
-      validationMetric: s.validation_metric,
-      validationMetricDirection: s.validation_metric_direction,
-      validationEvaluationScript: s.validation_evaluation_script || "",
+      validationSets: s.validation_sets,
       baseModel: s.base_model || "",
       trainingMethod: s.training_method || "",
       teacherModel: String(s.method_config?.teacher_model || ""),
@@ -542,7 +502,6 @@ export function NewRunModal({
   // apart (server: `setting_identity`). Sending only the four compared fields
   // is what made changing the Budget answer "same as the saved setting": the
   // cap never reached the question.
-  const hasValidationSuite = inputs.validationSets.length > 0;
   const matchQuery = new URLSearchParams({
     base_model: effective(inputs.baseModel),
     training_method: effective(inputs.trainingMethod),
@@ -558,10 +517,7 @@ export function NewRunModal({
     data_query: inputs.dataQuery.trim(),
     model_query: inputs.modelQuery.trim(),
     method_query: inputs.methodQuery.trim(),
-    validation_set: hasValidationSuite ? "" : inputs.validationSet.trim(),
     validation_sets: JSON.stringify(inputs.validationSets),
-    validation_split: hasValidationSuite ? "" : inputs.validationSplit.trim(),
-    validation_config: hasValidationSuite ? "" : inputs.validationConfig.trim(),
     validation_answer_fields: validationContract.answerFields.trim(),
     validation_sample_submission: validationContract.sampleSubmission,
     validation_metric_type: validationContract.metricType,
@@ -671,8 +627,6 @@ export function NewRunModal({
       const primaryTest = predefined.test_sets[0];
       if (!primaryTest) throw new Error("The selected Task has no Test suite.");
       const validationSets = normalizeScoringSuite(inputs.validationSets);
-      const primaryValidation = validationSets[0];
-      const hasValidationSuite = validationSets.length > 0;
       // Build the complete canonical request from what the form shows.
       const edited = {
         dataset: inputs.dataset,
@@ -682,13 +636,6 @@ export function NewRunModal({
         test_set: primaryTest.test_set,
         test_answer_fields: primaryTest.answer_fields,
         validation_sets: validationSets,
-        validation_set: hasValidationSuite ? "" : inputs.validationSet.trim(),
-        validation_split: hasValidationSuite ? "" : inputs.validationSplit.trim(),
-        validation_config: hasValidationSuite ? "" : inputs.validationConfig.trim(),
-        validation_answer_fields: hasValidationSuite
-          ? primaryValidation?.answer_fields ?? []
-          : validation.answerFields.split(",").map((field) => field.trim()).filter(Boolean),
-        validation_sample_submission: validation.sampleSubmission,
         test_sample_submission: primaryTest.sample_submission,
         base_model: inputs.baseModel,
         model_query: inputs.modelQuery.trim(),

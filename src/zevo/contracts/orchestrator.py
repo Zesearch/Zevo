@@ -350,10 +350,9 @@ class UserRequest(BaseModel):
         default_factory=list,
         description=(
             "Optional independent Validation contracts. When present, every "
-            "Test member remains 100% held out. When absent, validation_set may "
-            "supply one legacy/user-uploaded contract; if both are absent Zevo "
-            "derives 20% from eligible Test members, with at least 200 rows "
-            "per Validation member."
+            "Test member remains 100% held out. One Validation benchmark is a "
+            "one-item list. When absent Zevo derives 20% from eligible Test "
+            "members, with at least 200 rows per Validation member."
         ),
     )
     metric: str = Field(
@@ -388,7 +387,7 @@ class UserRequest(BaseModel):
     validation_metric_type: Literal["", "builtin", "custom"] = Field(
         "",
         description=(
-            "Validation evaluator kind. Leave blank with no validation_set; "
+            "Validation evaluator kind. Leave blank with no validation_sets; "
             "Run creation inherits metric_type from Test."
         ),
     )
@@ -396,14 +395,14 @@ class UserRequest(BaseModel):
         "",
         description=(
             "Metric used to select iterations. Leave blank with no "
-            "validation_set; Test-derived Validation inherits Test's metric."
+            "validation_sets; Test-derived Validation inherits Test's metric."
         ),
     )
     validation_metric_direction: Literal["", "max", "min"] = Field(
         "",
         description=(
             "Direction used for champion selection and stop thresholds. Leave "
-            "blank with no validation_set to inherit Test's direction."
+            "blank with no validation_sets to inherit Test's direction."
         ),
     )
     validation_evaluation_script: str = Field(
@@ -549,30 +548,20 @@ class UserRequest(BaseModel):
     validation_set: str = Field(
         default="",
         description=(
-            "Path to the FULL validation set — WITH the ground-truth columns. "
-            "This is what every iteration is scored on. It is kept in the "
-            "engine scoring boundary and is not exposed to Orchestrator or Data; "
-            "they receive only measured scores after evaluation. Leave '' and "
-            "Zevo deterministically takes 20% from each sufficiently large "
-            "Test-suite member before the Run begins, requiring at least 200 "
-            "Validation rows per eligible member. Small benchmarks remain "
-            "final-test-only. Derived rows are removed from their final held-out "
-            "Test populations."
+            "Internal settled Validation path. New Run requests must use "
+            "validation_sets, including for a single independent benchmark."
         ),
     )
     validation_split: str = Field(
         default="",
         description=(
-            "When `validation_set` is a HuggingFace id: which slice of the repo "
-            "to use as the validation set. Run creation fetches it to a local "
-            "file before anything starts, so the loop still sees an ordinary "
-            "path. '' picks the repo's validation-like split and fails if it "
-            "has none — defaulting to `train` would tune on training rows."
+            "Internal settled Validation split. New Run requests specify each "
+            "member's split inside validation_sets."
         ),
     )
     validation_config: str = Field(
         default="",
-        description="Named subset for hub repos that ship several. '' = the default config.",
+        description="Internal settled Validation config; new Run requests use validation_sets.",
     )
     validation_answer_fields: List[str] = Field(
         default_factory=list,
