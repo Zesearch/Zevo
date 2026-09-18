@@ -84,8 +84,11 @@ async def release_cloud(row: InfraInstance, run: Run) -> bool:
     async def gone() -> bool:
         instances = await provider.list_instances()
         matching = [item for item in instances if str(item.get("id", item.get("instance_id", ""))) == row.instance_id]
+        # Lambda keeps a destroyed instance listed as "terminating" for a few
+        # minutes; billing has already stopped, and re-sending terminate every
+        # retry until it disappears only adds noise.
         return not matching or all(str(item.get("status", item.get("actual_status", ""))).lower() in {
-            "terminated", "deleted", "destroyed",
+            "terminated", "terminating", "deleted", "destroyed",
         } for item in matching)
 
     if await gone():

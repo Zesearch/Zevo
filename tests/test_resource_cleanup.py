@@ -120,3 +120,23 @@ async def test_agent_authored_remote_path_never_becomes_a_delete_command(db, mon
         raise AssertionError("untrusted remote directory must never be deleted")
     monkeypatch.setattr(cleanup.asyncio, "create_subprocess_exec", unexpected)
     await cleanup.cleanup_run_resources(db, await db.get(Run,"r1"), force=True)
+
+
+@pytest.mark.asyncio
+async def test_terminating_cloud_instance_counts_as_released(db, monkeypatch):
+    """Lambda reports a destroyed box as 'terminating' for a while; that is a
+    confirmed release, not a reason to keep re-sending terminate."""
+    run = await db.get(Run, "r1")
+    row = InfraInstance(run_id="r1", ticket_id="infra", provider="cloud", instance_id="123", meta={"backend": "vastai"})
+    calls = []
+
+    class Provider:
+        async def list_instances(self):
+            return [{"id": "123", "status": "terminating"}]
+
+        async def destroy_instance(self, iid):
+            calls.append(iid)
+
+    monkeypatch.setattr(cleanup, "_cloud_provider", lambda *_: Provider())
+    assert await cleanup.release_cloud(row, run) is True
+    assert calls == []
