@@ -2640,3 +2640,30 @@ def test_min_direction_uses_the_lowest_validation_champion() -> None:
     assert baseline_and_best_test(history, "min") == (0.55, 0.25)
     assert improvement(history, "min") == pytest.approx(0.40)
     assert improvement_test(history, "min") == pytest.approx(0.30)
+
+
+def test_carve_keeps_repeated_questions_on_one_side(tmp_path: Path) -> None:
+    """Settlement refuses a Validation/Test pair that shares a question, so a
+    benchmark that repeats questions (different ids, same text) must never
+    have its repeats carved apart."""
+    d = tmp_path / "task"
+    test = [{"id": str(i), "question": f"t{i}", "answer": f"a{i}"} for i in range(1_000)]
+    # 21 repeats of existing questions under fresh ids, as public trivia
+    # benchmarks ship them.
+    test += [{"id": str(1_000 + i), "question": f"t{i * 7}", "answer": f"a{i * 7}"} for i in range(21)]
+    _write_csv(d / "test.csv", ["id", "question", "answer"], test)
+    _write_csv(d / "train.csv", ["id", "question", "answer"], test[:10])
+    out = carve(
+        dataset=str(d / "train.csv"),
+        test_set=str(d / "test.csv"),
+        test_answer_fields=["answer"],
+        out_dir=str(tmp_path / "splits"),
+    )
+    val = list(csv.DictReader(open(out.validation_set)))
+    rest = list(csv.DictReader(open(out.test_set)))
+    assert len(val) + len(rest) == 1_021
+    assert 204 <= len(val) <= 204 + 21  # the 20% quota, rounded up to whole identity groups
+    assert not {r["question"] for r in val} & {r["question"] for r in rest}
+    from zevo.engine.artifact_validation import semantic_record_fingerprints
+    assert not (semantic_record_fingerprints(out.validation_set, excluded_fields=["answer"])
+                & semantic_record_fingerprints(out.test_set, excluded_fields=["answer"]))
