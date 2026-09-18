@@ -325,7 +325,8 @@ async def test_vram_floor_selects_a_verified_eligible_allocation(client):
 
 
 @pytest.mark.asyncio
-async def test_terminal_run_frees_its_cards(client, sessionmaker_):
+@pytest.mark.parametrize("terminal_status", ["success", "failed", "halted", "cancelled"])
+async def test_terminal_run_retains_cards_until_confirmed_cleanup(client, sessionmaker_, terminal_status):
     allocs = _allocs(("101", 2))
     async with sessionmaker_() as s:
         s.add(Run(metric="accuracy", id="run-a", status="running"))
@@ -335,9 +336,17 @@ async def test_terminal_run_frees_its_cards(client, sessionmaker_):
 
     async with sessionmaker_() as s:
         run = await s.get(Run, "run-a")
-        run.status = "success"
+        run.status = terminal_status
         await s.commit()
 
+    # Run termination can leave a remote trainer alive; acquisition must not
+    # silently erase its lease, even when another Run reports the GPU idle.
+    assert (await _acquire(client, "run-b", 2, allocs)).status_code == 409
+    live = (await client.get("/api/gpu/leases")).json()
+    assert len(live) == 2
+    assert all(row["run_id"] == "run-a" for row in live)
+    response = await client.delete("/api/gpu/leases", params={"run_id": "run-a"})
+    assert response.json()["released"] == 2
     assert (await _acquire(client, "run-b", 2, allocs)).status_code == 200
 
 
