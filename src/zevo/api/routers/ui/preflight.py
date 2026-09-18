@@ -184,25 +184,19 @@ def _check_eval(req: UserRequest, items: list[PreflightItem]) -> None:
             for index, member in enumerate(req.validation_sets)
         ])
     if any(metric.endswith("_model_judge") for _, _, _, metric, _ in contracts):
-        from zevo.engine.method.model_judge import configured_provider_model
+        from zevo.engine.method.model_judge import DEFAULT_MODEL
 
-        try:
-            judge_provider, judge_model = configured_provider_model()
-        except ValueError as exc:
-            _block(items, "model_judge_configuration_invalid", str(exc))
-        else:
-            key_name = (
-                "OPENAI_API_KEY" if judge_provider == "openai"
-                else "GOOGLE_CLOUD_VERTEX_API_KEY"
+        if os.environ.get("OPENAI_API_KEY", "").strip():
+            _ok(
+                items, "model_judge_api_key",
+                f"{DEFAULT_MODEL} is configured for model-judged evaluation.",
             )
-            if os.environ.get(key_name, "").strip():
-                _ok(items, "model_judge_api_key", f"{judge_provider} {judge_model} is configured for model-judged evaluation.")
-            else:
-                _block(
-                    items, "model_judge_api_key_missing",
-                    f"Model-judged evaluation with {judge_provider} requires {key_name} "
-                    "in the Zevo server environment.",
-                )
+        else:
+            _block(
+                items, "model_judge_api_key_missing",
+                f"Model-judged evaluation with {DEFAULT_MODEL} requires "
+                "OPENAI_API_KEY in the Zevo server environment.",
+            )
     for code, label, metric_type, metric, eval_script in contracts:
         if not metric_type:
             _block(

@@ -13,11 +13,10 @@ import {
 // "Tickets & heartbeats" tab already shows, minus the transcripts. Individual
 // tickets are still reachable at /tickets/<id> from a run or an agent.
 //
-// No Leaderboard or Hardware entry either. Both pages still exist and open from
-// the command palette; the rail is for the pages a run passes through, and
-// hardware setup is reached from Settings when a run needs it. How to run is
-// explained where the choice is made: the "i" on each mode card in the launch
-// dialog.
+// No Leaderboard or Hardware entry either. Neither appears in Jump to; the
+// rail and command palette focus on the pages a run passes through. Hardware
+// setup is reached from Settings when a run needs it. How to run is explained
+// where the choice is made: the "i" on each mode card in the launch dialog.
 const links = [
   { to: "/", label: "Dashboard", icon: LayoutGrid, end: true },
   { to: "/runs", label: "Runs", icon: GitBranch },

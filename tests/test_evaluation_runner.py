@@ -62,6 +62,66 @@ def test_custom_evaluator_runs_through_bash_without_llm(tmp_path: Path) -> None:
     assert not any(e.get("type") == "turn_completed" for e in events)
 
 
+def test_model_judge_progress_streams_before_suite_member_finishes(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions.csv"
+    gold = tmp_path / "gold.csv"
+    _write_csv(predictions, [{"id": "1", "prediction": "A"}])
+    _write_csv(gold, [{"id": "1", "answer": "A"}])
+    evaluator = tmp_path / "eval.py"
+    evaluator.write_text(
+        "import json, pathlib, sys, time\n"
+        "progress = pathlib.Path(sys.argv[3]).with_name('judge-progress.json')\n"
+        "progress.write_text(json.dumps({'schema_version': 1, 'model': 'test-model', "
+        "'completed': 2, 'total': 3, 'cached': 1}))\n"
+        "time.sleep(1.5)\n"
+        "pathlib.Path(sys.argv[3]).write_text(json.dumps({'score': 1.0}))\n",
+        encoding="utf-8",
+    )
+    inp = EvaluationTaskInput(
+        ticket_id="eval-judge-suite",
+        test_set_name="Judged benchmark",
+        predictions_path=str(predictions),
+        scoring_set=str(gold),
+        sample_submission=str(predictions),
+        evaluation_script=str(evaluator),
+        evaluator_sha256=file_sha256(evaluator),
+        answer_fields=["answer"],
+        metric="accuracy",
+        suite_members=[EvaluationSuiteMemberInput(
+            name="Plain benchmark", predictions_path=str(predictions),
+            scoring_set=str(gold), sample_submission=str(predictions),
+            metric="accuracy", answer_fields=["answer"],
+        )],
+    )
+
+    async def check():
+        events = []
+        finished_at_event = []
+        task = None
+
+        def sink(event):
+            events.append(event)
+            if event.get("payload", {}).get("phase") == "model_judge":
+                finished_at_event.append(task.done())
+
+        task = asyncio.create_task(EvaluationRunnerDriver().run_agent(
+            blueprint=None, input_payload=inp,
+            workspace_dir=str(tmp_path / "work"), event_sink=sink,
+        ))
+        result = await task
+        return result, events, finished_at_event
+
+    result, events, finished_at_event = asyncio.run(check())
+    assert result.output.status == "succeeded"
+    assert finished_at_event == [False]
+    judge = next(event["payload"] for event in events
+                 if event.get("payload", {}).get("phase") == "model_judge")
+    assert (judge["step"], judge["total"], judge["cached"]) == (2, 3, 1)
+    assert (judge["benchmark_name"], judge["benchmark_index"], judge["benchmark_total"]) == (
+        "Judged benchmark", 1, 2,
+    )
+
+
 def test_builtin_evaluator_is_deterministic_and_writes_metrics(tmp_path: Path) -> None:
     predictions = tmp_path / "predictions.csv"
     gold = tmp_path / "gold.csv"

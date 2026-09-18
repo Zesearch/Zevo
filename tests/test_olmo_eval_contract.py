@@ -106,8 +106,40 @@ def test_model_judge_pairwise_is_position_balanced_and_cacheable(tmp_path, monke
     assert results == ["prediction"] * 8
     assert model == model_judge.DEFAULT_MODEL
     assert "Question" not in (tmp_path / "judge-cache.jsonl").read_text()
+    progress = json.loads((tmp_path / "judge-progress.json").read_text())
+    assert progress == {
+        "schema_version": 1, "model": model_judge.DEFAULT_MODEL,
+        "completed": 8, "total": 8, "cached": 0,
+    }
+    assert "Question" not in (tmp_path / "judge-progress.json").read_text()
     monkeypatch.delenv("OPENAI_API_KEY")
     assert model_judge.judge_many(items, tmp_path / "metrics.json")[0] == results
+    assert json.loads((tmp_path / "judge-progress.json").read_text())["cached"] == 8
+
+
+def test_model_judge_progress_counts_cached_and_duplicate_rows(tmp_path, monkeypatch):
+    cached_item = model_judge.JudgeItem("pairwise", "Private cached prompt", "candidate", "reference")
+    new_item = model_judge.JudgeItem("pairwise", "Private new prompt", "candidate", "reference")
+    key = model_judge._cache_key(cached_item, model_judge.DEFAULT_MODEL)
+    (tmp_path / "judge-cache.jsonl").write_text(
+        json.dumps({"key": key, "verdict": "prediction"}) + "\n"
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("ZEVO_EVALUATION_JUDGE_WORKERS", "1")
+    snapshots = []
+
+    def fake_request(item, **kwargs):
+        snapshots.append(json.loads((tmp_path / "judge-progress.json").read_text()))
+        return "reference"
+
+    monkeypatch.setattr(model_judge, "_request_verdict", fake_request)
+    verdicts, _ = model_judge.judge_many(
+        [cached_item, new_item, new_item], tmp_path / "metrics.json",
+    )
+    assert verdicts == ["prediction", "reference", "reference"]
+    assert [(s["completed"], s["total"], s["cached"]) for s in snapshots] == [(1, 3, 1)]
+    assert json.loads((tmp_path / "judge-progress.json").read_text())["completed"] == 3
+    assert "Private" not in (tmp_path / "judge-progress.json").read_text()
 
 
 def test_model_judge_requires_api_key_and_structured_response(tmp_path, monkeypatch):
@@ -138,63 +170,26 @@ def test_model_judge_requires_api_key_and_structured_response(tmp_path, monkeypa
     assert verdict == "tie"
     assert captured["model"] == "gpt-5.6-luna"
     assert captured["text"]["format"]["type"] == "json_schema"
+    assert captured["reasoning"] == {"effort": "none"}
     assert captured["store"] is False
 
 
-def test_vertex_ai_express_judge_uses_google_endpoint_and_structured_output(monkeypatch):
-    item = model_judge.JudgeItem("pairwise", "Question", "candidate", "reference")
-    captured = {}
-
-    class FakeResponse(BytesIO):
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            self.close()
-
-    def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["headers"] = dict(request.header_items())
-        captured["body"] = json.loads(request.data)
-        return FakeResponse(json.dumps({
-            "candidates": [{"finishReason": "STOP", "content": {
-                "parts": [{"text": '{"verdict":"a"}'}],
-            }}],
-        }).encode())
-
-    monkeypatch.setattr(model_judge, "urlopen", fake_urlopen)
-    verdict = model_judge._request_vertex_verdict(
-        item, key="01" * 32, api_key="vertex-test-key", model="gemini-2.5-flash",
-    )
-    assert verdict == "prediction"
-    assert captured["url"] == (
-        "https://aiplatform.googleapis.com/v1/publishers/google/models/"
-        "gemini-2.5-flash:generateContent"
-    )
-    assert "vertex-test-key" not in captured["url"]
-    assert captured["headers"]["X-goog-api-key"] == "vertex-test-key"
-    assert captured["body"]["generationConfig"]["responseMimeType"] == "application/json"
-    assert captured["body"]["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0
-
-
-def test_vertex_ai_selection_uses_its_own_key_and_cache_namespace(tmp_path, monkeypatch):
+def test_obsolete_judge_selection_does_not_override_fixed_model(tmp_path, monkeypatch):
     item = model_judge.JudgeItem("safety", "Benign request", "Helpful answer")
     monkeypatch.setenv("ZEVO_EVALUATION_JUDGE_PROVIDER", "vertex_ai")
-    monkeypatch.delenv("ZEVO_EVALUATION_JUDGE_MODEL", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_CLOUD_VERTEX_API_KEY", raising=False)
-    assert model_judge.configured_provider_model() == ("vertex_ai", "gemini-2.5-flash")
-    with pytest.raises(RuntimeError, match="GOOGLE_CLOUD_VERTEX_API_KEY"):
-        model_judge.judge_many([item], tmp_path / "metrics.json")
+    monkeypatch.setenv("ZEVO_EVALUATION_JUDGE_MODEL", "gemini-2.5-flash")
     monkeypatch.setenv("GOOGLE_CLOUD_VERTEX_API_KEY", "vertex-test-key")
-    monkeypatch.setattr(model_judge, "_request_vertex_verdict", lambda *args, **kwargs: "helpful_compliance")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    calls = []
+    def fake_request(item, **kwargs):
+        calls.append(kwargs)
+        return "helpful_compliance"
+    monkeypatch.setattr(model_judge, "_request_verdict", fake_request)
     verdicts, model = model_judge.judge_many([item], tmp_path / "metrics.json")
     assert verdicts == ["helpful_compliance"]
-    assert model == "gemini-2.5-flash"
-    assert model_judge._cache_key(item, model, "vertex_ai") != model_judge._cache_key(item, model, "openai")
-    monkeypatch.setenv("ZEVO_EVALUATION_JUDGE_MODEL", "gpt-5.6-luna")
-    with pytest.raises(ValueError, match="Gemini model"):
-        model_judge.configured_provider_model()
+    assert model == "gpt-5.6-luna"
+    assert calls[0]["model"] == "gpt-5.6-luna"
+    assert calls[0]["api_key"] == "openai-test-key"
 
 
 def test_dolly_uses_pairwise_judge_and_context(tmp_path, monkeypatch):
@@ -236,7 +231,6 @@ def test_frozen_scorer_protocol_runs_in_subprocess_from_cached_verdict(tmp_path)
     env = os.environ.copy()
     env.pop("OPENAI_API_KEY", None)
     env["PYTHONPATH"] = str(ROOT / "src")
-    env["ZEVO_EVALUATION_JUDGE_MODEL"] = model_judge.DEFAULT_MODEL
     result = subprocess.run([
         sys.executable, str(ROOT / "data/files/OLMo-3.1-Validation-Data/evaluator.py"),
         str(predictions), str(scoring), str(metrics),
@@ -333,16 +327,12 @@ def test_preflight_blocks_model_judge_without_openai_api_key(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     items = []
     _check_eval(request, items)
-    assert any(item.code == "model_judge_api_key" for item in items)
+    assert any(item.code == "model_judge_api_key" and "gpt-5.6-luna" in item.message for item in items)
     monkeypatch.setenv("ZEVO_EVALUATION_JUDGE_PROVIDER", "vertex_ai")
     monkeypatch.delenv("OPENAI_API_KEY")
     items = []
     _check_eval(request, items)
-    assert any(item.code == "model_judge_api_key_missing" and "GOOGLE_CLOUD_VERTEX_API_KEY" in item.message for item in items)
-    monkeypatch.setenv("GOOGLE_CLOUD_VERTEX_API_KEY", "vertex-test-key")
-    items = []
-    _check_eval(request, items)
-    assert any(item.code == "model_judge_api_key" and "vertex_ai" in item.message for item in items)
+    assert any(item.code == "model_judge_api_key_missing" and "OPENAI_API_KEY" in item.message for item in items)
 
 
 def test_prediction_rows_must_match_reference_identity():

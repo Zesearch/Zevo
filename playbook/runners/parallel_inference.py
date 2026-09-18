@@ -255,6 +255,15 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
             }
             for index in range(len(members))
         }
+        member_positions = {
+            index: [
+                (worker, local_index, part)
+                for worker, batch in active
+                for local_index, part in enumerate(batch)
+                if part.member_index == index
+            ]
+            for index in range(len(members))
+        }
         progress: dict[tuple[int, int], int] = {}
         committed: set[int] = set()
         request_counts: dict[int, int] = {}
@@ -286,6 +295,30 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                 "suite_rows_verified": sum(counts[item] for item in committed),
                 "suite_rows_total": sum(counts),
             })
+
+        def commit_ready_members() -> None:
+            # A worker can move to another benchmark without exiting. Commit
+            # each member as soon as all of its shards are fully written and
+            # validated, rather than waiting for that worker's entire batch.
+            # Final generation progress may precede the artifact writes, so a
+            # step==total report alone must never count as completion.
+            for index, positions in member_positions.items():
+                if index in committed or not positions:
+                    continue
+                if not all(
+                    progress.get((worker, local_index), 0) >= part.size
+                    for worker, local_index, part in positions
+                ):
+                    continue
+                if all(
+                    _complete({
+                        "output": part.output,
+                        "diagnostics": part.diagnostics,
+                        "sample_submission": part.member["sample_submission"],
+                    }, part.size)
+                    for _, _, part in positions
+                ):
+                    commit_member(index)
 
         for index in sorted(complete):
             commit_member(index)
@@ -329,6 +362,7 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                 try:
                     worker, line = message_queue.get(timeout=1)
                 except queue.Empty:
+                    commit_ready_members()
                     continue
                 if line is None:
                     readers_done.add(worker)
@@ -348,6 +382,7 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                     for part, item in zip(batch, worker_summaries):
                         part.unparseable = int(item.get("n_unparseable") or 0)
                     successful_workers.add(worker)
+                    commit_ready_members()
                     for member_index in range(len(members)):
                         if (member_index not in committed
                                 and owners[member_index] <= successful_workers):
@@ -396,6 +431,7 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                     "suite_rows_completed": sum(progress.values()) + already_done_rows,
                     "suite_rows_total": sum(counts),
                 })
+                commit_ready_members()
             if len(committed) != len(members):
                 raise ValueError("inference workers finished without committing every benchmark")
             _phase(ticket, "write_outputs")

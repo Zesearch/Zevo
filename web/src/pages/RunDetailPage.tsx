@@ -984,6 +984,18 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
     event.event_type === "progress"
     && typeof event.extras?.benchmark_name === "string"
   );
+  const judgeEvents = executionEvents.length > 0 || effectiveWake !== undefined
+    ? executionEvents : t.execution_events;
+  const latestJudgeProgress = t.agent_id === "evaluation"
+    ? [...judgeEvents].reverse().find((event) =>
+      event.event_type === "progress" && event.extras?.phase === "model_judge"
+    )
+    : undefined;
+  const judgeBenchmark = typeof latestJudgeProgress?.extras?.benchmark_name === "string"
+    ? latestJudgeProgress.extras.benchmark_name : "";
+  const judgeModel = typeof latestJudgeProgress?.extras?.model === "string"
+    ? latestJudgeProgress.extras.model : "";
+  const judgeCached = Number(latestJudgeProgress?.extras?.cached || 0);
   const activeBenchmarks = Array.isArray(latestInferenceProgress?.extras?.active_benchmarks)
     ? latestInferenceProgress.extras.active_benchmarks.filter(
       (name): name is string => typeof name === "string",
@@ -1049,6 +1061,18 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
             activeBenchmarks={activeBenchmarks} parallelWorkers={parallelWorkers}
             lastBenchmarkName={String(lastInferenceBenchmark?.extras?.benchmark_name || "")}
           />
+          {latestJudgeProgress && (
+            <div className="rounded-bezel border border-brass-500/25 bg-brass-500/[0.05] px-3 py-2.5 text-xs">
+              <div className="font-mono uppercase tracking-wider text-brass-300">Model judge</div>
+              <div className="mt-1 text-slate-200">
+                {[judgeBenchmark, judgeModel].filter(Boolean).join(" · ")}
+              </div>
+              <div className="mt-1 font-mono text-dim">
+                {latestJudgeProgress.current_step.toLocaleString()} / {latestJudgeProgress.total_steps.toLocaleString()} responses judged
+                {judgeCached > 0 && ` · ${judgeCached.toLocaleString()} reused from cache`}
+              </div>
+            </div>
+          )}
           {activeResourceRequest && (
             <ResourceRequestStatus instance={activeResourceRequest} />
           )}

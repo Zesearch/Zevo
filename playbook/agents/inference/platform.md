@@ -102,7 +102,9 @@ python zevo_parallel_inference.py --predict predict.py --model MODEL_PATH \
 
 Use absolute paths in the real script. The helper isolates each worker's GPUs
 and temp/cache directories, splits large prepared CSV benchmarks when useful,
-merges results in original row order, and reports aggregate benchmark progress.
+merges results in original row order, and marks each Benchmark complete as
+soon as its shard artifacts are validated, even while a replica continues with
+other Benchmarks. A final generated-row progress event alone is not completion.
 If available host RAM or CPU cannot support all possible replicas, pass
 `--max-workers N` with the safe limit derived from the site's allocation;
 never let the requested GPU count alone imply that many model copies fit.

@@ -10,11 +10,13 @@ back to another metric.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import os
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -77,6 +79,30 @@ def _timeout_seconds(*, code_execution: bool = False) -> float:
         return 3600.0
 
 
+def _judge_progress(path: Path, ticket_id: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return None
+    completed, total, cached = (
+        value.get("completed"), value.get("total"), value.get("cached")
+    )
+    if not all(type(number) is int for number in (completed, total, cached)):
+        return None
+    if not (0 < total <= 1_000_000 and 0 <= cached <= completed <= total):
+        return None
+    model = value.get("model")
+    if not isinstance(model, str) or not model or len(model) > 128:
+        return None
+    return {
+        "owner": ticket_id, "phase": "model_judge",
+        "step": completed, "total": total,
+        "model": model, "cached": cached,
+    }
+
+
 class EvaluationRunnerDriver:
     """Run the fixed evaluator without making a runner-owned LLM call."""
 
@@ -136,12 +162,26 @@ class EvaluationRunnerDriver:
                         },
                     })
                 member_dir = Path(workspace_dir).resolve() / "suite" / f"{index:03d}"
+
+                def member_event(event: dict[str, Any]) -> None:
+                    if event_sink is None:
+                        return
+                    if (event.get("type") == "progress"
+                            and event.get("payload", {}).get("phase") == "model_judge"):
+                        event = {**event, "payload": {
+                            **event["payload"],
+                            "benchmark_name": name,
+                            "benchmark_index": index + 1,
+                            "benchmark_total": len(entries),
+                        }}
+                    event_sink(event)
+
                 child = await self.run_agent(
                     blueprint=None,
                     input_payload=member_input,
                     workspace_dir=str(member_dir),
                     stdout_sink=stdout_sink,
-                    event_sink=event_sink,
+                    event_sink=member_event if event_sink is not None else None,
                 )
                 child_output = child.output
                 if not isinstance(child_output, EvaluationResult) or child_output.status != "succeeded":
@@ -210,6 +250,7 @@ class EvaluationRunnerDriver:
         scoring_set = Path(inp.scoring_set).resolve()
         sample_submission = Path(inp.sample_submission).resolve()
         metrics_path = work_dir / "metrics.json"
+        judge_progress_path = work_dir / "judge-progress.json"
         log_path = work_dir / "evaluate.log"
         script_path = Path(inp.evaluation_script).resolve() if inp.evaluation_script else None
 
@@ -280,8 +321,9 @@ class EvaluationRunnerDriver:
 
         try:
             metrics_path.unlink(missing_ok=True)
+            judge_progress_path.unlink(missing_ok=True)
         except OSError as exc:
-            output = _failed(inp.ticket_id, f"cannot clear stale metrics.json: {exc}")
+            output = _failed(inp.ticket_id, f"cannot clear stale evaluation output: {exc}")
             return DriverRunResult(output=output, exit_code=1, driver=self.name)
 
         if script_path is not None or inp.code_execution_adapter:
@@ -365,6 +407,38 @@ class EvaluationRunnerDriver:
                 start_new_session=True,
             )
             process_registry.register(inp.ticket_id, proc)
+            last_judge_progress: dict[str, Any] | None = None
+            last_judge_emit = 0.0
+
+            def publish_judge_progress(*, force: bool = False) -> None:
+                nonlocal last_judge_progress, last_judge_emit
+                if event_sink is None:
+                    return
+                payload = _judge_progress(judge_progress_path, inp.ticket_id)
+                if payload is None or payload == last_judge_progress:
+                    return
+                now = time.monotonic()
+                threshold = max(1, payload["total"] // 50)
+                if (not force and last_judge_progress is not None
+                        and payload["total"] == last_judge_progress["total"]
+                        and payload["model"] == last_judge_progress["model"]
+                        and payload["step"] < payload["total"]
+                        and payload["step"] - last_judge_progress["step"] < threshold
+                        and now - last_judge_emit < 5):
+                    return
+                event_sink({"type": "progress", "payload": payload})
+                last_judge_progress = payload
+                last_judge_emit = now
+
+            async def watch_judge_progress() -> None:
+                while True:
+                    publish_judge_progress()
+                    await asyncio.sleep(1)
+
+            progress_task = (
+                asyncio.create_task(watch_judge_progress())
+                if event_sink is not None else None
+            )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
                     proc.communicate(), timeout=_timeout_seconds(
@@ -383,6 +457,11 @@ class EvaluationRunnerDriver:
                 output = _failed(inp.ticket_id, message, f"route={route}")
                 return DriverRunResult(output=output, exit_code=124, driver=self.name)
             finally:
+                if progress_task is not None:
+                    progress_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await progress_task
+                publish_judge_progress(force=True)
                 process_registry.unregister(inp.ticket_id, proc)
 
             stdout = stdout_b.decode("utf-8", errors="replace")

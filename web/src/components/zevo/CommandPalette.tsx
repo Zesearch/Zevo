@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import useSWR from "swr";
 import {
-  LayoutGrid, GitBranch, ListChecks, Trophy, Users, Folder, Cpu, Box, KeyRound,
+  LayoutGrid, GitBranch, ListChecks, Users, Folder, Box, KeyRound,
   Rocket, CornerDownLeft, Search, Layers,
 } from "lucide-react";
 import type { AgentDTO, RunSummary } from "../../lib/api";
@@ -27,8 +27,6 @@ const PAGES: { to: string; label: string; icon: any }[] = [
   { to: "/tasks", label: "Tasks", icon: ListChecks },
   { to: "/files", label: "Files", icon: Folder },
   { to: "/models", label: "Models", icon: Box },
-  { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
-  { to: "/hardware", label: "Hardware", icon: Cpu },
   { to: "/settings", label: "Settings", icon: KeyRound },
   // Autonomy Level explainer — reachable in context from Task Settings, and
   // here so it is findable by search rather than only by a deep link.

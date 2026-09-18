@@ -74,21 +74,18 @@ export function LevelsPage() {
         />
       </div>
 
-      {/* The whole ladder as one table: four rows, three columns of who-decides.
-          It was four stacked cards, which made you hold L1 in your head to see
-          what L2 changed. Side by side, the column that flips is the answer. */}
-      <Bezel className="overflow-x-auto">
-        {/* The rule the table encodes, stated once before the table states it
-          per level. It used to be the page subtitle, which made that one line
-          three times longer than every other page's. */}
-      <p className="mb-4 px-4 pt-1 text-sm leading-relaxed text-slate-400">
+      <p className="mb-5 max-w-5xl text-sm leading-relaxed text-slate-400">
         Every task rests on three decisions: the training data, the model, and the method.
         Each decision is either given by the user or made by Zevo. The more Zevo decides,
         the higher the autonomy level. Zevo keeps the current branch until its inner search
         is exhausted, then advances one level at a time.
       </p>
 
-      {/* Fixed widths on the first four columns so the meaning column absorbs the
+      {/* The whole ladder as one table: four rows, three columns of who-decides.
+          It was four stacked cards, which made you hold L1 in your head to see
+          what L2 changed. Side by side, the column that flips is the answer. */}
+      <Bezel className="overflow-x-auto">
+        {/* Fixed widths on the first four columns so the meaning column absorbs the
             slack. Left to auto layout the three one-word columns each took a
             quarter of a wide screen and the table was mostly air. */}
         <table className="w-full min-w-[880px] table-fixed text-sm">

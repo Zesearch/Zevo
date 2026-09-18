@@ -32,6 +32,15 @@ if os.environ.get("FAKE_FAIL_MASK") == os.environ["CUDA_VISIBLE_DEVICES"]:
 for index, member in enumerate(members, start=1):
     with open(member["questions"], newline="", encoding="utf-8") as handle:
         questions = list(csv.DictReader(handle))
+    progress = {"step": len(questions), "total": len(questions),
+                "benchmark_name": member["name"], "benchmark_index": index,
+                "benchmark_total": len(members)}
+    early_progress = index == 1 and os.environ.get("FAKE_EARLY_PROGRESS") == "1"
+    if early_progress:
+        print("__PROGRESS__:" + args.ticket_id + ":" + json.dumps(progress), flush=True)
+        time.sleep(0.2)
+        if os.path.exists(os.environ["FAKE_FIRST_MERGED_OUTPUT"]):
+            sys.exit(8)  # A final step is not proof that artifacts are written.
     with open(member["output"], "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["id", "prediction"])
         writer.writeheader()
@@ -43,12 +52,17 @@ for index, member in enumerate(members, start=1):
                for j in range(len(questions)) for turn in range(turns)]
     with open(member["diagnostics"], "w", encoding="utf-8") as handle:
         json.dump({"schema_version": 1, "records": records}, handle)
-    progress = {"step": len(questions), "total": len(questions),
-                "benchmark_name": member["name"], "benchmark_index": index,
-                "benchmark_total": len(members)}
-    print("__PROGRESS__:" + args.ticket_id + ":" + json.dumps(progress), flush=True)
+    if not early_progress:
+        print("__PROGRESS__:" + args.ticket_id + ":" + json.dumps(progress), flush=True)
     summaries.append({"name": member["name"], "n_rows": len(questions),
                       "n_requests": len(records), "n_unparseable": 0})
+    if index == 1 and os.environ.get("FAKE_WAIT_FOR_FIRST_COMMIT") == "1":
+        deadline = time.monotonic() + 5
+        while not os.path.exists(os.environ["FAKE_FIRST_MERGED_OUTPUT"]):
+            if time.monotonic() >= deadline:
+                sys.exit(9)  # The runner waited for this worker to finish.
+            time.sleep(0.01)
+        print("FIRST_BENCHMARK_COMMITTED_BEFORE_WORKER_EXIT", flush=True)
     time.sleep(0.01)
 with open(args.summary, "w", encoding="utf-8") as handle:
     json.dump({"members": summaries}, handle)
@@ -157,3 +171,33 @@ def test_completed_benchmark_survives_another_worker_failure(tmp_path: Path) -> 
     assert Path(members[0]["output"]).is_file(), result.stdout + result.stderr
     assert Path(members[0]["diagnostics"]).is_file()
     assert not Path(members[1]["output"]).exists()
+
+
+def test_benchmark_commits_before_its_worker_finishes_other_members(tmp_path: Path) -> None:
+    predict = tmp_path / "predict.py"
+    predict.write_text(FAKE_PREDICT, encoding="utf-8")
+    suite = _suite(tmp_path, [3, 2])
+    members = json.loads(suite.read_text())["members"]
+    env = dict(
+        os.environ, CUDA_VISIBLE_DEVICES="0", TMPDIR="/tmp",
+        FAKE_EARLY_PROGRESS="1", FAKE_WAIT_FOR_FIRST_COMMIT="1",
+        FAKE_FIRST_MERGED_OUTPUT=members[0]["output"],
+    )
+    result = subprocess.run(
+        [sys.executable, str(HELPER), "--predict", str(predict),
+         "--model", "unused", "--suite", str(suite),
+         "--summary", str(tmp_path / "summary.json"), "--ticket-id", "test-ticket",
+         "--allocated-gpus", "1", "--gpus-per-worker", "1"],
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FIRST_BENCHMARK_COMMITTED_BEFORE_WORKER_EXIT" in result.stdout
+    completed = [
+        json.loads(line.split(":", 2)[2])
+        for line in result.stdout.splitlines()
+        if line.startswith("__PROGRESS__:test-ticket:")
+    ]
+    assert [row["benchmark_name"] for row in completed
+            if row.get("suite_rows_verified") is not None] == [
+        "benchmark 0", "benchmark 1",
+    ]

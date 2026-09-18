@@ -36,8 +36,6 @@ type AuthResponse = { drivers: AuthDriver[] };
 const SETTINGS_KEYS = [
   "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
   "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION",
-  "ZEVO_EVALUATION_JUDGE_PROVIDER", "ZEVO_EVALUATION_JUDGE_MODEL",
-  "GOOGLE_CLOUD_VERTEX_API_KEY",
   "OPENROUTER_API_KEY", "VASTAI_API_KEY", "LAMBDA_API_KEY",
   "HF_TOKEN", "WANDB_ENTITY", "WANDB_PROJECT", "WANDB_API_KEY",
 ];
@@ -47,7 +45,7 @@ function RestartNotice() {
   return (
     <div className="flex items-center rounded-md border border-brass-500/25 bg-brass-500/[0.06] px-4 py-3 text-brass-200">
       <span className="min-w-0 text-sm leading-relaxed">
-        Credential and Evaluation judge changes require a restart. A Default compute change applies
+        Credential changes require a restart. A Default compute change applies
         to the next Run immediately.
         <span className="mt-1 block max-w-full break-words font-mono text-xs font-semibold text-slate-200">
           docker compose up -d --force-recreate backend scheduler holdout-scheduler
