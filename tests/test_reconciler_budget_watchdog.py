@@ -6,6 +6,7 @@ are left alone.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -184,3 +185,76 @@ async def test_failed_tickets_cannot_skip_final_checkpoint_retention(monkeypatch
         counts=await _close_finished_runs(db)
         assert not any(counts.values())
         assert run.status == "running"
+
+
+def _final_state(deadline_delta, started_delta=timedelta(minutes=30)):
+    now = datetime.now(timezone.utc)
+    return {"finalization": {"reason": "iteration limit",
+                             "started_at": (now - started_delta).isoformat(),
+                             "deadline_at": (now + deadline_delta).isoformat()}}
+
+
+@pytest.mark.asyncio
+async def test_deadline_holds_while_final_test_is_in_flight(monkeypatch):
+    # A champion held-out pass can outlast the window on its own; the deadline
+    # must not reap it (or the queued registry behind it) mid-flight.
+    _patch_snapshot(monkeypatch, _Snap())
+    reaped = _reap_spy(monkeypatch)
+    Session = await _session()
+    async with Session() as db:
+        await _seed(db, iteration_budget=1, iterations_completed=1,
+                    lifecycle=_final_state(timedelta(seconds=-1)))
+        db.add(Ticket(id="test", run_id="r1", agent_id="inference", lane="held_out_test",
+                      status="running", payload={}))
+        db.add(Ticket(id="registry", run_id="r1", agent_id="registry", status="queued", payload={}))
+        await db.commit()
+        await _watchdog_halt_over_budget_runs(db)
+        run = await db.get(Run, "r1")
+        assert run.cancel_requested_at is None
+        assert (await db.get(Ticket, "test")).status == "running"
+        assert (await db.get(Ticket, "registry")).status == "queued"
+        assert (await db.get(Ticket, "orch-1")).status == "running"
+        assert "test" not in reaped and "registry" not in reaped
+
+
+@pytest.mark.asyncio
+async def test_completed_final_step_restarts_the_window(monkeypatch):
+    # Held-out eval finished a minute ago, past the original deadline: the
+    # orchestrator still gets a full window to register the champion.
+    _patch_snapshot(monkeypatch, _Snap())
+    _reap_spy(monkeypatch)
+    Session = await _session()
+    async with Session() as db:
+        await _seed(db, iteration_budget=1, iterations_completed=1,
+                    lifecycle=_final_state(timedelta(seconds=-1)))
+        db.add(Ticket(id="holdout-eval", run_id="r1", agent_id="evaluation", lane="held_out_test",
+                      status="succeeded", payload={},
+                      updated_at=datetime.now(timezone.utc) - timedelta(minutes=1)))
+        await db.commit()
+        await _watchdog_halt_over_budget_runs(db)
+        run = await db.get(Run, "r1")
+        assert run.cancel_requested_at is None
+        new_deadline = datetime.fromisoformat(run.lifecycle["finalization"]["deadline_at"])
+        assert new_deadline > datetime.now(timezone.utc) + timedelta(minutes=13)
+        assert (await db.get(Ticket, "orch-1")).status == "running"
+
+
+@pytest.mark.asyncio
+async def test_stale_final_step_does_not_extend_the_window(monkeypatch):
+    # The last finalization step finished well over a window ago and nothing
+    # is in flight: bounded rescue proceeds as before.
+    _patch_snapshot(monkeypatch, _Snap())
+    _reap_spy(monkeypatch)
+    Session = await _session()
+    async with Session() as db:
+        await _seed(db, iteration_budget=1, iterations_completed=1,
+                    lifecycle=_final_state(timedelta(seconds=-1)))
+        db.add(Ticket(id="holdout-eval", run_id="r1", agent_id="evaluation", lane="held_out_test",
+                      status="succeeded", payload={},
+                      updated_at=datetime.now(timezone.utc) - timedelta(minutes=20)))
+        await db.commit()
+        await _watchdog_halt_over_budget_runs(db)
+        run = await db.get(Run, "r1")
+        assert run.cancel_requested_at is not None
+        assert run.lifecycle["rescue_terminal_status"] == "halted"
+        assert (await db.get(Ticket, "orch-1")).status == "failed"
