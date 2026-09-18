@@ -95,6 +95,7 @@ packages = [
   "zevo.engine",
   "zevo.engine.agent",
   "zevo.engine.agent.drivers",
+  "zevo.engine.code_execution",
   "zevo.engine.cost",
   "zevo.engine.method",
   "zevo.engine.observe",
