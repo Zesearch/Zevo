@@ -3284,6 +3284,8 @@ async def _bind_system_validation_artifacts(
     artifact and recipe already exist.
     """
     holdout = dict(run.holdout or {})
+    if holdout.get("test_semantic_fingerprints") and holdout.get("semantic_fingerprint_version") != 2:
+        raise ValueError("This Run uses legacy scoring fingerprints. Start a new Run to rebuild its protected scoring contract before preparing Training data.")
     if looks_like_hub_id(inp.dataset) and not result.remote_dataset_path:
         raise ValueError(
             "Hugging Face Training data must stay on the assigned remote data plane"
@@ -6800,6 +6802,25 @@ async def _record_holdout_score(
     result_key = f"{source}|{iteration}|{base_model}"
     candidate_results = dict(all_results.get(result_key) or {})
     suite_item = next(item for item in suite if item["name"] == test_set_name)
+    from zevo.engine.method.evaluation_identity import (
+        snapshot_test_contract, inference_identity, complete_identity,
+    )
+    contract = holdout.get("evaluation_contract")
+    # Bind comparison evidence to the exact frozen population and the realized
+    # Inference configuration. Old runs/missing evidence stay incomparable.
+    current_contract = snapshot_test_contract(suite) if contract else None
+    if current_contract != contract:
+        current_contract = None
+    products = (await session.execute(select(WorkProduct).where(
+        WorkProduct.ticket_id == infer_id, WorkProduct.role == "predictions",
+    ))).scalars().all() if infer_id else []
+    product = next((item for item in products
+                    if (item.meta or {}).get("suite_member_name") == test_set_name), None)
+    if product is None and test_set_name == suite_names[0]:
+        product = next((item for item in products if (item.meta or {}).get("suite_primary")), None)
+        if product is None and len(suite) == 1 and len(products) == 1:
+            product = products[0]
+    realized = inference_identity((product.meta or {}).get("configuration")) if product else None
     candidate_results[test_set_name] = {
         "score": float(score),
         "metric": str(
@@ -6809,6 +6830,8 @@ async def _record_holdout_score(
         ),
         "metric_direction": str(suite_item.get("metric_direction") or "max"),
         "evaluation_ticket_id": ticket.id,
+        "test_contract": current_contract,
+        "inference_identity": realized,
     }
     all_results[result_key] = candidate_results
     holdout["suite_results"] = all_results
@@ -6841,6 +6864,9 @@ async def _record_holdout_score(
         run_id=run.id, iteration=iteration, split="test", source=source,
         score=float(score), metric_name=run.metric,
         extras={
+            **({"evaluation_identity": identity} if (
+                identity := complete_identity(contract, candidate_results)
+            ) else {}),
             "aggregation": "unweighted_mean",
             "test_sets": {
                 name: {
@@ -6903,6 +6929,7 @@ async def _record_holdout_score(
 async def _record_validation_score(
     session: AsyncSession, run: Run, ticket: Ticket, score: float,
     *, components: dict[str, dict[str, Any]] | None = None,
+    commit: bool = True,
 ) -> None:
     """File the score from an ordinary eval ticket as this run's validation point.
 
@@ -7136,7 +7163,8 @@ async def _record_validation_score(
     )
     if champion_test is not None:
         run.champion_test_score = champion_test
-    await session.commit()
+    if commit:
+        await session.commit()
 
 
 async def _record_validation_component(
@@ -7148,6 +7176,12 @@ async def _record_validation_component(
     Returns ``(complete, source_inference)``. Until complete, neither Run
     history nor ScoreEvent receives a model-selection number.
     """
+    # Serialize even direct/replayed component deliveries, not just the
+    # caller that already locked the Run. Refresh the committed JSON snapshot.
+    run = (await session.execute(
+        select(Run).where(Run.id == run.id).with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one()
     suite = _validation_sets(run)
     if len(suite) <= 1:
         await _record_validation_score(session, run, ticket, score)
@@ -7178,6 +7212,9 @@ async def _record_validation_component(
     holdout = dict(run.holdout or {})
     all_results = dict(holdout.get("validation_suite_results") or {})
     result_key = f"{source_kind}|{iteration}|{base_model}"
+    recorded = list(holdout.get("validation_suite_recorded") or [])
+    if result_key in recorded:
+        return True, source_infer
     candidate = dict(all_results.get(result_key) or {})
     item = next(member for member in suite if member.get("name") == name)
     candidate[name] = {
@@ -7190,12 +7227,8 @@ async def _record_validation_component(
         "evaluation_ticket_id": ticket.id,
     }
     all_results[result_key] = candidate
-    recorded = list(holdout.get("validation_suite_recorded") or [])
     holdout["validation_suite_results"] = all_results
     run.holdout = holdout
-    if result_key in recorded:
-        await session.commit()
-        return True, source_infer
     if any(member_name not in candidate for member_name in names):
         await session.commit()
         return False, source_infer
@@ -7204,14 +7237,19 @@ async def _record_validation_component(
     recorded.append(result_key)
     holdout["validation_suite_recorded"] = recorded
     run.holdout = holdout
-    await session.commit()
-    await _record_validation_score(
-        session,
-        run,
-        ticket,
-        aggregate,
-        components={member_name: candidate[member_name] for member_name in names},
-    )
+    try:
+        # The completion marker, event, journal and iteration counter have one
+        # commit boundary. An artifact or database failure leaves retryable
+        # component state instead of a marker for a score never published.
+        await _record_validation_score(
+            session, run, ticket, aggregate,
+            components={member_name: candidate[member_name] for member_name in names},
+            commit=False,
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
     return True, source_infer
 
 

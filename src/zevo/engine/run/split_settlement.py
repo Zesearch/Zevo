@@ -472,7 +472,10 @@ async def settle_splits(
     except Exception:
         validation_rows = 0
 
+    from zevo.engine.method.evaluation_identity import snapshot_test_contract
     holdout = {
+        "semantic_fingerprint_version": 2,
+        "evaluation_contract": None,
         "test_sets": [
             {
                 **item.model_dump(mode="json"),
@@ -540,6 +543,7 @@ async def settle_splits(
         "validation_rows": validation_rows,
         "note": "; ".join(notes),
     }
+    holdout["evaluation_contract"] = snapshot_test_contract(holdout["test_sets"])
     aggregate_validation = len(validation_suite) > 1
     agent_request = user_request.model_copy(update={
         # The optimization loop speaks the existing generic metric vocabulary,

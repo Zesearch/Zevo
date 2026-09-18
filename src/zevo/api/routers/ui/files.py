@@ -29,11 +29,14 @@ from typing import Literal
 
 from zevo.paths import files_root, holdout_root
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 from zevo.contracts._base import StrictBody
 from zevo.api.ui_access import is_trusted_ui_request
+from zevo.api.database import get_db
+from zevo.api.file_integrity import assert_unreferenced, publish_upload
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.engine.dataset_profiler import (
     DatasetProfile,
@@ -373,19 +376,9 @@ async def upload_dataset(
             )
         stored_name = f"{_FILE_ROLE_NAMES[wanted_role]}{suffix}"
     target_path = target_dir / stored_name
-    # Same ceiling the attachments endpoint enforces; without one, a single
-    # request can fill the disk.
-    _MAX_UPLOAD = 200 * 1024 * 1024
-    written = 0
-    with target_path.open("wb") as fh:
-        while chunk := file.file.read(1024 * 1024):
-            written += len(chunk)
-            if written > _MAX_UPLOAD:
-                fh.close()
-                target_path.unlink(missing_ok=True)
-                raise HTTPException(413, "file exceeds the 200MB upload limit")
-            fh.write(chunk)
-    size = target_path.stat().st_size
+    if not target_dir.resolve().is_relative_to(storage_dir.resolve()):
+        raise HTTPException(400, "upload folder escapes its file set")
+    size = publish_upload(file.file, target_path, max_bytes=200 * 1024 * 1024)
     # F.2 — fire-and-forget profiler so the dataset has structured
     # context ready before any agent inspects it. Errors are swallowed
     # (logged inside the profiler); the dataset is usable either way.
@@ -546,7 +539,9 @@ async def delete_dataset_remote(name: str, ident: str, split: str = "") -> FileS
 
 
 @router.delete("/files/{name}/contents/{filename:path}", response_model=FileSetDTO)
-async def delete_file_set_member(name: str, filename: str) -> FileSetDTO:
+async def delete_file_set_member(
+    name: str, filename: str, db: AsyncSession = Depends(get_db),
+) -> FileSetDTO:
     """Remove one file from a set. The set itself stays, even empty — deleting
     the last file is not the same request as deleting the set.
 
@@ -561,6 +556,7 @@ async def delete_file_set_member(name: str, filename: str) -> FileSetDTO:
         raise HTTPException(404, f"{filename!r} is not a file of file set {name!r}")
     if target.name in _META_FILES:
         raise HTTPException(400, f"{filename!r} is bookkeeping, not data")
+    await assert_unreferenced(db, [target])
     target.unlink()
     # An emptied subfolder is not a file the dataset has; leaving it behind
     # makes the next listing show a folder with nothing in it.
@@ -579,14 +575,13 @@ async def delete_file_set_member(name: str, filename: str) -> FileSetDTO:
 
 
 @router.delete("/files/{name}", status_code=204)
-async def delete_dataset(name: str) -> Response:
-    """Drop the whole directory. Settings and Tasks keep file references as plain text, so
-    a task pointing here is left naming a file that no longer exists — the run
-    will fail preflight rather than silently train on nothing."""
+async def delete_dataset(name: str, db: AsyncSession = Depends(get_db)) -> Response:
+    """Remove an unreferenced file-set version, preserving saved provenance."""
     d = _set_dir(name)
     private = _private_set_dir(d)
     if not d.is_dir() and not private.is_dir():
         raise HTTPException(404, f"file set {name!r} not found")
+    await assert_unreferenced(db, [d, private])
     if d.is_dir():
         shutil.rmtree(d)
     if private.is_dir():
