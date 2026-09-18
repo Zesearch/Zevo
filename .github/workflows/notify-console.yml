@@ -1,0 +1,31 @@
+name: notify-console
+
+# Tell the hosted console (Zesearch/Zevo-Console) that main moved, so its
+# upstream-sync workflow merges this commit right away instead of polling.
+# Runs in seconds on a public repo, so it costs no Actions minutes.
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch upstream-push to the console
+        env:
+          GH_TOKEN: ${{ secrets.CONSOLE_DISPATCH_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "CONSOLE_DISPATCH_TOKEN is not set; the console will pick this up on its schedule."
+            exit 0
+          fi
+          gh api repos/Zesearch/Zevo-Console/dispatches \
+            -f event_type=upstream-push \
+            -f "client_payload[sha]=$SHA"
+          echo "Dispatched upstream-push for $SHA"
