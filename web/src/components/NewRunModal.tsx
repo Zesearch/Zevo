@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, Eraser } from "lucide-react";
 import useSWR from "swr";
 import { useNavigate } from "react-router-dom";
+import { LaunchLimitsSummary, useLaunchPreflight } from "./LaunchPreflight";
 import { Modal } from "./Modal";
 import { AttachmentDropzone, type Attachment } from "./AttachmentDropzone";
 import { CustomizedRunForm } from "./CustomizedRunModal";
@@ -9,7 +10,6 @@ import { ModeInfo } from "./RunModeInfo";
 import {
   RunInputs,
   RunSummaryTable,
-  MultiFileSlot,
   BackendPicker,
   ChoiceField,
   LimitField,
@@ -41,7 +41,6 @@ import { RunSetupProgressView, useRunSetupProgress } from "./RunSetupProgress";
 
 export type RunLaunchMode = "auto" | "full_pipeline" | "customized_pipeline" | "single_stage";
 type Mode = RunLaunchMode;
-type Complexity = "simple" | "advanced";
 
 type TaskSummary = TaskDTO;
 
@@ -178,16 +177,15 @@ export function NewRunModal({
   initialInputs?: Record<string, string>;
 }) {
   const nav = useNavigate();
+  const preflight = useLaunchPreflight();
   const { data: tasks = [] } = useSWR<TaskSummary[]>(open ? "/api/tasks" : null);
   const { data: agents = [] } = useSWR<AgentLite[]>(open ? "/api/agents" : null);
 
   const [mode, setMode] = useState<Mode>(initialMode);
   // Always the full (advanced) view — the simple/advanced toggle was removed.
-  const complexity: Complexity = "advanced";
 
   // Full-pipeline form
   const [nl, setNl] = useState("");
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
   // The named inputs. They used to be the first attachment (dataset) plus a
   // JSON hints blob; every other uploaded file was silently unused.
   const [inputs, setInputs] = useState<RunInputValues>(EMPTY_RUN_INPUTS);
@@ -224,7 +222,7 @@ export function NewRunModal({
   const [showAutoChecklist, setShowAutoChecklist] = useState(false);
   const [showAutoTest, setShowAutoTest] = useState(false);
   const [showAutoTraining, setShowAutoTraining] = useState(false);
-  const [showAutoOthers, setShowAutoOthers] = useState(false);
+  const [showAutoOthers, setShowAutoOthers] = useState(true);
   const [autoTestQuery, setAutoTestQuery] = useState("");
   // One shared owner for all four help popovers. Independent local state let
   // two portaled panels remain open and overlap when their icons were clicked
@@ -256,7 +254,6 @@ export function NewRunModal({
    *  starting over should not mean closing and reopening. */
   function clearForm() {
     setNl("");
-    setAttachments([]);
     setInputs(EMPTY_RUN_INPUTS);
     setTaskName("");
     setRunName("");
@@ -271,7 +268,7 @@ export function NewRunModal({
     setShowAutoChecklist(false);
     setShowAutoTest(false);
     setShowAutoTraining(false);
-    setShowAutoOthers(false);
+    setShowAutoOthers(true);
     setAutoTestQuery("");
     setOpenModeInfo(null);
     setError(null);
@@ -599,7 +596,7 @@ export function NewRunModal({
 
   const dirtyForm = !!(
     taskName.trim() || runName.trim() || nl.trim() || singleNl.trim() || autoTestQuery.trim()
-    || attachments.length || singleAttachments.length
+    || singleAttachments.length
     || Object.values(inputs).some((v) => String(v || "").trim())
   );
 
@@ -694,6 +691,7 @@ export function NewRunModal({
         ...saveFields,
       };
     }
+    if (!(await preflight.check(body))) return;
     body = { ...body, setup_id: setupId };
     const out = await api<{ run_id?: string; setup_id?: string; status: string }>("/runs", {
       method: "POST",
@@ -730,6 +728,7 @@ export function NewRunModal({
       ...limitsFromInputs(inputs),
       ...backendFromInputs(inputs),
     };
+    if (!(await preflight.check(body))) return;
     const out = await api<{ run_id: string; status: string }>("/runs", {
       method: "POST",
       body: JSON.stringify(body),
@@ -914,6 +913,7 @@ export function NewRunModal({
   return (
     <Modal open={open} title="Start a new run" onClose={onClose} width="max-w-[78rem]" footer={footer}>
       <div className="space-y-5 pr-2">
+        {(mode === "auto" || mode === "full_pipeline") && <><LaunchLimitsSummary inputs={inputs} />{preflight.panel}</>}
         {/* Two columns: WHICH kind of run on the left, WHAT it is on the right.
             Stacked across the top, the three mode cards took a third of the
             dialog's height to answer a question asked once, and pushed the form
@@ -1128,7 +1128,7 @@ export function NewRunModal({
                   size={12}
                   className={`shrink-0 text-slate-400 transition-transform ${showAutoOthers ? "rotate-90" : ""}`}
                 />
-                <span className="field-label !text-slate-100">Others</span>
+                <span className="field-label !text-slate-100">Execution limits</span>
               </button>
               {showAutoOthers && (
                 <div className="space-y-3">
@@ -1265,16 +1265,7 @@ export function NewRunModal({
               }
               setInputs((v) => ({ ...v, ...patch }));
             }}
-            extra={complexity === "advanced" ? (
-              <MultiFileSlot label="Other files" values={attachments.map((a) => a.path)}
-                hint="Additional reference files available to the pipeline."
-                onChange={(paths) => {
-                  setAttachments(paths.map((path) => ({
-                    path, name: path.split("/").pop() || path, size_bytes: 0, mime: "",
-                  })));
-                  setInputs((v) => v.dataset || !paths[0] ? v : { ...v, dataset: paths[0] });
-                }} />
-            ) : null}
+
           />
         ) : (
           <div className="space-y-6">

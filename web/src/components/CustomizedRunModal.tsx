@@ -1,3 +1,4 @@
+import { LaunchLimitsSummary, useLaunchPreflight } from "./LaunchPreflight";
 import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { useNavigate } from "react-router-dom";
@@ -140,6 +141,7 @@ export function CustomizedRunForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const runSetup = useRunSetupProgress();
+  const preflight = useLaunchPreflight();
   const initialSettingApplied = useRef(false);
 
   const dirtyForm = !!(
@@ -444,6 +446,7 @@ export function CustomizedRunForm({
           ? { save_setting: true, setting_name: settingName.trim() }
           : {}),
       };
+      if (!(await preflight.check(body))) return;
       const d = await api<{ run_id?: string; setup_id?: string; status: string }>("/runs", {
         method: "POST",
         body: JSON.stringify(body),
@@ -673,6 +676,8 @@ export function CustomizedRunForm({
           )}
         />
 
+        <LaunchLimitsSummary inputs={inputs} />
+        {preflight.panel}
         {error && <div className="rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-2xs text-coral-300">{error}</div>}
       </div>
 

@@ -1,8 +1,5 @@
 import { X } from "lucide-react";
-import { useEffect } from "react";
-
-/** Currently-open dialogs, oldest first. Only the last one answers Escape. */
-const openModals: object[] = [];
+import { DialogOwner, useDialogFocus } from "../lib/dialog";
 
 export function Modal({
   open,
@@ -28,32 +25,16 @@ export function Modal({
    *  the dialog is, and "Console" above every one of them said nothing. */
   kicker?: string;
 }) {
-  // Escape closes the top dialog only. Dialogs stack — a run's task opens on
-  // the list, one of its files opens on the task — and without the stack every
-  // open one would hear the same keypress and the whole pile would vanish,
-  // when what you asked for was to step back one.
-  useEffect(() => {
-    if (!open) return;
-    const token = {};
-    openModals.push(token);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && openModals[openModals.length - 1] === token) onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      const i = openModals.indexOf(token);
-      if (i >= 0) openModals.splice(i, 1);
-    };
-  }, [open, onClose]);
+  const { id, ref } = useDialogFocus(open, onClose);
 
   if (!open) return null;
   return (
-    <div
+    <DialogOwner.Provider value={id}><div
       className="fixed inset-0 z-50 grid place-items-center bg-canvas/80 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
+        ref={ref} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1}
         className={`bezel relative flex w-full ${width} max-h-[85vh] flex-col animate-zevo-in overflow-hidden p-6`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -64,7 +45,7 @@ export function Modal({
           <div className="min-w-0">
             {kicker && <div className="kicker">{kicker}</div>}
             <div className="mt-1 flex flex-wrap items-center gap-3">
-              <h2 className="font-display text-lg font-semibold tracking-tight text-ink">
+              <h2 id={`${id}-title`} className="font-display text-lg font-semibold tracking-tight text-ink">
                 {title}
               </h2>
               {badge}
@@ -81,6 +62,6 @@ export function Modal({
           <div className="mt-4 shrink-0 border-t border-hair pt-4">{footer}</div>
         )}
       </div>
-    </div>
+    </div></DialogOwner.Provider>
   );
 }

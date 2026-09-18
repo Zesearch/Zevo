@@ -86,7 +86,7 @@ function delta(value: number, metric: string): string {
 }
 
 export function ConsoleOverview() {
-  const { data: runs = [], isLoading } = useSWR<RunSummary[]>("/api/runs?limit=500", {
+  const { data: runs = [], isLoading, error, mutate } = useSWR<RunSummary[]>("/api/runs?limit=500", {
     refreshInterval: 10000,
   });
   const [selectedKey, setSelectedKey] = useState("");
@@ -109,12 +109,14 @@ export function ConsoleOverview() {
 
   const title = (
     <div className="flex items-center gap-2">
-      <Kicker strong className="!text-sm">Model improvement by Zevo</Kicker>
+      <Kicker strong className="!text-sm">Model improvement · recent 500 runs</Kicker>
       <Note size={14}>
         Improvement is the test-score change from Zero, the baseline model, to models evolved by Zevo. Tasks stay separate because their metrics and targets may differ.
       </Note>
     </div>
   );
+
+  if (error) return <Bezel className="p-6"><p role="alert">Could not load model outcomes.</p><button className="btn mt-3" onClick={() => void mutate()}>Retry</button></Bezel>;
 
   if (isLoading) {
     return (

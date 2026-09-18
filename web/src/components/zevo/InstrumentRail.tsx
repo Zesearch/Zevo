@@ -29,7 +29,7 @@ const links = [
 
 export function InstrumentRail() {
   return (
-    <nav className="flex w-44 shrink-0 flex-col gap-1 border-r border-hair bg-panel/40 px-2 py-4">
+    <nav aria-label="Main navigation" className="flex w-full shrink-0 gap-1 overflow-x-auto border-b border-hair bg-panel/40 px-2 py-2 md:w-44 md:flex-col md:border-b-0 md:border-r md:py-4">
       {links.map(({ to, label, icon: Icon, end }) => (
         <NavLink
           key={to}
@@ -37,7 +37,7 @@ export function InstrumentRail() {
           end={end}
           className={({ isActive }) =>
             [
-              "relative flex h-11 items-center gap-3 rounded-xl px-3 transition",
+              "relative flex h-11 shrink-0 items-center gap-3 rounded-xl px-3 transition",
               isActive
                 ? "bg-brass-500/12 text-brass-300 shadow-[inset_0_0_0_1px_rgba(224,141,56,0.28)]"
                 : "text-ink hover:bg-raised",

@@ -30,19 +30,9 @@ const CARD_COLS = 3;
 
 
 export function ModelsPage() {
-  const { data: allModels = [], error: modelsError } = useSWR<ModelDTO[]>("/api/models");
-  const { data: runs, error: runsError } = useSWR<{ id: string }[]>("/api/runs?limit=500");
-
-  // Only show models that trace back to a run. Entries with no run_id were
-  // registered before lineage tracking and have nothing to open; entries whose
-  // run has since been deleted would link into a 404. The run cross-check is
-  // skipped until /runs resolves so a slow or failed fetch cannot blank the
-  // page — the run_id check alone still applies.
-  const runIds = useMemo(() => new Set((runs ?? []).map((r) => r.id)), [runs]);
-  const kept = useMemo(
-    () => allModels.filter((m) => m.run_id && (!runs || runIds.has(m.run_id))),
-    [allModels, runs, runIds],
-  );
+  const { data: allModels = [], error: modelsError, isLoading, mutate } = useSWR<ModelDTO[]>("/api/models");
+  // The model endpoint owns catalog membership; a paginated run list cannot prove absence.
+  const kept = allModels;
 
   // `?q=` like Runs and Tasks, so a filtered registry is a link you can send.
   const [params, setParams] = useSearchParams();
@@ -95,7 +85,7 @@ export function ModelsPage() {
     setPageSizePref(n);
   };
   // The page's two fetches are its only failure paths; surface whichever broke.
-  const fetchError = modelsError ?? runsError;
+  const fetchError = modelsError;
   const error = fetchError ? String((fetchError as Error).message || fetchError) : null;
 
   function toggleCompare(tag: string) {
@@ -129,7 +119,7 @@ export function ModelsPage() {
 
       {error && (
         <div className="mb-5 flex items-center gap-2 rounded-bezel border border-coral-500/30 bg-coral-500/10 px-3 py-2.5 text-xs text-coral-300">
-          <AlertTriangle size={13} /> {error}
+          <AlertTriangle size={13} /> {error} <button className="btn" onClick={() => void mutate()}>Retry</button>
         </div>
       )}
 
@@ -160,11 +150,10 @@ export function ModelsPage() {
         )}
       </div>
 
-      {models.length === 0 ? (
+      {isLoading ? <p role="status">Loading saved models…</p> : error && allModels.length === 0 ? null : models.length === 0 ? (
         <div className="rounded-bezel border border-dashed border-hair p-16 text-center text-sm text-slate-500">
           {q ? `No model matches "${query}".`
-             : allModels.length === 0 ? "No models registered yet."
-             : "No model traces back to an existing run."}
+             : "No models registered yet."}
         </div>
       ) : (
         <div ref={setListEl} className="stagger grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
