@@ -44,7 +44,7 @@ jobs:
       - name: Verify the distributable wheel contains runtime packages
         run: |
           python -m pip wheel --no-deps --no-build-isolation --wheel-dir /tmp/zevo-wheel .
-          python -c "import glob, zipfile; p=glob.glob('/tmp/zevo-wheel/zevo-*.whl')[0]; names=zipfile.ZipFile(p).namelist(); assert 'zevo/api/hardware/ssh_verify.py' in names"
+          python scripts/check_wheel.py /tmp/zevo-wheel
 
   frontend:
     runs-on: ubuntu-latest
