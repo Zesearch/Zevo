@@ -1326,8 +1326,24 @@ async def _watchdog_halt_over_budget_runs(session: AsyncSession) -> int:
             r.halted_reason = "Finalizing at limit: " + state["reason"]
             halted += 1
         deadline = _aware(datetime.fromisoformat(state["deadline_at"]))
-        expired = now >= deadline
         tickets = (await session.execute(select(Ticket).where(Ticket.run_id == r.id))).scalars().all()
+        # The window bounds idle time between finalization steps, not the
+        # whole tail: a champion held-out pass can itself outlast it. Each
+        # completed step restarts the clock, and in-flight steps hold it (a
+        # step that stalls is the liveness reaper's job, after which the
+        # clock runs out here).
+        steps = [tk for tk in tickets
+                 if tk.agent_id != "orchestrator" and finalization_allows(tk.agent_id, tk.lane)]
+        started = _aware(datetime.fromisoformat(state["started_at"])) if state.get("started_at") else None
+        last_done = max((_aware(tk.updated_at) for tk in steps
+                         if tk.status in TERMINAL_TICKET_STATUSES and tk.updated_at is not None
+                         and (started is None or _aware(tk.updated_at) >= started)), default=None)
+        if last_done is not None and last_done + _dt.timedelta(seconds=FINALIZATION_SECONDS) > deadline:
+            deadline = last_done + _dt.timedelta(seconds=FINALIZATION_SECONDS)
+            state["deadline_at"] = deadline.isoformat()
+            r.lifecycle = {**dict(r.lifecycle or {}), "finalization": state}
+        in_flight = any(tk.status not in TERMINAL_TICKET_STATUSES for tk in steps)
+        expired = now >= deadline and not in_flight
         for tk in tickets:
             if tk.status in TERMINAL_TICKET_STATUSES:
                 continue
