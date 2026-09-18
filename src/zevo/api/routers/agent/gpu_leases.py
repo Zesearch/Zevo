@@ -30,14 +30,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.database import get_db
-from zevo.db import GpuLease, Run
+from zevo.db import GpuLease
 from zevo.contracts.infrastructure import (
     GpuAllocationCandidate,
     GpuLeaseGrant,
     GpuLeaseRecord,
     GpuLeaseRequest,
 )
-from zevo.contracts.tickets import TERMINAL_RUN_STATUSES
 
 router = APIRouter()
 
@@ -78,27 +77,6 @@ def _grant(rows: list[GpuLease], *, reused: bool) -> GpuLeaseGrant:
         visible_devices=",".join(str(i) for i in idx),
         reused=reused,
     )
-
-
-async def _reap(db: AsyncSession) -> None:
-    """Release leases whose owning run is definitely terminal.
-
-    The allocations supplied to one acquire request are placement candidates,
-    not a global `squeue` snapshot. An omitted job may belong to another active
-    run or may simply have missed a transient probe, so omission is never proof
-    that its lease is dead. Allocation teardown uses the explicit release path;
-    this opportunistic sweep handles only terminal runs recorded by Zevo.
-    """
-    dead_runs = select(Run.id).where(Run.status.in_(TERMINAL_RUN_STATUSES))
-    await db.execute(
-        update(GpuLease)
-        .where(GpuLease.released_at.is_(None), GpuLease.run_id.in_(dead_runs))
-        .values(
-            released_at=datetime.now(timezone.utc),
-            release_reason="run ended",
-        )
-    )
-    await db.commit()
 
 
 def _choose(
@@ -199,7 +177,8 @@ def _refusal(
 @router.post("/gpu/leases", response_model=GpuLeaseGrant)
 async def acquire(body: GpuLeaseRequest, db: AsyncSession = Depends(get_db)) -> GpuLeaseGrant:
     """Lease GPUs on one of the reported allocations for `run_id`."""
-    await _reap(db)
+    # Terminal Run status is not proof its remote processes stopped. Only
+    # explicit release or confirmed cleanup can hand these cards back.
 
     # Already holding some? Hand back the same cards. The infra ticket can be
     # re-woken after a retry, and re-bidding would either double-book this run

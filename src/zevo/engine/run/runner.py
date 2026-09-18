@@ -3781,6 +3781,14 @@ async def run_ticket(
     # but the heartbeat still executes). The run is over; there is nothing to do.
     if run.status in TERMINAL_RUN_STATUSES:
         return tk
+    from zevo.engine.run.lifecycle import finalization, finalization_allows
+    if run.cancel_requested_at is not None:
+        return tk
+    if finalization(run) and not finalization_allows(tk.agent_id, tk.lane):
+        tk.status = "cancelled"
+        tk.error_message = "Run is finalizing; new optimization work is disabled"
+        await session.commit()
+        return tk
     # Background transcript and progress writers need independent sessions, but
     # they must use the SAME database binding as the caller. This keeps manual
     # runs and isolated test databases from leaking writes into the process-wide

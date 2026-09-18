@@ -28,6 +28,12 @@ class CancelWeightsPolicy(BaseModel):
     # Settings must be able to write it.
     hf_repo_id: str = ""
     hf_private: bool = True
+    # Rescue work is bounded. By default a failed copy retains the source and
+    # requires an explicit retry/discard; rented compute may continue billing.
+    rescue_timeout_seconds: int = Field(default=900, ge=30, le=3600)
+    attempt_timeout_seconds: int = Field(default=300, ge=10, le=900)
+    max_attempts: int = Field(default=3, ge=1, le=5)
+    discard_on_failure: bool = False
     # `hf` only: keep the local copy the upload was made from.
     keep_local_copy: bool = Field(default=True)
 

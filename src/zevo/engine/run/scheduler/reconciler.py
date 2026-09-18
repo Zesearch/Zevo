@@ -1284,7 +1284,7 @@ async def _watchdog_halt_over_budget_runs(session: AsyncSession) -> int:
     from zevo.engine.cost.budget import snapshot_for_run
 
     open_runs = (await session.execute(
-        select(Run).where(Run.status.in_(["planning", "running"]))
+        select(Run).where(Run.status.in_(["planning", "running"])).with_for_update(skip_locked=True)
     )).scalars().all()
 
     halted = 0
@@ -1311,29 +1311,44 @@ async def _watchdog_halt_over_budget_runs(session: AsyncSession) -> int:
         completed = int(r.iterations_completed or 0)
         if cap_iters > 0 and completed >= cap_iters:
             reasons.append(f"iterations {completed} >= budget {cap_iters}")
-        if not reasons:
+        from zevo.engine.run.lifecycle import FINALIZATION_SECONDS, finalization, finalization_allows
+        state = finalization(r)
+        if not reasons and not state:
             continue
-
-        r.status = "halted"
-        r.halted_reason = f"{_RECONCILER_TAG} budget watchdog: " + "; ".join(reasons)
-        r.finished_at = datetime.now(timezone.utc)
-        halted += 1
-        log.warning("%s halting run %s over budget: %s",
-                    _RECONCILER_TAG, r.id[:8], "; ".join(reasons))
-
-        # Fail whatever is still in flight so the runner + sweeps stop working it.
-        tickets = (await session.execute(
-            select(Ticket).where(Ticket.run_id == r.id)
-        )).scalars().all()
+        now = datetime.now(timezone.utc)
+        if not state:
+            state = {
+                "started_at": now.isoformat(),
+                "deadline_at": (now + _dt.timedelta(seconds=FINALIZATION_SECONDS)).isoformat(),
+                "reason": "; ".join(reasons),
+            }
+            r.lifecycle = {**dict(r.lifecycle or {}), "finalization": state}
+            r.halted_reason = "Finalizing at limit: " + state["reason"]
+            halted += 1
+        deadline = _aware(datetime.fromisoformat(state["deadline_at"]))
+        expired = now >= deadline
+        tickets = (await session.execute(select(Ticket).where(Ticket.run_id == r.id))).scalars().all()
         for tk in tickets:
-            if tk.status not in TERMINAL_TICKET_STATUSES:
-                tk.status = "failed"
-                tk.error_message = r.halted_reason
-                if not tk.summary:
-                    tk.summary = "reconciler: run over budget"
-                reaped_tickets.append(tk)
+            if tk.status in TERMINAL_TICKET_STATUSES:
+                continue
+            if not expired and finalization_allows(tk.agent_id, tk.lane):
+                continue
+            tk.status = "failed"
+            tk.error_message = "Run limit reached; " + state["reason"]
+            tk.summary = tk.summary or "Run limit reached"
+            reaped_tickets.append(tk)
+        if expired:
+            # Retain completed work before releasing the source, using the
+            # same bounded rescue policy as an operator cancellation.
+            from zevo.contracts.cancel import CancelWeightsPolicy
+            r.cancel_requested_at = now
+            r.cancel_policy = CancelWeightsPolicy().model_dump(mode="json")
+            r.cancel_outcome = {}
+            r.lifecycle = {**dict(r.lifecycle or {}), "rescue_terminal_status": "halted"}
+            r.halted_reason = "Finalization deadline reached; preserving checkpoint before release"
+            halted += 1
 
-    if halted:
+    if halted or reaped_tickets:
         await session.commit()
         # cancel_run_remote_jobs self-filters to train/inference and step-kills
         # zevo-<ticket> (never the shared allocation). Best-effort.
@@ -1440,6 +1455,24 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
         non_terminal = statuses - TERMINAL_TICKET_STATUSES
         if non_terminal:
             # Still work pending (including external scheduler wait) -- leave alone.
+            continue
+
+        from zevo.engine.run.lifecycle import finalization as run_finalization
+        if run_finalization(r) and not r.registry_version_tag:
+            # Failed optimization must not shortcut bounded retention just
+            # because its supervisor activation also ended. Wake once; the
+            # watchdog will request deterministic rescue at the deadline.
+            supervisor = next((t for t in tickets if t.agent_id == "orchestrator"), None)
+            if supervisor is not None:
+                existing = (await session.execute(select(AgentWakeupRequest.id).where(
+                    AgentWakeupRequest.ticket_id == supervisor.id,
+                    AgentWakeupRequest.trigger_detail == "bounded_finalization",
+                ).limit(1))).scalar_one_or_none()
+                if existing is None:
+                    from zevo.engine.run.wakeup import queue_wakeup
+                    await queue_wakeup(session, agent_id="orchestrator", ticket_id=supervisor.id,
+                                       source="reconciler", trigger_detail="bounded_finalization",
+                                       reason="Run limit reached. Register the best completed checkpoint; do not start new optimization.")
             continue
 
         # All tickets terminal — but that is not the same as the run being over.
@@ -1602,30 +1635,8 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
         released = 0
         for r in closed_runs:
             released += await _release_run_instances(session, r)
-            # `instance` allocations are the user's — _release_run_instances is a
-            # no-op there — but a train/inference srun STEP this run started can
-            # keep holding GPUs after close. Step-kill zevo-<ticket> (never the
-            # allocation) so the cards free for the next run. cloud self-destroys
-            # and cluster scancels its holder job, so this is only needed for
-            # instance. Best-effort.
-            if r.gpu_provider == "instance":
-                try:
-                    tks = (await session.execute(
-                        select(Ticket).where(Ticket.run_id == r.id)
-                    )).scalars().all()
-                    from zevo.engine.run.remote_jobs import cancel_run_remote_jobs
-                    await cancel_run_remote_jobs(session, tks)
-                except Exception as e:
-                    log.warning("[reconciler] instance step reap for run %s failed: %s", r.id[:8], e)
         if released:
             log.info("[reconciler] released %d system-owned GPU resource(s) for closed runs", released)
-        # Fixed `instance` hosts are operator-owned and never destroyed, but the
-        # CARDS this run held have to go back or the next run cannot be
-        # placed. Separate from the loop above precisely because the release
-        # there is a no-op for this provider.
-        cards = await _release_gpu_leases(session, [r.id for r in closed_runs])
-        if cards:
-            log.info("[reconciler] released %d GPU lease(s) for closed runs", cards)
     return counts
 
 
@@ -1651,227 +1662,11 @@ async def _release_gpu_leases(session: AsyncSession, run_ids: list[str]) -> int:
 
 
 async def _release_run_instances(session: AsyncSession, run: Run) -> int:
-    """Free system-owned GPUs marked for automatic release when a run ends.
-
-    Reads the `device_info` work products (the infra agent writes
-    device_info.json with `provider` + `instance_id`) and, per provider,
-    **destroys** the Vast.ai instance (cloud). Finite cluster stage jobs are
-    discovered from open InfraInstance rows and scancelled if still active.
-    An explicit `auto_release=false` is preserved on ordinary
-    completion; cancellation/deletion use their force-cleanup path. Failures
-    are logged, never raised — cleanup must not crash the reconciler.
-    """
-    import json as _json
-    from pathlib import Path as _Path
-
-    wps = (await session.execute(
-        select(WorkProduct)
-        .join(Ticket, Ticket.id == WorkProduct.ticket_id)
-        .where(Ticket.run_id == run.id, WorkProduct.role == "device_info")
-    )).scalars().all()
-
-    # Successful device contracts always name vastai|lambda. Empty remains
-    # possible only when acquisition failed after bookkeeping but before a
-    # valid device artifact; terminal cleanup treats it as a leak backstop.
-    cloud: dict[str, str] = {}
-    cluster_jobs: set[str] = set()
-    manual_release: set[str] = set()
-    # (ssh block, remote per-run workdir) to `rm -rf` once the run has ended —
-    # artifacts were SCP'd back to the local ./runs during the run.
-    remote_cleanup: list[tuple[dict, str]] = []
-    for wp in wps:
-        try:
-            info = _json.loads(_Path(wp.path).read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        prov = str(info.get("provider", "") or "").lower()
-        # Remote per-run work dir for either SSH-backed route.
-        route = info.get("cluster") or info.get("instance") or {}
-        wd = str(route.get("workdir", "") or "").strip()
-        sshb = info.get("ssh") or {}
-        if wd and sshb.get("host") and prov in ("cluster", "instance"):
-            remote_cleanup.append((sshb, wd))
-        iid = str(info.get("instance_id", "") or "").strip()
-        if not iid:
-            continue
-        if prov == "instance":
-            continue  # fixed operator-owned host — never power it off
-        if iid in manual_release:
-            continue
-        if info.get("auto_release") is not True:
-            manual_release.add(iid)
-            cloud.pop(iid, None)
-            cluster_jobs.discard(iid)
-            continue
-        if prov == "cluster":
-            cluster_jobs.add(iid)
-        elif prov == "cloud":
-            cloud.setdefault(iid, str(info.get("cloud_backend", "") or "").lower())
-        else:
-            log.warning(
-                "[reconciler] device_info for run %s names unknown provider %r "
-                "(expected cluster|cloud|instance); not releasing %s",
-                run.id[:8], prov, iid)
-
-    # Also pick up instances the agent registered via POST /infra/instances but
-    # that are not lifecycle handles in device_info.json — notably a finite
-    # Slurm stage job recorded right after `sbatch` while still PENDING, when the run is cancelled before
-    # the GPU is even allocated. Without this those jobs leak in the queue.
-    infra_rows = (await session.execute(
-        select(InfraInstance).where(
-            InfraInstance.run_id == run.id,
-            InfraInstance.instance_id != "",
-            InfraInstance.released_at.is_(None),
-        )
-    )).scalars().all()
-    for inst in infra_rows:
-        prov = (inst.provider or "").lower()
-        if prov == "instance":
-            continue  # legacy row only; the operator manages the fixed host
-        if inst.instance_id in manual_release:
-            continue
-        if (inst.meta or {}).get("auto_release") is not True:
-            manual_release.add(inst.instance_id)
-            cloud.pop(inst.instance_id, None)
-            cluster_jobs.discard(inst.instance_id)
-            continue
-        if prov == "cluster":
-            cluster_jobs.add(inst.instance_id)
-        elif prov == "cloud":
-            cloud.setdefault(inst.instance_id, str((inst.meta or {}).get("backend", "") or "").lower())
-        else:
-            log.warning(
-                "[reconciler] infra row %s names unknown provider %r "
-                "(expected cluster|cloud|instance); not releasing %s",
-                inst.id, prov, inst.instance_id)
-
-    released = 0
-
-    # Destroy each cloud box on its backend, falling back to the other if the
-    # hint was missing/wrong (destroy is idempotent; 'already gone' is harmless).
-    async def _destroy_cloud(iid: str, hint: str) -> bool:
-        order = ["lambda", "vastai"] if hint == "lambda" else ["vastai", "lambda"]
-        for name in order:
-            try:
-                if name == "lambda":
-                    from zevo.providers.lambda_labs import LambdaCloudProvider as _P
-                else:
-                    from zevo.providers.vastai import VastAIProvider as _P
-                if await _P().destroy_instance(iid):
-                    log.info("[reconciler] released %s instance %s (run %s ended)", name, iid, run.id[:8])
-                    return True
-            except Exception as e:
-                log.warning("[reconciler] %s release of %s failed: %s", name, iid, e)
-        return False
-
-    destroyed: set[str] = set()
-    for iid, hint in cloud.items():
-        if await _destroy_cloud(iid, hint):
-            destroyed.add(iid)
-            released += 1
-
-    if cluster_jobs:
-        selected_connection = (
-            await session.get(SshHost, run.ssh_host_id)
-            if run.ssh_host_id else None
-        )
-        host = (
-            selected_connection.host if selected_connection is not None
-            else os.environ.get("ZEVO_CLUSTER_SSH_HOST", "").strip()
-        )
-        if host:
-            key = (
-                selected_connection.key_path if selected_connection is not None
-                else resolve_ssh_key("ZEVO_CLUSTER_SSH_KEY")
-            )
-            password_path = (
-                selected_connection.password_path
-                if selected_connection is not None
-                else os.environ.get("ZEVO_CLUSTER_SSH_PASSWORD_FILE", "").strip()
-            )
-            if password_path:
-                key = ""
-            port = (
-                selected_connection.port if selected_connection is not None
-                else os.environ.get("ZEVO_CLUSTER_SSH_PORT", "22") or "22"
-            )
-            user = (
-                selected_connection.username if selected_connection is not None
-                else os.environ.get("ZEVO_CLUSTER_SSH_USER", "root")
-            )
-            for jid in cluster_jobs:
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        *ssh_base_args(
-                            key_path=key,
-                            password_path=password_path,
-                            port=int(port),
-                        ),
-                        f"{user}@{host}", f"scancel {jid}",
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    )
-                    await asyncio.wait_for(proc.communicate(), timeout=30)
-                    released += 1
-                    log.info("[reconciler] scancelled Slurm job %s (run %s ended)", jid, run.id[:8])
-                except Exception as e:
-                    log.warning("[reconciler] failed to scancel job %s: %s", jid, e)
-
-    # Delete the remote per-run work dir now that the run ended (its artifacts
-    # were SCP'd back to ./runs during the run). Guard: the path MUST contain
-    # this run's id, so we never rm a shared/parent dir. Shared caches live
-    # outside the run dir so they survive for the next run.
-    import shlex as _shlex
-    for sshb, wd in remote_cleanup:
-        if not wd or run.id not in wd or wd.count("/") < 2:
-            continue
-        try:
-            key = str(sshb.get("key_path") or "").strip()
-            password_path = str(sshb.get("password_path") or "").strip()
-            port = str(sshb.get("port") or 22)
-            user = str(sshb.get("user") or "root")
-            host = str(sshb.get("host") or "")
-            args = [
-                *ssh_base_args(
-                    key_path=key,
-                    password_path=password_path,
-                    port=int(port),
-                ),
-                f"{user}@{host}", f"rm -rf {_shlex.quote(wd)}",
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            await asyncio.wait_for(proc.communicate(), timeout=30)
-            log.info("[reconciler] removed remote work dir %s (run %s ended)", wd, run.id[:8])
-        except Exception as e:
-            log.warning("[reconciler] failed to remove remote dir %s: %s", wd, e)
-
-    # Mark the registered rows released so the leak detector / `hardware`
-    # stop showing them (idempotent: scancel of a finished job is harmless).
-    # A CLOUD row whose destroy FAILED on both backends stays active on
-    # purpose — the box is still billing, and marking it released is exactly
-    # what hides it from the stuck-infra detector (the playbook contract says
-    # the bookkeeping row outlives a failed destruction).
-    if infra_rows:
-        now = datetime.now(timezone.utc)
-        for inst in infra_rows:
-            if inst.instance_id in manual_release:
-                continue
-            if (
-                inst.provider == "cloud"
-                and inst.instance_id in cloud
-                and inst.instance_id not in destroyed
-            ):
-                log.warning(
-                    "[reconciler] cloud instance %s could not be destroyed; "
-                    "leaving its row active so leak detection stays honest",
-                    inst.instance_id)
-                continue
-            inst.status = "released"
-            inst.released_at = now
-            if not inst.release_reason:
-                inst.release_reason = "run ended"
-        await session.commit()
-    return released
+    from zevo.engine.run.resource_cleanup import cleanup_run_resources
+    results = await cleanup_run_resources(
+        session, run, force=run.status == "cancelled",
+    )
+    return sum(bool(item.get("destroyed")) for item in results)
 
 
 async def _run_produced_registered_model(
@@ -1919,7 +1714,7 @@ async def _cleanup_terminal_resources(session: AsyncSession) -> int:
     released = 0
     for run in runs:
         released += await _release_run_instances(session, run)
-    released += await _release_gpu_leases(session, [run.id for run in runs])
+    # Leases are released by cleanup_run_resources after remote confirmation.
     return released
 
 

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -32,8 +33,19 @@ from zevo.engine.run.scheduler.reconciler import (
 )
 
 
+_ENGINES = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _close_test_engines():
+    yield
+    while _ENGINES:
+        await _ENGINES.pop().dispose()
+
+
 async def _session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    _ENGINES.append(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     return async_sessionmaker(engine, expire_on_commit=False)
@@ -145,7 +157,7 @@ async def test_hf_pushes_from_the_local_copy(tmp_path, monkeypatch) -> None:
     pushed: list[tuple] = []
     monkeypatch.setattr(rescue, "hf_token", lambda: "hf_x")
 
-    def fake_push(model_dir, *, repo_id, private, token):
+    async def fake_push(model_dir, *, repo_id, private, token):
         pushed.append((Path(model_dir).name, repo_id, private, token))
         return f"https://huggingface.co/{repo_id}"
     monkeypatch.setattr(rescue, "push_to_hf", fake_push)
@@ -219,11 +231,11 @@ async def test_rescue_task_closes_the_run(tmp_path, monkeypatch) -> None:
         run = await db.get(Run, "r1")
         assert run.status == "cancelled" and run.finished_at is not None
         assert run.cancel_outcome["model_path"] == str(dest / "it1")
-        assert run.halted_reason == f"cancelled by user; weights kept at {dest / 'it1'}"
+        assert run.halted_reason == f"Run stopped; weights kept at {dest / 'it1'}"
 
 
 @pytest.mark.asyncio
-async def test_rescue_failure_still_closes_the_run(tmp_path, monkeypatch) -> None:
+async def test_rescue_failure_retains_source_for_explicit_recovery(tmp_path, monkeypatch) -> None:
     Session = await _session()
     monkeypatch.setattr(zevo_db, "get_session_factory", lambda: Session)
 
@@ -234,13 +246,15 @@ async def test_rescue_failure_still_closes_the_run(tmp_path, monkeypatch) -> Non
     async with Session() as db:
         await _seed(db, tmp_path, history=[], checkpoints=[],
                     cancel_requested_at=datetime.now(timezone.utc),
-                    cancel_policy={"weights": "download"})
+                    cancel_policy={"weights": "download", "max_attempts": 1})
         await rescue.complete_requested_cancels(db)
         await rescue._ACTIVE["r1"]
     async with Session() as db:
         run = await db.get(Run, "r1")
-        assert run.status == "cancelled"
+        assert run.status == "running"
         assert run.cancel_outcome["error"].startswith("scp exited 255")
+        assert run.cancel_outcome["status"] == "preservation_failed"
+        assert run.cancel_outcome["compute_may_accrue"] is True
 
 
 @pytest.mark.asyncio
@@ -248,7 +262,7 @@ async def test_cancel_api_records_policy_and_keeps_run_open(tmp_path, monkeypatc
     Session = await _session()
 
     async def no_remote(db, tickets):
-        return 0
+        return []
     monkeypatch.setattr(remote_jobs, "cancel_run_remote_jobs", no_remote)
 
     async with Session() as db:
@@ -291,7 +305,7 @@ async def test_cancel_api_discard_closes_immediately(tmp_path, monkeypatch) -> N
     Session = await _session()
 
     async def no_remote(db, tickets):
-        return 0
+        return []
     monkeypatch.setattr(remote_jobs, "cancel_run_remote_jobs", no_remote)
     async with Session() as db:
         await _seed(db, tmp_path, history=[], checkpoints=[])
@@ -299,3 +313,73 @@ async def test_cancel_api_discard_closes_immediately(tmp_path, monkeypatch) -> N
         assert out["status"] == "cancelled"
         run = await db.get(Run, "r1")
         assert run.status == "cancelled" and run.cancel_outcome["weights"] == "discard"
+
+
+@pytest.mark.asyncio
+async def test_failed_preservation_can_be_retried_or_explicitly_discarded(tmp_path, monkeypatch):
+    async def no_remote(*args): return []
+    monkeypatch.setattr(remote_jobs,"cancel_run_remote_jobs",no_remote)
+    Session = await _session()
+    async with Session() as db:
+        await _seed(db,tmp_path,history=[],checkpoints=[],
+                    cancel_requested_at=datetime.now(timezone.utc),
+                    cancel_policy={"weights":"download"},
+                    cancel_outcome={"status":"preservation_failed","error":"timeout"})
+        result = await cancel_run("r1",CancelWeightsPolicy(local_dir=str(tmp_path/"retry")),db)
+        assert result["status"] == "cancelling"
+        assert result["cancel_outcome"]["status"] == "pending"
+        # Discard is an escape even while a new attempt is running.
+        result = await cancel_run("r1",CancelWeightsPolicy(weights="discard"),db)
+        assert result["status"] == "cancelled"
+        assert (await db.get(Run,"r1")).cancel_outcome["weights"] == "discard"
+    await Session.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_expired_window_does_not_start_another_transfer(tmp_path,monkeypatch):
+    from datetime import timedelta
+    Session=await _session()
+    monkeypatch.setattr(zevo_db,"get_session_factory",lambda:Session)
+    async def unexpected(*args): raise AssertionError("deadline exhausted")
+    monkeypatch.setattr(rescue,"perform_rescue",unexpected)
+    async with Session() as db:
+        await _seed(db,tmp_path,history=[],checkpoints=[],
+                    cancel_requested_at=datetime.now(timezone.utc)-timedelta(hours=1),
+                    cancel_policy={"weights":"download"})
+        await rescue.complete_requested_cancels(db)
+        await rescue._ACTIVE["r1"]
+    async with Session() as db:
+        run=await db.get(Run,"r1")
+        assert run.cancel_outcome["status"] == "preservation_failed"
+        assert "retry window exhausted" in run.cancel_outcome["error"]
+        assert run.status == "running"
+        assert await rescue.complete_requested_cancels(db) == 0
+    await Session.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_transfer_cancellation_kills_and_reaps_child(monkeypatch):
+    import asyncio
+    class Proc:
+        returncode=None
+        killed=False
+        waited=False
+        async def communicate(self): await asyncio.Future()
+        def kill(self): self.killed=True; self.returncode=-9
+        async def wait(self): self.waited=True
+    proc=Proc()
+    async def spawn(*args,**kwargs): return proc
+    monkeypatch.setattr(rescue.asyncio,"create_subprocess_exec",spawn)
+    task=asyncio.create_task(rescue._run_transfer(["scp"]))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError): await task
+    assert proc.killed and proc.waited
+
+
+@pytest.mark.asyncio
+async def test_unsafe_checkpoint_path_is_rejected_before_transfer(tmp_path):
+    from types import SimpleNamespace
+    candidate=rescue.RescueCandidate(ticket=SimpleNamespace(id="ticket"),path="/shared/run/../",remote=True,meta={})
+    with pytest.raises(RuntimeError,match="canonical"):
+        await rescue._copy_off_box(None,candidate,tmp_path)

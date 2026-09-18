@@ -176,6 +176,7 @@ class RunSummary(BaseModel):
     cancelling: bool = False
     cancel_policy: dict[str, Any] = Field(default_factory=dict)
     cancel_outcome: dict[str, Any] = Field(default_factory=dict)
+    lifecycle: dict[str, Any] = Field(default_factory=dict)
     started_at: str
     finished_at: str | None = None
     # Zevo model-improvement iteration fields.
@@ -554,6 +555,7 @@ def _summary(
         cancelling=r.cancel_requested_at is not None and r.status not in TERMINAL_RUN_STATUSES,
         cancel_policy=dict(r.cancel_policy or {}),
         cancel_outcome=dict(r.cancel_outcome or {}),
+        lifecycle=dict(r.lifecycle or {}),
         started_at=r.started_at.isoformat() if r.started_at else "",
         finished_at=r.finished_at.isoformat() if r.finished_at else None,
         iteration_budget=r.iteration_budget,
@@ -1223,6 +1225,10 @@ async def patch_run(
         r.halted_reason = body.halted_reason.strip()
 
     if body.status is not None:
+        from zevo.engine.run.lifecycle import finalization
+        if (body.status in TERMINAL_RUN_STATUSES and finalization(r)
+                and not r.registry_version_tag and r.cancel_requested_at is None):
+            raise HTTPException(409, "Run is finalizing: preserve the checkpoint in Registry or request checkpoint-preserving cancellation before ending it")
         if body.status in TERMINAL_RUN_STATUSES:
             from zevo.engine.observe.run_metrics import incomplete_journal_entries
             incomplete = incomplete_journal_entries(r.history)
@@ -1282,224 +1288,23 @@ async def patch_run(
     return _summary(r)
 
 
-async def _destroy_one_cloud_instance(iid: str, backend_hint: str) -> dict:
-    """Destroy one rented cloud instance, trying the hinted backend first and
-    then the other only as terminal leak cleanup. A successful device contract
-    always records `cloud_backend`; an empty hint can occur only when a failed
-    acquisition persisted its handle before the final artifact. Returns
-    {instance_id, destroyed, backend, error}."""
-    hint = (backend_hint or "").strip().lower()
-    order = ["lambda", "vastai"] if hint == "lambda" else ["vastai", "lambda"]
-
-    def _provider(name: str):
-        if name == "lambda":
-            from zevo.providers.lambda_labs.provider import LambdaCloudProvider
-            return LambdaCloudProvider()
-        from zevo.providers.vastai.provider import VastAIProvider
-        return VastAIProvider()
-
-    last_err = ""
-    for name in order:
-        try:
-            if await _provider(name).destroy_instance(iid):
-                return {"instance_id": iid, "destroyed": True, "backend": name, "error": ""}
-        except Exception as e:  # missing key / not-found on this backend — try the next
-            last_err = str(e)[:120]
-    return {"instance_id": iid, "destroyed": False, "backend": "", "error": last_err}
-
-
-async def _destroy_run_gpu_instances(db: AsyncSession, run_id: str) -> list[dict]:
-    """Best-effort: destroy every cloud GPU (Vast.ai OR Lambda) this run rented.
-
-    The infra agent records each box's provider, instance_id, and cloud_backend
-    in the `device_info` work_product's `meta`. Cancelling a run
-    kills the in-flight subprocesses but does NOT run the agent's `release_remote`
-    step, so without this the rented GPU keeps billing. We read the ids straight
-    from the DB and destroy each on the recorded backend (falling back only for
-    an acquisition that failed before its final contract). Never raises — cleanup must not break the
-    cancel response; leaked-instance detection is the backstop.
-    """
-    from zevo.db import WorkProduct
-
-    rows = (await db.execute(
-        select(WorkProduct)
-        .join(Ticket, WorkProduct.ticket_id == Ticket.id)
-        .where(Ticket.run_id == run_id)
-    )).scalars().all()
-
-    # Unique cloud instance ids (+ backend hint) across all infra tickets.
-    seen: dict[str, str] = {}
-    for wp in rows:
-        meta = wp.meta or {}
-        if meta.get("provider") == "cloud":
-            iid = str(meta.get("instance_id") or "").strip()
-            if iid and iid not in seen:
-                seen[iid] = str(meta.get("cloud_backend") or "").strip().lower()
-
-    if not seen:
-        return []
-    return [await _destroy_one_cloud_instance(iid, hint) for iid, hint in seen.items()]
-
-
-async def _ssh_login_node(
-    prefix: str,
-    remote_cmd: str,
-    connection: SshHost | None = None,
-) -> tuple[bool, str]:
-    """Run one command on a Slurm login node. Never raises.
-
-    `prefix` picks the credential set -- CLUSTER for allocations Zevo made,
-    INSTANCE for the one the user started. The backend mounts the same
-    `~/.ssh` as the scheduler, so the same keys work here.
-    """
-    host = (
-        connection.host if connection is not None
-        else os.environ.get(f"ZEVO_{prefix}_SSH_HOST", "").strip()
-    )
-    if not host:
-        return False, f"ZEVO_{prefix}_SSH_HOST unset"
-    key_path = (
-        connection.key_path if connection is not None
-        else resolve_ssh_key(f"ZEVO_{prefix}_SSH_KEY")
-    )
-    password_path = (
-        connection.password_path if connection is not None
-        else os.environ.get(f"ZEVO_{prefix}_SSH_PASSWORD_FILE", "").strip()
-    )
-    if password_path:
-        key_path = ""
-    port = (
-        connection.port if connection is not None
-        else os.environ.get(f"ZEVO_{prefix}_SSH_PORT", "22") or "22"
-    )
-    user = (
-        connection.username if connection is not None
-        else os.environ.get(f"ZEVO_{prefix}_SSH_USER", "root")
-    )
-    cmd = [
-        *ssh_base_args(
-            key_path=key_path,
-            password_path=password_path,
-            port=int(port),
-        ),
-        f"{user}@{host}", remote_cmd,
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if proc.returncode == 0:
-            return True, out.decode("utf-8", "ignore").strip()
-        return False, err.decode("utf-8", "ignore")[:160]
-    except Exception as e:
-        return False, str(e)[:160]
-
-
-async def _scancel_run_slurm_jobs(db: AsyncSession, run_id: str) -> list[dict]:
-    """Best-effort backstop for finite Zevo-owned cluster Slurm jobs.
-
-    Direct cloud/instance processes are handled by ``cancel_run_remote_jobs``.
-    Never raises.
-    """
-    from zevo.db import InfraInstance, WorkProduct
-    from zevo.engine.run.remote_jobs import (
-        _slurm_cli_bootstrap_command,
-        _slurm_job_kill_command,
-    )
-
-    rows = (await db.execute(
-        select(WorkProduct)
-        .join(Ticket, WorkProduct.ticket_id == Ticket.id)
-        .where(Ticket.run_id == run_id)
-    )).scalars().all()
-    run_row = await db.get(Run, run_id)
-    selected_connection = None
-    if run_row is not None and run_row.ssh_host_id:
-        selected_connection = await db.get(SshHost, run_row.ssh_host_id)
-
-    owned: dict[str, str] = {}  # finite JOBID -> exact Train/Inference ticket
-
-    stage_rows = (await db.execute(select(InfraInstance).where(
-        InfraInstance.run_id == run_id,
-        InfraInstance.provider == "cluster",
-        InfraInstance.instance_id != "",
-    ))).scalars().all()
-    for row in stage_rows:
-        if row.ticket_id:
-            owned[row.instance_id] = row.ticket_id
-    for wp in rows:
-        meta = wp.meta or {}
-        jid = str(meta.get("instance_id") or "").strip()
-        if not jid:
-            continue
-        provider = meta.get("provider")
-        if provider == "cluster" and jid not in owned:
-            owned[jid] = str(wp.ticket_id or "")
-
-    results: list[dict] = []
-    for j, ticket_id in owned.items():
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", j):
-            results.append({
-                "jobid": j, "scancelled": False,
-                "error": "unsafe Slurm job id in bookkeeping",
-            })
-            continue
-        if ticket_id and not re.fullmatch(r"[A-Za-z0-9_-]+", ticket_id):
-            results.append({
-                "jobid": j, "scancelled": False,
-                "error": "unsafe Ticket id in Slurm bookkeeping",
-            })
-            continue
-        expected_name = f"zevo-{ticket_id}" if ticket_id else ""
-        if expected_name:
-            remote_command = _slurm_job_kill_command(j, ticket_id)
-        else:
-            remote_command = _slurm_cli_bootstrap_command() + f"scancel {j}"
-        ok, err = await _ssh_login_node(
-            "CLUSTER", remote_command, selected_connection,
-        )
-        results.append({"jobid": j, "scancelled": ok, "error": "" if ok else err})
-
-    return results
-
-
 async def _mark_run_instances_released(db: AsyncSession, run_id: str) -> int:
-    """Mark every open InfraInstance row for the run as released, so the cost
-    accounting clock stops and `hardware` / leak-detection are accurate.
-    Provider-agnostic: this only closes OUR bookkeeping — the actual Vast.ai
-    destroy / Slurm scancel is done separately (cloud/cluster only); a fixed
-    `instance` host is never shut down, just clock-stopped.
+    """Compatibility entrypoint: release only resources confirmed stopped."""
+    from zevo.engine.run.resource_cleanup import cleanup_run_resources
+    run = await db.get(Run, run_id)
+    if run is None:
+        return 0
+    results = await cleanup_run_resources(db, run, force=True, retry_now=True)
+    return sum(bool(item.get("destroyed")) for item in results)
 
-    The GPU LEASES go back here too. A fixed `instance` host is never torn down,
-    but the cards this run held on it must return to the pool or the next
-    run cannot be placed on hardware that is now idle. This helper is the one
-    exit every cancel and delete path already shares, so putting it here covers
-    all of them; the reconciler handles runs that end on their own."""
-    from zevo.db import GpuLease, InfraInstance
-    await db.execute(
-        sa_update(GpuLease)
-        .where(GpuLease.run_id == run_id, GpuLease.released_at.is_(None))
-        .values(
-            released_at=datetime.now(timezone.utc),
-            release_reason="run cancelled",
-        )
-    )
-    rows = (await db.execute(
-        select(InfraInstance).where(
-            InfraInstance.run_id == run_id, InfraInstance.released_at.is_(None)
-        )
-    )).scalars().all()
-    now = datetime.now(timezone.utc)
-    for inst in rows:
-        inst.status = "released"
-        inst.released_at = now
-        if not inst.release_reason:
-            inst.release_reason = "run cancelled"
-    # Commit unconditionally: the lease release above is real work even when
-    # this run never registered an InfraInstance row.
-    await db.commit()
-    return len(rows)
+
+async def _cleanup_run_resources(db: AsyncSession, run: Run) -> tuple[list[dict], list[dict]]:
+    from zevo.engine.run.resource_cleanup import cleanup_run_resources
+    results = await cleanup_run_resources(db, run, force=True, retry_now=True)
+    cloud = [item for item in results if item["provider"] == "cloud"]
+    cluster = [{**item, "jobid": item["instance_id"], "scancelled": item["destroyed"]}
+               for item in results if item["provider"] == "cluster"]
+    return cloud, cluster
 
 
 async def _finish_run_heartbeats(
@@ -1554,9 +1359,16 @@ async def cancel_run(
     and the box reaped like any other terminal run.
     """
     policy = body or CancelWeightsPolicy()
-    r = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one_or_none()
+    r = (await db.execute(select(Run).where(Run.id == run_id).with_for_update())).scalar_one_or_none()
     if r is None:
         raise HTTPException(404, f"run {run_id} not found")
+    retry_preservation = bool(
+        body is not None and policy.weights != "discard"
+        and (r.cancel_outcome or {}).get("status") == "preservation_failed"
+    )
+    if retry_preservation:
+        r.status = "running"
+        r.finished_at = None
     if r.status in TERMINAL_RUN_STATUSES:
         # Already terminal can still mean a remote trainer survived the local
         # SSH/Agent process.  Re-run exact Ticket cleanup before provider
@@ -1566,14 +1378,12 @@ async def cancel_run(
         )).scalars().all()
         from zevo.engine.run.remote_jobs import cancel_run_remote_jobs
         remote_jobs_cancelled = await cancel_run_remote_jobs(db, tickets)
-        gpus_destroyed = await _destroy_run_gpu_instances(db, run_id)
-        slurm_scancelled = await _scancel_run_slurm_jobs(db, run_id)
+        gpus_destroyed, slurm_scancelled = await _cleanup_run_resources(db, r)
         heartbeats_finished = await _finish_run_heartbeats(
             db,
             run_id,
             reason="cancelled by user (terminal Run cleanup)",
         )
-        await _mark_run_instances_released(db, run_id)
         return {
             "status": r.status,
             "run_id": run_id,
@@ -1584,8 +1394,8 @@ async def cancel_run(
             "heartbeats_finished": heartbeats_finished,
         }
 
-    if r.cancel_requested_at is not None:
-        raise HTTPException(409, "cancel already requested; weights are being rescued")
+    if r.cancel_requested_at is not None and policy.weights != "discard" and not retry_preservation:
+        raise HTTPException(409, "cancel already requested; weights are being rescued (explicit discard remains available)")
 
     # Everything that can refuse does so BEFORE any work is killed.
     if policy.weights != "discard":
@@ -1622,6 +1432,8 @@ async def cancel_run(
         # box survives until the rescue task has the checkpoint and closes it.
         r.cancel_requested_at = datetime.now(timezone.utc)
         r.cancel_policy = policy.model_dump(mode="json")
+        from zevo.engine.run.cancel_rescue import rescue_request_outcome
+        r.cancel_outcome = rescue_request_outcome(policy, r.cancel_requested_at)
         r.halted_reason = "cancel requested; keeping the champion checkpoint first"
         await db.commit()
         from zevo.engine.run.remote_jobs import cancel_run_remote_jobs
@@ -1642,7 +1454,9 @@ async def cancel_run(
             "remote_jobs_cancelled": remote_jobs_cancelled,
             "heartbeats_finished": heartbeats_finished,
             "rescue_dir": str(rescue_dir),
-            "note": "weights are being copied off the box; the run closes and the GPU is released when that finishes",
+            "cancel_policy": r.cancel_policy,
+            "cancel_outcome": r.cancel_outcome,
+            "note": "Bounded checkpoint rescue started. On failure the source is retained and compute may accrue until retry or explicit discard.",
         }
 
     r.status = "cancelled"
@@ -1660,9 +1474,7 @@ async def cancel_run(
 
     # Tear down any GPU this run was holding so cancelling never leaves a Vast.ai
     # instance billing or a Slurm job squatting on cluster GPUs. Best-effort.
-    gpus_destroyed = await _destroy_run_gpu_instances(db, run_id)
-    slurm_scancelled = await _scancel_run_slurm_jobs(db, run_id)
-    await _mark_run_instances_released(db, run_id)
+    gpus_destroyed, slurm_scancelled = await _cleanup_run_resources(db, r)
 
     from zevo.engine.observe.audit import audit
     await audit(
@@ -1725,9 +1537,15 @@ async def delete_run(
     # from work_products.meta). Best-effort; never blocks the delete.
     from zevo.engine.run.remote_jobs import cancel_run_remote_jobs
     remote_jobs_cancelled = await cancel_run_remote_jobs(db, tickets)
-    gpus_destroyed = await _destroy_run_gpu_instances(db, run_id)
-    slurm_scancelled = await _scancel_run_slurm_jobs(db, run_id)
-    await _mark_run_instances_released(db, run_id)
+    gpus_destroyed, slurm_scancelled = await _cleanup_run_resources(db, r)
+
+    from zevo.engine.run.resource_cleanup import has_pending_resources
+    if await has_pending_resources(db, run_id):
+        r.status = "cancelled"
+        r.finished_at = r.finished_at or datetime.now(timezone.utc)
+        r.halted_reason = "Deletion pending: provider resource release is not confirmed"
+        await db.commit()
+        raise HTTPException(409, "Compute cleanup is pending; the Run is retained for cleanup retries. Retry deletion after release.")
 
     from zevo.engine.observe.audit import audit
     await audit(

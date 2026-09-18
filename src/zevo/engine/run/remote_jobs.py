@@ -184,9 +184,11 @@ async def cancel_ticket_remote_job(
     result = await _ssh(info, command)
     if cluster_row is not None and result.get("ok"):
         now = datetime.now(timezone.utc)
-        cluster_row.status = "released"
-        cluster_row.released_at = now
-        cluster_row.release_reason = "ticket cancelled"
+        # scancel accepted the request; the resource remains billable/owned
+        # until the reconciler confirms the scheduler no longer holds it.
+        cluster_row.meta = {**dict(cluster_row.meta or {}),
+                            "cancellation_requested_at": now.isoformat()}
+        cluster_row.release_reason = "cancellation requested; awaiting scheduler confirmation"
         await db.flush()
     return {
         "ticket_id": ticket.id,

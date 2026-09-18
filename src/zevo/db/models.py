@@ -403,6 +403,8 @@ class Run(Base):
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancel_policy: Mapped[dict[str, Any]] = mapped_column(JsonCol, default=dict)
     cancel_outcome: Mapped[dict[str, Any]] = mapped_column(JsonCol, default=dict)
+    # Durable bounded finalization and recovery policy, independent of scoring.
+    lifecycle: Mapped[dict[str, Any]] = mapped_column(JsonCol, default=dict, server_default="{}")
     registry_version_tag: Mapped[str] = mapped_column(String(128), default="")
     # The reactive orchestrator's supervisor Ticket, reused for every wake.
     supervisor_ticket_id: Mapped[str] = mapped_column(String(64), default="")
