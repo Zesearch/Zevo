@@ -294,8 +294,27 @@ def carve(
 
     ordered = sorted(range(len(rows)), key=lambda i: _order_key(rows[i], i))
     n_val = _n_validation(len(rows))
-    chosen = sorted(ordered[:n_val])
-    val_idx = set(chosen)
+    # Settlement compares the two populations by question identity with the
+    # answer columns removed, and refuses a carve that puts one question on
+    # both sides. Public benchmarks repeat questions (trivia_qa_verified has 21
+    # such rows), so the unit of the carve is the identity, not the row: walk
+    # the shuffle and take every row that asks the same question together.
+    from zevo.engine.remote_training_data import _semantic_fingerprint
+
+    answers = set(answer_cols)
+    identity = [
+        _semantic_fingerprint({k: v for k, v in row.items() if k not in answers})
+        or f"\0{i}"
+        for i, row in enumerate(rows)
+    ]
+    same_question: dict[str, list[int]] = {}
+    for i in ordered:
+        same_question.setdefault(identity[i], []).append(i)
+    val_idx: set[int] = set()
+    for i in ordered:
+        if len(val_idx) >= n_val:
+            break
+        val_idx.update(same_question[identity[i]])
     # Keep both populations in original order so prediction rows can be checked
     # against their respective scoring populations.
     val_rows = [rows[i] for i in range(len(rows)) if i in val_idx]
