@@ -39,12 +39,20 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-# See Dockerfile.backend -- same rationale: source must be present before
-# `pip install -e .` because setuptools.packages verifies each dir exists.
+
+# Dependencies in their own cached layer. Only pyproject.toml is needed to
+# compute them, so a code change no longer reinstalls every wheel or
+# re-downloads the NLTK data; the package itself is installed after the
+# source copy with --no-deps.
+COPY pyproject.toml ./
+RUN pip install --upgrade pip \
+    && python -c "import tomllib; print(chr(10).join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/requirements.txt \
+    && pip install -r /tmp/requirements.txt \
+    && mkdir -p /opt/nltk_data && python -m nltk.downloader -d /opt/nltk_data \
+       punkt punkt_tab stopwords averaged_perceptron_tagger_eng
+
 COPY . .
-RUN pip install --upgrade pip && pip install -e .
-RUN mkdir -p /opt/nltk_data && python -m nltk.downloader -d /opt/nltk_data \
-    punkt punkt_tab stopwords averaged_perceptron_tagger_eng
+RUN pip install --no-deps -e .
 
 # The daemon never serves HTTP; just polls Postgres + spawns runners
 # (which shell out to `codex exec`). The host login is authoritative; an API
