@@ -24,6 +24,10 @@ def _ui_access_token() -> str:
 
 
 def _trusted(headers) -> bool:
+    # A worker routed through the UI proxy stays a worker. Never let the
+    # proxy-added credential upgrade its held-out visibility.
+    if "x-zevo-worker" in headers or "x-zevo-service" in headers:
+        return False
     expected = _ui_access_token()
     supplied = (headers.get(UI_ACCESS_HEADER) or "").strip()
     return bool(expected and supplied and secrets.compare_digest(expected, supplied))

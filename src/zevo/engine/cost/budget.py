@@ -183,11 +183,8 @@ async def snapshot_for_run(session: AsyncSession, run_id: str) -> BudgetSnapshot
         return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
     now = datetime.now(timezone.utc)
-    # A terminated run's GPU clock stops at the run's end — never keep billing
-    # against `now`. This is the authoritative cap even if an instance's
-    # `released_at` was never set (e.g. the run was cancelled outside the
-    # reconciler's release path, so the InfraInstance row stayed open).
-    run_end = aware(run.finished_at) if run.finished_at else now
+    # Provider billing outlives a failed/cancelled run until release is
+    # confirmed. Closing the run must never hide a still-rented machine.
     rows = (await session.execute(
         select(InfraInstance).where(InfraInstance.run_id == run_id)
     )).scalars().all()
@@ -197,7 +194,7 @@ async def snapshot_for_run(session: AsyncSession, run_id: str) -> BudgetSnapshot
             continue
         if not is_rented(r.provider):
             continue
-        end = aware(r.released_at) if r.released_at else run_end
+        end = aware(r.released_at) if r.released_at else now
         uptime_h = max(
             0.0, (end - aware(r.created_at)).total_seconds() / 3600.0,
         )

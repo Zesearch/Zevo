@@ -82,7 +82,7 @@ from zevo.db import (
 from zevo.engine.agent.drivers import Driver, get_driver
 from zevo.engine.observe.live_markers import LiveMarkerReader
 from zevo.engine.observe.markers import scan_text
-from zevo.engine.cost.pricing import accumulate_usage, estimate_cost
+from zevo.engine.cost.live_usage import LiveUsage, persist_usage
 from zevo.engine.run.scheduler.bindings import input_path, resolve_input_bindings
 from zevo.engine.remote_transfer import (
     build_download_command,
@@ -4320,12 +4320,9 @@ async def run_ticket(
     event_queue: asyncio.Queue = asyncio.Queue()
     pending_events: list[dict] = []  # kept for the final terminal commit
 
-    # Per-heartbeat usage accumulator. Filled from the driver's `turn_completed`
-    # events; folded into hb.* columns on close.
-    usage_running: dict[str, int] = {
-        "input_tokens": 0, "output_tokens": 0,
-        "cached_input_tokens": 0, "reasoning_output_tokens": 0,
-    }
+    # Provider usage is persisted with every transcript batch, while the
+    # heartbeat is still running, so the budget watchdog sees completed turns.
+    live_usage = LiveUsage()
 
     def event_sink(ev: dict) -> None:
         ev_type = str(ev.get("type") or "raw")
@@ -4341,7 +4338,7 @@ async def run_ticket(
         if ev_type in ("turn_completed", "turn.completed"):
             usage = payload.get("usage") if isinstance(payload, dict) else None
             if isinstance(usage, dict):
-                accumulate_usage(usage_running, usage)
+                live_usage.record(payload)
         envelope = transcript_bus.make_event(
             seq=transcript_bus.next_seq(heartbeat_id),
             ev_type=ev_type,
@@ -4510,6 +4507,7 @@ async def run_ticket(
                             if ts_dt is not None:
                                 kwargs["ts"] = ts_dt
                             s.add(TranscriptEvent(**kwargs))
+                        await persist_usage(s, heartbeat_id, hb.model, live_usage)
                         await s.commit()
                     batch.clear()
                 except Exception as e:
@@ -4529,6 +4527,7 @@ async def run_ticket(
                                 type=str(e.get("type") or "raw"),
                                 payload=e.get("payload") or {},
                             ))
+                        await persist_usage(s, heartbeat_id, hb.model, live_usage)
                         await s.commit()
                 except Exception as e:
                     _warn("flusher.final_drain", e)
@@ -4884,12 +4883,9 @@ async def run_ticket(
     hb.finished_at = datetime.now(timezone.utc)
     hb.exit_code = exit_code
     hb.error_message = error_message[:2000]
-    # Fold token usage + estimated cost onto the heartbeat row.
-    hb.input_tokens = int(usage_running.get("input_tokens", 0))
-    hb.output_tokens = int(usage_running.get("output_tokens", 0))
-    hb.cached_input_tokens = int(usage_running.get("cached_input_tokens", 0))
-    hb.reasoning_output_tokens = int(usage_running.get("reasoning_output_tokens", 0))
-    hb.estimated_cost_usd = estimate_cost(hb.model, usage_running)
+    # Absolute values agree with the live checkpoints (no double charging).
+    for field, value in live_usage.values(hb.model).items():
+        setattr(hb, field, value)
 
     # Set before the branch below: only one of the two paths assigns it, and the
     # handoff at the end of this function reads it either way.

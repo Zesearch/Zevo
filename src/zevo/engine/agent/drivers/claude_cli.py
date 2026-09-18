@@ -375,6 +375,7 @@ def _normalise_claude_event(obj: dict) -> list[dict]:
         if isinstance(usage, dict):
             out.append({"type": "turn_completed", "payload": {
                 "usage": _normalise_usage(usage),
+                "usage_id": str(msg.get("id") or ""),
             }})
         return out
 
@@ -438,7 +439,8 @@ def _normalise_claude_event(obj: dict) -> list[dict]:
         # agent_message + a turn_completed with usage so the cost meter
         # works.
         out.append({"type": "turn_completed", "payload": {
-            "usage": _normalise_usage(obj.get("usage") or {}),
+            "usage": _normalise_usage(obj["usage"]) if obj.get("usage") else {},
+            "usage_kind": "cumulative",
         }})
         result_text = obj.get("result") or ""
         if isinstance(result_text, str) and result_text.strip():
