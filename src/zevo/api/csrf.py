@@ -39,17 +39,31 @@ def _request_origin(request: Request) -> str | None:
     Non-browser clients send neither and get None (→ allowed by the caller).
     """
     origin = (request.headers.get("origin") or "").strip()
-    if origin and origin.lower() != "null":
-        return origin.rstrip("/")
+    if "origin" in request.headers:
+        return origin.rstrip("/") or "null"
     referer = (request.headers.get("referer") or "").strip()
     if referer:
-        parts = urlsplit(referer)
+        try:
+            parts = urlsplit(referer)
+        except ValueError:
+            return "null"
         if parts.scheme and parts.netloc:
             return f"{parts.scheme}://{parts.netloc}"
+        return "null"
     return None
 
 
 def _origin_allowed(origin: str, request: Request) -> bool:
+    # Opaque or malformed browser origins must not become anonymous callers,
+    # including when a permissive CORS allow-list is configured.
+    if origin.lower() == "null":
+        return False
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return False
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return False
     allowed = {o.rstrip("/") for o in settings.cors_origins}
     if "*" in allowed:
         return True
@@ -59,7 +73,7 @@ def _origin_allowed(origin: str, request: Request) -> bool:
     # (the dashboard talking to its own /api). Compare the Origin's netloc to
     # the request Host, which is what a same-origin fetch carries.
     host = (request.headers.get("host") or "").strip()
-    if host and urlsplit(origin).netloc == host:
+    if host and parts.netloc == host:
         return True
     return False
 

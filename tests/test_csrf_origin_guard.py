@@ -73,3 +73,22 @@ def test_disable_escape_hatch(monkeypatch):
     c = TestClient(_app())
     r = c.post("/thing", headers={"origin": "https://evil.example"})
     assert r.status_code == 200
+
+
+@pytest.mark.parametrize("origin", ["null", "", "https://[", "file://local", "garbage"])
+@pytest.mark.parametrize("trusted_referer", [False, True])
+def test_explicit_opaque_or_malformed_origin_is_rejected(client, origin, trusted_referer):
+    headers = {"origin": origin}
+    if trusted_referer:
+        headers["referer"] = "http://testserver/dashboard"
+    assert client.post("/thing", headers=headers).status_code == 403
+
+
+def test_null_origin_is_rejected_even_with_wildcard(client, monkeypatch):
+    monkeypatch.setenv("ZEVO_CORS_ORIGINS", "*")
+    assert client.post("/thing", headers={"origin": "null"}).status_code == 403
+
+
+@pytest.mark.parametrize("referer", ["https://[", "garbage"])
+def test_malformed_referer_fails_closed(client, referer):
+    assert client.post("/thing", headers={"referer": referer}).status_code == 403

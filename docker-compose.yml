@@ -170,6 +170,7 @@ x-zevo-volumes: &zevo-volumes
 
 services:
   postgres:
+    networks: [execution]
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
@@ -190,6 +191,7 @@ services:
       retries: 10
 
   backend:
+    networks: [execution, dashboard]
     build:
       context: .
       dockerfile: ops/docker/Dockerfile.backend
@@ -232,6 +234,7 @@ services:
       - ./.zevo-private/holdout:/run/zevo-holdout
 
   scheduler:
+    networks: [execution]
     build:
       context: .
       dockerfile: ops/docker/Dockerfile.scheduler
@@ -253,6 +256,7 @@ services:
       start_period: 45s
 
   holdout-scheduler:
+    networks: [execution]
     build:
       context: .
       dockerfile: ops/docker/Dockerfile.scheduler
@@ -287,6 +291,7 @@ services:
       - ./.zevo-private/holdout:/run/zevo-holdout:ro
 
   web:
+    networks: [dashboard]
     build:
       context: .
       dockerfile: ops/docker/Dockerfile.web
@@ -312,3 +317,10 @@ volumes:
   claude_home:
   codex_home:
   ui_auth:
+
+# Optimization workers must not reach the proxy that grants human UI access.
+# The backend alone bridges the two networks. Execution retains normal egress
+# for model providers and SSH; only the dashboard is published on loopback.
+networks:
+  execution:
+  dashboard:
