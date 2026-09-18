@@ -1,7 +1,10 @@
 name: CI
 
+# A branch push and its pull request used to run this twice, and branch
+# protection then waited on both copies. Push runs cover main only.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
