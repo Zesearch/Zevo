@@ -14,7 +14,9 @@ one background task per run:
   4. flips the Run to `cancelled`. `_cleanup_terminal_resources` tears the box
      down on the next tick, exactly as for any other terminal run.
 
-Every step converges on the same end state, so a daemon restart mid-rescue
+Failed preservation retains the source with an actionable failure; it never
+silently authorizes destruction. Retries and individual subprocesses are bounded.
+A daemon restart mid-rescue
 resumes rather than duplicates: a finished copy leaves a marker file, the
 registry upsert is keyed by the run's one tag, and the Hub upload is a commit
 against the same repo.
@@ -26,8 +28,11 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
+import json
+import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -125,20 +130,42 @@ def prepare_rescue_dir(run: Run, policy: CancelWeightsPolicy) -> Path:
     return dest
 
 
-def _run_transfer(command: list[str]) -> None:
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"scp exited {completed.returncode}: {(completed.stderr or '').strip()[:400]}"
-        )
+async def _run_transfer(command: list[str]) -> None:
+    """Cancellation kills and reaps the transfer, rather than orphaning a thread."""
+    proc = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _stdout, stderr = await proc.communicate()
+        if proc.returncode:
+            raise RuntimeError(f"transfer exited {proc.returncode}: {stderr.decode(errors='replace')[:400]}")
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
 
 
 async def _copy_off_box(session: AsyncSession, candidate: RescueCandidate, dest: Path) -> Path:
     """Copy the checkpoint folder into `dest/<name>/`; returns that folder."""
-    model_dir = dest / PurePosixPath(candidate.path).name
+    remote_path = PurePosixPath(candidate.path)
+    if not remote_path.is_absolute() or ".." in remote_path.parts or not remote_path.name:
+        raise RuntimeError("checkpoint path must be a canonical absolute path")
+    model_dir = dest / remote_path.name
+    if model_dir.is_symlink() or dest.resolve() not in model_dir.resolve().parents:
+        raise RuntimeError("checkpoint destination escapes the rescue folder")
+    identity = json.dumps({"ticket_id": candidate.ticket.id, "path": candidate.path}, sort_keys=True)
     if (model_dir / RESCUE_MARKER).exists():
-        return model_dir
+        if (model_dir / RESCUE_MARKER).read_text(encoding="utf-8") == identity:
+            return model_dir
+        raise RuntimeError("rescue destination belongs to a different checkpoint; choose another folder")
     dest.mkdir(parents=True, exist_ok=True)
+    owner = model_dir / ".zevo-rescue-owner"
+    source_is_destination = not candidate.remote and Path(candidate.path).resolve() == model_dir.resolve()
+    if model_dir.exists() and not source_is_destination:
+        if not owner.is_file() or owner.read_text(encoding="utf-8") != identity:
+            raise RuntimeError("rescue destination is not owned by this checkpoint; choose another folder")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    owner.write_text(identity, encoding="utf-8")
     if candidate.remote:
         info = await _device_info_for_ticket(session, candidate.ticket)
         if info is None:
@@ -149,17 +176,17 @@ async def _copy_off_box(session: AsyncSession, candidate: RescueCandidate, dest:
         command = build_download_command(
             info.ssh, remote_paths=[candidate.path], local_dir=str(dest), recursive=True,
         )
-        await asyncio.to_thread(_run_transfer, command)
+        await _run_transfer(command)
     else:
         source = Path(candidate.path)
         if not source.exists():
             raise RuntimeError(f"checkpoint path no longer exists: {source}")
         if source.resolve() != model_dir.resolve():
-            await asyncio.to_thread(shutil.copytree, source, model_dir, dirs_exist_ok=True)
+            await _run_transfer([sys.executable, "-c", "import shutil,sys; shutil.copytree(sys.argv[1],sys.argv[2],dirs_exist_ok=True)", str(source), str(model_dir)])
     if not model_dir.exists():
         raise RuntimeError(f"copy finished but {model_dir} is missing")
     (model_dir / RESCUE_MARKER).write_text(
-        datetime.now(timezone.utc).isoformat(), encoding="utf-8",
+        identity, encoding="utf-8",
     )
     return model_dir
 
@@ -196,15 +223,25 @@ def hf_token() -> str:
     return _read_env(ENV_PATH).get("HF_TOKEN", "") or os.environ.get("HF_TOKEN", "")
 
 
-def push_to_hf(model_dir: Path, *, repo_id: str, private: bool, token: str) -> str:
-    from huggingface_hub import HfApi
-    api = HfApi(token=token)
-    api.create_repo(repo_id, private=private, exist_ok=True)
-    api.upload_folder(
-        folder_path=str(model_dir), repo_id=repo_id,
-        commit_message="Zevo: checkpoint rescued on run cancel",
-        ignore_patterns=[RESCUE_MARKER],
+async def push_to_hf(model_dir: Path, *, repo_id: str, private: bool, token: str) -> str:
+    # Credentials go through stdin, never process arguments or logs.
+    script = (
+        "import json,sys; from huggingface_hub import HfApi; p=json.load(sys.stdin); "
+        "api=HfApi(token=p['token']); api.create_repo(p['repo'],private=p['private'],exist_ok=True); "
+        "api.upload_folder(folder_path=p['path'],repo_id=p['repo'],ignore_patterns=['.zevo-*'])"
     )
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", script, stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        await proc.communicate(json.dumps({"token": token, "repo": repo_id, "private": private, "path": str(model_dir)}).encode())
+        if proc.returncode:
+            raise RuntimeError(f"Hugging Face upload exited {proc.returncode}; local checkpoint retained")
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
     return f"https://huggingface.co/{repo_id}"
 
 
@@ -245,8 +282,8 @@ async def perform_rescue(session: AsyncSession, run: Run) -> dict[str, Any]:
         token = hf_token()
         if not token:
             raise RuntimeError("HF_TOKEN is not set in Settings")
-        outcome["hf_url"] = await asyncio.to_thread(
-            push_to_hf, model_dir,
+        outcome["hf_url"] = await push_to_hf(
+            model_dir,
             repo_id=policy.hf_repo_id, private=policy.hf_private, token=token,
         )
     return outcome
@@ -255,27 +292,73 @@ async def perform_rescue(session: AsyncSession, run: Run) -> dict[str, Any]:
 _ACTIVE: dict[str, asyncio.Task[None]] = {}
 
 
-async def complete_requested_cancels(session: AsyncSession) -> int:
-    """Start a rescue task for every run whose cancel is waiting on one.
+def _aware(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
-    A run already being worked on is skipped, so the 5s reconcile tick cannot
-    start a second copy of a transfer that takes minutes. Returns how many
-    tasks this pass started.
-    """
-    runs = (await session.execute(
-        select(Run).where(
-            Run.cancel_requested_at.is_not(None),
-            Run.status.in_(["planning", "running"]),
-        )
-    )).scalars().all()
+
+def rescue_request_outcome(policy: CancelWeightsPolicy, now: datetime) -> dict[str, Any]:
+    return {"status": "pending", "attempts": 0,
+            "deadline_at": (now + timedelta(seconds=policy.rescue_timeout_seconds)).isoformat(),
+            "source_retained": True, "compute_may_accrue": True}
+
+
+async def complete_requested_cancels(session: AsyncSession) -> int:
+    """Claim bounded attempts durably, including recovery after daemon restarts."""
+    runs = (await session.execute(select(Run).where(
+        Run.cancel_requested_at.is_not(None), Run.status.in_(["planning", "running"]),
+    ).with_for_update(skip_locked=True))).scalars().all()
     started = 0
+    now = datetime.now(timezone.utc)
+    claimed = []
     for run in runs:
-        task = _ACTIVE.get(run.id)
-        if task is not None and not task.done():
+        if run.id in _ACTIVE and not _ACTIVE[run.id].done():
             continue
-        _ACTIVE[run.id] = asyncio.create_task(_finish_cancel(run.id))
+        policy = CancelWeightsPolicy.model_validate(run.cancel_policy or {})
+        outcome = {**rescue_request_outcome(policy, _aware(run.cancel_requested_at)), **dict(run.cancel_outcome or {})}
+        if outcome.get("status") == "preservation_failed":
+            continue
+        retry_at = outcome.get("retry_at")
+        if retry_at and _aware(datetime.fromisoformat(retry_at)) > now:
+            continue
+        lease = outcome.get("lease_until")
+        if lease and _aware(datetime.fromisoformat(lease)) > now:
+            continue  # another scheduler process owns the transfer
+        outcome.update(status="rescuing", claim_token=str(uuid.uuid4()),
+                       lease_until=(now + timedelta(seconds=policy.attempt_timeout_seconds + 10)).isoformat())
+        run.cancel_outcome = outcome
+        claimed.append(run.id)
+    await session.commit()
+    for run_id in claimed:
+        _ACTIVE[run_id] = asyncio.create_task(_finish_cancel(run_id))
         started += 1
     return started
+
+
+async def _rescue_with_abort(Session, session, run, timeout: float):
+    """Abort an in-flight copy when another API process requests discard/retry."""
+    token = (run.cancel_outcome or {}).get("claim_token")
+    task = asyncio.create_task(perform_rescue(session, run))
+    deadline = asyncio.get_running_loop().time() + timeout
+    try:
+        while not task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError("checkpoint rescue attempt exceeded its deadline")
+            await asyncio.wait({task}, timeout=min(1.0, remaining))
+            if task.done():
+                break
+            async with Session() as check:
+                current = await check.get(Run, run.id)
+                if current is None or current.status not in {"planning", "running"} or (current.cancel_outcome or {}).get("claim_token") != token:
+                    raise asyncio.CancelledError()
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 async def _finish_cancel(run_id: str) -> None:
@@ -286,22 +369,54 @@ async def _finish_cancel(run_id: str) -> None:
             run = await session.get(Run, run_id)
             if run is None:
                 return
-            try:
-                outcome = await perform_rescue(session, run)
-            except Exception as exc:  # the run must still close; the error is the outcome
-                log.exception("[cancel-rescue] run %s: rescue failed", run_id[:8])
-                await session.rollback()
-                run = await session.get(Run, run_id)
-                outcome = {"weights": (run.cancel_policy or {}).get("weights", ""),
-                           "error": str(exc)[:500]}
+            policy = CancelWeightsPolicy.model_validate(run.cancel_policy or {})
+            prior = dict(run.cancel_outcome or {})
+            token = prior.get("claim_token")
             now = datetime.now(timezone.utc)
-            outcome["finished_at"] = now.isoformat()
-            run.cancel_outcome = outcome
-            run.status = "cancelled"
-            run.halted_reason = "cancelled by user; " + _describe(outcome)
-            run.finished_at = now
+            deadline = _aware(datetime.fromisoformat(prior["deadline_at"]))
+            attempts = int(prior.get("attempts") or 0)
+            error = ""
+            try:
+                if now >= deadline or attempts >= policy.max_attempts:
+                    raise TimeoutError("checkpoint rescue retry window exhausted")
+                outcome = await _rescue_with_abort(
+                    Session, session, run,
+                    min(policy.attempt_timeout_seconds, (deadline - now).total_seconds()),
+                )
+            except Exception as exc:
+                error = str(exc) or type(exc).__name__
+                await session.rollback()
+                outcome = {"weights": policy.weights, "error": error[:500]}
+            # Never overwrite a newer discard/retry from another process.
+            await session.refresh(run)
+            if run.status not in {"planning", "running"} or (run.cancel_outcome or {}).get("claim_token") != token:
+                return
+            attempts += 1
+            now = datetime.now(timezone.utc)
+            local = await _registered_model_dir(session, run)
+            exhausted = now >= deadline or attempts >= policy.max_attempts
+            if error and local is None and (not exhausted or not policy.discard_on_failure):
+                run.cancel_outcome = {
+                    **outcome, "status": "preservation_failed" if exhausted else "retry_pending",
+                    "attempts": attempts, "deadline_at": deadline.isoformat(),
+                    "retry_at": (now + timedelta(seconds=30)).isoformat(),
+                    "retryable": True, "source_retained": True, "compute_may_accrue": True,
+                }
+                run.halted_reason = "Checkpoint preservation failed; source retained and compute may still accrue. Retry or explicitly discard."
+            else:
+                if local is not None:
+                    outcome["model_path"] = str(local)
+                outcome.update(status="preservation_failed" if error else "completed",
+                               attempts=attempts, finished_at=now.isoformat(),
+                               source_retained=local is not None,
+                               compute_may_accrue=True, retryable=bool(error))
+                if error and policy.discard_on_failure and local is None:
+                    outcome["discarded_after_failure"] = True
+                run.cancel_outcome = outcome
+                run.status = str((run.lifecycle or {}).get("rescue_terminal_status") or "cancelled")
+                run.halted_reason = "Run stopped; " + _describe(outcome)
+                run.finished_at = now
             await session.commit()
-            log.info("[cancel-rescue] run %s closed: %s", run_id[:8], _describe(outcome))
     finally:
         _ACTIVE.pop(run_id, None)
 

@@ -536,6 +536,11 @@ async def create_ticket(
         if r is None:
             raise HTTPException(400, f"run {run_id!r} does not exist")
         owning_run = r
+        from zevo.engine.run.lifecycle import finalization
+        if r.cancel_requested_at is not None:
+            raise HTTPException(409, "Run is cancelling; no new work is accepted")
+        if finalization(r) and body.agent_id not in {"orchestrator", "registry"}:
+            raise HTTPException(409, "Run is finalizing at its limit; no new optimization is accepted")
         if r.mode != "single_stage" and body.agent_id != "orchestrator":
             final_registry = (await db.execute(select(Ticket).where(
                 Ticket.run_id == run_id,
