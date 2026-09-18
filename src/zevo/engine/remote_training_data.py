@@ -92,6 +92,7 @@ class RemoteTrainingPackage(BaseModel):
     prepare_script_sha256: str = Field(pattern=_SHA256_PATTERN)
     data_recipe_sha256: str = Field(pattern=_SHA256_PATTERN)
     data_signature: str = Field(pattern=_SHA256_PATTERN)
+    semantic_fingerprint_version: Literal[2]
     blocked_semantic_fingerprints: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -237,6 +238,7 @@ def remote_data_signature(
     realized_recipe.pop("audit_steps", None)
     realized_recipe.pop("dataset_name", None)
     value = {
+        "semantic_fingerprint_version": 2,
         "remote_dataset_spec": spec.model_dump(mode="json"),
         "data_recipe": realized_recipe,
         "prepare_script_sha256": prepare_script_sha256,
@@ -278,6 +280,7 @@ def build_remote_training_package(
         blocked_semantic_fingerprints=blocked,
     )
     return RemoteTrainingPackage(
+        semantic_fingerprint_version=2,
         source=spec.source,
         training_method=spec.training_method,
         method_format=spec.method_format,
@@ -306,51 +309,68 @@ _ANSWER_FIELD_KEYS = {
 }
 
 
-def _semantic_text(value: Any, *, key: str = "") -> list[str]:
-    if key.lower() in _SEMANTIC_METADATA_KEYS:
-        return []
+def _semantic_value(value: Any) -> Any:
+    """Canonical, typed input content; mapping order is never evidence.
+
+    Strings retain the established whitespace/case normalization. Explicit
+    type tags prevent numeric/boolean/null values and nested boundaries from
+    disappearing or colliding with text and delimiter-joined sequences.
+    """
     if isinstance(value, dict):
-        parts: list[str] = []
-        for child_key, child in value.items():
-            parts.extend(_semantic_text(child, key=str(child_key)))
-        return parts
-    if isinstance(value, list):
-        parts: list[str] = []
-        for child in value:
-            parts.extend(_semantic_text(child))
-        return parts
-    if isinstance(value, str) and value.strip():
-        return [" ".join(value.split()).casefold()]
-    return []
+        return ["object", [
+            [str(key), _semantic_value(child)]
+            for key, child in sorted(value.items(), key=lambda item: str(item[0]))
+            if str(key).casefold() not in _SEMANTIC_METADATA_KEYS
+        ]]
+    if isinstance(value, (list, tuple)):
+        return ["array", [_semantic_value(child) for child in value]]
+    if value is None:
+        return ["null"]
+    if isinstance(value, bool):
+        return ["bool", value]
+    if isinstance(value, (int, float)):
+        return ["number", value]
+    if isinstance(value, str):
+        return ["text", " ".join(value.split()).casefold()]
+    raise ValueError(f"unsupported semantic input type: {type(value).__name__}")
 
 
 def _semantic_fingerprint(record: dict[str, Any]) -> str:
+    """Fingerprint model inputs with canonical order and typed boundaries.
+
+    A single question, one user message, and one keyed instruction share the
+    same input-turn representation; supervised assistant targets stay absent.
+    Multi-field and structured inputs preserve their keys and list ordering.
+    """
     messages = record.get("messages")
     if isinstance(messages, list):
-        parts: list[str] = []
-        for message in messages:
-            if isinstance(message, dict):
-                role = str(message.get("role") or "").strip().casefold()
-                if role in {"user", "human"}:
-                    parts.extend(_semantic_text(message.get("content")))
+        inputs = [message.get("content") for message in messages
+                  if isinstance(message, dict)
+                  and str(message.get("role") or "").strip().casefold() in {"user", "human"}]
     elif isinstance(record.get("instruction"), dict):
         instructions = record["instruction"]
-        parts = []
-        for turn in instructions:
-            parts.extend(_semantic_text(instructions.get(turn)))
+        def turn_key(key: Any) -> tuple[int, Any]:
+            text = str(key)
+            return (0, int(text)) if text.isdecimal() else (1, text)
+        inputs = [instructions[key] for key in sorted(instructions, key=turn_key)]
     else:
-        selected = {
-            key: value for key, value in record.items()
-            if key.casefold() in _QUESTION_FIELD_KEYS
-        }
+        selected = {key: value for key, value in record.items()
+                    if key.casefold() in _QUESTION_FIELD_KEYS}
         if not selected:
-            selected = {
-                key: value for key, value in record.items()
-                if key.casefold() not in _ANSWER_FIELD_KEYS
-            }
-        parts = _semantic_text(selected)
-    text = "\n".join(parts)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
+            selected = {key: value for key, value in record.items()
+                        if key.casefold() not in _ANSWER_FIELD_KEYS | _SEMANTIC_METADATA_KEYS}
+        if not selected:
+            return ""
+        # Preserve the common cross-schema single-question equivalence.
+        inputs = ([next(iter(selected.values()))]
+                  if len(selected) == 1 and next(iter(selected)).casefold() in _QUESTION_FIELD_KEYS
+                  else [selected])
+    if not inputs:
+        return ""
+    encoded = json.dumps(["semantic-v2", [_semantic_value(item) for item in inputs]],
+                         ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
 
 
 def _scan_jsonl(

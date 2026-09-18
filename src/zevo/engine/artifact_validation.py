@@ -328,79 +328,8 @@ def validate_training_data_artifact(training_dataset: str) -> int:
     return len(rows)
 
 
-_SEMANTIC_METADATA_KEYS = {
-    "id", "row_id", "example_id", "index", "source", "split", "category",
-    "num_turns", "role",
-}
-
-_QUESTION_FIELD_KEYS = {
-    "question", "question_content", "prompt", "problem", "query", "input",
-    "instruction", "context", "passage", "text", "choices", "options",
-}
-
-_ANSWER_FIELD_KEYS = {
-    "answer", "answers", "response", "responses", "output", "completion",
-    "target", "label", "labels", "solution", "rationale", "reference",
-    "reference_answer", "expected", "gold", "ground_truth",
-}
-
-
-def _semantic_text(value: Any, *, key: str = "") -> list[str]:
-    if key.lower() in _SEMANTIC_METADATA_KEYS:
-        return []
-    if isinstance(value, dict):
-        parts: list[str] = []
-        for child_key, child in value.items():
-            parts.extend(_semantic_text(child, key=str(child_key)))
-        return parts
-    if isinstance(value, list):
-        parts = []
-        for child in value:
-            parts.extend(_semantic_text(child))
-        return parts
-    if isinstance(value, str) and value.strip():
-        return [" ".join(value.split()).casefold()]
-    return []
-
-
-def _semantic_fingerprint(record: dict[str, Any]) -> str:
-    """Fingerprint only model inputs, never supervised targets.
-
-    Held-out rows normally have their answer columns removed before reaching
-    this function, while SFT rows keep assistant targets inside ``messages``.
-    Including those targets made the same question hash differently across the
-    two schemas.  Input-only identity is the stable comparison boundary.
-    """
-    parts: list[str]
-    messages = record.get("messages")
-    if isinstance(messages, list):
-        parts = []
-        for message in messages:
-            if isinstance(message, dict):
-                role = str(message.get("role") or "").strip().casefold()
-                if role in {"user", "human"}:
-                    parts.extend(_semantic_text(message.get("content")))
-    elif isinstance(record.get("instruction"), dict):
-        # Capybara-style multi-turn records store all user turns and all
-        # assistant turns in separate keyed objects. Only the instructions are
-        # inputs; responses are supervised targets and must not affect overlap.
-        instructions = record["instruction"]
-        parts = []
-        for turn in instructions:
-            parts.extend(_semantic_text(instructions.get(turn)))
-    else:
-        selected = {
-            key: value for key, value in record.items()
-            if key.casefold() in _QUESTION_FIELD_KEYS
-        }
-        if not selected:
-            selected = {
-                key: value for key, value in record.items()
-                if key.casefold() not in _ANSWER_FIELD_KEYS
-            }
-        parts = _semantic_text(selected)
-    text = "\n".join(parts)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
+# The remote helper is standalone on GPU hosts; it owns the shared algorithm.
+from zevo.engine.remote_training_data import _semantic_fingerprint
 
 
 def semantic_record_fingerprints(

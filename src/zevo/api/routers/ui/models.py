@@ -39,6 +39,7 @@ from zevo.api.database import get_db
 from zevo.db import AuditEvent, RegistryModel, Run, ScoreEvent
 from zevo.engine.method.score_direction import improvement
 from zevo.engine.observe.run_metrics import baseline_and_best_test
+from zevo.engine.method.evaluation_identity import compatible_identities
 
 
 router = APIRouter()
@@ -150,6 +151,20 @@ async def _run_outcomes(db: AsyncSession, run_ids: list[str]) -> dict[str, dict[
     return out
 
 
+async def _comparison_identity(db: AsyncSession, model: RegistryModel, score: float | None) -> dict | None:
+    """Use immutable evidence attached to this saved champion's measurement."""
+    if not model.run_id or score is None:
+        return None
+    events = (await db.execute(select(ScoreEvent).where(
+        ScoreEvent.run_id == model.run_id, ScoreEvent.split == "test",
+        ScoreEvent.iteration == model.iteration,
+        ScoreEvent.source == ("baseline" if model.iteration == 0 else "trained"),
+    ).order_by(ScoreEvent.ts.desc()))).scalars().all()
+    if not events or float(events[0].score) != float(score):
+        return None
+    return (events[0].extras or {}).get("evaluation_identity")
+
+
 async def _task_names(db: AsyncSession, run_ids: list[str]) -> dict[str, str]:
     """{run_id: task_name} for the runs that still exist and were named.
 
@@ -257,7 +272,10 @@ async def compare(
 
     score_a = oa.get("champion_test_score")
     score_b = ob.get("champion_test_score")
-    comparable = ra.metric == rb.metric and ra.metric_direction == rb.metric_direction
+    identity_a = await _comparison_identity(db, ra, score_a)
+    identity_b = await _comparison_identity(db, rb, score_b)
+    comparable = (ra.metric == rb.metric and ra.metric_direction == rb.metric_direction
+                  and compatible_identities(identity_a, identity_b))
     delta = round(improvement(score_b, score_a, ra.metric_direction), 6) if (
         comparable and score_a is not None and score_b is not None
     ) else None
@@ -269,7 +287,7 @@ async def compare(
     if delta is not None:
         summary = f"{_name(rb)} {'+' if delta >= 0 else ''}{delta:g} held-out test difference vs {_name(ra)}"
     elif not comparable:
-        summary = f"{_name(ra)} and {_name(rb)} use different evaluator targets; structural diff only"
+        summary = f"{_name(ra)} and {_name(rb)} have different or unverified evaluation contracts; structural diff only"
     else:
         summary = f"{_name(ra)} or {_name(rb)} missing score; structural diff only"
 
