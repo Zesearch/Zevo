@@ -2855,13 +2855,33 @@ def _referenced_paths(guarded: list[str], events: list[dict]) -> list[str]:
     for path in guarded:
         if not path:
             continue
-        p = Path(path)
-        # `<parent>/<name>` when there is a parent, else the bare name. Both
-        # forms are what a shell command would contain.
-        needle = f"{p.parent.name}/{p.name}" if p.parent.name else p.name
-        if any(needle in inp for inp in inputs):
-            hits.add(p.name)
+        needle = _distinctive_suffix(Path(path))
+        # Anchor at a path boundary: `suite/000/x.csv` must not match inside
+        # `validation-suite/000/x.csv`.
+        pattern = re.compile(r"(?<![A-Za-z0-9_.\-])" + re.escape(needle))
+        if any(pattern.search(inp) for inp in inputs):
+            hits.add(Path(path).name)
     return sorted(hits)
+
+
+def _distinctive_suffix(p: Path) -> str:
+    """The shortest trailing part of `p` that names where the file is.
+
+    `<parent>/<name>` is enough when the parent is a real directory name. It
+    is not when the parent is a suite index: the held-out lane writes
+    `holdout-data-<run>/suite/000/validation_questions.csv` and the
+    optimization lane `data-<run>/validation-suite/000/validation_questions.csv`,
+    and `000/validation_questions.csv` matches both, which failed a clean
+    candidate Inference as a held-out leak. Keep climbing past components that
+    are only digits (or empty) until one carries a name.
+    """
+    parts = [part for part in p.parts if part not in ("/", "")]
+    if len(parts) <= 1:
+        return p.name
+    i = len(parts) - 2
+    while i > 0 and parts[i].isdigit():
+        i -= 1
+    return "/".join(parts[i:])
 
 
 def _artifact_problem(path: str) -> str:
