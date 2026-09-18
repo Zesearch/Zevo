@@ -19,7 +19,7 @@ type CostTotal = { total_usd: number; gpu_usd: number; agent_usd: number };
 
 function Vital({ label, value, live = false }: { label: string; value: string; live?: boolean }) {
   return (
-    <div className="flex flex-col leading-none">
+    <div role="group" aria-label={label} className="flex flex-col leading-none">
       <div className="flex items-center gap-1.5">
         {live && <span className="lamp lamp-running" />}
         <span className="readout text-lg font-semibold text-brass-300">{value}</span>
@@ -30,26 +30,25 @@ function Vital({ label, value, live = false }: { label: string; value: string; l
 }
 
 export function ConsoleBar() {
-  const { data: runs = [] } = useSWR<RunSummary[]>("/api/runs?limit=500", { refreshInterval: 4000 });
-  const { data: registry = [] } = useSWR<ModelDTO[]>("/api/models");
-  const { data: cost } = useSWR<CostTotal>("/api/cost/total", { refreshInterval: 15000 });
+  const { data: runs, error: runsError } = useSWR<RunSummary[]>("/api/runs?limit=500", { refreshInterval: 4000 });
+  const { data: registry, error: modelsError } = useSWR<ModelDTO[]>("/api/models");
+  const { data: cost, error: costError } = useSWR<CostTotal>("/api/cost/total", { refreshInterval: 15000 });
 
-  const active = runs.filter((r) => r.status === "running").length;
-  // Same filter the Models page and the dashboard tile use — count only
-  // models that trace back to a run, so all three agree.
-  const runIds = new Set(runs.map((r) => r.id));
-  const models = registry.filter((m) => m.run_id && runIds.has(m.run_id)).length;
-  const completedTime = runs.reduce((sum, r) => (
+  // Run summaries are deliberately bounded; the model catalogue is complete.
+  const runsKnown = !!runs && !runsError;
+  const active = runsKnown ? runs.filter((r) => r.status === "running").length : null;
+  const models = registry && !modelsError ? registry.length : null;
+  const completedTime = runsKnown ? runs.reduce((sum, r) => (
     r.is_terminal && r.duration_s != null && Number.isFinite(r.duration_s) && r.duration_s >= 0
       ? sum + r.duration_s
       : sum
-  ), 0);
-  const burn = cost ? fmtCost(cost.total_usd) : "—";
+  ), 0) : null;
+  const burn = cost && !costError ? fmtCost(cost.total_usd) : "—";
 
   const mac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
   return (
-    <header className="sticky top-0 z-40 flex h-16 items-center border-b border-hair bg-panel/85 pl-5 pr-5 backdrop-blur-md">
+    <header className="sticky top-0 z-40 flex h-16 min-w-0 items-center border-b border-hair bg-panel/85 px-3 sm:px-5 backdrop-blur-md">
       {/* Wordmark: the transparent Z artwork carries the letter, "evo" is text.
           items-baseline, not items-end: box-bottom alignment left "evo" riding
           ~6px high, because the text box reserves descender space that letters
@@ -60,30 +59,32 @@ export function ConsoleBar() {
           the wordmark block takes the remaining 156. Without this the vertical
           line in the bar sat 34px inside the vertical line down the page, and
           the two read as two unrelated rules rather than one frame. */}
-      <div className="flex w-[calc(11rem-1.25rem)] shrink-0 items-baseline gap-1">
+      <div className="flex w-auto shrink-0 md:w-[calc(11rem-1.25rem)] items-baseline gap-1">
         <img src={logoUrl} alt="Z" className="h-8 w-auto shrink-0" />
         <span className="ml-0.5 font-display text-3xl font-semibold leading-none tracking-tight text-ink">
           evo
         </span>
       </div>
 
-      <div className="hidden items-center gap-6 border-l border-hair pl-6 md:flex">
-        <Vital label="Active Runs" value={String(active)} live={active > 0} />
-        <Vital label="Saved Models" value={String(models)} />
-        <Vital label="Run Time" value={fmtDuration(completedTime)} />
+      <div className="hidden items-center gap-5 border-l border-hair pl-5 xl:flex">
+        <Vital label="Active · latest 500 runs" value={active === null ? "—" : String(active)} live={active !== null && active > 0} />
+        <Vital label="Saved Models" value={models === null ? "—" : String(models)} />
+        <Vital label="Time · latest 500 runs" value={completedTime === null ? "—" : fmtDuration(completedTime)} />
         <Vital label="Cost" value={burn} />
       </div>
 
       <div className="ml-auto flex items-center gap-2">
-        <button
-          onClick={() => fireCommand("open-palette")}
-          className="btn hidden items-center gap-2 sm:inline-flex"
-          title="Command palette"
-        >
-          <Command size={14} />
-          <span className="text-slate-400">Jump to…</span>
-          <kbd className="rounded border border-hair bg-canvas px-1.5 py-0.5 font-mono text-2xs text-slate-500">{mac ? "⌘" : "Ctrl"} K</kbd>
-        </button>
+        <div className="hidden sm:block">
+          <button
+            onClick={() => fireCommand("open-palette")}
+            className="btn items-center gap-2"
+            title="Command palette"
+          >
+            <Command size={14} />
+            <span className="text-slate-400">Jump to…</span>
+            <kbd className="rounded border border-hair bg-canvas px-1.5 py-0.5 font-mono text-2xs text-slate-500">{mac ? "⌘" : "Ctrl"} K</kbd>
+          </button>
+        </div>
       </div>
     </header>
   );

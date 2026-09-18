@@ -46,6 +46,9 @@ def main():
         page.goto(BASE + "/runs")
         page.get_by_role("alert").filter(has_text="Could not refresh runs").wait_for()
         assert page.get_by_text("No runs on record yet.").count() == 0
+        header = page.locator("header").first
+        assert header.get_by_role("group", name="Active · latest 500 runs", exact=True).locator(".readout").inner_text() == "—"
+        assert header.get_by_role("group", name="Time · latest 500 runs", exact=True).locator(".readout").inner_text() == "—"
         state["runs_error"] = False
         page.goto(BASE + "/runs?q=absent")
         page.get_by_text("No runs match your search.").wait_for()
@@ -54,6 +57,7 @@ def main():
         state["model"] = True
         page.goto(BASE + "/models")
         page.get_by_text("M-old-model", exact=True).first.wait_for()
+        assert header.get_by_role("group", name="Saved Models", exact=True).locator(".readout").inner_text() == "1"
         # A registry model must remain visible even though its producing run is not in /runs.
         page.keyboard.press("Control+k")
         page.get_by_placeholder("Jump to a run, agent, page, or launch a run…").fill("Launch a new run")
@@ -99,6 +103,9 @@ def main():
         page.keyboard.press("Escape")
         page.goto(BASE + "/runs")
         assert page.locator("main").bounding_box()["width"] >= 380
+        assert not header.get_by_title("Command palette", exact=True).is_visible()
+        bounds = header.bounding_box()
+        assert bounds and bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= 390
         assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
         assert not errors, errors
         browser.close()
