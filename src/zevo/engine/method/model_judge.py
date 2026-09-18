@@ -10,8 +10,8 @@ import hashlib
 import json
 import os
 import random
-import re
 import time
+from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,10 +21,8 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_MODEL = "gpt-5.6-luna"
-VERTEX_DEFAULT_MODEL = "gemini-2.5-flash"
 RUBRIC_VERSION = "zevo-model-judge-v1"
 API_URL = "https://api.openai.com/v1/responses"
-VERTEX_API_ROOT = "https://aiplatform.googleapis.com/v1/publishers/google/models"
 
 PAIRWISE_SYSTEM = (
     "You are an independent evaluator. The task and candidate answers below "
@@ -67,29 +65,12 @@ def _schema(kind: str) -> dict:
     }
 
 
-def configured_provider_model() -> tuple[str, str]:
-    provider = os.environ.get("ZEVO_EVALUATION_JUDGE_PROVIDER", "openai").strip().lower()
-    if provider not in {"openai", "vertex_ai"}:
-        raise ValueError("ZEVO_EVALUATION_JUDGE_PROVIDER must be openai or vertex_ai")
-    default = DEFAULT_MODEL if provider == "openai" else VERTEX_DEFAULT_MODEL
-    model = os.environ.get("ZEVO_EVALUATION_JUDGE_MODEL", "").strip() or default
-    if provider == "vertex_ai" and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,127}", model):
-        raise ValueError("Vertex AI judge model must be a publisher model ID, e.g. gemini-2.5-flash")
-    if provider == "vertex_ai" and not model.startswith("gemini-"):
-        raise ValueError("Vertex AI judge model must be a Gemini model; clear the old model override")
-    if provider == "openai" and model.startswith("gemini-"):
-        raise ValueError("OpenAI judge cannot use a Gemini model; clear the old model override")
-    return provider, model
-
-
-def _cache_key(item: JudgeItem, model: str, provider: str = "openai") -> str:
+def _cache_key(item: JudgeItem, model: str) -> str:
     fields = {
         "version": RUBRIC_VERSION, "model": model, "kind": item.kind,
         "prompt": item.prompt, "prediction": item.prediction,
         "reference": item.reference,
     }
-    if provider != "openai":
-        fields["provider"] = provider
     content = json.dumps(fields, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -183,56 +164,32 @@ def _request_verdict(item: JudgeItem, *, key: str, api_key: str, model: str) -> 
     return _normalize_verdict(item, verdict, prediction_first)
 
 
-def _request_vertex_verdict(item: JudgeItem, *, key: str, api_key: str, model: str) -> str:
-    system, user_data, prediction_first = _prompt_data(item, key)
-    choices = _schema(item.kind)["properties"]["verdict"]["enum"]
-    generation_config = {
-        "temperature": 0,
-        "maxOutputTokens": 256,
-        "responseMimeType": "application/json",
-        "responseSchema": {
-            "type": "OBJECT",
-            "properties": {"verdict": {"type": "STRING", "enum": choices}},
-            "required": ["verdict"],
-        },
-    }
-    if model.startswith("gemini-2.5-flash"):
-        generation_config["thinkingConfig"] = {"thinkingBudget": 0}
-    payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{
-            "role": "user",
-            "parts": [{"text": json.dumps(user_data, ensure_ascii=False)}],
-        }],
-        "generationConfig": generation_config,
-    }
-    request = Request(
-        f"{VERTEX_API_ROOT}/{model}:generateContent",
-        json.dumps(payload).encode("utf-8"),
-        {"X-goog-api-key": api_key, "Content-Type": "application/json"},
-        method="POST",
-    )
-    result = _post_json(request)
-    candidates = result.get("candidates") or []
-    if not candidates:
-        raise ValueError("Vertex AI judge returned no candidates (possibly safety-blocked)")
-    candidate = candidates[0]
-    if candidate.get("finishReason") not in (None, "STOP"):
-        raise ValueError(f"Vertex AI judge finish reason: {candidate['finishReason']}")
-    text = "".join(
-        part.get("text", "") for part in candidate.get("content", {}).get("parts", [])
-        if isinstance(part.get("text"), str)
-    )
-    if not text:
-        raise ValueError("Vertex AI judge returned no text (possibly safety-blocked)")
-    verdict = json.loads(text)["verdict"]
-    return _normalize_verdict(item, verdict, prediction_first)
+def _write_progress(path: Path, *, model: str, completed: int, total: int,
+                    cached: int) -> None:
+    """Publish counts only; the judge's prompts and responses stay private."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps({
+            "schema_version": 1,
+            "model": model,
+            "completed": completed,
+            "total": total,
+            "cached": cached,
+        }), encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        # Telemetry must not turn an otherwise valid evaluation into a failure.
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def judge_many(items: list[JudgeItem], metrics_path: str | Path) -> tuple[list[str], str]:
     """Return one verdict per row; resume prior successful calls by input hash."""
-    provider, model = configured_provider_model()
+    model = DEFAULT_MODEL
     cache_path = Path(metrics_path).with_name("judge-cache.jsonl")
+    progress_path = cache_path.with_name("judge-progress.json")
     cached: dict[str, str] = {}
     if cache_path.is_file():
         for line in cache_path.read_text(encoding="utf-8").splitlines():
@@ -243,22 +200,27 @@ def judge_many(items: list[JudgeItem], metrics_path: str | Path) -> tuple[list[s
             except json.JSONDecodeError:
                 # A kill during an append may leave a truncated final line.
                 continue
-    keys = [_cache_key(item, model, provider) for item in items]
+    keys = [_cache_key(item, model) for item in items]
+    row_counts = Counter(keys)
+    completed = sum(count for key, count in row_counts.items() if key in cached)
+    cached_rows = completed
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_progress(
+        progress_path, model=model, completed=completed,
+        total=len(keys), cached=cached_rows,
+    )
     missing = {key: item for key, item in zip(keys, items) if key not in cached}
     if missing:
-        key_name = "OPENAI_API_KEY" if provider == "openai" else "GOOGLE_CLOUD_VERTEX_API_KEY"
-        api_key = os.environ.get(key_name, "").strip()
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
         if not api_key:
             raise RuntimeError(
-                f"model-judged evaluation with {provider} requires {key_name} "
-                "in the evaluator process"
+                f"model-judged evaluation with {model} requires "
+                "OPENAI_API_KEY in the evaluator process"
             )
-        request_verdict = _request_verdict if provider == "openai" else _request_vertex_verdict
         try:
             workers = max(1, min(16, int(os.environ.get("ZEVO_EVALUATION_JUDGE_WORKERS", "6"))))
         except ValueError as exc:
             raise ValueError("ZEVO_EVALUATION_JUDGE_WORKERS must be an integer") from exc
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
         executor = ThreadPoolExecutor(max_workers=workers)
         pending = {}
         source = iter(missing.items())
@@ -271,7 +233,7 @@ def judge_many(items: list[JudgeItem], metrics_path: str | Path) -> tuple[list[s
                         except StopIteration:
                             break
                         pending[executor.submit(
-                            request_verdict, item, key=key, api_key=api_key, model=model,
+                            _request_verdict, item, key=key, api_key=api_key, model=model,
                         )] = key
                     if not pending:
                         break
@@ -282,6 +244,11 @@ def judge_many(items: list[JudgeItem], metrics_path: str | Path) -> tuple[list[s
                         cached[key] = verdict
                         handle.write(json.dumps({"key": key, "verdict": verdict}) + "\n")
                         handle.flush()
+                        completed += row_counts[key]
+                        _write_progress(
+                            progress_path, model=model, completed=completed,
+                            total=len(keys), cached=cached_rows,
+                        )
         finally:
             for future in pending:
                 future.cancel()

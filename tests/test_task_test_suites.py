@@ -912,6 +912,20 @@ def test_combined_suite_progress_counts_completed_members_not_tickets() -> None:
     assert progress["validation"]["completed"] == 2
     assert progress["validation"]["current"][0]["name"] == "code"
 
+    # Finishing the last model-judge row is not the same as validating the
+    # benchmark's metrics file, so it must not advance the suite counter.
+    judge_rows_done = ExecutionEvent(
+        ticket_id=evaluation_in_progress.id, heartbeat_id="score",
+        attempt_id="one", event_type="progress", phase="scoring",
+        current_step=50, total_steps=50,
+        extras={"phase": "model_judge", "benchmark_name": "code"},
+    )
+    progress = _benchmark_progress(
+        run, [inference, evaluation_in_progress], reveal_holdout=False,
+        completion_events=[*finished, *scored, judge_rows_done],
+    )
+    assert progress["validation"]["completed"] == 2
+
     inference.status = "succeeded"
     evaluation = evaluation_in_progress
     evaluation.status = "succeeded"

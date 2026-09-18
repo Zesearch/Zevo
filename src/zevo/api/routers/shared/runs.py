@@ -431,7 +431,12 @@ def _benchmark_progress(
             name = str((event.extras or {}).get("benchmark_name") or "")
             if name in names and event.ticket_id in focused_inference_ids:
                 inference_done.add(name)
-            if name in names and event.ticket_id in focused_evaluation_ids:
+            # A model judge can finish its last row before the scorer writes
+            # and validates metrics. Only the scorer's completion marker
+            # finishes a benchmark, not an arbitrary x/x progress reading.
+            phase = str((event.extras or {}).get("phase") or event.phase or "")
+            if (name in names and event.ticket_id in focused_evaluation_ids
+                    and phase.startswith("benchmark_complete")):
                 evaluation_done.add(name)
         completed = len(evaluation_done)
         failed = sum(

@@ -56,9 +56,6 @@ ALLOWED_KEYS = {
     # codex_cli driver -- ChatGPT-plan auth comes from the mounted auth.json;
     # this key is the optional usage-billed fallback.
     "OPENAI_API_KEY",
-    "GOOGLE_CLOUD_VERTEX_API_KEY",
-    "ZEVO_EVALUATION_JUDGE_PROVIDER",
-    "ZEVO_EVALUATION_JUDGE_MODEL",
     # bedrock driver
     "AWS_BEARER_TOKEN_BEDROCK", # Bedrock API key (bearer token) -- the only Bedrock auth we use
     "AWS_REGION",
@@ -83,7 +80,6 @@ ALLOWED_KEYS = {
 PLAIN_KEYS = {
     "AWS_REGION", DEFAULT_COMPUTE_KEY, "ZEVO_CLOUD_BACKEND",
     "WANDB_ENTITY", "WANDB_PROJECT",
-    "ZEVO_EVALUATION_JUDGE_PROVIDER", "ZEVO_EVALUATION_JUDGE_MODEL",
 }
 
 # Lenient per-key format check so the UI catches obvious paste errors
@@ -96,9 +92,6 @@ KEY_FORMATS: dict[str, re.Pattern] = {
     # Bedrock API key is a base64 blob (decodes to "BedrockAPIKey-...:secret").
     "AWS_BEARER_TOKEN_BEDROCK":  re.compile(r"^[A-Za-z0-9+/=]{40,}$"),
     "OPENAI_API_KEY":            re.compile(r"^sk-[A-Za-z0-9\-_]{20,}$"),
-    "GOOGLE_CLOUD_VERTEX_API_KEY": re.compile(r"^\S{16,}$"),
-    "ZEVO_EVALUATION_JUDGE_PROVIDER": re.compile(r"^(openai|vertex_ai)$"),
-    "ZEVO_EVALUATION_JUDGE_MODEL": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$"),
     "OPENROUTER_API_KEY":        re.compile(r"^sk-or-v1-[a-f0-9]{32,}$"),
     "AWS_REGION":                re.compile(r"^[a-z]{2}-[a-z]+-\d$"),
     "VASTAI_API_KEY":            re.compile(r"^[a-f0-9]{32,128}$"),
