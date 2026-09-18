@@ -1265,7 +1265,7 @@ function CancelRunButton({ run, onCancelled }: { run: RunDetail; onCancelled: ()
         onClick={() => setOpen(true)}
         className="btn border-coral-500/40 text-coral-300 hover:border-coral-500/70 hover:text-coral-200"
       >
-        <StopCircle size={14} /> cancel run
+        <StopCircle size={14} /> {run.cancelling ? "Checkpoint recovery options" : "cancel run"}
       </button>
     </>
   );
@@ -1376,7 +1376,7 @@ export function RunDetailPage() {
           // orchestrator was handed, so it stays one hover away.
           subtitle={run.task_objective}
           subtitleTitle={run.agent_objective}
-          right={live && !run.cancelling ? <CancelRunButton run={run} onCancelled={() => void mutate()} /> : undefined}
+          right={live ? <CancelRunButton run={run} onCancelled={() => void mutate()} /> : undefined}
         />
       </div>
 
@@ -1389,7 +1389,15 @@ export function RunDetailPage() {
         <HeaderTelemetry run={run} runId={runId} />
       </Bezel>
 
-      {run.cancelling ? (
+      {run.lifecycle?.finalization && !run.is_terminal && (
+        <div role="status" className="mb-5 rounded border border-hair p-3 text-sm">Finalizing the result: new optimization work has stopped while evaluation and model preservation finish. {run.lifecycle.finalization.deadline_at && <>Deadline: {new Date(run.lifecycle.finalization.deadline_at).toLocaleString()}.</>}</div>
+      )}
+      {run.cancel_outcome.status === "preservation_failed" ? (
+        <div role="alert" className="mb-5 rounded border border-coral-500/40 p-3 text-sm text-coral-300">
+          <strong>Checkpoint preservation needs attention.</strong> {run.cancel_outcome.error || run.cancel_outcome.note}
+          <p>The source is retained. Compute may continue to accrue charges. Open checkpoint recovery options to retry preservation, or explicitly discard the weights and release compute.</p>
+        </div>
+      ) : run.cancelling ? (
         <div className="mb-5 flex items-center gap-2 rounded-bezel border border-brass-500/30 bg-brass-500/10 p-3 text-sm text-brass-300">
           <span className="lamp lamp-running" />
           cancelling: {run.cancel_policy.weights === "hf"

@@ -185,7 +185,7 @@ export function RunsPage() {
     taskPeek ? `/api/runs/${taskPeek.id}/request` : null,
   );
 
-  const { data, mutate } = useSWR(
+  const { data, mutate, error: loadError, isLoading } = useSWR(
     `/api/runs?limit=${pageSize}&offset=${page * pageSize}`
       + `&q=${encodeURIComponent(query.trim())}&sort=${sort}&order=${order}&group=${group}`,
     fetchPage,
@@ -240,7 +240,7 @@ export function RunsPage() {
     <div className="flex w-full flex-1 flex-col px-[max(1.5rem,1.5vw)] py-8">
       <PageHead
         title="Runs"
-        subtitle="All runs completed by Zevo"
+        subtitle="Active and completed runs"
       />
 
       {/* Search + sort. Any change resets to page 1: staying on page 7 of a
@@ -318,11 +318,12 @@ export function RunsPage() {
         })}
       </div>
 
-      {runs.length === 0 ? (
+      {loadError && <div role="alert" className="mb-4 rounded border border-coral-500/40 p-3 text-coral-300">Could not refresh runs. {data ? "Showing the last loaded results." : "Your run history is unavailable."} <button className="btn ml-2" onClick={() => void mutate()}>Retry</button></div>}
+      {isLoading && !data ? <Bezel className="p-12">Loading runs…</Bezel> : loadError && !data ? null : runs.length === 0 ? (
         <Bezel className="p-12 text-center">
-          <p className="text-sm text-slate-500">No runs on record yet.</p>
-          <button onClick={() => fireCommand("open-new-run")} className="btn btn-brass mx-auto mt-4">
-            <Rocket size={14} /> Launch your first run
+          <p className="text-sm text-slate-500">{query ? "No runs match your search." : "No runs on record yet."}</p>
+          <button onClick={() => query ? setQuery("") : fireCommand("open-new-run")} className="btn btn-brass mx-auto mt-4">
+            <Rocket size={14} /> {query ? "Clear search" : "Launch your first run"}
           </button>
         </Bezel>
       ) : (

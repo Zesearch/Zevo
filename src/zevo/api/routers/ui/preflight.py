@@ -25,10 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.compute_defaults import DefaultComputeError, resolve_default_compute
 from zevo.api.database import get_db
-from zevo.db import Agent, InfraInstance
+from zevo.db import Agent, InfraInstance, SshHost
 from zevo.contracts.customizations import RunCustomizations
 from zevo.contracts.orchestrator import (
     BUILTIN_METRICS,
+    AutoUserRequest,
     UserRequest,
     effective_test_suite,
     inherit_test_validation_contract,
@@ -66,7 +67,8 @@ class PreflightResponse(BaseModel):
 class PreflightBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_request: UserRequest
+    mode: Literal["auto", "full_pipeline", "customized_pipeline"] = "full_pipeline"
+    user_request: UserRequest | AutoUserRequest
     # Mirror CreateRunRequest: execution runtime is top-level and never part of
     # UserRequest. A missing provider resolves to the concrete Settings default.
     gpu_provider: Literal["cluster", "cloud", "instance"] | None = None
@@ -79,6 +81,12 @@ class PreflightBody(BaseModel):
     @model_validator(mode="after")
     def validation_uses_suite(self) -> "PreflightBody":
         request = self.user_request
+        if self.mode == "auto":
+            if not isinstance(request, AutoUserRequest):
+                raise ValueError("Auto preflight requires the Auto request contract")
+            return self
+        if not isinstance(request, UserRequest):
+            raise ValueError("Standard preflight requires the full scoring contract")
         if (request.validation_set.strip() or request.validation_split.strip()
                 or request.validation_config.strip()):
             raise ValueError(
@@ -712,14 +720,17 @@ async def _check_provider_creds(items: list[PreflightItem], db: AsyncSession) ->
 @router.post("/preflight", response_model=PreflightResponse)
 async def preflight(body: PreflightBody, db: AsyncSession = Depends(get_db)) -> PreflightResponse:
     items: list[PreflightItem] = []
-    req = inherit_test_validation_contract(body.user_request)
+    req = body.user_request if body.mode == "auto" else inherit_test_validation_contract(body.user_request)
 
     _check_objective(req, items)
     _check_dataset(req, items)
     _check_dataset_profile(req, items)         # B.3: hoist profiler signals
-    _check_test_set(req, items)
-    _check_scoring_assets(req, items)
-    _check_eval(req, items)
+    if body.mode != "auto":
+        _check_test_set(req, items)
+        _check_scoring_assets(req, items)
+        _check_eval(req, items)
+    else:
+        _risk(items, "auto_scoring_pending", "Auto will select and validate the evaluation contract during scoping.")
     _check_base_model(req, items)
     _check_method_config(req, items)
     provider = body.gpu_provider
@@ -734,6 +745,14 @@ async def preflight(body: PreflightBody, db: AsyncSession = Depends(get_db)) -> 
             provider = default_compute.provider
             cloud_backend = default_compute.cloud_backend
             ssh_host_id = default_compute.ssh_host_id
+    if ssh_host_id:
+        host = await db.get(SshHost, ssh_host_id)
+        if host is None:
+            _block(items, "ssh_host_missing", "The selected SSH connection no longer exists.")
+        elif host.status != "verified":
+            _block(items, "ssh_host_unverified", "Verify the selected SSH connection before launch.")
+        elif host.category != provider:
+            _block(items, "ssh_host_category", "The selected SSH connection does not match the GPU provider.")
     _check_infra(
         provider,
         items,
@@ -759,7 +778,7 @@ async def preflight(body: PreflightBody, db: AsyncSession = Depends(get_db)) -> 
         summary = f"Run can start, but {len(risks)} risk(s) flagged: {', '.join(risks)}"
     else:
         status = "ready"
-        summary = "All preflight checks passed. Safe to start."
+        summary = "Configuration checks passed. Runtime connectivity and capacity are verified during setup."
 
     return PreflightResponse(
         status=status, items=items,

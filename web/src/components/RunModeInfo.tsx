@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useDialogOwner } from "../lib/dialog";
 import type { RunLaunchMode } from "./NewRunModal";
 
 /**
@@ -73,6 +74,7 @@ export function ModeInfo({
   onToggle: () => void;
   onClose: () => void;
 }) {
+  const owner = useDialogOwner();
   const way = WAYS[mode];
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -89,7 +91,7 @@ export function ModeInfo({
   function toggle() {
     const r = btnRef.current!.getBoundingClientRect();
     setPos({
-      left: Math.min(r.right + 8, window.innerWidth - POPOVER_W - 16),
+      left: Math.max(16, Math.min(r.right + 8, window.innerWidth - Math.min(POPOVER_W, window.innerWidth - 32) - 16)),
       top: Math.max(16, Math.min(r.top, window.innerHeight - 420)),
     });
     onToggle();
@@ -120,11 +122,12 @@ export function ModeInfo({
         // layered `fixed` utility, so the fixed placement lives on a wrapper.
         <div
           data-mode-info
+          data-dialog-owner={owner || undefined}
           className="fixed z-[110]"
           style={{ top: pos.top, left: pos.left, width: POPOVER_W, maxWidth: "calc(100vw - 2rem)" }}
           onClick={(e) => e.stopPropagation()}
         >
-        <div className="bezel p-4 animate-zevo-in">
+        <div className="bezel max-h-[80vh] overflow-y-auto p-4 animate-zevo-in">
           <div className="text-sm font-semibold text-ink">{way.title}</div>
           <p className="mt-0.5 text-xs text-slate-400">{way.when}</p>
           <ol className="mt-3 flex flex-col gap-2">

@@ -24,7 +24,7 @@ env/
 /data/
 /.zevo-private/
 /user_data/
-web/node_modules/
+web/node_modules
 web/dist/
 web/.vite/
 
@@ -45,3 +45,5 @@ web/tsconfig.tsbuildinfo
 # private clusters. Keep only the generic template in Git; local site folders
 # are discovered by Zevo but remain private to each installation.
 /playbook/skills/infrastructure/*/
+
+web/.cache/

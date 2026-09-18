@@ -328,6 +328,11 @@ export type InfraInstanceDTO = {
 
 /** What the cancel-time rescue did with the weights. */
 export type CancelOutcome = {
+  status?: string;
+  retryable?: boolean;
+  source_retained?: boolean;
+  compute_may_accrue?: boolean;
+  deadline_at?: string;
   weights?: "download" | "hf" | "discard";
   model_path?: string;
   hf_url?: string;
@@ -338,6 +343,7 @@ export type CancelOutcome = {
 };
 
 export type RunSummary = {
+  lifecycle?: { finalization?: { started_at?: string; deadline_at?: string; reason?: string } };
   id: string;
   task_name: string;
   // What the user called this execution; required by every current launch.

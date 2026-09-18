@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
+import { useDialogOwner } from "../lib/dialog";
 import { createPortal } from "react-dom";
 
 export type ThemedSelectOption = {
@@ -35,6 +36,7 @@ export function ThemedSelect({
   className?: string;
   buttonClassName?: string;
 }) {
+  const owner = useDialogOwner();
   const control = useRef<HTMLDivElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
@@ -104,7 +106,8 @@ export function ThemedSelect({
           setOpen((v) => !v);
         }}
         onKeyDown={(e) => {
-          if (e.key === "Escape") { setOpen(false); return; }
+          if (e.key === "Escape" && open) { e.preventDefault(); e.stopPropagation(); setOpen(false); return; }
+          if (e.key === "Tab") setOpen(false);
           if (e.key === "ArrowDown" || e.key === "ArrowUp") {
             e.preventDefault();
             if (!open) setOpen(true);
@@ -125,6 +128,8 @@ export function ThemedSelect({
       {open && !disabled && createPortal(
         <div
           ref={menu}
+          data-dialog-owner={owner || undefined}
+          onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setOpen(false); control.current?.querySelector("button")?.focus(); } }}
           role="listbox"
           aria-label={ariaLabel}
           style={{

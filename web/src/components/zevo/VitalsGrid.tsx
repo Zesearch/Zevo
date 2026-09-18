@@ -56,28 +56,27 @@ const WINDOWS = [
   { id: "1d", label: "1d" },
   { id: "1w", label: "1w" },
   { id: "1m", label: "1m" },
-  { id: "all", label: "all" },
+  { id: "all", label: "recent" },
 ] as const;
 
 export function VitalsGrid() {
   const [costWindow, setCostWindow] = useState<string>("all");
   const [timeWindow, setTimeWindow] = useState<string>("all");
-  const { data: runs = [] } = useSWR<RunSummary[]>("/api/runs?limit=500", { refreshInterval: 4000 });
-  const { data: registry = [] } = useSWR<ModelDTO[]>("/api/models");
+  const { data: runs = [], error: runsError, isLoading: runsLoading } = useSWR<RunSummary[]>("/api/runs?limit=500", { refreshInterval: 4000 });
+  const { data: registry = [], error: modelsError } = useSWR<ModelDTO[]>("/api/models");
   const { data: cost } = useSWR<CostTotal>(
     `/api/cost/total?window=${costWindow}`, { refreshInterval: 15000 });
 
-  const active = runs.filter((r) => r.status === "running").length;
+  const active = runs.filter((r) => !r.is_terminal).length;
   const succeeded = runs.filter((r) => r.status === "success").length;
   // failed / cancelled / halted all mean "did not deliver"; one count says so.
   const failed = runs.filter((r) =>
-    ["failed", "cancelled", "halted"].includes(r.status)).length;
+    r.status === "failed").length;
 
   // Count what the Models page actually shows: models that trace back to a
   // run. Counting the raw table made this tile disagree with the page it links
   // to (8 here, 5 there).
-  const runIds = new Set(runs.map((r) => r.id));
-  const models = registry.filter((m) => m.run_id && runIds.has(m.run_id)).length;
+  const models = registry.length;
   const windowMs: Record<string, number> = {
     "1d": 24 * 60 * 60 * 1000,
     "1w": 7 * 24 * 60 * 60 * 1000,
@@ -98,29 +97,32 @@ export function VitalsGrid() {
   const totalTime = timedRuns.reduce((sum, r) => sum + (r.duration_s ?? 0), 0);
 
   return (
-    <div className="grid grid-cols-2 gap-5 lg:grid-cols-4">
+    <div>
+      <p className="mb-3 text-xs text-slate-400">Run counts and runtime cover the newest 500 runs. Saved models and cost cover the full catalog and selected billing window.</p>
+      {(runsError || modelsError) && <p role="alert" className="mb-3 text-coral-300">Some workspace statistics are unavailable. Refresh to retry.</p>}
+      <div className="grid grid-cols-2 gap-5 lg:grid-cols-4">
       {/* One brass tone across all four — the strip reads as a single
           instrument rather than four independently-coloured statuses. */}
       <Tile to="/runs">
         <Readout
-          label="ACTIVE RUNS"
-          value={active}
+          label="ACTIVE IN RECENT 500"
+          value={runsLoading || runsError ? "—" : active}
           tone="brass"
           size="lg"
           strongLabel
-          // "N on record" alone hid that some of them failed, which is the
+          // "N in recent history" alone hid that some of them failed, which is the
           // part worth knowing at a glance.
           hint={
             <span className="text-slate-100">
               {failed > 0
-                ? `${runs.length} on record · ${succeeded} succeeded · ${failed} failed`
-                : `${runs.length} run${runs.length === 1 ? "" : "s"} on record`}
+                ? `${runs.length} in recent history · ${succeeded} succeeded · ${failed} failed`
+                : `${runs.length} run${runs.length === 1 ? "" : "s"} in recent history`}
             </span>
           }
         />
       </Tile>
       <Tile to="/models">
-        <Readout label="SAVED MODELS" value={models} tone="brass" size="lg" strongLabel />
+        <Readout label="SAVED MODELS" value={modelsError ? "—" : models} tone="brass" size="lg" strongLabel />
       </Tile>
       <Tile>
         <div className="absolute right-4 top-4 flex items-center gap-0.5">
@@ -139,8 +141,8 @@ export function VitalsGrid() {
           ))}
         </div>
         <Readout
-          label="RUN TIME"
-          value={fmtDuration(totalTime)}
+          label="RECENT RUN TIME"
+          value={runsLoading || runsError ? "—" : fmtDuration(totalTime)}
           tone="brass"
           size="lg"
           strongLabel
@@ -183,6 +185,7 @@ export function VitalsGrid() {
           }
         />
       </Tile>
+      </div>
     </div>
   );
 }

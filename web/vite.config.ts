@@ -11,6 +11,7 @@ const WS_BACKEND = BACKEND.replace(/^http/, "ws");
 
 export default defineConfig({
   plugins: [react()],
+  cacheDir: ".cache/vite",
   build: {
     rollupOptions: {
       output: {

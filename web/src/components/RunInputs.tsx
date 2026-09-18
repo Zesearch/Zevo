@@ -1053,10 +1053,10 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   sshHostId: "",
   generation_backend: "",
   // Blank resolves once to one GPU on the Run.
-  numGpus: "",
+  numGpus: "1",
   // Empty IS the value here: both are uncapped unless a number is typed, which
   // is what the placeholder says.
-  iterations: "", budget: "", timeLimitHours: "", queueWaitHours: "", stopThreshold: "",
+  iterations: "3", budget: "10", timeLimitHours: "1", queueWaitHours: "24", stopThreshold: "",
 };
 
 /** The effective Validation scorer shown and sent by both launch modes. */

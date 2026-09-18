@@ -8,6 +8,7 @@ import {
   LayoutGrid, GitBranch, ListChecks, Users, Folder, Box, KeyRound,
   Rocket, CornerDownLeft, Search, Layers,
 } from "lucide-react";
+import { DialogOwner, useDialogFocus } from "../../lib/dialog";
 import type { AgentDTO, RunSummary } from "../../lib/api";
 import { fireCommand, onCommand } from "../../lib/commands";
 
@@ -38,6 +39,7 @@ export function CommandPalette() {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
   const nav = useNavigate();
+  const { id: dialogId, ref: dialogRef } = useDialogFocus(open, () => setOpen(false), 100);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -51,7 +53,6 @@ export function CommandPalette() {
         e.preventDefault();
         setOpen((o) => !o);
       }
-      if (e.key === "Escape") setOpen(false);
     };
     window.addEventListener("keydown", onKey);
     const off = onCommand((c) => c === "open-palette" && setOpen(true));
@@ -123,9 +124,9 @@ export function CommandPalette() {
   let idx = -1;
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-start justify-center px-4 pt-[12vh]" onMouseDown={() => setOpen(false)}>
+    <DialogOwner.Provider value={dialogId}><div className="fixed inset-0 z-[100] flex items-start justify-center px-4 pt-[12vh]" onMouseDown={() => setOpen(false)}>
       <div className="absolute inset-0 bg-canvas/80 backdrop-blur-sm" />
-      <div
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Jump to" tabIndex={-1}
         className="bezel relative w-full max-w-2xl overflow-hidden animate-zevo-in"
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -181,6 +182,6 @@ export function CommandPalette() {
           })}
         </div>
       </div>
-    </div>
+    </div></DialogOwner.Provider>
   );
 }
