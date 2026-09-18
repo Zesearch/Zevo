@@ -43,14 +43,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 WORKDIR /app
 
-# Copy source first, then editable install. The setuptools `packages = [...]`
-# block in pyproject.toml verifies each declared package directory exists,
-# so we can't separate the pip cache layer without splitting deps out
-# to a requirements.txt.
+# Dependencies in their own cached layer. Only pyproject.toml is needed to
+# compute them, so a code change no longer reinstalls every wheel or
+# re-downloads the NLTK data; the package itself is installed after the
+# source copy with --no-deps.
+COPY pyproject.toml ./
+RUN pip install --upgrade pip \
+    && python -c "import tomllib; print(chr(10).join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/requirements.txt \
+    && pip install -r /tmp/requirements.txt \
+    && mkdir -p /opt/nltk_data && python -m nltk.downloader -d /opt/nltk_data \
+       punkt punkt_tab stopwords averaged_perceptron_tagger_eng
+
 COPY . .
-RUN pip install --upgrade pip && pip install -e .
-RUN mkdir -p /opt/nltk_data && python -m nltk.downloader -d /opt/nltk_data \
-    punkt punkt_tab stopwords averaged_perceptron_tagger_eng
+RUN pip install --no-deps -e .
 
 # Default port matches the rest of the stack.
 EXPOSE 8000
