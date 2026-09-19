@@ -164,6 +164,17 @@ async def load_memory_context(
 
 
 def _forbidden_reason(update: MemoryUpdate, run: Run) -> str:
+    # Visibility is useful metadata, never part of the stage result's success
+    # contract.  A worker can over-share a local lesson by mistake; reject just
+    # that memory row here so a valid checkpoint/prediction is not discarded.
+    if update.visibility == "shared_candidate" and update.kind not in {
+        "verified_fact", "experiment_finding", "recommendation",
+    }:
+        return (
+            "shared_candidate is reserved for verified cross-Agent facts, "
+            "experiment findings, or recommendations; keep pitfalls/runtime "
+            "details/artifact references agent_local"
+        )
     text = json.dumps(update.model_dump(), ensure_ascii=False, default=str)
     if _SECRET.search(text):
         return "memory may not contain credentials or secrets"

@@ -121,14 +121,6 @@ class MemoryUpdate(BaseModel):
             raise ValueError("details must be JSON serializable") from exc
         if len(encoded) > 6000:
             raise ValueError("details must serialize to at most 6000 characters")
-        if self.visibility == "shared_candidate" and self.kind not in {
-            "verified_fact", "experiment_finding", "recommendation",
-        }:
-            raise ValueError(
-                "shared_candidate is reserved for verified cross-Agent facts, "
-                "experiment findings, or recommendations; keep pitfalls/runtime "
-                "details/artifact references agent_local"
-            )
         return self
 
 

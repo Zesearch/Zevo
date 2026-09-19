@@ -193,18 +193,13 @@ exact `nodes`, `num_gpus`/`gpus_per_node`, job name, stdout, stderr, and matched
 site directives; embed `runtime_prologue` byte-for-byte before environment
 activation and `prepare_data.py`, embed `lifecycle_prologue`, and run
 `prepare_data.py` in the
-foreground. Validate and upload it, then submit only the remote file with
-`sbatch --parsable`.
-
-Immediately POST the JOBID to `slurm_job.infra_instances_endpoint` with
-`provider="cluster"`, `status="provisioning"`, exact Run/Ticket ids,
-`gpu_count=slurm_job.num_gpus`, and metadata containing
-`resource_request=true`, `stage="data"`, `scheduler_state="PENDING"`,
-`nodes=slurm_job.nodes`, `gpus_per_node=slurm_job.gpus_per_node`, the remote
-script/workdir, and exact `status_path`. If registration fails, cancel that
-JOBID. Return `status="deferred"` and the exact local `slurm_script_path`; do
-not poll or wait inside the Agent activation. Registration is what makes the
-generic Overview resource card appear immediately.
+foreground. Validate it, upload it to the exact
+`slurm_job.remote_script_path` inside `slurm_job.remote_work_dir`, and verify
+the checksum. Do not call `sbatch` or create Infrastructure bookkeeping.
+Return `status="deferred"` and the exact local `slurm_script_path`; the engine
+validates the Result and all stage contracts before it submits the uploaded
+file and registers the returned JOBID. Do not poll or wait inside the Agent
+activation.
 
 On `phase="collect"`, never submit duplicate work. A non-terminal state remains
 deferred. On `COMPLETED`, copy and validate the compact control artifacts and

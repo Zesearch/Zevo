@@ -34,6 +34,8 @@ def test_cluster_stage_contract_names_a_finite_sbatch_artifact() -> None:
         resource_plan_source="test scheduler",
         resource_plan_rationale="rough estimate rounded to the two-GPU tier",
         script_path="/tmp/train.sbatch",
+        remote_work_dir="/remote/run/train-001",
+        remote_script_path="/remote/run/train-001/train.sbatch",
         job_name="zevo-train-001",
         status_path=status_path,
         stdout_path="/remote/run/train-001/slurm-%j.out",
@@ -41,9 +43,6 @@ def test_cluster_stage_contract_names_a_finite_sbatch_artifact() -> None:
         lifecycle_prologue=slurm_lifecycle_prologue(status_path),
         runtime_prologue=slurm_runtime_prologue(),
         num_gpus=2,
-        infra_instance_create_schema={"type": "object"},
-        infra_instance_patch_schema={"type": "object"},
-        infra_instance_response_schema={"type": "object"},
     )
     assert contract.script_path.endswith(".sbatch")
     assert contract.num_gpus == 2

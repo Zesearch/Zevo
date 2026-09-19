@@ -60,13 +60,15 @@ stage or retry action.
 
 While a new instruction is `queued` or `delivered`, Zevo pauses optimization
 Specialist activations and holds their queued wakeups. `needs_input` keeps that
-gate closed. An already submitted scheduler job keeps running unless you
-explicitly decide that the request warrants cancelling its Ticket; pausing the
-control plane must not discard expensive external work. Recording `scheduled`,
+gate closed. An already submitted scheduler job keeps running while you decide.
+Recording `scheduled`,
 `applied`, or `declined` releases the gate. When a Specialist should apply the
 request now, post the exact instruction to that Ticket before recording the
-releasing decision, so its held wake resumes with the new context rather than
-the old plan.
+releasing decision and include `run_instruction_id=<instruction id>` in that
+message request. Zevo stops the Specialist's old activation and exact external
+job, waits for scheduler-confirmed release, then starts the instruction
+activation with the new context. Never route an apply-now instruction as an
+ordinary unlinked message.
 
 For each new instruction, promptly PATCH
 `api_routes.decide_run_instruction` with a plain-language decision. Use
@@ -77,8 +79,9 @@ when the user must clarify, `declined` when the request cannot be honored, and
 scheduled instruction to `applied` when it is carried out. The dashboard shows
 this response to the user. If an active Specialist should act, POST the exact
 instruction and context to `api_routes.post_ticket_message` with
-`author="orchestrator"`; this queues a Specialist wake. Inspect the current
-external job before claiming that its resources or work changed. Preserve the
+`author="orchestrator"` and the exact `run_instruction_id`; this queues the
+replacement Specialist wake. Inspect the new external job before claiming that
+its resources or work changed. Preserve the
 normal Run budgets, provenance, and execution contracts when acting on any
 instruction. Before finishing the Run, resolve any scheduled instruction or
 explain in its decision why the Run must end before it can be applied.

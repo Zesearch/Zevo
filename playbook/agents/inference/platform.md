@@ -137,27 +137,21 @@ status path. It emits `RUNNING` when the allocation begins and `EXITED` when
 the script exits, allowing Zevo's persistent status stream to observe lifecycle
 changes without repeatedly querying Slurm.
 
-Validate with `bash -n`, upload and checksum the file, then submit only
-`sbatch --parsable <remote-predict.sbatch>`. Parse only its first
-semicolon-delimited component as the JOBID, then immediately register it at
-`slurm_job.infra_instances_endpoint` as cluster/provisioning for this
-Run/Ticket, zero cost, `gpu_count=slurm_job.num_gpus`, and metadata containing
-`auto_release=true`, `resource_request=true`,
-`stage="inference"`, `scheduler_state="PENDING"`,
-`nodes=slurm_job.nodes`, `gpus_per_node=slurm_job.gpus_per_node`, the remote script/workdir, and
-`status_path` equal to the exact `slurm_job.status_path`.
-Use the supplied exact schemas. If bookkeeping fails, cancel the job. Then
-return `status="deferred"` with `slurm_script_path` set and no claimed
+Validate with `bash -n`, upload and checksum the file at the exact
+`slurm_job.remote_script_path` inside `slurm_job.remote_work_dir`. Do not call
+`sbatch` or create Infrastructure bookkeeping yourself. Return
+`status="deferred"` with `slurm_script_path` set and no claimed
 predictions. Do not POST `Waiting:`, `Running:`, or `Done:`: after validating
-the typed Result, script, status path, and registered JOBID, the engine commits
-the watcher handoff and publishes the appropriate lifecycle message. Do not
+the typed Result, configuration, script, and paths, the engine submits the
+uploaded file, registers the returned JOBID, commits the watcher handoff, and
+publishes the appropriate lifecycle message. Do not
 call `squeue`, `sacct`, or wait for the job: the backend Scheduler streams the
 job-local lifecycle file, uses state-aware low-frequency polling only as a
 fallback and for authoritative terminal details, enforces the queue deadline,
 records terminal state, and wakes this same Ticket.
 
-After the deferred Result passes validation, the engine resolves `%j` with the
-registered JOBID and stamps the exact stdout/stderr paths into watcher metadata;
+After the deferred Result passes validation, the engine submits the job,
+resolves `%j` with its JOBID, and stamps the exact stdout/stderr paths into watcher metadata;
 the Agent must not provide or override those engine-owned fields.
 
 When `slurm_job.phase="collect"`, never submit another inference job. If its

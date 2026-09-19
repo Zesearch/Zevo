@@ -44,6 +44,7 @@ from zevo.providers import resolve_ssh_key
 from zevo.api.database import get_db
 from zevo.api.ui_access import is_trusted_ui_request
 from zevo.db import (
+    AgentWakeupRequest,
     ExecutionEvent,
     HeartbeatResult,
     HeartbeatRun,
@@ -270,6 +271,12 @@ class RunInstructionDTO(BaseModel):
         "queued", "delivered", "scheduled", "applied", "needs_input", "declined"
     ]
     agent_response: str
+    activity_status: Literal[
+        "reviewing", "waiting", "applying", "scheduled", "applied",
+        "needs_input", "declined", "needs_attention",
+    ]
+    activity_agent: str = ""
+    target_ticket_id: str | None = None
     created_at: str
     updated_at: str
 
@@ -286,7 +293,21 @@ class DecideRunInstruction(BaseModel):
     agent_response: str = Field(min_length=1, max_length=4000)
 
 
-def _instruction_dto(row: RunInstruction) -> RunInstructionDTO:
+def _instruction_dto(
+    row: RunInstruction,
+    *,
+    activity_status: str = "",
+    activity_agent: str = "",
+    target_ticket_id: str | None = None,
+) -> RunInstructionDTO:
+    default_activity = {
+        "queued": "reviewing",
+        "delivered": "reviewing",
+        "scheduled": "scheduled",
+        "applied": "applied",
+        "needs_input": "needs_input",
+        "declined": "declined",
+    }[row.status]
     return RunInstructionDTO(
         id=row.id,
         run_id=row.run_id,
@@ -294,9 +315,61 @@ def _instruction_dto(row: RunInstruction) -> RunInstructionDTO:
         body=row.body,
         status=row.status,
         agent_response=row.agent_response or "",
+        activity_status=activity_status or default_activity,
+        activity_agent=activity_agent,
+        target_ticket_id=target_ticket_id,
         created_at=row.created_at.isoformat() if row.created_at else "",
         updated_at=row.updated_at.isoformat() if row.updated_at else "",
     )
+
+
+async def _instruction_dto_list(
+    db: AsyncSession, rows: list[RunInstruction],
+) -> list[RunInstructionDTO]:
+    if not rows:
+        return []
+    run_id = rows[0].run_id
+    tickets = (await db.execute(
+        select(Ticket).where(Ticket.run_id == run_id)
+    )).scalars().all()
+    ticket_by_id = {ticket.id: ticket for ticket in tickets}
+    wakeups = (await db.execute(
+        select(AgentWakeupRequest)
+        .where(AgentWakeupRequest.ticket_id.in_(list(ticket_by_id)))
+        .order_by(AgentWakeupRequest.created_at)
+    )).scalars().all() if ticket_by_id else []
+    wakeup_by_instruction: dict[str, AgentWakeupRequest] = {}
+    for wakeup in wakeups:
+        payload = wakeup.payload if isinstance(wakeup.payload, dict) else {}
+        instruction_id = str(payload.get("run_instruction_id") or "")
+        if instruction_id:
+            wakeup_by_instruction[instruction_id] = wakeup
+
+    result: list[RunInstructionDTO] = []
+    for row in rows:
+        wakeup = wakeup_by_instruction.get(row.id)
+        activity = ""
+        agent = ""
+        target_id = None
+        if wakeup is not None:
+            target_id = wakeup.ticket_id
+            target = ticket_by_id.get(str(target_id or ""))
+            agent = target.agent_id if target is not None else wakeup.agent_id
+            if row.status == "scheduled":
+                activity = {
+                    "queued": "waiting",
+                    "running": "applying",
+                    "completed": "applying",
+                    "failed": "needs_attention",
+                    "coalesced": "waiting",
+                }.get(wakeup.status, "scheduled")
+        result.append(_instruction_dto(
+            row,
+            activity_status=activity,
+            activity_agent=agent,
+            target_ticket_id=target_id,
+        ))
+    return result
 
 
 _BENCHMARK_LIVE_STATUSES = {
@@ -963,7 +1036,7 @@ async def list_run_instructions(
         .where(RunInstruction.run_id == run_id)
         .order_by(RunInstruction.created_at, RunInstruction.id)
     )).scalars().all()
-    return [_instruction_dto(row) for row in rows]
+    return await _instruction_dto_list(db, list(rows))
 
 
 @router.post("/runs/{run_id}/instructions", response_model=RunInstructionDTO)
@@ -1033,7 +1106,7 @@ async def decide_run_instruction(
     row.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(row)
-    return _instruction_dto(row)
+    return (await _instruction_dto_list(db, [row]))[0]
 
 
 @router.get("/runs/{run_id}", response_model=RunDetail)
