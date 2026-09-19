@@ -353,6 +353,11 @@ async def _converse_async(client, **kwargs):
 async def _dispatch_tool(
     name: str, args: dict, *, cwd: str, env: dict[str, str], staged_dir=None
 ) -> dict[str, Any]:
+    # A user instruction freezes optimization work while the Orchestrator
+    # decides how and when to apply it.  SDK drivers run in-process, so they
+    # need this cooperative boundary in addition to SIGSTOP for live shells.
+    from zevo.engine.run import process_registry
+    await process_registry.wait_until_resumed(str(env.get("TICKET_ID") or ""))
     if name == "Skill":
         action = str(args.get("action", "load")).lower()
         if action == "list":

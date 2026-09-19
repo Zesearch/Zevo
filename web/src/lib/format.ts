@@ -311,3 +311,21 @@ export function splitDatasetPath(
   const file = rest.slice(cut + 1);
   return { dataset, file, label: `${dataset}/${file}` };
 }
+
+/** A user-facing name for a file path managed by Zevo.
+ *
+ * Runtime paths carry workspace, user, and upload UUID segments so the backend
+ * can isolate and authorize files. Those segments are storage details rather
+ * than part of the file's name. Catalogue paths keep the dataset plus its path
+ * inside that dataset; one-off browser uploads show the original filename.
+ */
+export function displayFilePath(path: string): string {
+  const inCatalogue = splitDatasetPath(path);
+  if (inCatalogue) return inCatalogue.label;
+
+  const normalized = (path || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  if (/(^|\/)uploads\//.test(normalized)) {
+    return normalized.split("/").filter(Boolean).pop() || path;
+  }
+  return normalized.startsWith("/app/") ? normalized.slice(5) : normalized;
+}

@@ -9,7 +9,7 @@ import { FileSetView } from "../components/FileSetView";
 import { Modal } from "../components/Modal";
 import { Bezel, Detail, Kicker, PageHead } from "../components/zevo/primitives";
 import { PAGE_SIZES, Pager } from "../components/zevo/Pager";
-import { fmtDate, fmtMetric, splitDatasetPath } from "../lib/format";
+import { displayFilePath, fmtDate, fmtMetric, splitDatasetPath } from "../lib/format";
 import { useRowsPerPage } from "../lib/useRowsPerPage";
 import { api } from "../lib/api";
 import type { TaskDTO, TaskSettingDTO } from "../lib/api";
@@ -118,7 +118,7 @@ function TestFiles({
         label: inCatalogue.label,
       };
     }
-    const parts = path.replace(/\/+$/, "").split("/");
+    const parts = displayFilePath(path).split("/");
     const file = parts.pop() || path;
     const folder = parts.pop() || "";
     return { file, folder, packaged: false, label: folder ? `${folder}/${file}` : file };
@@ -184,14 +184,14 @@ function TestFiles({
           f.packaged ? (
             <button
               onClick={(event) => { event.stopPropagation(); onPeek(f.folder, f.file); }}
-              title={path}
+              title={f.label}
               className="flex min-w-0 items-baseline gap-1 text-slate-300 transition hover:text-brass-300 hover:underline"
             >
               <Folder size={11} className="shrink-0 translate-y-px text-slate-500" />
               <span className="min-w-0 truncate font-mono text-2xs">{f.label}</span>
             </button>
           ) : (
-            <span title={path} className="min-w-0 truncate font-mono text-2xs text-slate-300">{f.label}</span>
+            <span title={f.label} className="min-w-0 truncate font-mono text-2xs text-slate-300">{f.label}</span>
           )
         ) : (
           <span title={value} className="min-w-0 truncate font-mono text-2xs text-slate-300">{value}</span>

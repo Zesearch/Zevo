@@ -1290,14 +1290,23 @@ export function RunDetailPage() {
     runId ? `/api/heartbeats?run_id=${encodeURIComponent(runId)}&limit=500` : null,
     { refreshInterval: 5000 },
   );
+  // A user-instruction wake is control-plane review shown in the dedicated
+  // instruction panel. Keep its heartbeat for audit and cost accounting, but
+  // do not render it as another pipeline step in the Timeline/ring counts.
+  const executionHeartbeats = useMemo(
+    () => heartbeats.filter((h) => !(
+      h.agent_id === "orchestrator" && h.activation_phase === "instruction"
+    )),
+    [heartbeats],
+  );
   const wakesByTicket = useMemo(() => {
     const m: Record<string, number> = {};
-    for (const h of heartbeats) m[h.ticket_id] = (m[h.ticket_id] ?? 0) + 1;
+    for (const h of executionHeartbeats) m[h.ticket_id] = (m[h.ticket_id] ?? 0) + 1;
     return m;
-  }, [heartbeats]);
+  }, [executionHeartbeats]);
   const supervisorWakes = useMemo(
-    () => heartbeats.filter((h) => h.agent_id === "orchestrator").length,
-    [heartbeats],
+    () => executionHeartbeats.filter((h) => h.agent_id === "orchestrator").length,
+    [executionHeartbeats],
   );
   // The hub's lamp, by the same rule the rim stations use — the supervisor is
   // an agent and can be running, done or failed like any other.
@@ -1570,7 +1579,7 @@ export function RunDetailPage() {
       </div>
       <div className="mt-4">
         {tab === "timeline" ? (
-          <PipelineTimeline run={run} heartbeats={heartbeats} />
+          <PipelineTimeline run={run} heartbeats={executionHeartbeats} />
         ) : tab === "journal" ? (
           <JournalPanel run={run} />
         ) : tab === "tickets" ? (

@@ -13,6 +13,7 @@ from zevo.api.routers.shared import runs as runs_router
 from zevo.db import AgentWakeupRequest, Base, Run, RunInstruction, Ticket
 from zevo.engine.agent.drivers._prompt import _conversation_block
 from zevo.engine.run.runner import _run_instruction_context
+from zevo.engine.run.steering import instruction_gate_active
 
 
 @pytest_asyncio.fixture
@@ -73,6 +74,7 @@ async def test_run_instruction_wakes_supervisor_and_persists_decision(client_and
         run = await session.get(Run, "run-1")
         supervisor = await session.get(Ticket, "orchestrate-001")
         specialist = await session.get(Ticket, "train-001")
+        assert await instruction_gate_active(session, "run-1") is True
         assert await _run_instruction_context(session, run=run, ticket=specialist) == []
         context = await _run_instruction_context(session, run=run, ticket=supervisor)
         assert [item["body"] for item in context] == ["Use fewer GPUs when safe"]
@@ -93,6 +95,7 @@ async def test_run_instruction_wakes_supervisor_and_persists_decision(client_and
     assert listed.json()[0]["agent_response"] == "I will change the next safe step."
 
     async with Session() as session:
+        assert await instruction_gate_active(session, "run-1") is False
         context = await _run_instruction_context(
             session,
             run=await session.get(Run, "run-1"),
@@ -111,6 +114,22 @@ async def test_run_instruction_wakes_supervisor_and_persists_decision(client_and
             run=await session.get(Run, "run-1"),
             ticket=await session.get(Ticket, "orchestrate-001"),
         ) == []
+
+
+@pytest.mark.asyncio
+async def test_needs_input_keeps_run_instruction_gate_closed(client_and_session) -> None:
+    client, Session = client_and_session
+    posted = await client.post(
+        "/api/runs/run-1/instructions", json={"body": "Change the next step"},
+    )
+    instruction_id = posted.json()["id"]
+    decision = await client.patch(
+        f"/api/runs/run-1/instructions/{instruction_id}",
+        json={"status": "needs_input", "agent_response": "Which checkpoint?"},
+    )
+    assert decision.status_code == 200
+    async with Session() as session:
+        assert await instruction_gate_active(session, "run-1") is True
 
 
 @pytest.mark.asyncio

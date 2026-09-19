@@ -106,6 +106,7 @@ from zevo.engine.run.failure_policy import (
 )
 from zevo.engine.run.resource_planning import plan_stage_resources
 from zevo.engine.run.slurm_capacity import probe_slurm_capacity
+from zevo.engine.run.steering import instruction_gate_active
 from zevo.engine.observe import transcript_bus
 from zevo.engine.artifact_validation import (
     materialize_system_scoring_artifacts,
@@ -3882,6 +3883,8 @@ async def run_ticket(
     work_dir_root: str = "",
     driver_name: str = "",
     model_override: str = "",
+    activation_source: str = "",
+    activation_reason: str = "",
 ) -> Ticket:
     """Run one ticket through the appropriate Driver. Persists everything."""
     tk = (
@@ -4149,7 +4152,16 @@ async def run_ticket(
     # and re-announcing it would restart the pipeline behind it.
     status_at_pickup = tk.status
     slurm_contract = getattr(inp, "slurm_job", None)
-    if status_at_pickup == "repairing":
+    if (
+        tk.agent_id == "orchestrator"
+        and activation_source == "on_demand"
+        and activation_reason.startswith("run user instruction ")
+    ):
+        # The dashboard keeps instruction decisions in their dedicated panel.
+        # This tag lets the Run Timeline omit a steering-only activation while
+        # retaining the heartbeat as a complete audit record.
+        hb.activation_phase = "instruction"
+    elif status_at_pickup == "repairing":
         hb.activation_phase = "repair"
     elif isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled:
         hb.activation_phase = str(slurm_contract.phase or "")
@@ -4498,6 +4510,7 @@ async def run_ticket(
         Session = BackgroundSession
         batch: list[dict] = []
         stopped = False
+        steering_paused = False
         last_real_event_time = asyncio.get_event_loop().time()
         # Closure-scoped: each heartbeat gets its own counter so
         # concurrent flushers don't race on a shared function attribute.
@@ -4567,6 +4580,40 @@ async def run_ticket(
                                 transcript_bus.publish(heartbeat_id, cancel_ev)
                                 batch.append(cancel_ev)
                                 stopped = True
+                            elif (
+                                tk_row is not None
+                                and tk_row.agent_id != "orchestrator"
+                                and tk_row.lane == "optimization"
+                            ):
+                                gate_active = await instruction_gate_active(
+                                    cs, tk_row.run_id,
+                                )
+                                if gate_active and not steering_paused:
+                                    # SIGSTOP preserves the activation and any
+                                    # in-memory repair context.  A scheduler-owned
+                                    # Slurm job is independent and keeps running;
+                                    # the Orchestrator may explicitly cancel it if
+                                    # the instruction requires that.
+                                    process_registry.pause(tk.id)
+                                    steering_paused = True
+                                    print(
+                                        "[runner] instruction gate paused "
+                                        f"ticket {tk.id} heartbeat {heartbeat_id[:8]}",
+                                        file=sys.stderr, flush=True,
+                                    )
+                                elif not gate_active and steering_paused:
+                                    process_registry.resume(tk.id)
+                                    steering_paused = False
+                                    print(
+                                        "[runner] instruction decision resumed "
+                                        f"ticket {tk.id} heartbeat {heartbeat_id[:8]}",
+                                        file=sys.stderr, flush=True,
+                                    )
+                                if steering_paused:
+                                    # Do not manufacture periodic "still running"
+                                    # events while the instruction panel already
+                                    # explains why execution is intentionally idle.
+                                    last_real_event_time = now
                     except Exception as e:
                         _warn("flusher.cancel_check", e)
 
@@ -4576,7 +4623,11 @@ async def run_ticket(
                 # the 30s monitor loop) post __PROGRESS__ into ExecutionEvent, so the
                 # pulse can report "training · step N/M · loss L".
                 now = asyncio.get_event_loop().time()
-                if not stopped and (now - last_real_event_time) >= ALIVE_INTERVAL_S:
+                if (
+                    not stopped
+                    and not steering_paused
+                    and (now - last_real_event_time) >= ALIVE_INTERVAL_S
+                ):
                     msg = "Agent is still running…"
                     prog: dict = {}
                     try:
@@ -4647,6 +4698,11 @@ async def run_ticket(
                     # warn so a permanent DB outage shows up in logs.
                     _warn("flusher.batch_insert", e)
         finally:
+            # Never strand a stopped process if the flusher itself exits during
+            # shutdown or another exceptional runner path.
+            if steering_paused:
+                from zevo.engine.run import process_registry
+                process_registry.resume(tk.id)
             # Final drain on shutdown
             if batch:
                 try:

@@ -447,8 +447,10 @@ class EvaluationRunnerDriver:
                 if event_sink is not None else None
             )
             try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    proc.communicate(), timeout=_timeout_seconds(
+                stdout_b, stderr_b = await process_registry.wait_for_active_time(
+                    proc.communicate(),
+                    key=inp.ticket_id,
+                    timeout=_timeout_seconds(
                         code_execution=bool(inp.code_execution_adapter),
                     ),
                 )
