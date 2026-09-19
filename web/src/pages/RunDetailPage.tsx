@@ -7,7 +7,7 @@ import { RunInstructionPanel } from "../components/RunInstructionPanel";
 import { StepTimeline } from "../components/StepTimeline";
 import type { EventEnvelope } from "../components/LiveTranscript";
 
-import type { BenchmarkProgress, CostBreakdown, HeartbeatDTO, InfraInstanceDTO, RunDetail, TicketDetail } from "../lib/api";
+import type { BenchmarkProgress, CostBreakdown, HeartbeatDTO, InfraInstanceDTO, RunDetail, RunInstructionDTO, TicketDetail } from "../lib/api";
 import { StatusBadge, statusToneFor } from "../components/StatusBadge";
 import { LiveTranscript } from "../components/LiveTranscript";
 import { IterationChart, RunJournal } from "../components/IterationHistoryPanel";
@@ -430,7 +430,13 @@ function PerTicketGroups({ run }: { run: RunDetail }) {
   );
 }
 
-function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: HeartbeatDTO[] }) {
+function PipelineTimeline({
+  run, heartbeats, activeInstructions,
+}: {
+  run: RunDetail;
+  heartbeats: HeartbeatDTO[];
+  activeInstructions: RunInstructionDTO[];
+}) {
   const groups = useMemo(() => groupByIteration(run.tickets), [run.tickets]);
   // A run has ONE supervisor ticket with one heartbeat per activation, spanning
   // every iteration. groupByIteration can only file it under one block, so the
@@ -513,8 +519,46 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
       .at(-1);
     return (lastStage && info.get(lastStage.id)?.key) || groups.at(-1)?.key || "baseline";
   })();
-  const allTickets = groups.flatMap((g) => [...g.tickets, ...g.mirror]);
-  const running = allTickets.find((t) => t.status === "running" || t.status === "repairing");
+  const allTickets = useMemo(
+    () => groups.flatMap((g) => [...g.tickets, ...g.mirror]),
+    [groups],
+  );
+  const pausedTicketIds = useMemo(() => {
+    if (activeInstructions.length === 0) return new Set<string>();
+    const ids = new Set(
+      activeInstructions
+        .map((instruction) => instruction.target_ticket_id)
+        .filter((id): id is string => !!id),
+    );
+    // While the Orchestrator is still reviewing, it may not have selected a
+    // target yet. The instruction gate has already stopped every live
+    // optimization Specialist, so reflect those pauses immediately.
+    for (const ticket of allTickets) {
+      if (
+        ticket.lane !== "held_out_test"
+        && agentIdOf(ticket) !== "orchestrator"
+        && (ticket.status === "running" || ticket.status === "repairing")
+      ) ids.add(ticket.id);
+    }
+    // A submitted cluster stage is represented as waiting_external. Its remote
+    // job may continue, but the pipeline itself is paused until the instruction
+    // decision. Keep the current stage visible instead of leaving no Paused row.
+    if (ids.size === 0) {
+      const current = [...allTickets]
+        .filter((ticket) => (
+          ticket.lane !== "held_out_test"
+          && agentIdOf(ticket) !== "orchestrator"
+          && ["queued", "awaiting_input", "waiting_external"].includes(ticket.status)
+        ))
+        .sort((a, b) => a.created_at.localeCompare(b.created_at))
+        .at(-1);
+      if (current) ids.add(current.id);
+    }
+    return ids;
+  }, [activeInstructions, allTickets]);
+  const paused = allTickets.find((ticket) => pausedTicketIds.has(ticket.id));
+  const running = paused
+    || allTickets.find((t) => t.status === "running" || t.status === "repairing");
   const runningOrchestrator = orchestratorWakes.find((heartbeat) => heartbeat.is_live);
   const [sel, setSel] = useState<string>("");
   // While the run is LIVE the right panel follows the running stage — a click
@@ -563,15 +607,18 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
           const groupOrchestrator = orchestratorByGroup.get(g.key) || [];
           const groupHasUnrecordedFailure = unrecordedOrchestratorFailure
             && failureGroupKey === g.key;
-          const groupRunning = groupTickets.some((t) => t.status === "running" || t.status === "repairing")
-            || groupOrchestrator.some((heartbeat) => heartbeat.is_live);
+          const groupPaused = groupTickets.some((ticket) => pausedTicketIds.has(ticket.id));
+          const groupRunning = !groupPaused && (groupTickets.some((t) => t.status === "running" || t.status === "repairing")
+            || groupOrchestrator.some((heartbeat) => heartbeat.is_live));
           const groupFailed = groupTickets.some((t) => t.status === "failed")
             || groupOrchestrator.some((heartbeat) => heartbeat.action === "mark_failed")
             || groupHasUnrecordedFailure;
           const groupDegraded = groupTickets.some((t) => t.status === "degraded");
           const groupDone = groupTickets.length > 0
             && groupTickets.every((t) => ["succeeded", "skipped"].includes(t.status));
-          const headDot = groupRunning
+          const headDot = groupPaused
+            ? statusToneFor("paused").dot
+            : groupRunning
             ? "bg-brass-400"
             : groupFailed
               ? "bg-coral-500"
@@ -720,8 +767,10 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                       ? activationCaptions.join(" → ")
                       : activationCaptions[0] || operationCaption(t);
                     const active = selectedId === t.id;
-                    const isRunning = t.status === "running" || t.status === "repairing";
-                    const dot = statusToneFor(t.status).dot;
+                    const isPaused = pausedTicketIds.has(t.id);
+                    const displayStatus = isPaused ? "paused" : t.status;
+                    const isRunning = !isPaused && (t.status === "running" || t.status === "repairing");
+                    const dot = statusToneFor(displayStatus).dot;
                     rows.push(
                       <li key={t.id} className="relative">
                         {showConnector && (
@@ -744,7 +793,7 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
                               <span className={`text-sm font-medium ${active ? "text-brass-300" : "text-slate-200"}`}>
                                 {stageLabel(t)}
                               </span>
-                              <StatusBadge status={t.status} />
+                              <StatusBadge status={displayStatus} />
                             </span>
                             <span className="flex min-w-0 items-center gap-1.5">
                               <span className="truncate font-mono text-[12px] text-dim">{activity}</span>
@@ -854,16 +903,18 @@ function PipelineTimeline({ run, heartbeats }: { run: RunDetail; heartbeats: Hea
           ? Number(selectedId.split("#")[1]) : undefined}
         showUnrecordedFailure={selectedId.endsWith("#failed")}
         benchmarkProgress={run.benchmark_progress}
+        paused={pausedTicketIds.has(selectedId.split("#")[0])}
       />
     </div>
   );
 }
 
-function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkProgress }: {
+function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkProgress, paused = false }: {
   ticketId: string;
   wake?: number;
   showUnrecordedFailure?: boolean;
   benchmarkProgress?: BenchmarkProgress;
+  paused?: boolean;
 }) {
   const { data: t } = useSWR<TicketDetail>(
     ticketId ? `/api/tickets/${ticketId}` : null, {
@@ -1008,7 +1059,7 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
           <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{t.id}</Link>
-          <StatusBadge status={t.status} />
+          <StatusBadge status={paused ? "paused" : t.status} />
         </div>
         <div className="flex items-center gap-3">
           <Link to={`/tickets/${t.id}`} className="font-mono text-[13px] uppercase tracking-wider text-dim hover:text-brass-300">
@@ -1290,13 +1341,20 @@ export function RunDetailPage() {
     runId ? `/api/heartbeats?run_id=${encodeURIComponent(runId)}&limit=500` : null,
     { refreshInterval: 5000 },
   );
+  const { data: instructions = [] } = useSWR<RunInstructionDTO[]>(
+    runId ? `/api/runs/${encodeURIComponent(runId)}/instructions` : null,
+    { refreshInterval: 3000 },
+  );
+  const activeInstructions = useMemo(
+    () => instructions.filter((instruction) =>
+      ["reviewing", "waiting", "applying"].includes(instruction.activity_status)),
+    [instructions],
+  );
   // A user-instruction wake is control-plane review shown in the dedicated
   // instruction panel. Keep its heartbeat for audit and cost accounting, but
   // do not render it as another pipeline step in the Timeline/ring counts.
   const executionHeartbeats = useMemo(
-    () => heartbeats.filter((h) => !(
-      h.agent_id === "orchestrator" && h.activation_phase === "instruction"
-    )),
+    () => heartbeats.filter((h) => h.activation_phase !== "instruction"),
     [heartbeats],
   );
   const wakesByTicket = useMemo(() => {
@@ -1579,7 +1637,11 @@ export function RunDetailPage() {
       </div>
       <div className="mt-4">
         {tab === "timeline" ? (
-          <PipelineTimeline run={run} heartbeats={executionHeartbeats} />
+          <PipelineTimeline
+            run={run}
+            heartbeats={executionHeartbeats}
+            activeInstructions={activeInstructions}
+          />
         ) : tab === "journal" ? (
           <JournalPanel run={run} />
         ) : tab === "tickets" ? (

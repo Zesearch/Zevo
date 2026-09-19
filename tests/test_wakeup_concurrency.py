@@ -26,9 +26,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from zevo.db.models import (
-    Agent, AgentWakeupRequest, Base, RunInstruction, Ticket, TicketNotice,
+    Agent, AgentWakeupRequest, Base, InfraInstance, RunInstruction, Ticket, TicketNotice,
 )
 from zevo.engine.run.scheduler import wakeup_daemon as wd
+from zevo.engine.run.wakeup import queue_wakeup
 
 
 @pytest_asyncio.fixture
@@ -174,6 +175,121 @@ async def test_pending_run_instruction_holds_specialist_wakeup(db, started):
     assert await wd._drain_once() == 1
     await asyncio.sleep(0)
     assert started == ["train-paused-wakeup"]
+
+
+@pytest.mark.asyncio
+async def test_instruction_identity_promotes_the_queued_wakeup(db) -> None:
+    await _seed(db, "train", cap=1, n_queued=0)
+    async with db() as s:
+        s.add(Ticket(
+            id="train-directed", run_id="run-directed", agent_id="train",
+            status="cancelled", lane="optimization", payload={},
+            customization={}, inputs={},
+            error_message="current activation superseded by Run instruction instruction-1",
+        ))
+        s.add(AgentWakeupRequest(
+            id="old-assignment", agent_id="train", ticket_id="train-directed",
+            status="queued", source="assignment",
+            scheduled_for=datetime.now(timezone.utc),
+        ))
+        await s.commit()
+        promoted = await queue_wakeup(
+            s,
+            agent_id="train",
+            ticket_id="train-directed",
+            source="on_demand",
+            reason="message by orchestrator",
+            payload={"run_instruction_id": "instruction-1"},
+        )
+        assert promoted.id == "old-assignment"
+        assert promoted.source == "on_demand"
+        assert promoted.payload == {"run_instruction_id": "instruction-1"}
+
+
+@pytest.mark.asyncio
+async def test_new_slurm_job_replaces_stale_queued_collect_payload(db) -> None:
+    await _seed(db, "inference", cap=1, n_queued=0)
+    async with db() as s:
+        s.add(Ticket(
+            id="infer-repaired", run_id="run-repaired", agent_id="inference",
+            status="queued", lane="optimization", payload={},
+            customization={}, inputs={},
+        ))
+        s.add(AgentWakeupRequest(
+            id="old-collect", agent_id="inference", ticket_id="infer-repaired",
+            status="queued", source="slurm_watcher", reason="old job ended",
+            payload={"job_id": "100"}, scheduled_for=datetime.now(timezone.utc),
+        ))
+        await s.commit()
+        current = await queue_wakeup(
+            s,
+            agent_id="inference",
+            ticket_id="infer-repaired",
+            source="slurm_watcher",
+            reason="new job ended",
+            payload={"job_id": "200", "scheduler_state": "COMPLETED"},
+        )
+        assert current.id == "old-collect"
+        assert current.payload["job_id"] == "200"
+        assert "superseded stale Slurm wake for 100" in current.reason
+
+
+@pytest.mark.asyncio
+async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
+    db, monkeypatch,
+) -> None:
+    await _seed(db, "train", cap=1, n_queued=0)
+    async with db() as s:
+        s.add(Ticket(
+            id="train-replace", run_id="run-replace", agent_id="train",
+            status="cancelled", lane="optimization", payload={},
+            customization={}, inputs={},
+            error_message="current activation superseded by Run instruction instruction-1",
+        ))
+        s.add(RunInstruction(
+            id="instruction-1", run_id="run-replace", body="Use a better plan",
+            status="scheduled", agent_response="Applying now",
+        ))
+        s.add(InfraInstance(
+            id="stage-row", provider="cluster", instance_id="12345",
+            run_id="run-replace", ticket_id="train-replace",
+            status="provisioning", meta={"resource_request": True},
+        ))
+        s.add(AgentWakeupRequest(
+            id="instruction-wake", agent_id="train", ticket_id="train-replace",
+            status="queued", source="on_demand", reason="message by orchestrator",
+            payload={"run_instruction_id": "instruction-1"},
+            scheduled_for=datetime.now(timezone.utc),
+        ))
+        await s.commit()
+
+    @asynccontextmanager
+    async def _lock(*_args, **_kwargs):
+        yield True
+
+    calls: list[dict] = []
+
+    async def _run(*_args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(wd, "advisory_lock", _lock)
+    monkeypatch.setattr(wd, "run_ticket", _run)
+    await wd._run_one("train", "instruction-wake", datetime.now(timezone.utc))
+    assert calls == []
+
+    async with db() as s:
+        stage = await s.get(InfraInstance, "stage-row")
+        stage.released_at = datetime.now(timezone.utc)
+        stage.status = "released"
+        wake = await s.get(AgentWakeupRequest, "instruction-wake")
+        wake.scheduled_for = datetime.now(timezone.utc)
+        await s.commit()
+
+    await wd._run_one("train", "instruction-wake", datetime.now(timezone.utc))
+    assert calls[0]["activation_payload"] == {"run_instruction_id": "instruction-1"}
+    async with db() as s:
+        ticket = await s.get(Ticket, "train-replace")
+        assert ticket.status == "queued"
 
 
 @pytest.mark.asyncio

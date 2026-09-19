@@ -226,9 +226,10 @@ class PatchInfraInstanceBody(StrictBody):
 class SlurmStageJobContract(BaseModel):
     """Engine-owned contract for a finite Data, Train, or Inference Slurm job.
 
-    Cluster stages render this contract as a local ``.sbatch`` artifact, copy
-    it to the verified login route, and submit that file. Other providers keep
-    ``enabled=false`` and use direct SSH execution.
+    Cluster stages render this contract as a local ``.sbatch`` artifact and
+    copy it to the exact verified login path. After validating the typed stage
+    Result and the local/remote script checksum, the engine submits that file.
+    Other providers keep ``enabled=false`` and use direct SSH execution.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -244,6 +245,8 @@ class SlurmStageJobContract(BaseModel):
     resource_plan_source: str = ""
     resource_plan_rationale: str = ""
     script_path: str = ""
+    remote_work_dir: str = ""
+    remote_script_path: str = ""
     job_name: str = ""
     status_path: str = ""
     stdout_path: str = ""
@@ -277,11 +280,7 @@ class SlurmStageJobContract(BaseModel):
         ),
     )
     max_queue_wait_hours: float = Field(48, gt=0, le=168)
-    infra_instances_endpoint: Literal["/api/infra/instances"] = "/api/infra/instances"
     openapi_endpoint: Literal["/api/openapi.json"] = "/api/openapi.json"
-    infra_instance_create_schema: dict[str, Any] = Field(default_factory=dict)
-    infra_instance_patch_schema: dict[str, Any] = Field(default_factory=dict)
-    infra_instance_response_schema: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def gpus_per_node(self) -> int:
@@ -299,7 +298,8 @@ class SlurmStageJobContract(BaseModel):
             if any((
                 self.stage, self.estimated_gpus, self.resource_plan_source,
                 self.resource_plan_rationale,
-                self.script_path, self.job_name, self.bookkeeping_row_id,
+                self.script_path, self.remote_work_dir, self.remote_script_path,
+                self.job_name, self.bookkeeping_row_id,
                 self.job_id, self.scheduler_state, self.scheduler_exit_code,
                 self.scheduler_reason, self.status_path, self.stdout_path,
                 self.stderr_path, self.lifecycle_prologue,
@@ -317,6 +317,14 @@ class SlurmStageJobContract(BaseModel):
             )
         if not self.script_path.startswith("/") or not self.script_path.endswith(".sbatch"):
             raise ValueError("enabled Slurm stage contract requires an absolute .sbatch path")
+        if not self.remote_work_dir.startswith("/"):
+            raise ValueError("enabled Slurm stage contract requires an absolute remote work dir")
+        if not self.remote_script_path.startswith(self.remote_work_dir + "/"):
+            raise ValueError(
+                "enabled Slurm stage contract requires its remote script inside remote_work_dir"
+            )
+        if not self.remote_script_path.endswith(".sbatch"):
+            raise ValueError("enabled Slurm stage contract requires a remote .sbatch path")
         if not self.job_name.startswith("zevo-"):
             raise ValueError("enabled Slurm stage contract requires a zevo-* job name")
         if not self.status_path.startswith("/") or not self.status_path.endswith(
@@ -335,12 +343,6 @@ class SlurmStageJobContract(BaseModel):
             raise ValueError("enabled Slurm stage contract requires the exact lifecycle prologue")
         if self.runtime_prologue != slurm_runtime_prologue():
             raise ValueError("enabled Slurm stage contract requires the exact runtime prologue")
-        if not (
-            self.infra_instance_create_schema
-            and self.infra_instance_patch_schema
-            and self.infra_instance_response_schema
-        ):
-            raise ValueError("enabled Slurm stage contract requires bookkeeping schemas")
         if self.phase == "submit" and any((
             self.bookkeeping_row_id, self.job_id, self.scheduler_state,
             self.scheduler_exit_code, self.scheduler_reason,

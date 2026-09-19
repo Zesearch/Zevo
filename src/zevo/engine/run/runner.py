@@ -845,6 +845,10 @@ async def _slurm_stage_job_contract(
         resource_plan_source=selection.source if selection is not None else "",
         resource_plan_rationale=selection.rationale if selection is not None else "",
         script_path=str(Path(work_dir) / filename) if cluster else "",
+        remote_work_dir=remote_ticket_dir,
+        remote_script_path=(
+            str(PurePosixPath(remote_ticket_dir) / filename) if cluster else ""
+        ),
         job_name=f"zevo-{ticket.id}" if cluster else "",
         status_path=status_path,
         stdout_path=(
@@ -868,15 +872,6 @@ async def _slurm_stage_job_contract(
         num_gpus=(selection.num_gpus if selection is not None else selected_gpus),
         nodes=(selection.nodes if selection is not None else int(info.resource_plan.nodes)),
         max_queue_wait_hours=float(run.max_queue_wait_hours or 48.0),
-        infra_instance_create_schema=(
-            CreateInfraInstanceBody.model_json_schema() if cluster else {}
-        ),
-        infra_instance_patch_schema=(
-            PatchInfraInstanceBody.model_json_schema() if cluster else {}
-        ),
-        infra_instance_response_schema=(
-            InfraInstanceDTO.model_json_schema() if cluster else {}
-        ),
     )
 
 
@@ -3665,6 +3660,130 @@ async def _latest_slurm_resource_request(
     )
 
 
+async def _slurm_watcher_job_is_current(
+    session: AsyncSession, ticket: Ticket, payload: dict[str, Any],
+) -> bool:
+    """Accept a collect wake only for the newest committed terminal JOBID."""
+    expected_job_id = str(payload.get("job_id") or "")
+    current_job = await _latest_slurm_resource_request(session, ticket)
+    current_meta = dict(current_job.meta or {}) if current_job is not None else {}
+    current_state = str(current_meta.get("scheduler_state") or "").upper()
+    current_state = current_state.split()[0].rstrip("+") if current_state else ""
+    return bool(
+        expected_job_id
+        and current_job is not None
+        and current_job.instance_id == expected_job_id
+        and bool(current_meta.get("submission_committed"))
+        and current_job.released_at is not None
+        and current_state in _SLURM_TERMINAL_STATES
+    )
+
+
+async def _submit_validated_slurm_stage(
+    session: AsyncSession,
+    *,
+    run: Run,
+    ticket: Ticket,
+    inp: BaseModel,
+    heartbeat_id: str,
+) -> InfraInstance:
+    """Commit one prepared cluster stage after its typed result validates.
+
+    The Agent prepares and uploads the files.  The engine owns the irreversible
+    ``sbatch`` call so an invalid Result, configuration, or script can never
+    leave an unowned GPU job behind.
+    """
+    contract = getattr(inp, "slurm_job", None)
+    device_info_path = str(getattr(inp, "device_info_path", "") or "")
+    if not isinstance(contract, SlurmStageJobContract) or not contract.enabled:
+        raise ValueError("engine Slurm commit requires an enabled stage contract")
+    if contract.phase != "submit":
+        raise ValueError("engine Slurm commit is valid only during submit phase")
+    if await _latest_slurm_resource_request(session, ticket) is not None:
+        raise ValueError("a Slurm resource request already exists for this Ticket")
+    try:
+        info = InfrastructureDeviceInfo.model_validate_json(
+            Path(device_info_path).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot load the validated cluster route: {exc}") from exc
+    if info.provider != "cluster" or info.cluster is None:
+        raise ValueError("engine Slurm commit requires a cluster device route")
+    try:
+        local_script_sha256 = hashlib.sha256(
+            Path(contract.script_path).read_bytes()
+        ).hexdigest()
+    except OSError as exc:
+        raise ValueError(f"cannot hash the validated Slurm script: {exc}") from exc
+
+    from zevo.engine.run.remote_jobs import _ssh
+
+    remote_script = shlex.quote(contract.remote_script_path)
+    command = (
+        "if ! command -v sbatch >/dev/null 2>&1; then "
+        "if [ -r /etc/profile.d/modules.sh ]; then "
+        ". /etc/profile.d/modules.sh >/dev/null 2>&1; "
+        "if command -v module >/dev/null 2>&1; then "
+        "module load default-environment >/dev/null 2>&1 || true; fi; fi; fi; "
+        "command -v sbatch >/dev/null 2>&1 "
+        "|| { echo slurm-sbatch-unavailable >&2; exit 127; }; "
+        f"test -s {remote_script} "
+        "|| { echo staged-slurm-script-missing >&2; exit 2; }; "
+        f"test \"$(sha256sum {remote_script} | awk '{{print $1}}')\" = "
+        f"{shlex.quote(local_script_sha256)} "
+        "|| { echo staged-slurm-script-checksum-mismatch >&2; exit 3; }; "
+        f"sbatch --parsable -- {remote_script}"
+    )
+    submitted = await _ssh(info, command, timeout_seconds=30)
+    if not submitted.get("ok"):
+        raise ValueError(
+            "engine could not submit the validated Slurm script: "
+            + str(submitted.get("error") or submitted.get("stdout") or "unknown error")
+        )
+    raw_job_id = str(submitted.get("stdout") or "").strip().splitlines()[-1:]
+    job_id = (raw_job_id[0].split(";", 1)[0].strip() if raw_job_id else "")
+    if not job_id.isdecimal():
+        raise ValueError(f"sbatch returned an invalid JOBID: {job_id!r}")
+
+    gpu = info.gpu
+    row = InfraInstance(
+        instance_id=job_id,
+        provider="cluster",
+        status="provisioning",
+        run_id=run.id,
+        ticket_id=ticket.id,
+        gpu_name=(gpu.gpu_name if gpu is not None else ""),
+        gpu_count=contract.num_gpus,
+        vram_gb=(gpu.vram_gb if gpu is not None else 0),
+        dph=0.0,
+        ssh_host=info.ssh.host,
+        ssh_port=info.ssh.port,
+        ssh_user=info.ssh.user,
+        meta={
+            "auto_release": True,
+            "resource_request": True,
+            "stage": contract.stage,
+            "scheduler_state": "PENDING",
+            "nodes": contract.nodes,
+            "gpus_per_node": contract.gpus_per_node,
+            "remote_script": contract.remote_script_path,
+            "remote_workdir": contract.remote_work_dir,
+            "status_path": contract.status_path,
+            "submission_heartbeat_id": heartbeat_id,
+        },
+    )
+    session.add(row)
+    try:
+        await session.flush()
+    except Exception:
+        # The scheduler side effect happened but bookkeeping did not.  Reap the
+        # exact Ticket-owned job before surfacing the database failure.
+        from zevo.engine.run.remote_jobs import _slurm_job_kill_command
+        await _ssh(info, _slurm_job_kill_command(job_id, ticket.id))
+        raise
+    return row
+
+
 def _slurm_job_was_submitted_by(
     row: InfraInstance | None, heartbeat_id: str,
 ) -> bool:
@@ -3885,6 +4004,7 @@ async def run_ticket(
     model_override: str = "",
     activation_source: str = "",
     activation_reason: str = "",
+    activation_payload: dict[str, Any] | None = None,
 ) -> Ticket:
     """Run one ticket through the appropriate Driver. Persists everything."""
     tk = (
@@ -3908,6 +4028,16 @@ async def run_ticket(
         tk.error_message = "Run is finalizing; new optimization work is disabled"
         await session.commit()
         return tk
+    activation_payload = dict(activation_payload or {})
+    if activation_source == "slurm_watcher":
+        if not await _slurm_watcher_job_is_current(
+            session, tk, activation_payload,
+        ):
+            # Watcher activations are immutable JOBID events. A repair or
+            # continuation may have installed a newer row before this queued
+            # event obtains the Ticket lock; never reinterpret the old wake as
+            # Collect for the new job.
+            return tk
     # Background transcript and progress writers need independent sessions, but
     # they must use the SAME database binding as the caller. This keeps manual
     # runs and isolated test databases from leaking writes into the process-wide
@@ -4152,10 +4282,9 @@ async def run_ticket(
     # and re-announcing it would restart the pipeline behind it.
     status_at_pickup = tk.status
     slurm_contract = getattr(inp, "slurm_job", None)
-    if (
-        tk.agent_id == "orchestrator"
-        and activation_source == "on_demand"
-        and activation_reason.startswith("run user instruction ")
+    if activation_source == "on_demand" and (
+        activation_reason.startswith("run user instruction ")
+        or bool(activation_payload.get("run_instruction_id"))
     ):
         # The dashboard keeps instruction decisions in their dedicated panel.
         # This tag lets the Run Timeline omit a steering-only activation while
@@ -5094,6 +5223,7 @@ async def run_ticket(
     # was indistinguishable from this one in the log.
     artifact_meta: dict = {}
     deferred_stage_row: InfraInstance | None = None
+    prepared_slurm_submission = False
     await session.refresh(tk)
     cancelled_by_user = tk.status == "cancelled"
     if output is None or error_message:
@@ -5262,10 +5392,16 @@ async def run_ticket(
                 stage_row = await _latest_slurm_resource_request(session, tk)
                 deferred_stage_row = stage_row
                 if stage_row is None:
-                    runtime_contract_mismatches["deferred_status"] = {
-                        "declared": "registered finite Slurm job",
-                        "reported": "no cluster InfraInstance row for this Ticket",
-                    }
+                    if inp.slurm_job.phase == "submit":
+                        # The Agent has only prepared/uploaded the stage. The
+                        # engine submits it after every Result/config/script
+                        # check below passes.
+                        prepared_slurm_submission = True
+                    else:
+                        runtime_contract_mismatches["deferred_status"] = {
+                            "declared": "the exact registered finite Slurm job",
+                            "reported": "no cluster InfraInstance row for this Ticket",
+                        }
                 elif str((stage_row.meta or {}).get("status_path") or "") != (
                     inp.slurm_job.status_path
                 ):
@@ -5829,6 +5965,25 @@ async def run_ticket(
                 )
                 error_message = summary
                 artifact = ""  # never register a phantom work_product
+        if status == "deferred" and prepared_slurm_submission:
+            try:
+                deferred_stage_row = await _submit_validated_slurm_stage(
+                    session,
+                    run=run,
+                    ticket=tk,
+                    inp=inp,
+                    heartbeat_id=heartbeat_id,
+                )
+            except Exception as exc:  # submission is part of the stage result
+                status = "failed"
+                summary = f"validated Slurm stage could not be submitted: {exc}"[:2000]
+                error_message = summary
+                artifact = ""
+                artifact_meta = {}
+                if hasattr(output, "status"):
+                    output.status = "failed"
+                if hasattr(output, "error_message"):
+                    output.error_message = summary
         # A cancelled ticket stays cancelled. Cancelling SIGTERMs the driver,
         # which surfaces here as a non-zero exit — indistinguishable from a
         # genuine failure unless we look. Overwriting the status lost the fact
@@ -6168,6 +6323,25 @@ async def run_ticket(
                     "Zevo validation."
                 ),
             )
+
+    instruction_id = str(activation_payload.get("run_instruction_id") or "")
+    if (
+        instruction_id
+        and not cancelled_by_user
+        and status in {"succeeded", "degraded", "deferred"}
+    ):
+        instruction = await session.get(RunInstruction, instruction_id)
+        if (
+            instruction is not None
+            and instruction.run_id == tk.run_id
+            and instruction.status in {"queued", "delivered", "scheduled"}
+        ):
+            instruction.status = "applied"
+            instruction.updated_at = datetime.now(timezone.utc)
+            if not (instruction.agent_response or "").strip():
+                instruction.agent_response = (
+                    f"{tk.agent_id.title()} applied this instruction."
+                )
 
     await session.commit()
 

@@ -21,6 +21,7 @@ from zevo.db import (
     InfraInstance,
     RegistryModel,
     Run,
+    RunInstruction,
     ScoreEvent,
     Ticket,
     TicketMessage,
@@ -1422,6 +1423,10 @@ class MessageBody(StrictBody):
     # messages should leave this False to avoid self-loops. It is ignored
     # once the run is finished -- see post_message.
     wake_agent: bool = True
+    # Set only when the Orchestrator routes a Run-level user instruction to
+    # this Specialist. It gives the scheduler an exact execution identity and
+    # lets it quiesce the old attempt before applying the new direction.
+    run_instruction_id: str = ""
 
 
 def _external_stage_message_body(
@@ -1456,6 +1461,35 @@ async def post_message(
         raise HTTPException(404, f"ticket {ticket_id} not found")
     body = payload.body
     author = (payload.author or "").strip()
+    instruction: RunInstruction | None = None
+    if payload.run_instruction_id:
+        instruction = await db.get(RunInstruction, payload.run_instruction_id)
+        if author != "orchestrator":
+            raise HTTPException(422, "only the orchestrator may route a Run instruction")
+        if (
+            instruction is None
+            or instruction.run_id != t.run_id
+            or instruction.status not in {"queued", "delivered", "scheduled"}
+        ):
+            raise HTTPException(422, "run_instruction_id is not an active instruction for this Run")
+        if t.agent_id == "orchestrator" or t.lane != "optimization":
+            raise HTTPException(422, "Run instructions may target only optimization Specialists")
+        # Stop the old execution before a new activation is allowed to consume
+        # the instruction. For Slurm, the daemon below also waits until the
+        # watcher confirms that the exact allocation is gone.
+        from zevo.engine.run.remote_jobs import cancel_ticket_remote_job
+        cleanup = await cancel_ticket_remote_job(db, t)
+        if cleanup.get("attempted") and not cleanup.get("ok"):
+            raise HTTPException(
+                409,
+                "could not stop the Specialist's current external job before "
+                "applying the Run instruction",
+            )
+        if t.status not in TERMINAL_TICKET_STATUSES:
+            t.status = "cancelled"
+            t.error_message = (
+                f"current activation superseded by Run instruction {instruction.id}"
+            )
     if author == t.agent_id and re.match(r"^\s*Done\s*:", body, re.IGNORECASE):
         stage_rows = (await db.execute(
             select(InfraInstance)
@@ -1524,6 +1558,10 @@ async def post_message(
             ticket_id=ticket_id,
             source="on_demand",
             reason=f"message by {payload.author}",
+            payload=(
+                {"run_instruction_id": instruction.id}
+                if instruction is not None else None
+            ),
         )
         message.triggered_wakeup_id = str(getattr(wakeup, "id", "") or "")
         await db.commit()

@@ -137,6 +137,32 @@ def test_memory_update_is_strict_and_normalized() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalid_shared_memory_is_dropped_without_failing_stage_result(
+    session: AsyncSession,
+) -> None:
+    run = _run("run-memory-warning")
+    ticket = _ticket("train-memory-warning", run.id)
+    session.add_all([run, ticket])
+    await session.flush()
+
+    # This combination used to fail MemoryUpdate parsing and therefore reject
+    # the entire typed Train/Inference result, even after a job was submitted.
+    update = _update(
+        "local_pitfall",
+        kind="pitfall",
+        visibility="shared_candidate",
+    )
+    stored, rejected = await persist_memory_updates(
+        session, run=run, ticket=ticket, updates=[update],
+    )
+    await session.flush()
+    notices = (await session.execute(select(TicketNotice))).scalars().all()
+    assert stored == 0
+    assert rejected and "shared_candidate is reserved" in rejected[0]
+    assert [notice.code for notice in notices] == ["memory.rejected"]
+
+
+@pytest.mark.asyncio
 async def test_memory_is_isolated_by_run_agent_and_lane(session: AsyncSession) -> None:
     run_a = _run("run-a")
     run_b = _run("run-b")

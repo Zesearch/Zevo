@@ -450,6 +450,9 @@ export type RunInstructionDTO = {
   body: string;
   status: "queued" | "delivered" | "scheduled" | "applied" | "needs_input" | "declined";
   agent_response: string;
+  activity_status: "reviewing" | "waiting" | "applying" | "scheduled" | "applied" | "needs_input" | "declined" | "needs_attention";
+  activity_agent: string;
+  target_ticket_id: string | null;
   created_at: string;
   updated_at: string;
 };

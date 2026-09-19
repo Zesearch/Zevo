@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from zevo.db import (
     Agent,
     AgentWakeupRequest,
+    InfraInstance,
     Run,
     Ticket,
     TicketNotice,
@@ -155,6 +156,7 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
                 model_override=model_override,
                 activation_source=w.source,
                 activation_reason=w.reason,
+                activation_payload=payload,
             )
         else:
             # Join on the run: a ticket queued before the user cancelled is
@@ -183,6 +185,7 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
                     model_override=model_override,
                     activation_source=w.source,
                     activation_reason=w.reason,
+                    activation_payload=payload,
                 )
     except Exception as e:
         error_message = f"{type(e).__name__}: {e}"
@@ -372,6 +375,10 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                         target = (await s.execute(
                             select(Ticket).where(Ticket.id == w.ticket_id)
                         )).scalar_one_or_none()
+                        wake_payload = w.payload if isinstance(w.payload, dict) else {}
+                        instruction_id = str(
+                            wake_payload.get("run_instruction_id") or ""
+                        )
                         if (
                             target is not None
                             and target.agent_id != "orchestrator"
@@ -386,6 +393,39 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                                 target.id, wakeup_id[:8],
                             )
                             return
+                        if target is not None and instruction_id:
+                            active_stage = (await s.execute(
+                                select(InfraInstance).where(
+                                    InfraInstance.ticket_id == target.id,
+                                    InfraInstance.provider == "cluster",
+                                    InfraInstance.instance_id != "",
+                                    InfraInstance.released_at.is_(None),
+                                ).order_by(InfraInstance.created_at.desc()).limit(1)
+                            )).scalar_one_or_none()
+                            if active_stage is not None:
+                                # scancel acceptance is not release. Keep the
+                                # instruction activation queued until Slurm no
+                                # longer owns the old allocation.
+                                w.scheduled_for = datetime.now(timezone.utc) + _dt.timedelta(
+                                    seconds=5
+                                )
+                                await s.commit()
+                                log.info(
+                                    "[wakeup] instruction %s waits for Slurm job %s release",
+                                    instruction_id[:8], active_stage.instance_id,
+                                )
+                                return
+                            superseded = (
+                                target.status == "cancelled"
+                                and target.error_message.startswith(
+                                    "current activation superseded by Run instruction "
+                                )
+                            )
+                            if superseded:
+                                target.status = "queued"
+                                target.error_message = ""
+                                target.summary = ""
+                                await s.commit()
                         obsolete = bool(
                             target is not None
                             and target.status in TERMINAL_TICKET_STATUSES

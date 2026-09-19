@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from zevo.api.database import get_db
 from zevo.api.routers.shared import runs as runs_router
+from zevo.api.routers.shared.tickets import MessageBody, post_message
 from zevo.db import AgentWakeupRequest, Base, Run, RunInstruction, Ticket
 from zevo.engine.agent.drivers._prompt import _conversation_block
 from zevo.engine.run.runner import _run_instruction_context
@@ -130,6 +131,39 @@ async def test_needs_input_keeps_run_instruction_gate_closed(client_and_session)
     assert decision.status_code == 200
     async with Session() as session:
         assert await instruction_gate_active(session, "run-1") is True
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_routes_instruction_as_a_quiesced_specialist_wake(
+    client_and_session,
+) -> None:
+    client, Session = client_and_session
+    posted = await client.post(
+        "/api/runs/run-1/instructions", json={"body": "Apply this to Train now"},
+    )
+    instruction_id = posted.json()["id"]
+    async with Session() as session:
+        instruction = await session.get(RunInstruction, instruction_id)
+        instruction.status = "delivered"
+        await session.commit()
+        await post_message(
+            "train-001",
+            MessageBody(
+                body="Apply this to Train now",
+                author="orchestrator",
+                run_instruction_id=instruction_id,
+            ),
+            session,
+        )
+        ticket = await session.get(Ticket, "train-001")
+        assert ticket.status == "cancelled"
+        wakeups = (await session.execute(
+            select(AgentWakeupRequest).where(
+                AgentWakeupRequest.ticket_id == "train-001"
+            )
+        )).scalars().all()
+        assert len(wakeups) == 1
+        assert wakeups[0].payload == {"run_instruction_id": instruction_id}
 
 
 @pytest.mark.asyncio

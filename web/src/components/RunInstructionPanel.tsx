@@ -7,19 +7,6 @@ import { api, type RunInstructionDTO } from "../lib/api";
 import { fmtDate } from "../lib/format";
 import { Bezel, Kicker } from "./zevo/primitives";
 
-const LABELS: Record<RunInstructionDTO["status"], string> = {
-  queued: "Run paused · waiting for orchestrator",
-  delivered: "Run paused · orchestrator deciding",
-  scheduled: "Planned · run resumed",
-  applied: "Applied · run resumed",
-  needs_input: "Run paused · needs your reply",
-  declined: "Cannot apply · run resumed",
-};
-
-const BLOCKING_STATUSES = new Set<RunInstructionDTO["status"]>([
-  "queued", "delivered", "needs_input",
-]);
-
 const TERMINAL_RUN_STATUSES = new Set(["success", "degraded", "failed", "halted", "cancelled"]);
 
 export function RunInstructionPanel({
@@ -37,27 +24,50 @@ export function RunInstructionPanel({
   const [busy, setBusy] = useState(false);
   const [postError, setPostError] = useState("");
   const closed = cancelling || TERMINAL_RUN_STATUSES.has(runStatus);
-  const pausedForInstruction = !closed && data.some((item) => BLOCKING_STATUSES.has(item.status));
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!body.trim() || busy || closed) return;
     setBusy(true);
     setPostError("");
+    const instruction = body.trim();
+    const optimisticId = `local-${Date.now()}`;
+    const optimistic: RunInstructionDTO = {
+      id: optimisticId,
+      run_id: runId,
+      source_ticket_id: null,
+      body: instruction,
+      status: "queued",
+      agent_response: "",
+      activity_status: "reviewing",
+      activity_agent: "",
+      target_ticket_id: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    setBody("");
+    await mutate((current) => [...(current ?? []), optimistic], false);
     try {
       const created = await api<RunInstructionDTO>(
         `/runs/${encodeURIComponent(runId)}/instructions`,
         {
           method: "POST",
           body: JSON.stringify({
-            body: body.trim(),
+            body: instruction,
           }),
         },
       );
-      setBody("");
-      await mutate((current) => [...(current ?? []), created], false);
+      await mutate(
+        (current) => (current ?? []).map((item) => item.id === optimisticId ? created : item),
+        false,
+      );
       void mutate();
     } catch (err) {
+      await mutate(
+        (current) => (current ?? []).filter((item) => item.id !== optimisticId),
+        false,
+      );
+      setBody(instruction);
       setPostError(String((err as Error).message || err));
     } finally {
       setBusy(false);
@@ -72,12 +82,6 @@ export function RunInstructionPanel({
       <p className="mt-1 text-sm text-slate-400">
         In case you want to change this run or guide a future iteration, tell the system here. New actions pause while the orchestrator decides when to apply it.
       </p>
-      {pausedForInstruction && (
-        <div className="mt-3 flex items-center gap-2 rounded-lg border border-brass-500/30 bg-brass-500/10 px-3 py-2 text-sm text-brass-200">
-          <span className="lamp lamp-running" />
-          <span>Run paused for an instruction decision. Existing external jobs keep running unless the orchestrator stops them.</span>
-        </div>
-      )}
       {!closed ? (
         <form onSubmit={submit} className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
           <textarea
@@ -98,28 +102,47 @@ export function RunInstructionPanel({
       {postError && <p className="mt-2 text-sm text-coral-300">{postError}</p>}
       {error && <p className="mt-2 text-sm text-coral-300">Could not load instructions.</p>}
       {data.length > 0 && (
-        <div className="mt-4 space-y-2 border-t border-hair pt-4">
-          {[...data].reverse().map((item) => {
+        <div className="mt-4 space-y-4 border-t border-hair pt-4">
+          {data.map((item) => {
             const unresolvedAtEnd = closed && ["queued", "delivered", "scheduled", "needs_input"].includes(item.status);
+            const actor = item.activity_agent
+              ? item.activity_agent.charAt(0).toUpperCase() + item.activity_agent.slice(1)
+              : "System";
+            const activityText: Record<RunInstructionDTO["activity_status"], string> = {
+              reviewing: "System is reviewing your instruction…",
+              waiting: `${actor} will apply your instruction after the current work stops…`,
+              applying: `${actor} is applying your instruction…`,
+              scheduled: "The system scheduled this for a later safe point.",
+              applied: "Instruction applied.",
+              needs_input: "The system needs more information from you.",
+              declined: "The system could not apply this instruction.",
+              needs_attention: `${actor} could not finish applying this instruction.`,
+            };
+            const active = ["reviewing", "waiting", "applying"].includes(item.activity_status);
             return (
-              <div key={item.id} className="rounded-lg border border-hair bg-canvas/60 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-                  <span>{fmtDate(item.created_at)}{item.source_ticket_id && (
-                    <> · <Link className="text-brass-300 hover:underline" to={`/tickets/${item.source_ticket_id}`}>
-                      {item.source_ticket_id}
-                    </Link></>
-                  )}</span>
-                  <span className={item.status === "applied" ? "text-phosphor-300" : "text-brass-300"}>
-                    {unresolvedAtEnd ? "Run ended before completion" : LABELS[item.status]}
-                  </span>
-                </div>
-                <p className="mt-2 whitespace-pre-wrap text-sm text-ink">{item.body}</p>
-                {item.agent_response && (
-                  <div className="mt-3 border-l-2 border-brass-500/50 pl-3">
-                    <div className="font-mono text-2xs uppercase tracking-wider text-brass-300">Agent decision</div>
-                    <p className="mt-1 whitespace-pre-wrap text-sm text-slate-300">{item.agent_response}</p>
+              <div key={item.id} className="space-y-2">
+                <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm border border-brass-500/30 bg-brass-500/10 px-4 py-3">
+                  <p className="whitespace-pre-wrap text-sm text-ink">{item.body}</p>
+                  <div className="mt-2 text-right text-2xs text-slate-500">
+                    You · {fmtDate(item.created_at)}{item.source_ticket_id && (
+                      <> · <Link className="text-brass-300 hover:underline" to={`/tickets/${item.source_ticket_id}`}>{item.source_ticket_id}</Link></>
+                    )}
                   </div>
-                )}
+                </div>
+                <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-hair bg-canvas/70 px-4 py-3">
+                  <div className="flex items-center gap-2 text-xs text-brass-300">
+                    {active && <span className="lamp lamp-running" />}
+                    <span>{unresolvedAtEnd ? "Run ended before this instruction was resolved." : activityText[item.activity_status]}</span>
+                  </div>
+                  {item.agent_response && (
+                    <p className="mt-2 whitespace-pre-wrap text-sm text-slate-300">{item.agent_response}</p>
+                  )}
+                  {item.target_ticket_id && (
+                    <div className="mt-2 text-2xs text-slate-500">
+                      {actor} · <Link className="text-brass-300 hover:underline" to={`/tickets/${item.target_ticket_id}`}>{item.target_ticket_id}</Link>
+                    </div>
+                  )}
+                </div>
               </div>
             );
           })}

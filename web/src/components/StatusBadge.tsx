@@ -38,6 +38,8 @@ export function statusToneFor(status: string): StatusTone {
     case "awaiting_input":
     case "waiting_external":
       return { dot: "bg-skyx-400 shadow-glow-brass", text: "text-skyx-200", ring: "border-skyx-400/50 bg-skyx-500/15", live: true };
+    case "paused":
+      return { dot: "bg-skyx-400", text: "text-skyx-200", ring: "border-skyx-400/40 bg-skyx-500/10" };
     case "cancelled":
     case "skipped":
       return { dot: "bg-dim", text: "text-slate-400", ring: "border-slate-600/40 bg-slate-800/40" };

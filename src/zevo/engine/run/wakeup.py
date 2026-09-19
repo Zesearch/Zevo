@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from sqlalchemy import select, text
@@ -74,6 +75,41 @@ async def queue_wakeup(
             )
         ).scalars().first()
         if existing is not None:
+            instruction_id = str((payload or {}).get("run_instruction_id") or "")
+            if source == "on_demand" and instruction_id:
+                # The queued row is the one the daemon will execute. Promote
+                # that row to the instruction activation instead of storing the
+                # identity only on a coalesced row that can never run.
+                existing.source = source
+                existing.trigger_detail = trigger_detail
+                existing.reason = reason
+                existing.payload = payload or {}
+                existing.scheduled_for = datetime.now(timezone.utc)
+                await session.commit()
+                await session.refresh(existing)
+                return existing
+            incoming_job_id = str((payload or {}).get("job_id") or "")
+            existing_job_id = str((existing.payload or {}).get("job_id") or "")
+            if (
+                source == "slurm_watcher"
+                and existing.source == "slurm_watcher"
+                and incoming_job_id
+                and incoming_job_id != existing_job_id
+            ):
+                # A newer continuation/repair job supersedes a queued collect
+                # for the old JOBID. Keeping the old payload while marking the
+                # new wake coalesced made Collect bind to whichever row happened
+                # to be newest, which could cancel a healthy running job.
+                existing.trigger_detail = trigger_detail
+                existing.reason = (
+                    f"superseded stale Slurm wake for {existing_job_id or '(unknown)'}: "
+                    f"{reason}"
+                )[:2000]
+                existing.payload = payload or {}
+                existing.scheduled_for = datetime.now(timezone.utc)
+                await session.commit()
+                await session.refresh(existing)
+                return existing
             row = AgentWakeupRequest(
                 agent_id=agent_id, ticket_id=ticket_id, source=source,
                 status="coalesced", trigger_detail=trigger_detail,
