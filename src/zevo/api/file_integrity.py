@@ -64,14 +64,46 @@ def _strings(value: Any):
             yield from _strings(child)
 
 
-def _file_key(value: str) -> Path | None:
-    """Unify public/private and host/container spellings before comparing."""
+def _file_roots() -> tuple[Path, ...]:
+    """Resolve managed roots once per integrity scan, not once per stored value."""
+    raw_roots = (
+        Path(files_root()),
+        Path(holdout_root()) / "files",
+        Path("/app/data/files"),
+        Path("/run/zevo-holdout/files"),
+        Path("data/files"),
+    )
+    roots: list[Path] = []
+    for root in raw_roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def _file_key(value: str, roots: tuple[Path, ...] | None = None) -> Path | None:
+    """Unify public/private and host/container spellings before comparing.
+
+    Most strings in Run and Ticket JSON are prose, prompts, or model output.
+    Reject those lexically before ``Path.resolve`` touches the filesystem; an
+    unreferenced deletion otherwise resolves thousands of arbitrary strings.
+    """
     raw = Path(value.strip())
-    roots = (Path(files_root()), Path(holdout_root()) / "files", Path("/app/data/files"), Path("/run/zevo-holdout/files"), Path("data/files"))
+    roots = roots if roots is not None else _file_roots()
+    root_names = {root.name for root in roots}
+    if not root_names.intersection(raw.parts):
+        return None
+    try:
+        resolved = raw.resolve()
+    except OSError:
+        return None
     for root in roots:
         try:
-            return raw.resolve().relative_to(root.resolve())
-        except (ValueError, OSError):
+            return resolved.relative_to(root)
+        except ValueError:
             continue
     return None
 
@@ -83,7 +115,11 @@ async def assert_unreferenced(db: AsyncSession, paths: list[Path]) -> None:
     A file-set reference covers every member, not just a named leaf. Deleting
     the owning records or creating a new file-set version is an explicit step.
     """
-    targets = [key for path in paths if (key := _file_key(str(path))) is not None]
+    roots = _file_roots()
+    targets = [
+        key for path in paths
+        if (key := _file_key(str(path), roots)) is not None
+    ]
     if not targets:
         raise HTTPException(409, "Cannot prove this file is safe to remove")
     for model in (Task, TaskSetting, Run, Ticket, WorkProduct):
@@ -92,7 +128,7 @@ async def assert_unreferenced(db: AsyncSession, paths: list[Path]) -> None:
         for row in rows:
             values = [getattr(row, column.key) for column in model.__table__.columns]
             for value in _strings(values):
-                key = _file_key(value)
+                key = _file_key(value, roots)
                 if key is not None and any(
                     key == target or key.is_relative_to(target) or target.is_relative_to(key)
                     for target in targets
