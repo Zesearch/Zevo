@@ -867,7 +867,7 @@ async def _slurm_stage_job_contract(
         scheduler_reason=str(meta.get("scheduler_reason") or ""),
         num_gpus=(selection.num_gpus if selection is not None else selected_gpus),
         nodes=(selection.nodes if selection is not None else int(info.resource_plan.nodes)),
-        max_queue_wait_hours=float(run.max_queue_wait_hours or 24.0),
+        max_queue_wait_hours=float(run.max_queue_wait_hours or 48.0),
         infra_instance_create_schema=(
             CreateInfraInstanceBody.model_json_schema() if cluster else {}
         ),

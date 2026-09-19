@@ -31,7 +31,7 @@ export function useLaunchPreflight() {
 export function LaunchLimitsSummary({ inputs }: { inputs: RunInputValues }) {
   const limit = (value: string, unit = "") => Number(value) > 0 ? `${value}${unit}` : "Unlimited";
   return <aside aria-label="Execution limits" className="rounded border border-hair bg-raised p-3 text-xs leading-relaxed">
-    <strong>Execution limits:</strong> {limit(inputs.iterations)} rounds · {Number(inputs.budget) > 0 ? `$${inputs.budget}` : "Unlimited spend"} · {limit(inputs.timeLimitHours, " hours")} · {limit(inputs.numGpus)} GPUs.
-    <p className="mt-1 text-slate-400">New runs start with 3 rounds, $10, 1 hour, and 1 GPU. Adjust limits below; clearing a limit explicitly removes that cap. Budgets include estimated agent and rented GPU costs.</p>
+    <strong>Execution limits:</strong> {limit(inputs.iterations)} rounds · {Number(inputs.budget) > 0 ? `$${inputs.budget}` : "Unlimited spend"} · {limit(inputs.timeLimitHours, " hours")} · {limit(inputs.numGpus)} GPUs · {inputs.queueWaitHours.trim() || "48"} hours queue wait.
+    <p className="mt-1 text-slate-400">Rounds, spend, active runtime, and GPU count start without a user cap. Slurm queue wait defaults to 48 hours. Budgets include estimated agent and rented GPU costs.</p>
   </aside>;
 }

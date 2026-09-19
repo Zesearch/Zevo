@@ -434,7 +434,7 @@ export function NewRunModal({
     { name: "Iterations", value: inputs.iterations.trim() || "unlimited", overridden: !!inputs.iterations.trim() },
     { name: "Budget", value: inputs.budget.trim() ? `$${inputs.budget.trim()}` : "unlimited", overridden: !!inputs.budget.trim() },
     { name: "Time limit", value: inputs.timeLimitHours.trim() ? `${inputs.timeLimitHours.trim()} h` : "unlimited", overridden: !!inputs.timeLimitHours.trim() },
-    { name: "Queue limit", value: inputs.queueWaitHours.trim() ? `${inputs.queueWaitHours.trim()} h` : "24 h", overridden: !!inputs.queueWaitHours.trim() },
+    { name: "Queue limit", value: inputs.queueWaitHours.trim() ? `${inputs.queueWaitHours.trim()} h` : "48 h", overridden: !!inputs.queueWaitHours.trim() },
     { name: "Stop threshold", value: inputs.stopThreshold.trim() || "not set", overridden: !!inputs.stopThreshold.trim() },
   ];
   const selectedAgent = callableAgents.find((agent) => agent.id === agentId);
@@ -1167,7 +1167,7 @@ export function NewRunModal({
                       hint="Active experiment time only; Slurm queue wait is excluded." />
                     <LimitField label="Max queue wait (hours)" value={inputs.queueWaitHours}
                       onChange={(v) => setInputs((s) => ({ ...s, queueWaitHours: v }))}
-                      hint="Maximum Slurm PENDING time; blank defaults to 24 hours (max 168)." />
+                      hint="Maximum Slurm PENDING time; blank defaults to 48 hours (max 168)." />
                     <NumberField
                       label="Stop threshold" value={inputs.stopThreshold}
                       onChange={(v) => setInputs((s) => ({ ...s, stopThreshold: v }))}
