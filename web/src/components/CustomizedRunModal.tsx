@@ -422,9 +422,7 @@ export function CustomizedRunForm({
       if (!Number.isFinite(queueWaitHours) || queueWaitHours <= 0 || queueWaitHours > 168) {
         throw new Error("Max queue wait must be greater than 0 and at most 168 hours.");
       }
-      const setupId = runSetup.begin();
       const body = {
-        setup_id: setupId,
         mode: "customized_pipeline",
         task_name: taskName.trim(),
         run_name: runName.trim(),
@@ -447,9 +445,10 @@ export function CustomizedRunForm({
           : {}),
       };
       if (!(await preflight.check(body))) return;
+      const setupId = runSetup.begin();
       const d = await api<{ run_id?: string; setup_id?: string; status: string }>("/runs", {
         method: "POST",
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, setup_id: setupId }),
       });
       const runId = d.run_id || (await runSetup.wait(d.setup_id || setupId)).run_id;
       if (!runId) throw new Error("Run setup completed without a Run id.");
@@ -678,9 +677,9 @@ export function CustomizedRunForm({
 
         <LaunchLimitsSummary inputs={inputs} />
         {preflight.panel}
-        {error && <div className="rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-2xs text-coral-300">{error}</div>}
       </div>
 
+      {error && <div role="alert" className="max-h-32 overflow-auto whitespace-pre-line rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-xs text-coral-300">{error}</div>}
       <div className="mt-4 flex items-center justify-end gap-2 border-t border-hair pt-4">
         {busy && runSetup.progress ? (
           <RunSetupProgressView progress={runSetup.progress} />

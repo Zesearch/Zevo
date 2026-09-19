@@ -130,13 +130,18 @@ class EvaluationRunnerDriver:
             # Each member retains its own immutable scorer and ground truth.
             # The parent ticket publishes only after all members succeed.
             entries = [
-                (inp.test_set_name, inp.model_copy(update={"suite_members": []})),
+                (
+                    inp.test_set_name, inp.benchmark_id,
+                    inp.model_copy(update={"suite_members": []}),
+                ),
                 *[
                     (
                         member.name,
+                        member.benchmark_id,
                         inp.model_copy(update={
                             "suite_members": [],
                             "test_set_name": member.name,
+                            "benchmark_id": member.benchmark_id,
                             "predictions_path": member.predictions_path,
                             "scoring_set": member.scoring_set,
                             "sample_submission": member.sample_submission,
@@ -152,7 +157,7 @@ class EvaluationRunnerDriver:
                 ],
             ]
             suite_results: list[EvaluationSuiteMemberResult] = []
-            for index, (name, member_input) in enumerate(entries):
+            for index, (name, identity, member_input) in enumerate(entries):
                 if event_sink is not None:
                     event_sink({
                         "type": "phase",
@@ -171,6 +176,7 @@ class EvaluationRunnerDriver:
                         event = {**event, "payload": {
                             **event["payload"],
                             "benchmark_name": name,
+                            "benchmark_id": identity,
                             "benchmark_index": index + 1,
                             "benchmark_total": len(entries),
                         }}
@@ -217,6 +223,7 @@ class EvaluationRunnerDriver:
                             "step": 1,
                             "total": 1,
                             "benchmark_name": name,
+                            "benchmark_id": identity,
                             "benchmark_index": index + 1,
                             "benchmark_total": len(entries),
                         },

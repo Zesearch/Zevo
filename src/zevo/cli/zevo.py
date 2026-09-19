@@ -2076,7 +2076,8 @@ def _print_event(ev: dict, show_agent: bool = False) -> None:
     if ev_type == "run_finished":
         st = payload.get("status", "")
         color = "green" if st == "success" else "red"
-        console.print(f"{prefix} [{color}]◆ run {st}[/] {escape(str(payload.get('halted_reason','')))}")
+        reason = str(payload.get("halted_reason", "")) if st != "success" else ""
+        console.print(f"{prefix} [{color}]◆ run {st}[/] {escape(reason)}")
         return
     if ev_type == "cancelled":
         console.print(f"{prefix} [red]⊘ {escape(str(payload.get('message','cancelled')))}[/]")

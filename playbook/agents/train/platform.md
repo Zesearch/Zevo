@@ -66,8 +66,14 @@ fallback is forbidden for every provider.
 ### Cluster: finite `train.sbatch`
 
 When `slurm_job.enabled=true`, `device_info.json` is an access route, not an
-allocation. For `slurm_job.phase="submit"`, load the installed site-operation Skill matching
-`device_info.ssh.host` and apply its scheduler/container constraints alongside
+allocation. The engine sizes this Train job from the known model and pinned method,
+then applies the site rules and Run GPU maximum. The route's planning GPU count
+is not the Train minimum. Choose `training.world_size` and the distributed
+topology to match the supplied `slurm_job`; if a later configuration choice
+requires more memory than that job can provide, fail preflight before
+submission. For `slurm_job.phase="submit"`, load the installed site-operation
+Skill matching `device_info.ssh.host` and apply its scheduler/container
+constraints alongside
 the selected Train method Skill; fail if multiple site Skills match. Write the
 exact local file at `slurm_job.script_path`. The script must
 contain all resolved partition/account/QOS, GPU count, CPU, RAM, walltime,

@@ -16,7 +16,9 @@ For `operation="provision"`, the Ticket contains the operation and exact
 immediate `purpose` (`train` or `inference`).
 The runner stamps the user-fixed `provider` and `num_gpus` maximum, deployment
 routing and capability facts, and a held-out-safe `resource_context`. You own
-the concrete GPU count and every other resource value.
+the concrete GPU count and every other resource value for cloud and instance.
+For cluster, the GPU count in `resource_plan` is a conservative route estimate,
+not a reservation or a lower bound for later stage jobs.
 
 Resolve one `resource_plan` before searching, submitting, or leasing anything:
 
@@ -34,7 +36,7 @@ Resolve one `resource_plan` before searching, submitting, or leasing anything:
   account, QOS, and wall time. Deployment hints are evidence, not permission to
   invent a site value;
 - on a cluster, use live availability only to verify the route and scheduler
-  rules. Do not shrink the model's safe GPU minimum to today's idle capacity or
+  rules. Do not shrink the planning estimate to today's idle capacity or
   treat today's idle/QoS headroom as a durable allocation. Zevo refreshes that
   headroom before each new Data, Train, or Inference job;
 - choose a positive `resource_plan.num_gpus`; when Run `num_gpus` is positive,
@@ -356,10 +358,11 @@ Run/cache directories are available without submitting any job. A login-node
 environment check may import lightweight dependencies, but it must not load a
 model or claim compute-node GPU/CUDA facts.
 
-Resolve a bounded minimum resource plan for the downstream stage. Record the
-partition/account/QOS, CPU, RAM, GPU type/minimum count, and walltime. The
-downstream stage may request a larger legal GPU tier after refreshing live
-Slurm capacity; it must never request fewer GPUs than this safe minimum.
+Resolve a conservative route plan for the downstream stage. Record the
+partition/account/QOS, CPU, RAM, GPU type, planning GPU count, and walltime.
+The cluster GPU count is a schema-required estimate, not a held allocation or
+a minimum for Train. Each stage independently chooses a legal GPU count from
+its workload and the discovered constraints before submission.
 If a requested GPU mapping or account
 association cannot be established from live read-only state, fail visibly.
 Also record `cluster.gpu_constraints` from that same evidence: the minimum GPUs
@@ -378,13 +381,12 @@ Write cluster `device_info.json` as an access contract:
 - `provider="cluster"`, empty `instance_id`, and `auto_release=false`;
 - `ssh` copied exactly from the typed route;
 - `cluster.jobid=""` and `cluster.node=""`, with resolved scheduler hints,
-  `requested_gpus=resource_plan.num_gpus` (the cluster-wide total),
+  `requested_gpus=resource_plan.num_gpus` (the route planning estimate),
   `cluster.nodes=resource_plan.nodes`, configured container image,
-  environment setup, Run workdir, and shared HF cache. For a multi-node plan the
-  downstream stage renders `#SBATCH --nodes`, `--ntasks-per-node`, and
-  `--gpus-per-node` (`requested_gpus // nodes`) and launches with
-  torchrun/deepspeed rendezvous; `requested_gpus` must be an exact multiple of
-  `cluster.nodes`;
+  environment setup, Run workdir, and shared HF cache. The planning estimate
+  must be an exact multiple of `cluster.nodes`. A downstream stage renders its
+  own `#SBATCH` GPU and node directives from the engine-owned `slurm_job`
+  contract, which may use a different count;
 - `gpu=null`, `cuda=null`, `probe_source="ssh-environment"`, and zero cost.
 
 Never call `sbatch`, `salloc`, or `srun` in cluster provision. The consuming

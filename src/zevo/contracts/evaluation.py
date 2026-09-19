@@ -29,6 +29,7 @@ class EvaluationSuiteMemberInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1)
+    benchmark_id: str = ""
     predictions_path: str = Field(min_length=1)
     scoring_set: str = Field(min_length=1)
     sample_submission: str = Field(min_length=1)
@@ -52,6 +53,7 @@ class EvaluationTaskInput(AgentTaskInput):
 
     predictions_path: str = Field(..., description="Path to predictions CSV produced by inference.")
     test_set_name: str = ""
+    benchmark_id: str = ""
     code_execution_adapter: CodeExecutionAdapter = ""
     scoring_set: str = Field(
         ...,

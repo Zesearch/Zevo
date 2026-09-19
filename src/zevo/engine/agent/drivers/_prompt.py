@@ -50,35 +50,64 @@ def _payload_block(input_payload: BaseModel) -> str:
 
 
 def _conversation_block(conversation: list[dict] | None) -> str:
-    """Empty string if no conversation. Otherwise: separator + the
-    standard CONVERSATION SO FAR explainer + each message as
-    `**[author]** body`."""
+    """Render Ticket conversation and durable Run instructions separately."""
     if not conversation:
         return ""
-    lines: list[str] = [
-        "",
-        "---",
-        "",
-        "## CONVERSATION SO FAR",
-        "",
-        (
-            "Below is the conversation that has happened on THIS ticket "
-            "before this run. The MOST RECENT user message is the live "
-            "instruction — treat it as the current request, even if it "
-            "asks you to change or redo something you already did. Use "
-            "earlier messages as context. Acknowledge what changed in "
-            "your first action (a one-line POST to "
-            "/tickets/$TICKET_ID/messages)."
-        ),
-        "",
-    ]
-    for c in conversation:
+    ticket_messages = [c for c in conversation if c.get("kind") != "run_instruction"]
+    run_instructions = [c for c in conversation if c.get("kind") == "run_instruction"]
+    lines: list[str] = []
+    if ticket_messages:
+        lines.extend([
+            "", "---", "", "## CONVERSATION SO FAR", "",
+            (
+                "Below is the conversation on THIS ticket. "
+                + (
+                    "The Run user instructions below are the live requests; "
+                    "use these Ticket messages as context."
+                    if run_instructions else
+                    "Treat the most recent user message as a live request. "
+                    "Acknowledge changes in a POST to /tickets/$TICKET_ID/messages."
+                )
+            ),
+            "",
+        ])
+    for c in ticket_messages:
         author = str(c.get("author") or "?")
         body = (str(c.get("body") or "")).strip()
         if not body:
             continue
         lines.append(f"**[{author}]** {body}")
         lines.append("")
+    if run_instructions:
+        lines.extend([
+            "", "---", "", "## RUN USER INSTRUCTIONS", "",
+            (
+                "These are durable user requests for this Run. Review each "
+                "new request promptly, using the current Run and Ticket state. "
+                "Decide whether to act now, after the current work, or in a "
+                "later iteration. Record your decision with PATCH "
+                "/api/runs/{run_id}/instructions/{instruction_id}, using "
+                "status=scheduled, applied, needs_input, or declined and a "
+                "plain-language agent_response. A scheduled request will be "
+                "shown again on later activations; mark it applied only after "
+                "the requested action actually happens. If a specialist "
+                "should handle it, send that Ticket a message via POST "
+                "/api/tickets/{ticket_id}/messages with author=orchestrator. "
+                "Do not claim that an already submitted external job changed "
+                "without inspecting and changing its actual execution."
+            ),
+            "",
+        ])
+        for c in run_instructions:
+            lines.append(
+                f"**Instruction {c.get('id')}** "
+                f"(run_id={c.get('run_id')}, status={c.get('status')}, "
+                f"source_ticket_id={c.get('source_ticket_id') or 'none'})"
+            )
+            lines.append(str(c.get("body") or "").strip())
+            if c.get("agent_response"):
+                lines.append(f"Previous decision: {c['agent_response']}")
+            lines.append("")
     return "\n".join(lines)
 
 

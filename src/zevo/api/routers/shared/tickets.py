@@ -32,6 +32,10 @@ from zevo.contracts.customizations import RunCustomizations
 from zevo.contracts.data import is_sha256
 from zevo.contracts.model_registry import model_tag_for_run
 from zevo.engine.method.score_direction import is_better
+from zevo.engine.run.benchmark_telemetry import (
+    benchmark_progress_phase,
+    canonical_benchmark_marker,
+)
 from zevo.contracts._base import StrictBody
 from zevo.contracts.tickets import (
     TERMINAL_TICKET_STATUSES,
@@ -1698,6 +1702,12 @@ async def post_progress(
         await db.commit()
         return {"ok": True}
     else:  # progress
+        if ticket.agent_id in {"inference", "evaluation"}:
+            run = await db.get(Run, ticket.run_id)
+            if run is not None:
+                body = canonical_benchmark_marker(
+                    body, run.holdout or {}, ticket.lane,
+                )
         reserved = {
             "kind", "owner", "attempt_id", "t", "step", "total",
             "current_step", "total_steps", "phase",
@@ -1716,6 +1726,11 @@ async def post_progress(
             )
             ticket.summary = f"Inference suite · {benchmark_name}{position}"[:1000]
         phase = str(body.get("phase", ""))
+        if ticket.agent_id in {"inference", "evaluation"}:
+            phase = benchmark_progress_phase(
+                phase,
+                str(body.get("benchmark_id") or body.get("benchmark_name") or ""),
+            )
         current_step = int(body.get("step", body.get("current_step", 0)) or 0)
         existing = (await db.execute(select(ExecutionEvent).where(
             ExecutionEvent.heartbeat_id == heartbeat_id,

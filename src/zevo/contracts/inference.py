@@ -54,6 +54,7 @@ class InferenceSuiteMemberInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1)
+    benchmark_id: str = ""
     test_set_name: str = Field(min_length=1)
     scoring_set: str = Field(min_length=1)
     sample_submission: str = Field(min_length=1)
@@ -80,6 +81,7 @@ class InferenceTaskInput(AgentTaskInput):
     operation: Literal["run_inference"] = "run_inference"
     run_id: str = Field(min_length=1)
     iteration: int = Field(ge=0)
+    benchmark_id: str = ""
     test_set_name: str = ""
     model_source: Literal["base_model", "checkpoint"]
     configuration_mode: Literal["select", "reuse"]

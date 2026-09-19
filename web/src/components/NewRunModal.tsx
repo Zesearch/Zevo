@@ -600,7 +600,7 @@ export function NewRunModal({
     || Object.values(inputs).some((v) => String(v || "").trim())
   );
 
-  async function submitFull(setupId: string) {
+  async function submitFull() {
     // A predefined name executes that package; anything else ships the task the
     // user described, under the name they gave it.
     // Blank stays blank: omitted limits resolve to 0 (no hard cap).
@@ -692,6 +692,7 @@ export function NewRunModal({
       };
     }
     if (!(await preflight.check(body))) return;
+    const setupId = runSetup.begin();
     body = { ...body, setup_id: setupId };
     const out = await api<{ run_id?: string; setup_id?: string; status: string }>("/runs", {
       method: "POST",
@@ -788,7 +789,7 @@ export function NewRunModal({
             `"${trimmedTask}" is not a predefined task, so describe what you want to achieve.`,
           );
         }
-        await submitFull(runSetup.begin());
+        await submitFull();
       } else {
         if (!runName.trim()) {
           throw new Error("Give the run a name.");
@@ -828,6 +829,12 @@ export function NewRunModal({
   // Rendered by the dialog under its scroller, so "start run" stays in view
   // however long the form is. Customized carries its own footer.
   const footer = mode !== "customized_pipeline" ? (
+      <div className="space-y-3">
+        {error && (
+          <div role="alert" className="max-h-32 overflow-auto whitespace-pre-line rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-xs text-coral-300">
+            {error}
+          </div>
+        )}
         <div className="flex justify-end gap-2">
           {/* Cancel stays small and quiet; starting a run is the action this
               dialog exists for, so it carries the weight — same proportion as
@@ -908,6 +915,7 @@ export function NewRunModal({
             {busy ? "starting…" : "start run"}
           </button>
         </div>
+      </div>
   ) : undefined;
 
   return (
@@ -1352,12 +1360,6 @@ export function NewRunModal({
         )}
         </div>
         </div>
-
-        {error && mode !== "customized_pipeline" && (
-          <div className="rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-2xs text-coral-300">
-            {error}
-          </div>
-        )}
 
       </div>
     </Modal>

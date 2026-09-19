@@ -291,6 +291,21 @@ class OrchestratorApiRoutes(BaseModel):
     retry_status: Literal[
         "/api/tickets/{ticket_id}/retry-status"
     ] = "/api/tickets/{ticket_id}/retry-status"
+    run_instructions: Literal[
+        "/api/runs/{run_id}/instructions"
+    ] = "/api/runs/{run_id}/instructions"
+    decide_run_instruction: Literal[
+        "/api/runs/{run_id}/instructions/{instruction_id}"
+    ] = "/api/runs/{run_id}/instructions/{instruction_id}"
+    post_ticket_message: Literal[
+        "/api/tickets/{ticket_id}/messages"
+    ] = "/api/tickets/{ticket_id}/messages"
+    rerun_ticket: Literal[
+        "/api/tickets/{ticket_id}/rerun"
+    ] = "/api/tickets/{ticket_id}/rerun"
+    cancel_ticket: Literal[
+        "/api/tickets/{ticket_id}/cancel"
+    ] = "/api/tickets/{ticket_id}/cancel"
 
 
 class IterationHistoryEntry(BaseModel):

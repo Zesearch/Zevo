@@ -93,7 +93,8 @@ def _suite(tmp_path: Path, row_counts: list[int]) -> Path:
             encoding="utf-8",
         )
         members.append({
-            "name": f"benchmark {index}", "config": str(config),
+            "name": f"benchmark {index}",
+            "benchmark_id": f"validation:{index}", "config": str(config),
             "questions": str(questions), "sample_submission": str(sample),
             "output": str(root / "predictions.csv"),
             "diagnostics": str(root / "diagnostics.json"),
@@ -200,4 +201,8 @@ def test_benchmark_commits_before_its_worker_finishes_other_members(tmp_path: Pa
     assert [row["benchmark_name"] for row in completed
             if row.get("suite_rows_verified") is not None] == [
         "benchmark 0", "benchmark 1",
+    ]
+    assert [row["benchmark_id"] for row in completed
+            if row.get("suite_rows_verified") is not None] == [
+        "validation:0", "validation:1",
     ]

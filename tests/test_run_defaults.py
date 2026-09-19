@@ -1230,6 +1230,7 @@ async def test_supervisor_can_explicitly_finish_its_run() -> None:
             id="explicit-success", task_name="task", status="running",
             supervisor_ticket_id="orchestrate-explicit-001",
             registry_version_tag="M-explicit", iterations_completed=1,
+            halted_reason="Finalizing at limit: iterations 1 >= budget 1",
             history=[complete], started_at=datetime.now(timezone.utc),
         ))
         db.add(Ticket(
@@ -1244,11 +1245,24 @@ async def test_supervisor_can_explicitly_finish_its_run() -> None:
 
         result = await patch_run(
             "explicit-success",
-            PatchRunRequest(status="success", summary="Champion retained."),
+            PatchRunRequest(
+                status="success", summary="Champion retained.",
+                halted_reason="Finalizing at limit: iterations 1 >= budget 1",
+            ),
             db,
         )
         assert result.status == "success"
         assert result.summary == "Champion retained."
+        assert result.halted_reason == ""
+        assert (await db.get(Run, "explicit-success")).halted_reason == ""
+
+        updated = await patch_run(
+            "explicit-success",
+            PatchRunRequest(halted_reason="Finalizing at limit"),
+            db,
+        )
+        assert updated.halted_reason == ""
+        assert (await db.get(Run, "explicit-success")).halted_reason == ""
 
     await engine.dispose()
 

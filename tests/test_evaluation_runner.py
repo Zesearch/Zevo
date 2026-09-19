@@ -160,6 +160,7 @@ def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -
     result, events = _run(EvaluationTaskInput(
         ticket_id="eval-suite-001",
         test_set_name="first",
+        benchmark_id="validation:0",
         predictions_path=str(first_prediction),
         scoring_set=str(first_gold),
         sample_submission=str(first_prediction),
@@ -168,6 +169,7 @@ def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -
         metric="accuracy",
         suite_members=[EvaluationSuiteMemberInput(
             name="second",
+            benchmark_id="validation:1",
             predictions_path=str(second_prediction),
             scoring_set=str(second_gold),
             sample_submission=str(second_prediction),
@@ -187,6 +189,11 @@ def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -
         and event.get("payload", {}).get("phase") == "benchmark_complete"
     ]
     assert completed == ["first", "second"]
+    assert [
+        event["payload"]["benchmark_id"] for event in events
+        if event.get("type") == "progress"
+        and event.get("payload", {}).get("phase") == "benchmark_complete"
+    ] == ["validation:0", "validation:1"]
 
 
 def test_suite_failure_names_the_member(tmp_path: Path) -> None:

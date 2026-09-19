@@ -100,6 +100,39 @@ def _inference_estimate(
     )
 
 
+def _train_estimate(
+    *, base_model: str, training_method: str,
+    info: InfrastructureDeviceInfo, constraints: ClusterGpuConstraints,
+) -> tuple[int, str]:
+    """Estimate the Train stage without treating Infra's route plan as a floor."""
+    parameters = model_parameter_billions(base_model)
+    method = training_method.strip().lower().replace("-", "_")
+    if parameters is None or method not in {"full_sft", "lora_sft"}:
+        return int(info.resource_plan.num_gpus), (
+            "model size or Train method has no supported memory estimate; "
+            "retained Infrastructure's conservative fallback"
+        )
+
+    reported_vram = float(constraints.gpu_vram_gib or 0)
+    usable_per_gpu = reported_vram * 0.80 if reported_vram > 0 else 64.0
+    if method == "lora_sft":
+        # Frozen BF16 base weights plus adapter/runtime room. Adapter optimizer
+        # state is small relative to the frozen model.
+        required_gib = parameters * 1_000_000_000 * 2 / (1024 ** 3) * 1.25 + 8.0
+        workload = "LoRA with frozen BF16 base weights"
+    else:
+        # Full-parameter Adam: BF16 weights and gradients (4 bytes), Adam
+        # moments (8), FP32 master weights (4). The usable-VRAM margin covers
+        # activations, runtime buffers, and imperfect sharding.
+        required_gib = parameters * 1_000_000_000 * 16 / (1024 ** 3) + 8.0
+        workload = "full-parameter Adam/FSDP training"
+    return max(1, math.ceil(required_gib / usable_per_gpu)), (
+        f"parsed about {parameters:g}B parameters for {workload}; "
+        f"estimated {required_gib:.0f} GiB across GPUs against "
+        f"{usable_per_gpu:.0f} GiB usable per GPU"
+    )
+
+
 def _constraints_for(info: InfrastructureDeviceInfo) -> ClusterGpuConstraints:
     if info.cluster is None:
         raise ValueError("cluster stage has no cluster execution route")
@@ -176,6 +209,7 @@ def plan_stage_resources(
     inference_rows: int = 0,
     inference_members: int = 1,
     inference_gpus_per_replica: int = 0,
+    train_world_size_pin: int = 0,
     registered_gpus: int = 0,
     registered_nodes: int = 0,
 ) -> StageResourceSelection:
@@ -209,8 +243,10 @@ def plan_stage_resources(
         )
 
     if stage == "train":
-        estimated = int(info.resource_plan.num_gpus)
-        estimate_reason = "used Infrastructure's model/method-aware Train minimum"
+        estimated, estimate_reason = _train_estimate(
+            base_model=base_model, training_method=training_method,
+            info=info, constraints=constraints,
+        )
     elif stage == "data":
         # Ordinary preparation is CPU-heavy. Some sites nevertheless require a
         # GPU GRES to enter their container/QoS path; start at the smallest tier
@@ -224,7 +260,17 @@ def plan_stage_resources(
         estimated = max(estimated, inference_gpus_per_replica)
 
     single_node = stage in {"data", "inference"}
-    candidates = _tier_candidates(estimated, maximum_gpus)
+    if stage == "train" and train_world_size_pin:
+        if train_world_size_pin < estimated:
+            raise ValueError(
+                f"pinned Train world_size {train_world_size_pin} is below "
+                f"estimated GPU requirement {estimated}"
+            )
+        candidates = [train_world_size_pin] if (
+            not maximum_gpus or train_world_size_pin <= maximum_gpus
+        ) else []
+    else:
+        candidates = _tier_candidates(estimated, maximum_gpus)
     baseline = next(
         ((tier, shape) for tier in candidates
          if (shape := _shape_for(tier, constraints, single_node=single_node)) is not None),
@@ -239,15 +285,9 @@ def plan_stage_resources(
             f"whole_node={constraints.whole_node}"
         )
 
-    # Extra Train GPUs can shorten a large-model/full-parameter job. Inference
-    # scales only for a sizeable scoring workload: each replica gets the full
-    # minimum model envelope, and a single ticket still owns the whole job.
-    model_size = model_parameter_billions(base_model)
-    can_scale_train = stage == "train" and (
-        training_method == "full_sft"
-        or (not training_method and model_size is not None and model_size >= 30)
-    )
-    useful_ceiling = baseline[0] * 2 if can_scale_train else baseline[0]
+    # Train requests the smallest safe tier. Inference may add replicas for a
+    # sizeable scoring workload; each replica needs the full model envelope.
+    useful_ceiling = baseline[0]
     replica_gpus = max(1, estimated)
     if stage == "inference":
         by_members = math.ceil(max(1, inference_members) / 3)
@@ -256,6 +296,8 @@ def plan_stage_resources(
         if inference_members < 2 and inference_rows < 2000:
             useful_replicas = 1
         useful_ceiling = max(baseline[0], replica_gpus * useful_replicas)
+    if stage == "train" and train_world_size_pin:
+        estimate_reason += f"; honored pinned Train world_size={train_world_size_pin}"
     selected_tier, selected_shape = baseline
     if live_capacity is not None:
         for tier in reversed(candidates):
@@ -296,7 +338,11 @@ def plan_stage_resources(
         num_gpus=selected_tier,
         nodes=nodes,
         gpus_per_node=per_node,
-        source="live Slurm capacity" if live_capacity is not None else "static cluster constraints",
+        source=(
+            "pinned Train world_size" if stage == "train" and train_world_size_pin
+            else "live Slurm capacity" if live_capacity is not None
+            else "static cluster constraints"
+        ),
         rationale=(
             f"{estimate_reason}; rounded minimum to tier {baseline[0]} using "
             f"{constraints.source}; "

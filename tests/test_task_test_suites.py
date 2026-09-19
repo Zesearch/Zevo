@@ -751,6 +751,7 @@ async def test_validation_member_selects_its_own_baseline_inference_query() -> N
         )
         assert len(members) == 1
         qa = members[0]
+        assert qa.benchmark_id == "validation:1"
         assert qa.test_set_name == "validation:qa"
         assert qa.configuration_pins["inference_config"][
             "inference_query"
@@ -837,6 +838,7 @@ async def test_run_overview_reports_current_benchmark_and_suite_progress() -> No
             "inference_completed": 1,
             "total": 2,
             "failed": 0,
+            "unmatched_progress": 0,
             "iteration": 0,
             "model_source": "base_model",
             "current": [{
@@ -953,6 +955,62 @@ def test_combined_suite_progress_counts_completed_members_not_tickets() -> None:
     assert progress["test"]["inference_completed"] == 3
 
 
+def test_benchmark_progress_uses_identity_not_display_name() -> None:
+    from zevo.api.routers.shared.runs import _benchmark_progress
+
+    run = Run(
+        id="identity-progress", task_name="suite", status="running",
+        holdout={"validation_sets": [
+            {"name": "Math · MATH-Hard"}, {"name": "Chat · Dolly"},
+        ]},
+    )
+    inference = Ticket(
+        id="identity-infer", run_id=run.id, agent_id="inference",
+        status="running", lane="optimization", iteration=0,
+        payload={"model_source": "base_model", "base_model": "owner/model"},
+        summary="Inference suite · Math · MATH Hard (1/2)",
+        created_at=datetime.now(timezone.utc),
+    )
+    def completed(extras: dict) -> ExecutionEvent:
+        return ExecutionEvent(
+            ticket_id=inference.id, heartbeat_id="submit", attempt_id="one",
+            event_type="progress", phase="generate", current_step=10,
+            total_steps=10, extras=extras,
+        )
+
+    by_id = completed({
+        "benchmark_id": "validation:0", "benchmark_name": "Math · MATH Hard",
+    })
+    progress = _benchmark_progress(
+        run, [inference], reveal_holdout=False, completion_events=[by_id],
+    )
+    assert progress["validation"]["inference_completed"] == 1
+    assert progress["validation"]["current"][0]["name"] == "Math · MATH-Hard"
+
+    # A job launched before IDs were added still has an exact ordered slot.
+    by_index = completed({
+        "benchmark_index": 1, "benchmark_total": 2,
+        "benchmark_name": "Math · MATH Hard",
+    })
+    progress = _benchmark_progress(
+        run, [inference], reveal_holdout=False,
+        completion_events=[by_index, completed({
+            "benchmark_id": "validation:1", "benchmark_name": "Chat · Dolly",
+        })],
+    )
+    assert progress["validation"]["inference_completed"] == 2
+
+    unknown = completed({
+        "benchmark_id": "validation:99", "benchmark_index": 1,
+        "benchmark_total": 2, "benchmark_name": "Math · MATH-Hard",
+    })
+    progress = _benchmark_progress(
+        run, [inference], reveal_holdout=False, completion_events=[unknown],
+    )
+    assert progress["validation"]["inference_completed"] == 0
+    assert progress["validation"]["unmatched_progress"] == 1
+
+
 @pytest.mark.asyncio
 async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
     from zevo.engine.run.runner import (
@@ -1018,6 +1076,7 @@ async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
         )
         assert len(members) == 1
         assert members[0].name == "qa"
+        assert members[0].benchmark_id == "test:1"
         assert members[0].configuration_pins["inference_config"][
             "inference_query"
         ] == next(
@@ -1043,6 +1102,7 @@ async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
             dict(evaluations[0].inputs or {}), run, db,
         )
         assert [member.name for member in scoring_members] == ["qa"]
+        assert [member.benchmark_id for member in scoring_members] == ["test:1"]
         assert [
             item.inputs["predictions"]["work_product_id"]
             for item in evaluations

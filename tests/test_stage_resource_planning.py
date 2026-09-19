@@ -114,17 +114,19 @@ def test_same_model_uses_two_gpu_tier_on_a_partial_eighty_gib_node() -> None:
     assert (selected.estimated_gpus, selected.num_gpus, selected.nodes) == (2, 2, 1)
 
 
-def test_train_retains_the_infrastructure_estimate_and_data_starts_small() -> None:
+def test_train_estimates_its_own_gpu_count_and_data_starts_small() -> None:
     info = _cluster_info(
         plan_gpus=8, plan_nodes=2, constraints=_beta_constraints(),
     )
     train = plan_stage_resources(
-        stage="train", base_model="org/32B", info=info, maximum_gpus=8,
+        stage="train", base_model="org/32B", training_method="full_sft",
+        info=info, maximum_gpus=8,
     )
     data = plan_stage_resources(
         stage="data", base_model="org/32B", info=info, maximum_gpus=8,
     )
-    assert (train.num_gpus, train.nodes) == (8, 2)
+    assert (train.estimated_gpus, train.num_gpus, train.nodes) == (4, 4, 1)
+    assert "full-parameter Adam/FSDP" in train.rationale
     assert (data.estimated_gpus, data.num_gpus, data.nodes) == (1, 4, 1)
 
 
@@ -175,20 +177,20 @@ def _partial_node_constraints() -> dict:
     }
 
 
-def test_large_train_expands_only_when_live_capacity_allows_it() -> None:
+def test_train_uses_smallest_safe_tier_even_when_more_gpus_are_idle() -> None:
     info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
     full = plan_stage_resources(
         stage="train", base_model="org/32B", training_method="full_sft",
         info=info, live_capacity=SlurmCapacitySnapshot((4, 4), 8),
     )
-    assert (full.num_gpus, full.nodes, full.gpus_per_node) == (8, 2, 4)
+    assert (full.num_gpus, full.nodes, full.gpus_per_node) == (4, 1, 4)
     assert full.source == "live Slurm capacity"
 
     reduced = plan_stage_resources(
         stage="train", base_model="org/32B", training_method="full_sft",
         info=info, live_capacity=SlurmCapacitySnapshot((4, 4), 6),
     )
-    assert (reduced.num_gpus, reduced.nodes, reduced.gpus_per_node) == (6, 2, 3)
+    assert (reduced.num_gpus, reduced.nodes, reduced.gpus_per_node) == (4, 1, 4)
 
     queued = plan_stage_resources(
         stage="train", base_model="org/32B", training_method="full_sft",
@@ -196,6 +198,21 @@ def test_large_train_expands_only_when_live_capacity_allows_it() -> None:
     )
     assert queued.num_gpus == 4
     assert "wait in Slurm" in queued.rationale
+
+
+def test_full_train_needs_more_gpus_when_each_gpu_has_less_vram() -> None:
+    constraints = {**_partial_node_constraints(), "gpu_vram_gib": 80}
+    info = _cluster_info(plan_gpus=4, constraints=constraints)
+    selected = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="full_sft",
+        info=info,
+    )
+    assert (selected.estimated_gpus, selected.num_gpus) == (8, 8)
+    with pytest.raises(ValueError, match="no valid train GPU tier"):
+        plan_stage_resources(
+            stage="train", base_model="org/32B", training_method="full_sft",
+            info=info, maximum_gpus=4,
+        )
 
 
 def test_lora_and_inference_do_not_take_extra_gpus_merely_because_they_are_free() -> None:
@@ -209,7 +226,7 @@ def test_lora_and_inference_do_not_take_extra_gpus_merely_because_they_are_free(
         stage="inference", base_model="org/32B",
         info=info, live_capacity=capacity,
     )
-    assert lora.num_gpus == 4
+    assert lora.num_gpus == 1
     assert inference.num_gpus == 1
 
 
@@ -262,6 +279,40 @@ def test_probe_failure_keeps_minimum_safe_shape() -> None:
     )
     assert selected.num_gpus == 4
     assert "timed out" in selected.rationale
+
+
+def test_train_uses_infra_fallback_when_model_size_is_unknown() -> None:
+    info = _cluster_info(plan_gpus=8, constraints=_partial_node_constraints())
+    selected = plan_stage_resources(
+        stage="train", base_model="org/model-without-size",
+        training_method="full_sft", info=info,
+    )
+    assert selected.num_gpus == 8
+    assert "conservative fallback" in selected.rationale
+
+
+def test_train_uses_infra_fallback_when_method_is_not_selected() -> None:
+    info = _cluster_info(plan_gpus=8, constraints=_partial_node_constraints())
+    selected = plan_stage_resources(
+        stage="train", base_model="org/32B", info=info,
+    )
+    assert selected.num_gpus == 8
+    assert "conservative fallback" in selected.rationale
+
+
+def test_pinned_train_world_size_is_exact_and_must_fit() -> None:
+    info = _cluster_info(plan_gpus=8, constraints=_partial_node_constraints())
+    selected = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="full_sft",
+        info=info, train_world_size_pin=6, maximum_gpus=8,
+    )
+    assert (selected.estimated_gpus, selected.num_gpus, selected.nodes) == (4, 6, 1)
+    assert selected.source == "pinned Train world_size"
+    with pytest.raises(ValueError, match="below estimated GPU requirement"):
+        plan_stage_resources(
+            stage="train", base_model="org/32B", training_method="full_sft",
+            info=info, train_world_size_pin=2,
+        )
 
 
 def test_slurm_snapshot_parses_node_and_qos_headroom() -> None:
@@ -318,8 +369,40 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
 
     submit = asyncio.run(contract())
     assert submit.phase == "submit"
-    assert (submit.num_gpus, submit.nodes) == (8, 2)
+    assert (submit.num_gpus, submit.nodes) == (4, 1)
     assert observed == ["probe"]
+
+    script = tmp_path / "train.sbatch"
+    script.write_text("\n".join((
+        "#!/bin/bash",
+        f"#SBATCH --job-name={submit.job_name}",
+        f"#SBATCH --gpus={submit.num_gpus}",
+        f"#SBATCH --output={submit.stdout_path}",
+        f"#SBATCH --error={submit.stderr_path}",
+        submit.runtime_prologue,
+        submit.lifecycle_prologue,
+        "python train.py",
+    )), encoding="utf-8")
+    config_path = tmp_path / "train_config.yaml"
+    config_path.write_text("test stub", encoding="utf-8")
+    training = SimpleNamespace(
+        world_size=8, distributed=SimpleNamespace(nodes=1, gpus_per_node=8),
+    )
+    monkeypatch.setattr(
+        runner, "load_train_config", lambda _path: SimpleNamespace(training=training),
+    )
+    monkeypatch.setattr(runner, "validate_cluster_train_config", lambda _cfg: None)
+    problem = runner._slurm_stage_result_problem(
+        SimpleNamespace(slurm_job=submit), str(script), "train.py",
+        configuration_path=str(config_path),
+    )
+    assert "world_size differs" in problem
+    training.world_size = 4
+    training.distributed.gpus_per_node = 4
+    assert runner._slurm_stage_result_problem(
+        SimpleNamespace(slurm_job=submit), str(script), "train.py",
+        configuration_path=str(config_path),
+    ) == ""
 
     job_row = SimpleNamespace(
         id="request-1", gpu_count=6, instance_id="12345", status="RUNNING",
