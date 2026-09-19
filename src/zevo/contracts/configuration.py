@@ -1477,6 +1477,30 @@ def validate_cluster_train_config(config: TrainRunConfig) -> None:
         )
 
 
+def validate_train_stage_shape(
+    config: TrainRunConfig, *, world_size: int, nodes: int,
+) -> None:
+    """Require Train's launcher topology to match the engine-selected job."""
+    if world_size < 1 or nodes < 1 or world_size % nodes:
+        raise ValueError("expected Train GPU count must divide evenly across nodes")
+    if config.training.world_size != world_size:
+        raise ValueError(
+            "cluster Train world_size differs from the engine resource request: "
+            f"expected {world_size}, got {config.training.world_size}"
+        )
+    distributed = config.training.distributed
+    if distributed is None:
+        if world_size > 1:
+            raise ValueError("multi-GPU cluster Train requires a distributed topology")
+        return
+    if distributed.nodes != nodes or distributed.gpus_per_node != world_size // nodes:
+        raise ValueError(
+            "cluster Train distributed topology differs from the engine "
+            f"resource request: expected {nodes} node(s) x "
+            f"{world_size // nodes} GPU(s)"
+        )
+
+
 _CONFIG_MODELS: dict[str, type[BaseModel]] = {
     "inference": InferenceRunConfig,
     "train": TrainRunConfig,
@@ -1513,6 +1537,16 @@ def _main(argv: list[str] | None = None) -> int:
         type=int,
         help="require Train data selection to match the bound prepared row count",
     )
+    validate_parser.add_argument(
+        "--expected-world-size",
+        type=int,
+        help="require Train world_size to match the stage GPU request",
+    )
+    validate_parser.add_argument(
+        "--expected-nodes",
+        type=int,
+        help="require Train distributed nodes to match the stage request",
+    )
     args = parser.parse_args(argv)
     model = _CONFIG_MODELS[args.kind]
     if args.command == "schema":
@@ -1534,6 +1568,17 @@ def _main(argv: list[str] | None = None) -> int:
             if args.kind != "train":
                 raise ValueError("--cluster is supported only for Train configuration")
             validate_cluster_train_config(TrainRunConfig.model_validate(config))
+        if args.expected_world_size is not None or args.expected_nodes is not None:
+            if args.kind != "train" or args.expected_world_size is None or args.expected_nodes is None:
+                raise ValueError(
+                    "--expected-world-size and --expected-nodes are required "
+                    "together for Train configuration"
+                )
+            validate_train_stage_shape(
+                TrainRunConfig.model_validate(config),
+                world_size=args.expected_world_size,
+                nodes=args.expected_nodes,
+            )
         if args.adaptive_vllm_memory:
             if args.kind != "inference":
                 raise ValueError(

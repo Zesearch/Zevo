@@ -72,6 +72,7 @@ from zevo.db import (
     HeartbeatRun,
     InfraInstance,
     Run,
+    RunInstruction,
     SshHost,
     Ticket,
     TicketMessage,
@@ -167,7 +168,11 @@ from zevo.contracts.infrastructure import (
     slurm_runtime_prologue,
     validate_device_info,
 )
-from zevo.engine.run.benchmark_telemetry import benchmark_progress_phase
+from zevo.engine.run.benchmark_telemetry import (
+    benchmark_id as benchmark_member_id,
+    benchmark_progress_phase,
+    canonical_benchmark_marker,
+)
 from zevo.contracts.configuration import (
     InferenceRunConfig,
     TrainRunConfig,
@@ -178,6 +183,7 @@ from zevo.contracts.configuration import (
     train_method_contracts,
     validate_adaptive_vllm_memory_config,
     validate_cluster_train_config,
+    validate_train_stage_shape,
 )
 from zevo.contracts.model_registry import (
     RegisterTaskInput,
@@ -796,9 +802,9 @@ async def _slurm_stage_job_contract(
         selection = plan_stage_resources(
             stage=stage,
             base_model=str((ticket.payload or {}).get("base_model") or ""),
-            training_method=str(
-                (ticket.payload or {}).get("training_method_pin")
-                or (ticket.payload or {}).get("training_method") or ""
+            training_method=(
+                str((ticket.payload or {}).get("training_method_pin") or "")
+                if stage == "train" else ""
             ),
             info=info,
             live_capacity=capacity,
@@ -809,6 +815,11 @@ async def _slurm_stage_job_contract(
             ),
             inference_members=max(1, len(inference_suite)),
             inference_gpus_per_replica=configured_tp,
+            train_world_size_pin=(
+                int(((ticket.payload or {}).get("configuration_pins") or {}).get(
+                    "world_size"
+                ) or 0) if stage == "train" else 0
+            ),
             registered_gpus=registered_gpus,
             registered_nodes=registered_nodes,
         )
@@ -954,7 +965,11 @@ async def _build_train_input(
             "python -m zevo.contracts.configuration validate train "
             "<absolute-yaml-path>"
             f" --source-rows {dataset_rows}"
-            + (" --cluster" if slurm_job.enabled else "")
+            + (
+                f" --cluster --expected-world-size {slurm_job.num_gpus}"
+                f" --expected-nodes {slurm_job.nodes}"
+                if slurm_job.enabled else ""
+            )
         ),
         telemetry_helper_path=str(Path(work_dir) / "zevo_train_telemetry.py"),
         execution_contract=TrainExecutionContract(
@@ -1071,6 +1086,7 @@ async def _build_validation_suite_members(
         member_dir = str(Path(work_dir) / "suite" / f"{index:03d}")
         members.append(InferenceSuiteMemberInput(
             name=name,
+            benchmark_id=benchmark_member_id("validation", index),
             test_set_name=f"{_VALIDATION_MEMBER_PREFIX}{name}",
             scoring_set=scoring_set,
             sample_submission=sample_submission,
@@ -1114,9 +1130,10 @@ async def _build_holdout_suite_members(
     source_pins = dict(payload.get("configuration_pins") or {})
     members: list[InferenceSuiteMemberInput] = []
     ordered = [
-        item for index, item in enumerate(suite) if index != primary_index
+        (index, item) for index, item in enumerate(suite)
+        if index != primary_index
     ]
-    for index, item in enumerate(ordered, start=1):
+    for position, (index, item) in enumerate(ordered, start=1):
         name = str(item.get("name") or f"Test {index + 1}")
         scoring_set = resolve_asset(str(item.get("public") or ""))
         sample_submission = resolve_asset(
@@ -1148,9 +1165,10 @@ async def _build_holdout_suite_members(
             raise ValueError(
                 f"Test suite member {name!r} has no inference data profile"
             )
-        member_dir = str(Path(work_dir) / "suite" / f"{index:03d}")
+        member_dir = str(Path(work_dir) / "suite" / f"{position:03d}")
         members.append(InferenceSuiteMemberInput(
             name=name,
+            benchmark_id=benchmark_member_id("test", index),
             test_set_name=name,
             scoring_set=scoring_set,
             sample_submission=sample_submission,
@@ -1192,6 +1210,17 @@ async def _build_inference_input(
             session=session,
         )
     )
+    frozen_suite = (
+        _heldout_test_sets(run) if ticket.lane == "held_out_test"
+        else _validation_sets(run)
+    )
+    primary_name = str(payload.get("test_set_name") or "")
+    if primary_name.startswith(_VALIDATION_MEMBER_PREFIX):
+        primary_name = primary_name[len(_VALIDATION_MEMBER_PREFIX):]
+    primary_index = next((
+        index for index, item in enumerate(frozen_suite)
+        if str(item.get("name") or "") == primary_name
+    ), 0)
     slurm_job = await _slurm_stage_job_contract(
         run=run, ticket=ticket, work_dir=work_dir, filename="predict.sbatch",
         device_info_path=device_info_path, session=session, stage="inference",
@@ -1204,6 +1233,12 @@ async def _build_inference_input(
         operation="run_inference",
         run_id=str(ticket.run_id or ""),
         iteration=int(ticket.iteration or 0),
+        benchmark_id=(
+            benchmark_member_id(
+                "test" if ticket.lane == "held_out_test" else "validation",
+                primary_index,
+            ) if frozen_suite else ""
+        ),
         test_set_name=str(payload.get("test_set_name") or ""),
         model_source=str(payload.get("model_source") or "base_model"),
         configuration_mode=(
@@ -1292,7 +1327,7 @@ async def _build_evaluation_suite_members(
         )).scalars().all()
         if ticket.lane == "held_out_test":
             from zevo.holdout_storage import resolve_asset
-        for item in suite:
+        for index, item in enumerate(suite):
             name = str(item.get("name") or "")
             if name == primary_name:
                 continue
@@ -1313,6 +1348,10 @@ async def _build_evaluation_suite_members(
                 member_submission = resolve_asset(member_submission)
             members.append(EvaluationSuiteMemberInput(
                 name=name,
+                benchmark_id=benchmark_member_id(
+                    "test" if ticket.lane == "held_out_test" else "validation",
+                    index,
+                ),
                 predictions_path=product.path,
                 scoring_set=member_scoring,
                 sample_submission=member_submission,
@@ -1346,11 +1385,21 @@ def _build_evaluation_input(
         primary_name = _validation_member_name(ticket) or (
             str(suite[0].get("name") or "Validation") if suite else ""
         )
+    primary_index = next((
+        index for index, item in enumerate(suite)
+        if str(item.get("name") or "") == primary_name
+    ), 0)
     return EvaluationTaskInput(
         ticket_id=ticket.id,
         **_customization_kwargs(ticket.customization or {}),
         predictions_path=input_path(inputs, "predictions"),
         test_set_name=primary_name,
+        benchmark_id=(
+            benchmark_member_id(
+                "test" if ticket.lane == "held_out_test" else "validation",
+                primary_index,
+            ) if suite else ""
+        ),
         code_execution_adapter=str(payload.get("code_execution_adapter") or ""),
         scoring_set=_eval_set_of(payload, ticket),
         evaluation_script=str(payload.get("evaluation_script") or ""),
@@ -1443,6 +1492,47 @@ def _build_orchestrate_input(ticket: Ticket, payload: dict) -> OrchestratorTaskI
         dataset_profile=payload.get("dataset_profile") or {},
         runtime=payload["runtime"],
     )
+
+
+async def _run_instruction_context(
+    session: AsyncSession, *, run: Run, ticket: Ticket,
+) -> list[dict[str, str]]:
+    """Deliver durable, unresolved Run requests to the responsible agent."""
+    receives = (
+        ticket.id == run.supervisor_ticket_id
+        or (not run.supervisor_ticket_id and run.mode == "single_stage")
+    )
+    if not receives:
+        return []
+    rows = (await session.execute(
+        select(RunInstruction)
+        .where(
+            RunInstruction.run_id == run.id,
+            RunInstruction.status.in_(
+                ("queued", "delivered", "scheduled", "needs_input")
+            ),
+        )
+        .order_by(RunInstruction.created_at, RunInstruction.id)
+    )).scalars().all()
+    context = []
+    changed = False
+    for row in rows:
+        context.append({
+            "kind": "run_instruction",
+            "id": row.id,
+            "run_id": run.id,
+            "source_ticket_id": row.source_ticket_id or "",
+            "status": row.status,
+            "body": row.body[:4000],
+            "agent_response": (row.agent_response or "")[:4000],
+        })
+        if row.status == "queued":
+            row.status = "delivered"
+            row.updated_at = datetime.now(timezone.utc)
+            changed = True
+    if changed:
+        await session.commit()
+    return context
 
 
 def _build_freeform_input(
@@ -2315,7 +2405,11 @@ def _slurm_stage_result_problem(
         if not configuration_path:
             return "cluster Train must report train_config_path before submission handoff"
         try:
-            validate_cluster_train_config(load_train_config(configuration_path))
+            train_config = load_train_config(configuration_path)
+            validate_cluster_train_config(train_config)
+            validate_train_stage_shape(
+                train_config, world_size=contract.num_gpus, nodes=contract.nodes,
+            )
         except (OSError, ValueError) as exc:
             return f"cluster Train configuration is invalid: {exc}"
     elif (
@@ -4178,6 +4272,11 @@ async def run_ticket(
         })
 
     def on_progress(phase: str, data: dict) -> None:
+        if tk.agent_id in {"inference", "evaluation"} and (
+            data.get("benchmark_id") or data.get("benchmark_index")
+            or data.get("benchmark_name")
+        ):
+            data = canonical_benchmark_marker(data, run.holdout or {}, tk.lane)
         # Per-step HF logs use `loss`; the final summary uses `train_loss` — and
         # some scripts only emit the latter. Prefer a real per-step loss, else
         # fall back to train_loss/eval_loss so the chart still gets the point.
@@ -4202,7 +4301,9 @@ async def run_ticket(
         name = phase or data.get("phase", "")
         benchmark_name = str(data.get("benchmark_name") or "").strip()
         if tk.agent_id in {"inference", "evaluation"}:
-            name = benchmark_progress_phase(str(name), benchmark_name)
+            name = benchmark_progress_phase(
+                str(name), str(data.get("benchmark_id") or benchmark_name),
+            )
         if tk.agent_id == "inference" and benchmark_name:
             benchmark_index = int(data.get("benchmark_index") or 0)
             benchmark_total = int(data.get("benchmark_total") or 0)
@@ -4675,6 +4776,9 @@ async def run_ticket(
         {"author": c.author, "body": (c.body or "")[:4000]}
         for c in prior_messages[-12:]
     ]
+    conversation_for_prompt.extend(
+        await _run_instruction_context(session, run=run, ticket=tk)
+    )
 
     # Export HEARTBEAT_ID so the driver's subprocess env includes it
     # (the cancel endpoint uses it to look up the process in the registry).

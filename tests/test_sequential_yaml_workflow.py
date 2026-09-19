@@ -695,6 +695,15 @@ def test_cluster_train_validator_requires_zero_dataloader_workers(
         "validate", "train", str(config_path), "--cluster",
     ]) == 0
     assert "VALID TrainRunConfig" in capsys.readouterr().out
+    assert configuration_main([
+        "validate", "train", str(config_path), "--cluster",
+        "--expected-world-size", "1", "--expected-nodes", "1",
+    ]) == 0
+    assert configuration_main([
+        "validate", "train", str(config_path), "--cluster",
+        "--expected-world-size", "2", "--expected-nodes", "1",
+    ]) == 1
+    assert "world_size differs" in capsys.readouterr().err
 
 
 def test_adaptive_vllm_memory_plan_replaces_fixed_gpu_fraction(

@@ -52,6 +52,31 @@ Stop
 
 ## One action per wake
 
+Run-level user instructions appear in the `RUN USER INSTRUCTIONS` prompt block
+on every wake until resolved. They may refer to the current Ticket, an earlier
+iteration, or a future one. Read the live Run and relevant Tickets before
+deciding when to act. There is no fixed mapping from instruction text to a
+stage or retry action.
+
+For each new instruction, promptly PATCH
+`api_routes.decide_run_instruction` with a plain-language decision. Use
+`scheduled` when work must finish first or the instruction belongs to a later
+iteration; that instruction will remain in future prompts. Use `needs_input`
+when the user must clarify, `declined` when the request cannot be honored, and
+`applied` only after the requested change actually occurred. Update a
+scheduled instruction to `applied` when it is carried out. The dashboard shows
+this response to the user. If an active Specialist should act, POST the exact
+instruction and context to `api_routes.post_ticket_message` with
+`author="orchestrator"`; this queues a Specialist wake. Inspect the current
+external job before claiming that its resources or work changed. Preserve the
+normal Run budgets, provenance, and execution contracts when acting on any
+instruction. Before finishing the Run, resolve any scheduled instruction or
+explain in its decision why the Run must end before it can be applied.
+For an explicit retry request, inspect `api_routes.retry_status` and the
+current Run before using `api_routes.rerun_ticket`; it retries a Ticket, not
+the whole Run. Use `api_routes.cancel_ticket` only when the user request and
+current execution state warrant stopping that Ticket.
+
 Read the live Run, Tickets, WorkProducts, budget, and stop verdict. Use only the
 exact paths in `api_routes`; never derive a plural URL or probe guessed routes.
 Before starting Data/Train N, refresh `api_routes.budget` and
@@ -119,6 +144,8 @@ through `api_routes.openapi` instead of testing guessed keys or endpoints.
 Infrastructure resolves concrete resources from Run context. Provider and the
 user-supplied GPU maximum remain fixed; zero means unlimited. Infrastructure
 selects a concrete positive count and must not exceed a positive limit.
+For cluster this is an access-route planning estimate, not the GPU minimum for
+each later Slurm job. Train and Inference choose their own stage job shapes.
 Use one `purpose="train"` route before initial Data. A train-sized route is also
 valid for Baseline/candidate Inference, so keep and reuse that exact device
 artifact through Data, Train, and Inference. Do not provision another host just

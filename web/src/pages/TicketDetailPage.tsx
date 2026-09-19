@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
-  ChevronLeft, MessageSquare, PlayCircle, StopCircle,
-  RotateCw, GitCommit, AlertTriangle,
+  ChevronLeft, MessageSquare, StopCircle, RotateCw,
 } from "lucide-react";
 
 import { TrainingMonitor } from "../components/TrainingMonitor";
@@ -44,14 +43,11 @@ export function TicketDetailPage() {
   // [started, finished] window.
   const isOrchestrate = tk?.agent_id === "orchestrator";
   // Fetched for every ticket, not just orchestrate ones: the emitted-children
-  // panel and the heartbeat controls read the run, and the message box needs its
-  // status to know whether a message is an instruction or just a note.
+  // panel reads the parent Run.
   const { data: runForHb } = useSWR<RunDetail>(
     tk?.run_id ? `/api/runs/${encodeURIComponent(tk.run_id)}` : null,
     { refreshInterval: 3000 }
   );
-  const runFinished = !!runForHb
-    && ["success", "degraded", "failed", "cancelled", "halted"].includes(runForHb.status);
   // How many orchestrate tickets this run has. Newer runs use ONE ticket for the
   // whole run (all wakes reuse it), so its transcript == the whole run; older
   // runs split the orchestrator into one ticket per iteration loop.
@@ -127,7 +123,6 @@ export function TicketDetailPage() {
   const [message, setMessage] = useState("");
   const [messageBusy, setMessageBusy] = useState(false);
   const [hbMsg, setHbMsg] = useState<string | null>(null);
-  const [hbBusy, setHbBusy] = useState(false);
   const [selectedHbId, setSelectedHbId] = useState<string>("");
   // The currently-selected heartbeat, shared by the Transcript tabs AND the
   // Emitted-payloads panel so clicking either side syncs the other.
@@ -253,23 +248,6 @@ export function TicketDetailPage() {
     }
   }
 
-  async function runHeartbeat() {
-    setHbBusy(true);
-    setHbMsg(null);
-    try {
-      const body = await api<{ status?: string }>(
-        `/tickets/${encodeURIComponent(ticketId)}/heartbeat`,
-        { method: "POST", body: JSON.stringify({}) },
-      );
-      setHbMsg(body.status === "queued" ? "Heartbeat queued." : JSON.stringify(body));
-      void mutate();
-    } catch (e) {
-      setHbMsg(String((e as Error).message || e));
-    } finally {
-      setHbBusy(false);
-    }
-  }
-
   return (
     <div className="w-full px-[max(1.5rem,1.5vw)] py-8">
       <button onClick={goBack} className="inline-flex items-center gap-1 font-mono text-2xs text-slate-500 hover:text-brass-300">
@@ -305,14 +283,8 @@ export function TicketDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={runHeartbeat} disabled={hbBusy} className="btn btn-brass disabled:opacity-50">
-            <PlayCircle size={14} /> {hbBusy ? "running…" : "Run heartbeat"}
-          </button>
           {(tk.status === "running" || tk.status === "repairing") && (
             <CancelButton ticketId={tk.id} onCancelled={() => void mutate()} />
-          )}
-          {(tk.status === "failed" || tk.status === "cancelled") && (
-            <RerunButton ticketId={tk.id} onRerun={() => void mutate()} />
           )}
         </div>
       </Bezel>
@@ -481,13 +453,7 @@ export function TicketDetailPage() {
             />
           </>
         )}
-        {/* The question, when the agent stopped to ask one.
-            Comments are not otherwise shown — that was deliberate, the feed
-            above says what happened. But a clarification is different in kind:
-            the run is HALTED on it and only a reply restarts it, so leaving it
-            in a channel nothing renders meant the pipeline stopped dead with the
-            reason stored where nobody could read it. Shown only while blocked,
-            and only the asking message. */}
+        {/* A clarification reply must go to this exact Ticket to unblock it. */}
         {tk.status === "awaiting_input" && clarification && (
           <div className="mt-3 rounded-bezel border border-skyx-400/50 bg-skyx-500/10 p-3">
             <div className="mb-1 font-mono text-2xs uppercase tracking-wider text-skyx-300">
@@ -497,21 +463,29 @@ export function TicketDetailPage() {
             <div className="mt-1 text-xs text-dim">Answer below to resume the run.</div>
           </div>
         )}
-        {/* Talking to the agent belongs with its transcript, not in a separate
-            section further down: you write here BECAUSE of what you just read. */}
-        <div className="mt-3 flex gap-2">
-          <input
-            type="text"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") postMessage(); }}
-            placeholder={runFinished ? "Add a note…" : "Send a message…"}
-            className="flex-1 rounded-lg border border-hair bg-canvas px-3 py-2 text-sm text-ink placeholder:text-slate-600 focus:border-brass-500/50"
-          />
-          <button onClick={postMessage} disabled={messageBusy || !message.trim()} className="btn disabled:opacity-50">
-            <MessageSquare size={12} /> post
-          </button>
-        </div>
+        {tk.status === "awaiting_input" && (
+          <div className="mt-3 flex gap-2">
+            <input
+              type="text"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") postMessage(); }}
+              placeholder="Answer the agent's question…"
+              className="flex-1 rounded-lg border border-hair bg-canvas px-3 py-2 text-sm text-ink placeholder:text-slate-600 focus:border-brass-500/50"
+            />
+            <button onClick={postMessage} disabled={messageBusy || !message.trim()} className="btn disabled:opacity-50">
+              <MessageSquare size={12} /> reply
+            </button>
+          </div>
+        )}
+        {(tk.messages || []).some((item) => item.author === "user" && !item.body.startsWith("__CLARIFY__")) && (
+          <div className="mt-3 border-t border-hair pt-3">
+            <div className="font-mono text-2xs uppercase tracking-wider text-slate-500">Earlier Ticket messages</div>
+            {(tk.messages || []).filter((item) => item.author === "user" && !item.body.startsWith("__CLARIFY__")).map((item) => (
+              <p key={item.id} className="mt-2 whitespace-pre-wrap text-sm text-slate-300">{item.body}</p>
+            ))}
+          </div>
+        )}
       </Section>
 
     </div>
@@ -674,8 +648,8 @@ function WaitingPanel({ ticketId, agentId }: { ticketId: string; agentId: string
   if (wakeups.length === 0) {
     return (
       <div className="text-xs text-slate-500">
-        No heartbeats yet, and no wakeup queued. Click <em>Run heartbeat</em>{" "}
-        above, or post a message to wake the agent.
+        No agent activation yet. The scheduler will start this Ticket when its
+        dependencies are ready.
       </div>
     );
   }
@@ -749,120 +723,6 @@ function CancelButton({
     >
       <StopCircle size={14} /> {busy ? "cancelling…" : "cancel"}
     </button>
-  );
-}
-
-
-type RetryStatus = {
-  ticket_id: string;
-  ticket_status: string;
-  verdict: "transient" | "structural" | "cancelled" | "unknown";
-  retryable: boolean;
-  reason: string;
-  code: string;
-  description: string;
-  recovery: string;
-  last_error: string;
-  last_exit_code: number;
-};
-
-function RerunButton({
-  ticketId,
-  onRerun,
-}: {
-  ticketId: string;
-  onRerun: () => void;
-}) {
-  const { data: cls } = useSWR<RetryStatus>(
-    `/api/tickets/${encodeURIComponent(ticketId)}/retry-status`,
-    { refreshInterval: 0 },
-  );
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
-
-  async function rerun(strategy: "fresh" | "from_checkpoint", force = false) {
-    if (!confirm(`Rerun this ticket with strategy=${strategy}${force ? " (FORCE)" : ""}?`)) return;
-    setBusy(true); setErr(null);
-    try {
-      await api(`/tickets/${encodeURIComponent(ticketId)}/rerun`, {
-        method: "POST",
-        body: JSON.stringify({ strategy, actor: "ui", force }),
-      });
-      setMenuOpen(false);
-      onRerun();
-    } catch (e) {
-      setErr(String((e as Error).message || e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // Verdict drives the visible affordance + tooltip.
-  const isStructural = cls?.verdict === "structural";
-  const verdictColor =
-    cls?.verdict === "transient" ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" :
-    cls?.verdict === "cancelled" ? "border-sky-500/40 bg-sky-500/10 text-sky-300" :
-    isStructural ? "border-amber-500/40 bg-amber-500/10 text-amber-300" :
-    "border-slate-700 bg-slate-900 text-slate-300";
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => setMenuOpen((v) => !v)}
-        disabled={busy}
-        title={cls ? `verdict: ${cls.verdict}, because ${cls.reason}` : "loading classification…"}
-        className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs uppercase tracking-wider transition hover:opacity-80 disabled:opacity-50 ${verdictColor}`}
-      >
-        <RotateCw size={14} className={busy ? "animate-spin" : ""} />
-        {busy ? "rerunning…" : "rerun"}
-      </button>
-      {menuOpen && !busy && (
-        <div
-          onMouseLeave={() => setMenuOpen(false)}
-          className="absolute right-0 top-full z-10 mt-1 w-80 rounded-md border border-slate-700 bg-slate-950 p-2 shadow-xl"
-        >
-          {cls && (
-            <div className="mb-2 rounded border border-slate-800 bg-slate-900/40 p-2 text-[15px]">
-              <span className="font-mono">{cls.verdict}</span>
-              <span className="ml-1 font-mono text-slate-500">{cls.code}</span>, because <span className="text-slate-400">{cls.reason}</span>
-            </div>
-          )}
-          {isStructural && (
-            <div className="mb-2 flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[15px] text-amber-200">
-              <AlertTriangle size={11} className="mt-0.5 flex-shrink-0" />
-              <span>
-                Structural failure, so rerunning the same inputs will reproduce
-                the failure. Edit the upstream / payload first, OR use force.
-              </span>
-            </div>
-          )}
-          <button
-            onClick={() => rerun("fresh", isStructural)}
-            className="block w-full rounded px-2 py-1.5 text-left text-xs text-slate-200 hover:bg-slate-800"
-          >
-            <RotateCw size={11} className="inline mr-1.5" />
-            Fresh rerun
-            {isStructural && <span className="ml-1 text-amber-300">(force)</span>}
-            <div className="text-[14px] text-slate-500">drops any WorkProduct, starts clean</div>
-          </button>
-          <button
-            onClick={() => rerun("from_checkpoint", isStructural)}
-            className="mt-1 block w-full rounded px-2 py-1.5 text-left text-xs text-slate-200 hover:bg-slate-800"
-          >
-            <GitCommit size={11} className="inline mr-1.5" />
-            Rerun from checkpoint
-            {isStructural && <span className="ml-1 text-amber-300">(force)</span>}
-            <div className="text-[14px] text-slate-500">keeps prior WorkProduct; Agent re-emits result on top</div>
-          </button>
-          {err && (
-            <div className="mt-2 rounded border border-rose-500/30 bg-rose-500/10 p-1.5 text-[14px] text-rose-300">
-              {err}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
   );
 }
 

@@ -443,6 +443,17 @@ export type MessageDTO = {
   triggered_wakeup_id: string;
 };
 
+export type RunInstructionDTO = {
+  id: string;
+  run_id: string;
+  source_ticket_id: string | null;
+  body: string;
+  status: "queued" | "delivered" | "scheduled" | "applied" | "needs_input" | "declined";
+  agent_response: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type NoticeDTO = {
   id: string;
   code: string;
@@ -537,6 +548,7 @@ export type BenchmarkSuiteProgress = {
   inference_completed: number;
   total: number;
   failed: number;
+  unmatched_progress: number;
   iteration: number;
   model_source: "" | "base_model" | "checkpoint";
   current: BenchmarkActivity[];

@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
   CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
@@ -57,6 +58,7 @@ const NON_NEGATIVE_METRICS = new Set([
 ]);
 const SUMMARY_KEYS = ["train_runtime", "total_flos", "train_samples_per_second", "train_steps_per_second"];
 const PALETTE = ["#E08D38", "#5FB0DD", "#A98FD6", "#4FD1B5", "#F26F58", "#8FCDEB", "#E0B23C", "#F2C185"];
+const CHARTS_PER_PAGE = 8;
 
 /** Compact scientific: drop the ".00" trailing zeros and the leading "+" on the
  *  exponent, so tiny lr / huge num_tokens labels stay narrow. */
@@ -194,6 +196,7 @@ function MetricChart({ metric, color, data, total }: {
  *  de-duped per step. Rendered identically in the run Timeline and the per-ticket
  *  view so the two never diverge. */
 export function TrainingMonitor({ executionEvents }: { executionEvents: ExecutionEventDTO[] }) {
+  const [page, setPage] = useState(0);
   const num = (v: unknown) => (typeof v === "number" && isFinite(v) ? v : undefined);
 
   // Runtime repair may launch Trainer again for the same Ticket. `attempt_id`
@@ -274,16 +277,6 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
   }
   const data = [...byStep.values()].sort((a, b) => (a.step ?? 0) - (b.step ?? 0));
 
-  if (data.length === 0) {
-    const phase = scopedEvents[scopedEvents.length - 1]?.phase;
-    return (
-      <div className="text-xs text-dim">
-        No loss readings yet{phase ? `, current phase: ` : "."}
-        {phase && <span className="font-mono text-brass-300">{phase}</span>}
-      </div>
-    );
-  }
-
   // The run's length, taken from the progress rows themselves — the trainer
   // reports `total_steps` alongside every reading, so the axis knows where the
   // run ENDS from the first point onward and never has to grow into it. Falling
@@ -297,8 +290,31 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
   // Metric keys = loss first, then every other numeric field except the x-axis.
   const keys = new Set<string>();
   for (const row of data) for (const k of Object.keys(row)) if (k !== "step") keys.add(k);
-  const metrics = ["loss", ...[...keys].filter((k) => k !== "loss").sort()];
+  const metrics = [
+    ...(keys.has("loss") ? ["loss"] : []),
+    ...[...keys].filter((k) => k !== "loss").sort(),
+  ];
   const colorFor = (m: string, i: number) => METRIC_COLORS[m] ?? PALETTE[i % PALETTE.length];
+  const pageCount = Math.max(1, Math.ceil(metrics.length / CHARTS_PER_PAGE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const firstMetric = currentPage * CHARTS_PER_PAGE;
+  const visibleMetrics = metrics.slice(firstMetric, firstMetric + CHARTS_PER_PAGE);
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+  useEffect(() => {
+    setPage(0);
+  }, [latestAttemptId]);
+
+  if (data.length === 0) {
+    const phase = scopedEvents[scopedEvents.length - 1]?.phase;
+    return (
+      <div className="text-xs text-dim">
+        No loss readings yet{phase ? `, current phase: ` : "."}
+        {phase && <span className="font-mono text-brass-300">{phase}</span>}
+      </div>
+    );
+  }
 
   // The last value each metric actually REPORTED, not the values on the last
   // row. The final reading is usually an evaluation line, which carries a loss
@@ -315,19 +331,55 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
     <div>
       <div className="mb-3 flex flex-wrap gap-2 font-mono text-[15px]">
         <span className="rounded bg-raised px-2 py-0.5 text-dim">step <span className="text-slate-100">{last.step}</span></span>
-        {metrics.map((m, i) =>
+        {visibleMetrics.map((m) => {
+          const i = metrics.indexOf(m);
+          return (
           last[m] !== undefined ? (
             <span key={m} className="rounded px-2 py-0.5"
               style={{ background: "rgba(102,120,138,0.1)", color: colorFor(m, i) }}>
               {m} <span className="text-slate-100">{fmtMetric(last[m] as number)}</span>
             </span>
           ) : null
-        )}
+          );
+        })}
       </div>
+      {pageCount > 1 && (
+        <div className="mb-3 flex items-center justify-between gap-3 border-y border-hair py-2">
+          <span className="font-mono text-xs text-dim">
+            Charts {firstMetric + 1}–{Math.min(firstMetric + CHARTS_PER_PAGE, metrics.length)} of {metrics.length}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPage((current) => Math.max(0, current - 1))}
+              disabled={currentPage === 0}
+              aria-label="Previous training charts"
+              className="btn px-2 py-1 disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <span className="min-w-16 text-center font-mono text-xs text-slate-300">
+              {currentPage + 1} / {pageCount}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))}
+              disabled={currentPage === pageCount - 1}
+              aria-label="Next training charts"
+              className="btn px-2 py-1 disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {metrics.map((m, i) => (
+        {visibleMetrics.map((m) => {
+          const i = metrics.indexOf(m);
+          return (
           <MetricChart total={total} key={m} metric={m} color={colorFor(m, i)} data={data} />
-        ))}
+          );
+        })}
       </div>
     </div>
   );

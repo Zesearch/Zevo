@@ -230,7 +230,7 @@ function RunFinished({ ev }: { ev: TranscriptEvent }) {
   return (
     <div className="rounded-md border border-lilac-500/30 bg-lilac-500/10 px-3 py-1.5 font-mono text-[15px] text-lilac-200">
       ◆ run {status}
-      {ev.payload.halted_reason ? (
+      {status !== "success" && ev.payload.halted_reason ? (
         <span className="ml-2 italic text-dim">
           {String(ev.payload.halted_reason)}
         </span>

@@ -25,7 +25,9 @@ instance mode.
   positive `resource_plan.num_gpus` no greater than a positive maximum, then
   derive the remaining plan for VRAM, host RAM, CPU, disk,
   time, GPU type, image, Slurm request, and cloud backend from the supplied Run
-  context and live capabilities. Once resolved, enforce it exactly. A usable
+  context and live capabilities. Enforce the count exactly for cloud and instance;
+  for cluster, validate it as a legal route estimate and let each stage size its
+  own job. A usable
   but undersized resource is failure unless a non-strict customized instruction
   explicitly accepts the shortfall; only then may the result be `degraded` with
   the exact deviation.

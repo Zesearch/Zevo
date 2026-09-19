@@ -371,6 +371,33 @@ def _check_test_set(req: UserRequest, items: list[PreflightItem]) -> None:
         )
 
 
+def _check_validation_sets(req: UserRequest, items: list[PreflightItem]) -> None:
+    """Catch local Validation sets that setup would reject after HTTP 202."""
+    from zevo.engine.method.validation_split import MIN_VALIDATION_ROWS, SplitError, _read_rows
+    from zevo.engine.remote_datasets import looks_like_hub_id
+
+    for index, member in enumerate(req.validation_sets):
+        if looks_like_hub_id(member.test_set):
+            continue  # Remote row counts are known only after materialization.
+        code = f"validation_set_{index + 1}"
+        path = Path(member.test_set)
+        if not path.is_file():
+            _block(items, f"{code}_missing", f"Validation set {member.name!r} file {member.test_set!r} does not exist.")
+            continue
+        try:
+            _columns, rows = _read_rows(path)
+        except (OSError, ValueError, SplitError) as exc:
+            _block(items, f"{code}_unreadable", f"Validation set {member.name!r} cannot be read: {exc}")
+            continue
+        if len(rows) < MIN_VALIDATION_ROWS:
+            _block(
+                items, f"{code}_too_small",
+                f"Validation set {member.name!r} has {len(rows)} row(s); "
+                f"each Validation set requires at least {MIN_VALIDATION_ROWS}.",
+                "Use the full split or choose a larger independent dataset.",
+            )
+
+
 def _check_scoring_assets(req: UserRequest, items: list[PreflightItem]) -> None:
     for i, message in enumerate(scoring_asset_errors(req)):
         _block(items, f"scoring_assets_{i + 1}", message)
@@ -727,6 +754,7 @@ async def preflight(body: PreflightBody, db: AsyncSession = Depends(get_db)) -> 
     _check_dataset_profile(req, items)         # B.3: hoist profiler signals
     if body.mode != "auto":
         _check_test_set(req, items)
+        _check_validation_sets(req, items)
         _check_scoring_assets(req, items)
         _check_eval(req, items)
     else:

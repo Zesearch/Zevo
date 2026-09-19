@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom"
 import useSWR from "swr";
 import { StopCircle, ChevronRight, ChevronDown, Clock, ListChecks, Package, ArrowLeft, Layers3, ScrollText } from "lucide-react";
 import { TrainingMonitor } from "../components/TrainingMonitor";
+import { RunInstructionPanel } from "../components/RunInstructionPanel";
 import { StepTimeline } from "../components/StepTimeline";
 import type { EventEnvelope } from "../components/LiveTranscript";
 
@@ -1178,6 +1179,11 @@ function BenchmarkStageProgress({
           {suite.failed > 0 && (
             <span className="ml-2 text-coral-300">· {suite.failed} failed</span>
           )}
+          {suite.unmatched_progress > 0 && (
+            <span className="ml-2 text-coral-300">
+              · {suite.unmatched_progress} unmapped progress marker{suite.unmatched_progress === 1 ? "" : "s"}
+            </span>
+          )}
         </span>
       </div>
       <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-800">
@@ -1404,7 +1410,7 @@ export function RunDetailPage() {
             ? `pushing the champion checkpoint to ${run.cancel_policy.hf_repo_id}`
             : "copying the champion checkpoint off the box"} before the GPU is released…
         </div>
-      ) : run.halted_reason ? (
+      ) : run.status !== "success" && run.halted_reason ? (
         <div className="mb-5 rounded-bezel border border-coral-500/30 bg-coral-500/10 p-3 text-sm text-coral-300">
           halted: {run.halted_reason}
           {run.cancel_outcome.hf_url && (
@@ -1541,6 +1547,8 @@ export function RunDetailPage() {
           <CostStrip run={run} runId={runId!} />
         </Bezel>
       </div>
+
+      <RunInstructionPanel runId={run.id} runStatus={run.status} cancelling={run.cancelling} />
 
       {/* ── Data views ── */}
       <div className="mt-8 flex flex-wrap items-center gap-2">

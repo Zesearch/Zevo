@@ -211,6 +211,9 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
         members = json.load(handle)["members"]
     if not members:
         raise ValueError("inference suite is empty")
+    identities = [str(member.get("benchmark_id") or "").strip() for member in members]
+    if any(not identity for identity in identities) or len(set(identities)) != len(identities):
+        raise ValueError("inference suite requires a distinct benchmark_id for every member")
     if (allocated_gpus < 1 or gpus_per_worker < 1
             or gpus_per_worker > allocated_gpus or max_workers < 1):
         raise ValueError("invalid GPU allocation or per-worker model-parallel size")
@@ -286,6 +289,7 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
             committed.add(index)
             _emit(ticket, {
                 "step": counts[index], "total": counts[index],
+                "benchmark_id": member["benchmark_id"],
                 "benchmark_name": member["name"], "benchmark_index": index + 1,
                 "benchmark_total": len(members), "parallel_workers": workers,
                 "suite_rows_completed": max(
@@ -417,16 +421,23 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                     for (worker_id, batch_index), value in progress.items()
                     if value < assigned[worker_id][batch_index].size
                 })
+                active_ids = sorted({
+                    assigned[worker_id][batch_index].member["benchmark_id"]
+                    for (worker_id, batch_index), value in progress.items()
+                    if value < assigned[worker_id][batch_index].size
+                })
                 _emit(ticket, {
                     # A benchmark is complete only after its merged artifacts
                     # are durable and checked, not when a shard generated its
                     # final token. The API counts step==total as completed.
                     "step": min(member_step, counts[member_index] - 1),
                     "total": counts[member_index],
+                    "benchmark_id": part.member["benchmark_id"],
                     "benchmark_name": part.member["name"],
                     "benchmark_index": member_index + 1,
                     "benchmark_total": len(members),
                     "active_benchmarks": active_names,
+                    "active_benchmark_ids": active_ids,
                     "parallel_workers": workers,
                     "suite_rows_completed": sum(progress.values()) + already_done_rows,
                     "suite_rows_total": sum(counts),

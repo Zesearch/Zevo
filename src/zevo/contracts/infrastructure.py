@@ -438,8 +438,10 @@ class InfrastructureResourcePlan(BaseModel):
         ge=1,
         description=(
             "Total GPU count selected by Infrastructure for this resource plan, "
-            "summed across all nodes. It must be no greater than a positive Run "
-            "num_gpus maximum; Run num_gpus=0 means no upper bound. With nodes>1 "
+            "summed across all nodes. For cluster it is a route planning estimate, "
+            "not a stage-job minimum or allocation. It must be no greater than "
+            "a positive Run num_gpus maximum; Run num_gpus=0 means no upper "
+            "bound. With nodes>1 "
             "it must be an exact multiple of nodes so each node gets the same "
             "gpus_per_node."
         ),
@@ -448,8 +450,9 @@ class InfrastructureResourcePlan(BaseModel):
         default=1,
         ge=1,
         description=(
-            "Number of physical nodes requested. Default 1 (single node, "
-            "unchanged). Multi-node plans set nodes>1 for distributed training "
+            "Number of physical nodes requested, or estimated for a cluster "
+            "route. Default 1 (single node). Multi-node plans set nodes>1 for "
+            "distributed training "
             "(FSDP HYBRID_SHARD / ZeRO-3 across nodes); num_gpus is then the "
             "cluster-wide total and gpus_per_node = num_gpus // nodes."
         ),
@@ -643,13 +646,16 @@ class DeviceClusterRoute(BaseModel):
     node: str = ""
     requested_gpus: int = Field(
         ge=1,
-        description="Total GPUs requested across all nodes for the stage job.",
+        description=(
+            "Cluster route's legal GPU planning estimate across nodes. No job "
+            "is requested by Infrastructure; stages choose their own count."
+        ),
     )
     nodes: int = Field(
         default=1,
         ge=1,
         description=(
-            "Node count for the stage job. Default 1 (single node). Must equal "
+            "Node count for the route planning estimate. Default 1. Must equal "
             "resource_plan.nodes; requested_gpus must be a multiple of it."
         ),
     )

@@ -44,7 +44,10 @@ from zevo.contracts.infrastructure import (
     SLURM_STATUS_EVENT_PREFIX,
     SLURM_STATUS_FILENAME,
 )
-from zevo.engine.run.benchmark_telemetry import benchmark_progress_phase
+from zevo.engine.run.benchmark_telemetry import (
+    benchmark_progress_phase,
+    canonical_benchmark_marker,
+)
 from zevo.engine.observe.run_metrics import incomplete_journal_entries
 from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
 from zevo.engine.observe.markers import scan_text
@@ -262,6 +265,13 @@ async def _persist_slurm_execution_marker(
     if kind != "progress":
         return False
 
+    ticket = await session.get(Ticket, ticket_id)
+    if ticket is not None and ticket.agent_id in {"inference", "evaluation"}:
+        run = await session.get(Run, ticket.run_id)
+        if run is not None:
+            payload = canonical_benchmark_marker(
+                payload, run.holdout or {}, ticket.lane,
+            )
     try:
         current_step = int(payload.get("step", payload.get("current_step", 0)) or 0)
         total_steps = int(payload.get("total", payload.get("total_steps", 0)) or 0)
@@ -284,9 +294,10 @@ async def _persist_slurm_execution_marker(
     extras = {key: value for key, value in payload.items() if key not in reserved}
     benchmark_name = str(payload.get("benchmark_name") or "").strip()
     if benchmark_name:
-        name = benchmark_progress_phase(name, benchmark_name)
+        name = benchmark_progress_phase(
+            name, str(payload.get("benchmark_id") or benchmark_name),
+        )
     if benchmark_name:
-        ticket = await session.get(Ticket, ticket_id)
         if ticket is not None and ticket.agent_id == "inference":
             try:
                 benchmark_index = int(payload.get("benchmark_index") or 0)

@@ -6,6 +6,7 @@ Schema overview (see plan: peaceful-crafting-bentley.md, "Postgres schema"):
   runs              - pipeline runs initiated by `run create` or POST /runs
   tickets           - work units; one row per ticket in a run's DAG
   ticket_messages   - human/agent conversation attached to a ticket
+  run_instructions  - user requests and agent decisions for a live Run
   ticket_notices    - structured system notices attached to a ticket
   heartbeat_results - one structured agent result per activation
   agent_memory_entries - Run-scoped lessons shared across one Agent's Tickets
@@ -524,6 +525,9 @@ class Run(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tickets: Mapped[list["Ticket"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    instructions: Mapped[list["RunInstruction"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
     memory_entries: Mapped[list["AgentMemoryEntry"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
@@ -682,6 +686,41 @@ class TicketMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), default=_utcnow)
 
     ticket: Mapped[Ticket] = relationship(back_populates="messages")
+
+
+class RunInstruction(Base):
+    """A user request addressed to the Run's coordinator, with its decision."""
+
+    __tablename__ = "run_instructions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'delivered', 'scheduled', 'applied', "
+            "'needs_input', 'declined')",
+            name="ck_run_instructions_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    source_ticket_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tickets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(16), default="queued", server_default="queued", index=True
+    )
+    agent_response: Mapped[str] = mapped_column(Text, default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    run: Mapped[Run] = relationship(back_populates="instructions")
 
 
 class TicketNotice(Base):

@@ -31,9 +31,10 @@
    independent replicas via `parallel_runner_path` below. Never submit
    another GPU job for a suite member. Atomically persist each member before
    moving on so a repaired execution can skip completed members. During every
-   member emit progress with exact
-   `benchmark_name`, one-based `benchmark_index`, and `benchmark_total`, in
-   addition to row `step` / `total`; this drives the live Overview label.
+   member emit progress with its exact engine-assigned `benchmark_id`, Task
+   display `benchmark_name`, one-based `benchmark_index`, and
+   `benchmark_total`, in addition to row `step` / `total`. Never reconstruct
+   the ID from the name; the ID counts progress and the name is only a label.
    Put the first benchmark's config, predictions, and diagnostics in
    `primary_member_work_dir` (`work_dir/suite/000`) for every Inference ticket,
    including one-benchmark runs. Additional members use their assigned
@@ -89,7 +90,8 @@ recommended_gpus_per_replica`, keep the YAML
 model-fitting size (normally `recommended_gpus_per_replica`), not the whole
 allocation. Respect a larger frozen baseline YAML in reuse mode. Copy
 `parallel_runner_path` beside the remote `predict.py`. Upload the normal
-ordered `suite.json` manifest; each member has `name`, `config`, `questions`,
+ordered `suite.json` manifest; each member has the exact `benchmark_id` from
+the primary work order or `suite_members`, plus `name`, `config`, `questions`,
 `sample_submission`, `output`, and `diagnostics`. `predict.py` must accept
 `--model`, `--suite`, `--summary`, `--ticket-id` and emit per-member progress.
 After validating every YAML, run the system helper in the batch foreground:

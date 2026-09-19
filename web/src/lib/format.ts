@@ -4,6 +4,10 @@ const PERCENTAGE_SCORE_METRICS = new Set([
   "accuracy", "exact_match", "em", "f1", "f1_micro", "f1_macro", "token_f1",
   "precision", "recall", "bleu", "rouge", "rouge_l", "pass_rate", "win_rate",
   "pass@1", "pass_at_1", "mc_loglikelihood", "accuracy_norm", "suite_average",
+  // These custom model-judge scores average per-row values in [0, 1].
+  "pairwise_win_rate_vs_human_reference_model_judge",
+  "pairwise_win_rate_vs_reference_model_judge",
+  "balanced_safe_response_accuracy_model_judge",
 ]);
 
 export function isPercentageMetric(metric: string | null | undefined): boolean {

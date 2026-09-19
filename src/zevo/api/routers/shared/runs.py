@@ -49,6 +49,7 @@ from zevo.db import (
     HeartbeatRun,
     RegistryModel,
     Run,
+    RunInstruction,
     ScoreEvent,
     SshHost,
     Ticket,
@@ -61,6 +62,11 @@ from zevo.engine.observe.run_metrics import (
     validation_best_score,
 )
 from zevo.engine.ssh_auth import ssh_base_args
+from zevo.engine.run.benchmark_telemetry import (
+    benchmark_id,
+    benchmark_names,
+    resolve_benchmark_id,
+)
 from zevo.contracts.customizations import RunCustomizations
 from zevo.contracts.orchestrator import (
     AutoUserRequest,
@@ -255,6 +261,44 @@ class RunDetail(RunSummary):
     harness_model: str = ""
 
 
+class RunInstructionDTO(BaseModel):
+    id: str
+    run_id: str
+    source_ticket_id: str | None
+    body: str
+    status: Literal[
+        "queued", "delivered", "scheduled", "applied", "needs_input", "declined"
+    ]
+    agent_response: str
+    created_at: str
+    updated_at: str
+
+
+class CreateRunInstruction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    body: str = Field(min_length=1, max_length=4000)
+    source_ticket_id: str | None = None
+
+
+class DecideRunInstruction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["scheduled", "applied", "needs_input", "declined"]
+    agent_response: str = Field(min_length=1, max_length=4000)
+
+
+def _instruction_dto(row: RunInstruction) -> RunInstructionDTO:
+    return RunInstructionDTO(
+        id=row.id,
+        run_id=row.run_id,
+        source_ticket_id=row.source_ticket_id,
+        body=row.body,
+        status=row.status,
+        agent_response=row.agent_response or "",
+        created_at=row.created_at.isoformat() if row.created_at else "",
+        updated_at=row.updated_at.isoformat() if row.updated_at else "",
+    )
+
+
 _BENCHMARK_LIVE_STATUSES = {
     "queued", "running", "repairing", "awaiting_input", "waiting_external",
 }
@@ -273,21 +317,8 @@ def _benchmark_progress(
     Group by candidate so an earlier iteration cannot finish a newer one.
     """
     holdout = dict(run.holdout or {})
-    validation_members = list(holdout.get("validation_sets") or [])
-    validation_names = [
-        str(item.get("name") or f"Validation {index + 1}")
-        for index, item in enumerate(validation_members)
-    ]
-    if not validation_names and holdout.get("validation_set"):
-        validation_names = ["Validation"]
-
-    test_members = list(holdout.get("test_sets") or []) if reveal_holdout else []
-    test_names = [
-        str(item.get("name") or f"Test {index + 1}")
-        for index, item in enumerate(test_members)
-    ]
-    if reveal_holdout and not test_names and holdout.get("test_set"):
-        test_names = ["Test"]
+    validation_names = benchmark_names(holdout, "validation")
+    test_names = benchmark_names(holdout, "test") if reveal_holdout else []
 
     by_id = {ticket.id: ticket for ticket in tickets}
 
@@ -317,6 +348,11 @@ def _benchmark_progress(
             else ""
         )
         summary = str(ticket.summary or "")
+        position = re.search(r"\((\d+)/(\d+)\)$", summary)
+        if stage_prefix and position and int(position.group(2)) == len(names):
+            index = int(position.group(1)) - 1
+            if 0 <= index < len(names):
+                return names[index]
         current = next((
             name for name in names
             if stage_prefix and (
@@ -344,6 +380,7 @@ def _benchmark_progress(
         return ""
 
     def suite_progress(suite: str, names: list[str]) -> dict[str, Any]:
+        identities = {benchmark_id(suite, index) for index in range(len(names))}
         relevant = [
             ticket for ticket in tickets
             if (
@@ -415,8 +452,9 @@ def _benchmark_progress(
                 combined_inference if ticket.agent_id == "inference"
                 else combined_evaluation
             )
-            finished = set(names) if combined else (
-                {raw_name} if raw_name in names else {names[0]} if names else set()
+            finished = identities if combined else (
+                {benchmark_id(suite, names.index(raw_name))}
+                if raw_name in names else {benchmark_id(suite, 0)} if names else set()
             )
             if ticket.agent_id == "inference":
                 inference_done.update(finished)
@@ -428,17 +466,29 @@ def _benchmark_progress(
         focused_evaluation_ids = {
             ticket.id for ticket in focused if ticket.agent_id == "evaluation"
         }
+        unmatched_progress: set[tuple[str, str, str]] = set()
         for event in completion_events or []:
-            name = str((event.extras or {}).get("benchmark_name") or "")
-            if name in names and event.ticket_id in focused_inference_ids:
-                inference_done.add(name)
+            marker = dict(event.extras or {})
+            identity = resolve_benchmark_id(marker, names, suite)
+            if identity is not None and event.ticket_id in focused_inference_ids:
+                inference_done.add(identity)
             # A model judge can finish its last row before the scorer writes
             # and validates metrics. Only the scorer's completion marker
             # finishes a benchmark, not an arbitrary x/x progress reading.
-            phase = str((event.extras or {}).get("phase") or event.phase or "")
-            if (name in names and event.ticket_id in focused_evaluation_ids
+            phase = str(marker.get("phase") or event.phase or "")
+            if (identity is not None and event.ticket_id in focused_evaluation_ids
                     and phase.startswith("benchmark_complete")):
-                evaluation_done.add(name)
+                evaluation_done.add(identity)
+            if identity is None and (
+                event.ticket_id in focused_inference_ids
+                or (event.ticket_id in focused_evaluation_ids
+                    and phase.startswith("benchmark_complete"))
+            ) and (marker.get("benchmark_id") or marker.get("benchmark_name")):
+                unmatched_progress.add((
+                    event.ticket_id,
+                    str(marker.get("benchmark_id") or ""),
+                    str(marker.get("benchmark_name") or ""),
+                ))
         completed = len(evaluation_done)
         failed = sum(
             ticket.status == "failed" for ticket in latest_by_name.values()
@@ -486,6 +536,7 @@ def _benchmark_progress(
             "inference_completed": len(inference_done),
             "total": len(names),
             "failed": int(failed),
+            "unmatched_progress": len(unmatched_progress),
             "iteration": int(focus_key[0]) if focus_key is not None else 0,
             "model_source": str(focus_key[1]) if focus_key is not None else "",
             "current": current,
@@ -551,7 +602,7 @@ def _summary(
         status=r.status, is_terminal=r.status in TERMINAL_RUN_STATUSES,
         summary=r.summary,
         registry_version_tag=r.registry_version_tag,
-        halted_reason=r.halted_reason,
+        halted_reason="" if r.status == "success" else r.halted_reason,
         cancelling=r.cancel_requested_at is not None and r.status not in TERMINAL_RUN_STATUSES,
         cancel_policy=dict(r.cancel_policy or {}),
         cancel_outcome=dict(r.cancel_outcome or {}),
@@ -899,6 +950,90 @@ async def run_task_counts(
             func.lower(Run.id).like(like),
         ))
     return {r.task_name: int(r.n or 0) for r in (await db.execute(stmt)).all()}
+
+
+@router.get("/runs/{run_id}/instructions", response_model=list[RunInstructionDTO])
+async def list_run_instructions(
+    run_id: str, db: AsyncSession = Depends(get_db),
+) -> list[RunInstructionDTO]:
+    if (await db.get(Run, run_id)) is None:
+        raise HTTPException(404, f"run {run_id} not found")
+    rows = (await db.execute(
+        select(RunInstruction)
+        .where(RunInstruction.run_id == run_id)
+        .order_by(RunInstruction.created_at, RunInstruction.id)
+    )).scalars().all()
+    return [_instruction_dto(row) for row in rows]
+
+
+@router.post("/runs/{run_id}/instructions", response_model=RunInstructionDTO)
+async def post_run_instruction(
+    run_id: str, body: CreateRunInstruction,
+    db: AsyncSession = Depends(get_db),
+) -> RunInstructionDTO:
+    """Save a user instruction and promptly wake the Run's coordinator."""
+    run = await db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(404, f"run {run_id} not found")
+    if run.status in TERMINAL_RUN_STATUSES or run.cancel_requested_at is not None:
+        raise HTTPException(409, "this Run has ended; start a new Run to give new instructions")
+    instruction = body.body.strip()
+    if not instruction:
+        raise HTTPException(422, "instruction must not be blank")
+    if body.source_ticket_id:
+        source = await db.get(Ticket, body.source_ticket_id)
+        if source is None or source.run_id != run_id:
+            raise HTTPException(422, "source_ticket_id must belong to this Run")
+        if source.lane == "held_out_test":
+            raise HTTPException(422, "private Test Tickets cannot be instruction context")
+
+    row = RunInstruction(
+        run_id=run_id, source_ticket_id=body.source_ticket_id,
+        body=instruction, status="queued", agent_response="",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+
+    target = None
+    if run.supervisor_ticket_id:
+        target = await db.get(Ticket, run.supervisor_ticket_id)
+    elif run.mode == "single_stage":
+        target = (await db.execute(
+            select(Ticket)
+            .where(Ticket.run_id == run_id, Ticket.lane == "optimization")
+            .order_by(Ticket.created_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+    if target is not None and target.status != "cancelled":
+        from zevo.engine.run.wakeup import queue_wakeup
+        await queue_wakeup(
+            db, agent_id=target.agent_id, ticket_id=target.id,
+            source="on_demand", reason=f"run user instruction {row.id}",
+        )
+    # Auto mode may still be settling its scoring contract. The pending row is
+    # included in the first supervisor activation once that Ticket exists.
+    return _instruction_dto(row)
+
+
+@router.patch("/runs/{run_id}/instructions/{instruction_id}", response_model=RunInstructionDTO)
+async def decide_run_instruction(
+    run_id: str, instruction_id: str, body: DecideRunInstruction,
+    db: AsyncSession = Depends(get_db),
+) -> RunInstructionDTO:
+    """Record the agent's decision; scheduled requests stay in future prompts."""
+    row = await db.get(RunInstruction, instruction_id)
+    if row is None or row.run_id != run_id:
+        raise HTTPException(404, f"instruction {instruction_id} not found")
+    response = body.agent_response.strip()
+    if not response:
+        raise HTTPException(422, "agent_response must not be blank")
+    row.status = body.status
+    row.agent_response = response
+    row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(row)
+    return _instruction_dto(row)
 
 
 @router.get("/runs/{run_id}", response_model=RunDetail)
@@ -1283,6 +1418,10 @@ async def patch_run(
         r.status = body.status
         if body.status in TERMINAL_RUN_STATUSES:
             r.finished_at = datetime.now(timezone.utc)
+    # Reaching a planned limit is normal completion, not a halt. Keep this
+    # invariant even if a later PATCH tries to add a reason to a success.
+    if r.status == "success":
+        r.halted_reason = ""
     await db.commit()
     await db.refresh(r)
     return _summary(r)

@@ -3,6 +3,7 @@
 | Field | Contract |
 |---|---|
 | `operation` | Always `run_inference`. |
+| `benchmark_id` | Engine-assigned identity of the primary benchmark. Copy it unchanged into the suite manifest and progress markers; never derive it from the display name. |
 | `configuration_mode` | `select` only for baseline Validation; otherwise `reuse`. |
 | `iteration` | The initial model Baseline is 0. A later Zevo-selected model may establish its Baseline at the next unused Train iteration; trained checkpoints are 1..N. |
 | `model_source` | `base_model` or `checkpoint`. |
@@ -26,7 +27,7 @@
 | `slurm_job` | Engine-owned finite-job path/name, job-id stdout/stderr patterns, GPU count, queue deadline, phase, backend-observed JOBID/state, bookkeeping endpoints, and exact schemas. Enabled only for cluster. `submit` creates one job and returns deferred; `collect` never duplicates it. |
 | `generation_backend` | Run-owned `hf` or `vllm`. |
 | `work_dir` | Persistent local artifact directory. |
-| `suite_members` | Additional benchmark contracts for this same model execution. Run them sequentially inside this job; never submit one GPU job per member. |
+| `suite_members` | Additional benchmark contracts, each with its own engine-assigned `benchmark_id`. One GPU job owns the whole suite; never submit one job per member. |
 
 `inference_config.yaml` must validate as `InferenceRunConfig` and include:
 
