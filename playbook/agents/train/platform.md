@@ -23,7 +23,10 @@
    `training.implementation_config.dataloader_num_workers=0`; do not remove or
    bypass its `--cluster` argument.
 6. Generate `train.py` strictly from that YAML and the Skill.
-7. Run concrete dependency/data/model/GPU preflight.
+7. Run concrete dependency/data/model/GPU preflight. Determine whether the
+   mandatory large-or-complex-training smoke test below applies, record its
+   trigger and exact test plan in `training.implementation_config`, and fail if
+   the plan cannot exercise the realized runtime path.
    For Cluster, also confirm the realized model/method/checkpoint-saving peak
    fits `device_info.resource_plan.min_ram_gb`; include full serialization and
    optimizer/offload state when applicable. Fail before submission when the
@@ -284,6 +287,46 @@ every distributed argument in `training.implementation_config` and every
 acceleration package in `training.software_versions`. Real multi-GPU/multi-node
 execution must be validated on actual hardware; the contracts and launch command
 are unit-tested, but a live run confirms rendezvous, sharding, and saving.
+
+### Mandatory smoke test for large or complex training
+
+Run a bounded runtime smoke test before committing the allocation to the full
+training schedule when **any** of these conditions holds:
+
+- the verified parent model contains strictly more than 10 billion parameters;
+- the realized backend is FSDP or DeepSpeed ZeRO-2/3;
+- tensor parallelism, sequence parallelism, parameter offload, or optimizer
+  offload is enabled; or
+- the run uses a custom optimizer class, or an optimizer/backend/framework
+  combination that has not completed an optimizer step in the current verified
+  environment.
+
+GPU count alone is neither a trigger nor an exemption. Ordinary DDP alone does
+not trigger this rule. Determine parameter count from verified model config or
+weight metadata when the model id does not contain a reliable size hint; do not
+assume an unknown model is small.
+
+The test must exercise the realized code rather than a separate toy
+implementation:
+
+1. Before the expensive parent load, run a short distributed compatibility
+   check with the exact launcher, backend, precision, optimizer class and
+   kwargs, sharding/offload path, gradient clipping, and training-step code on
+   a small representative module. Complete at least two
+   forward/backward/optimizer steps. Abort on an unsupported distributed
+   operator, mixed local/sharded state, collective stall, or non-finite update.
+2. Clean up the smoke-test model and temporary state after it passes, then load
+   the real parent and start the declared training schedule. Keep this inside
+   the same finite Slurm allocation so the Run does not release GPUs, queue
+   again, or load the large parent twice.
+
+The smoke test does not require an immediate full-model checkpoint. Save and
+verify resumable checkpoints at the normal cadence selected for the real
+training plan. Give the smoke phase an explicit timeout and progress marker. On
+failure, dump all rank stacks where possible, report the exact operation, leave
+no success artifact, and release the allocation. Record the trigger, tested
+topology, completed operations, and elapsed time in
+`training.implementation_config` and the local log.
 
 ### Method branch selection
 

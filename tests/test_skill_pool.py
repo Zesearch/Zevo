@@ -214,6 +214,19 @@ def test_train_loads_its_pool():
     assert bp.output_schema.__name__ == "TrainResult"
 
 
+def test_train_requires_smoke_test_for_large_or_complex_runtime_paths():
+    instructions = " ".join(load_agent("train").instructions.split())
+
+    assert "strictly more than 10 billion parameters" in instructions
+    assert "the realized backend is FSDP or DeepSpeed ZeRO-2/3" in instructions
+    assert "parameter offload, or optimizer" in instructions
+    assert "custom optimizer class" in instructions
+    assert "GPU count alone is neither a trigger nor an exemption" in instructions
+    assert "forward/backward/optimizer steps" in instructions
+    assert "same finite Slurm allocation" in instructions
+    assert "does not require an immediate full-model checkpoint" in instructions
+
+
 def test_data_loads_its_pool():
     bp = load_agent("data")
     methods = {s.method for s in bp.skills}

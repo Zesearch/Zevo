@@ -163,6 +163,8 @@ async def _post(payload: dict, *, api_key: str) -> dict:
 async def _dispatch_tool(
     name: str, args: dict, *, cwd: str, env: dict[str, str], staged_dir=None
 ) -> dict[str, Any]:
+    from zevo.engine.run import process_registry
+    await process_registry.wait_until_resumed(str(env.get("TICKET_ID") or ""))
     if name == "Skill":
         action = str(args.get("action", "load")).lower()
         if action == "list":

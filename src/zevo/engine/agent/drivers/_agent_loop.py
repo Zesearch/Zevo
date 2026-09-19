@@ -187,7 +187,9 @@ async def exec_bash(
     key = str(env.get("TICKET_ID") or "")
     process_registry.register(key, proc)
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        stdout_b, stderr_b = await process_registry.wait_for_active_time(
+            proc.communicate(), key=key, timeout=timeout_sec,
+        )
     except asyncio.TimeoutError:
         _kill_tree(proc)
         return {

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from zevo.db.models import (
     AgentWakeupRequest, Base, ExecutionEvent, HeartbeatResult, HeartbeatRun, InfraInstance, Run,
-    Ticket, TicketMessage, TranscriptEvent, WorkProduct,
+    RunInstruction, Ticket, TicketMessage, TranscriptEvent, WorkProduct,
 )
 from zevo.api.routers.shared.runs import _finish_run_heartbeats
 from zevo.engine.run.scheduler.reconciler import (
@@ -228,6 +228,19 @@ async def test_a_run_that_went_quiet_is_still_swept(session):
     tk = await session.get(Ticket, "train-030")
     assert tk.status == "failed"
     assert "silent for" in tk.error_message
+
+
+@pytest.mark.asyncio
+async def test_instruction_paused_activation_is_not_swept_as_dead(session):
+    await _mk(session, "train-paused", started_ago=4000, chatter_ago=2400)
+    session.add(RunInstruction(
+        id="instruction-pausing-run", run_id="r1", body="Change the plan",
+        status="delivered", agent_response="",
+    ))
+    await session.commit()
+
+    assert await _sweep_stuck_tickets(session, CUTOFF) == 0
+    assert (await session.get(Ticket, "train-paused")).status == "running"
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,9 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from zevo.db.models import Agent, AgentWakeupRequest, Base, Ticket, TicketNotice
+from zevo.db.models import (
+    Agent, AgentWakeupRequest, Base, RunInstruction, Ticket, TicketNotice,
+)
 from zevo.engine.run.scheduler import wakeup_daemon as wd
 
 
@@ -138,6 +140,65 @@ async def test_agents_do_not_block_each_other(db, started):
     got = await _drain(started)
     assert sum(w.startswith("registry") for w in got) == 1
     assert sum(w.startswith("train") for w in got) == 2
+
+
+@pytest.mark.asyncio
+async def test_pending_run_instruction_holds_specialist_wakeup(db, started):
+    await _seed(db, "train", cap=1, n_queued=0)
+    async with db() as s:
+        s.add(Ticket(
+            id="train-paused", run_id="run-steered", agent_id="train",
+            status="queued", lane="optimization", payload={},
+            customization={}, inputs={},
+        ))
+        s.add(RunInstruction(
+            id="instruction-1", run_id="run-steered", body="Change the plan",
+            status="queued", agent_response="",
+        ))
+        s.add(AgentWakeupRequest(
+            id="train-paused-wakeup", agent_id="train", ticket_id="train-paused",
+            status="queued", source="assignment",
+            scheduled_for=datetime.now(timezone.utc),
+        ))
+        await s.commit()
+
+    assert await wd._drain_once() == 0
+    await asyncio.sleep(0)
+    assert started == []
+
+    async with db() as s:
+        instruction = await s.get(RunInstruction, "instruction-1")
+        instruction.status = "scheduled"
+        await s.commit()
+
+    assert await wd._drain_once() == 1
+    await asyncio.sleep(0)
+    assert started == ["train-paused-wakeup"]
+
+
+@pytest.mark.asyncio
+async def test_pending_instruction_does_not_pause_held_out_lane(db, started):
+    await _seed(db, "evaluation", cap=1, n_queued=0)
+    async with db() as s:
+        s.add(Ticket(
+            id="private-eval", run_id="run-steered", agent_id="evaluation",
+            status="queued", lane="held_out_test", payload={},
+            customization={}, inputs={},
+        ))
+        s.add(RunInstruction(
+            id="instruction-private", run_id="run-steered",
+            body="Change optimization", status="queued", agent_response="",
+        ))
+        s.add(AgentWakeupRequest(
+            id="private-eval-wakeup", agent_id="evaluation",
+            ticket_id="private-eval", status="queued", source="assignment",
+            scheduled_for=datetime.now(timezone.utc),
+        ))
+        await s.commit()
+
+    assert await wd._drain_once("held_out_test") == 1
+    await asyncio.sleep(0)
+    assert started == ["private-eval-wakeup"]
 
 
 @pytest.mark.asyncio

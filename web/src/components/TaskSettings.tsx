@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { ChevronRight, Folder, Pencil, Plus, Trash2, X } from "lucide-react";
 import { Note } from "./zevo/primitives";
-import { shortModel, splitDatasetPath } from "../lib/format";
+import { displayFilePath, shortModel, splitDatasetPath } from "../lib/format";
 import {
   MODEL_ID_HINT,
   ScoringSuiteEditor,
@@ -117,7 +117,7 @@ function dataRows(s: TaskSettingDTO): {
       // mark which of the bundle's entries you arrived for.
       file: isHub ? raw : leaf,
       split,
-      title: raw + (slice ? ` (${slice})` : ""),
+      title: displayFilePath(raw) + (slice ? ` (${slice})` : ""),
     };
   };
   const validationSuite = s.validation_sets ?? [];
@@ -129,7 +129,7 @@ function dataRows(s: TaskSettingDTO): {
     folder: "",
     packaged: false,
     file: "",
-    title: validationSuite.map((item) => `${item.name}: ${item.test_set}`).join("\n"),
+    title: validationSuite.map((item) => `${item.name}: ${displayFilePath(item.test_set)}`).join("\n"),
   } : {
     label: "val" as const,
     value: "From Test suite · 20% per eligible set · minimum 200 Validation rows",

@@ -24,8 +24,9 @@ Auth precedence is a Zevo policy, resolved and enforced at spawn time:
 Lower-priority credentials are removed from the child environment so the
 reported auth mode and the credential Claude actually uses cannot diverge.
 
-Cancel: registers the subprocess in process_registry by HEARTBEAT_ID
-so `POST /tickets/{id}/cancel` -> SIGTERM works.
+Cancel and steering: registers the subprocess in process_registry by both
+HEARTBEAT_ID and TICKET_ID so cancellation can SIGTERM it and a Run instruction
+can temporarily SIGSTOP it while the Orchestrator decides.
 """
 from __future__ import annotations
 
@@ -97,6 +98,7 @@ async def _await_cli_activity(
     last_activity: Callable[[], float],
     idle_timeout_seconds: float,
     agent_id: str,
+    paused: Callable[[], bool] | None = None,
 ) -> None:
     """Wait for CLI I/O + exit, failing when raw output becomes inactive."""
     pending = set(tasks)
@@ -105,6 +107,9 @@ async def _await_cli_activity(
         return
     loop = asyncio.get_running_loop()
     poll_seconds = max(0.01, min(1.0, idle_timeout_seconds / 4.0))
+    last_tick = loop.time()
+    observed_activity = last_activity()
+    idle_seconds = 0.0
     while pending:
         done, pending = await asyncio.wait(
             pending,
@@ -115,7 +120,14 @@ async def _await_cli_activity(
         # decoder/pipe failure would look like an idle process until timeout.
         for task in done:
             await task
-        idle_seconds = loop.time() - last_activity()
+        now = loop.time()
+        activity = last_activity()
+        if activity > observed_activity:
+            observed_activity = activity
+            idle_seconds = max(0.0, now - activity)
+        elif not (paused and paused()):
+            idle_seconds += max(0.0, now - last_tick)
+        last_tick = now
         if pending and idle_seconds >= idle_timeout_seconds:
             raise ClaudeStreamStalled(
                 f"claude exec produced no stdout/stderr bytes for "
@@ -646,8 +658,13 @@ class ClaudeCliDriver:
             )
 
             hb_id = env.get("HEARTBEAT_ID", "")
-            if hb_id:
-                process_registry.register(hb_id, proc)
+            tk_id = env.get("TICKET_ID", "")
+            # The heartbeat key serves direct heartbeat cancellation.  The
+            # Ticket key also lets a Run-level instruction freeze this CLI at
+            # the same control boundary used by in-process driver tools.
+            for key in (hb_id, tk_id):
+                if key:
+                    process_registry.register(key, proc)
 
             if proc.stdin is None:
                 raise RuntimeError("claude subprocess has no stdin")
@@ -726,6 +743,7 @@ class ClaudeCliDriver:
                     last_activity=lambda: last_activity_at,
                     idle_timeout_seconds=_claude_idle_timeout_seconds(),
                     agent_id=blueprint.id,
+                    paused=lambda: process_registry.is_paused(tk_id),
                 )
                 exit_code = int(proc.returncode or 0)
             except BaseException:
@@ -739,8 +757,9 @@ class ClaudeCliDriver:
                 await asyncio.gather(*cli_tasks, return_exceptions=True)
                 raise
             finally:
-                if hb_id:
-                    process_registry.unregister(hb_id)
+                for key in (hb_id, tk_id):
+                    if key:
+                        process_registry.unregister(key, proc)
                 # Sandbox teardown: download the workspace back (collecting artifacts
                 # the agent wrote inside the sandbox) then delete it. No-op when not
                 # sandboxed. Do this BEFORE unstage so skills are cleaned last.

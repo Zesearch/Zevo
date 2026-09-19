@@ -58,6 +58,16 @@ iteration, or a future one. Read the live Run and relevant Tickets before
 deciding when to act. There is no fixed mapping from instruction text to a
 stage or retry action.
 
+While a new instruction is `queued` or `delivered`, Zevo pauses optimization
+Specialist activations and holds their queued wakeups. `needs_input` keeps that
+gate closed. An already submitted scheduler job keeps running unless you
+explicitly decide that the request warrants cancelling its Ticket; pausing the
+control plane must not discard expensive external work. Recording `scheduled`,
+`applied`, or `declined` releases the gate. When a Specialist should apply the
+request now, post the exact instruction to that Ticket before recording the
+releasing decision, so its held wake resumes with the new context rather than
+the old plan.
+
 For each new instruction, promptly PATCH
 `api_routes.decide_run_instruction` with a plain-language decision. Use
 `scheduled` when work must finish first or the instruction belongs to a later

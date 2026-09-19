@@ -8,13 +8,17 @@ import { fmtDate } from "../lib/format";
 import { Bezel, Kicker } from "./zevo/primitives";
 
 const LABELS: Record<RunInstructionDTO["status"], string> = {
-  queued: "Waiting for agent",
-  delivered: "Delivered to agent",
-  scheduled: "Planned",
-  applied: "Applied",
-  needs_input: "Needs your reply",
-  declined: "Cannot apply",
+  queued: "Run paused · waiting for orchestrator",
+  delivered: "Run paused · orchestrator deciding",
+  scheduled: "Planned · run resumed",
+  applied: "Applied · run resumed",
+  needs_input: "Run paused · needs your reply",
+  declined: "Cannot apply · run resumed",
 };
+
+const BLOCKING_STATUSES = new Set<RunInstructionDTO["status"]>([
+  "queued", "delivered", "needs_input",
+]);
 
 const TERMINAL_RUN_STATUSES = new Set(["success", "degraded", "failed", "halted", "cancelled"]);
 
@@ -33,6 +37,7 @@ export function RunInstructionPanel({
   const [busy, setBusy] = useState(false);
   const [postError, setPostError] = useState("");
   const closed = cancelling || TERMINAL_RUN_STATUSES.has(runStatus);
+  const pausedForInstruction = !closed && data.some((item) => BLOCKING_STATUSES.has(item.status));
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -65,8 +70,14 @@ export function RunInstructionPanel({
         <Kicker strong className="!text-sm">User instructions</Kicker>
       </div>
       <p className="mt-1 text-sm text-slate-400">
-        In case you want to change this run or guide a future iteration, tell the system here. The agent will decide when to apply it and report back.
+        In case you want to change this run or guide a future iteration, tell the system here. New actions pause while the orchestrator decides when to apply it.
       </p>
+      {pausedForInstruction && (
+        <div className="mt-3 flex items-center gap-2 rounded-lg border border-brass-500/30 bg-brass-500/10 px-3 py-2 text-sm text-brass-200">
+          <span className="lamp lamp-running" />
+          <span>Run paused for an instruction decision. Existing external jobs keep running unless the orchestrator stops them.</span>
+        </div>
+      )}
       {!closed ? (
         <form onSubmit={submit} className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
           <textarea

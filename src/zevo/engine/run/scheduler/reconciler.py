@@ -50,6 +50,7 @@ from zevo.engine.run.benchmark_telemetry import (
 )
 from zevo.engine.observe.run_metrics import incomplete_journal_entries
 from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
+from zevo.engine.run.steering import instruction_gate_active
 from zevo.engine.observe.markers import scan_text
 from zevo.engine.ssh_auth import ssh_base_args
 from zevo.providers import resolve_ssh_key
@@ -1052,6 +1053,16 @@ async def _sweep_stuck_tickets(
 
     swept: list[Ticket] = []
     for tk in running:
+        # A specialist paused by a Run instruction is intentionally silent.
+        # The scheduler process still owns its stopped subprocess and resumes
+        # it after the Orchestrator's decision, so silence here is not evidence
+        # that the runner crashed.
+        if (
+            tk.lane == "optimization"
+            and tk.agent_id != "orchestrator"
+            and await instruction_gate_active(session, tk.run_id)
+        ):
+            continue
         # A finite Slurm job has no live Agent heartbeat by design. The backend
         # watcher owns it between submit and collect, so a finished submission
         # heartbeat is evidence of correct deferral, not a crashed runner.

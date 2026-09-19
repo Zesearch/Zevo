@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { CheckCircle2, ChevronRight, Plus, Trash2, Upload, X } from "lucide-react";
-import { FILES_ROOT, fmtScoringRows, splitDatasetPath } from "../lib/format";
+import { displayFilePath, fmtScoringRows, splitDatasetPath } from "../lib/format";
 import { api } from "../lib/api";
 import type {
   FileSetDTO,
@@ -51,8 +51,7 @@ async function uploadFile(f: File): Promise<string> {
 
 /** Strip the container prefix so a path reads the way the repo has it. */
 function short(p: string): string {
-  if (p.startsWith(FILES_ROOT + "/")) return p.slice(FILES_ROOT.length + 1);
-  return p.startsWith("/app/") ? p.slice(5) : p;
+  return displayFilePath(p);
 }
 
 function isUploadedPath(value: string): boolean {
@@ -136,7 +135,7 @@ export function ScoringSuiteManifest({
             <div className="grid gap-3 bg-white/[0.012] px-10 pb-3 pt-1 text-2xs sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <div className="field-label mb-1 !text-slate-500">{setLabel}</div>
-                <p className="break-all font-mono text-slate-300" title={item.test_set}>
+                <p className="break-all font-mono text-slate-300" title={short(item.test_set)}>
                   {short(item.test_set)}
                 </p>
               </div>
@@ -166,14 +165,14 @@ export function ScoringSuiteManifest({
               </div>
               <div>
                 <div className="field-label mb-1 !text-slate-500">Sample submission</div>
-                <p className="break-all font-mono text-slate-300" title={item.sample_submission}>
+                <p className="break-all font-mono text-slate-300" title={short(item.sample_submission)}>
                   {short(item.sample_submission)}
                 </p>
               </div>
               {item.metric_type === "custom" && (
                 <div className="sm:col-span-2">
                   <div className="field-label mb-1 !text-slate-500">Evaluation script</div>
-                  <p className="break-all font-mono text-slate-300" title={item.evaluation_script}>
+                  <p className="break-all font-mono text-slate-300" title={short(item.evaluation_script)}>
                     {short(item.evaluation_script)}
                   </p>
                 </div>
@@ -794,7 +793,7 @@ function Chosen({
   return (
     <div className={`flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2 ${className}`}>
       {uploaded && <CheckCircle2 size={15} className="shrink-0 text-phosphor-300" />}
-      <span className="min-w-0 flex-1" title={value}>
+      <span className="min-w-0 flex-1" title={displayValue}>
         <span className="block truncate font-mono text-sm text-slate-100">{displayValue}</span>
         {uploaded && (
           <span className="mt-0.5 block font-mono text-2xs text-phosphor-300">Upload complete</span>
@@ -1363,7 +1362,7 @@ export function MultiFileSlot({
         <div className="mt-1.5 space-y-1">
           {values.map((v) => (
             <div key={v} className="flex items-center justify-between gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2">
-              <span className="flex min-w-0 items-center gap-2" title={v}>
+              <span className="flex min-w-0 items-center gap-2" title={isUploadedPath(v) ? uploadedFileName(v) : short(v)}>
                 {isUploadedPath(v) && <CheckCircle2 size={14} className="shrink-0 text-phosphor-300" />}
                 <span className="min-w-0">
                   <span className="block truncate font-mono text-xs text-slate-200">

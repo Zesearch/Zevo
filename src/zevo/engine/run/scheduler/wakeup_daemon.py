@@ -43,6 +43,10 @@ from zevo.paths import work_dir_root
 from zevo.engine.run.runner import run_ticket
 from zevo.engine.run.scheduler.reconciler import reconcile_runs_and_tickets
 from zevo.engine.run.wakeup import advisory_lock, queue_wakeup
+from zevo.engine.run.steering import (
+    instruction_gate_active,
+    instruction_gate_exists,
+)
 from zevo.contracts.tickets import TERMINAL_RUN_STATUSES, TERMINAL_TICKET_STATUSES
 
 
@@ -149,6 +153,8 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
                 work_dir_root=work_root,
                 driver_name=driver_name,
                 model_override=model_override,
+                activation_source=w.source,
+                activation_reason=w.reason,
             )
         else:
             # Join on the run: a ticket queued before the user cancelled is
@@ -161,6 +167,11 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
                     Ticket.status == "queued",
                     Ticket.lane == _scheduler_lane(),
                     Run.status.notin_(list(TERMINAL_RUN_STATUSES)),
+                    or_(
+                        Ticket.agent_id == "orchestrator",
+                        Ticket.lane != "optimization",
+                        ~instruction_gate_exists(Ticket.run_id),
+                    ),
                 ).order_by(Ticket.created_at).limit(1)
             )).scalar_one_or_none()
             if tk is not None:
@@ -170,6 +181,8 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
                     work_dir_root=work_root,
                     driver_name=driver_name,
                     model_override=model_override,
+                    activation_source=w.source,
+                    activation_reason=w.reason,
                 )
     except Exception as e:
         error_message = f"{type(e).__name__}: {e}"
@@ -226,6 +239,15 @@ async def _drain_once(lane: str | None = None) -> int:
             .where(AgentWakeupRequest.status == "queued")
             .where(AgentWakeupRequest.scheduled_for <= datetime.now(timezone.utc))
             .where(_wakeup_lane_clause(lane))
+            # A Run instruction is an execution gate for optimization work.
+            # Keep specialist wakeups queued until the Orchestrator records a
+            # decision; the Orchestrator's own wake must remain runnable.
+            .where(or_(
+                Ticket.id.is_(None),
+                Ticket.agent_id == "orchestrator",
+                Ticket.lane != "optimization",
+                ~instruction_gate_exists(Ticket.run_id),
+            ))
             .order_by(AgentWakeupRequest.scheduled_for)
             .limit(50)
         )).scalars().all()
@@ -350,6 +372,20 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                         target = (await s.execute(
                             select(Ticket).where(Ticket.id == w.ticket_id)
                         )).scalar_one_or_none()
+                        if (
+                            target is not None
+                            and target.agent_id != "orchestrator"
+                            and target.lane == "optimization"
+                            and await instruction_gate_active(s, target.run_id)
+                        ):
+                            # The instruction may have arrived after _drain_once
+                            # selected this row.  Leave it queued so the same
+                            # activation resumes after the decision.
+                            log.info(
+                                "[wakeup] instruction gate holds ticket %s; defer %s",
+                                target.id, wakeup_id[:8],
+                            )
+                            return
                         obsolete = bool(
                             target is not None
                             and target.status in TERMINAL_TICKET_STATUSES
@@ -422,6 +458,11 @@ async def _cron_tick(interval_seconds: int, lane: str | None = None) -> None:
                     Ticket.agent_id == a.id,
                     Ticket.status == "queued",
                     Ticket.lane == lane,
+                    or_(
+                        Ticket.agent_id == "orchestrator",
+                        Ticket.lane != "optimization",
+                        ~instruction_gate_exists(Ticket.run_id),
+                    ),
                     ~select(TicketNotice.id).where(
                         TicketNotice.ticket_id == Ticket.id,
                         TicketNotice.code
