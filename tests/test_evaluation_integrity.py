@@ -56,6 +56,30 @@ def test_upload_is_atomic_immutable_and_idempotent(tmp_path):
     assert list(tmp_path.iterdir()) == [target]
 
 
+def test_file_reference_scan_skips_prose_before_filesystem_resolution(
+    tmp_path, monkeypatch,
+):
+    import zevo.api.file_integrity as integrity
+
+    monkeypatch.setattr(integrity, "files_root", lambda: str(tmp_path / "files"))
+    monkeypatch.setattr(integrity, "holdout_root", lambda: str(tmp_path / "private"))
+    roots = integrity._file_roots()
+    real_resolve = Path.resolve
+    resolved: list[str] = []
+
+    def tracked_resolve(path: Path, *args, **kwargs) -> Path:
+        resolved.append(str(path))
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", tracked_resolve)
+    prose = "The agent considered several models and produced a long explanation."
+    assert integrity._file_key(prose, roots) is None
+    assert resolved == []
+    managed = tmp_path / "files" / "example" / "test.csv"
+    assert integrity._file_key(str(managed), roots) == Path("example/test.csv")
+    assert resolved == [str(managed)]
+
+
 @pytest.mark.asyncio
 async def test_delete_rejects_saved_and_historical_references(tmp_path, monkeypatch):
     monkeypatch.setenv("ZEVO_FILES_ROOT", str(tmp_path / "files"))
