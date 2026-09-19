@@ -418,7 +418,7 @@ export function CustomizedRunForm({
       }
       const queueWaitHours = inputs.queueWaitHours.trim()
         ? Number(inputs.queueWaitHours)
-        : 24;
+        : 48;
       if (!Number.isFinite(queueWaitHours) || queueWaitHours <= 0 || queueWaitHours > 168) {
         throw new Error("Max queue wait must be greater than 0 and at most 168 hours.");
       }

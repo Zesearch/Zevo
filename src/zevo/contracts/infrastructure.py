@@ -276,7 +276,7 @@ class SlurmStageJobContract(BaseModel):
             "rendezvous. num_gpus must be an exact multiple of nodes."
         ),
     )
-    max_queue_wait_hours: float = Field(24, gt=0, le=168)
+    max_queue_wait_hours: float = Field(48, gt=0, le=168)
     infra_instances_endpoint: Literal["/api/infra/instances"] = "/api/infra/instances"
     openapi_endpoint: Literal["/api/openapi.json"] = "/api/openapi.json"
     infra_instance_create_schema: dict[str, Any] = Field(default_factory=dict)
@@ -960,7 +960,7 @@ class InfraTaskInput(AgentTaskInput):
     )
 
     max_queue_wait_hours: float = Field(
-        24,
+        48,
         gt=0,
         le=168,
         description=(

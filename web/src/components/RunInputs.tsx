@@ -1051,11 +1051,12 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   cloudBackend: "",
   sshHostId: "",
   generation_backend: "",
-  // Blank resolves once to one GPU on the Run.
-  numGpus: "1",
-  // Empty IS the value here: both are uncapped unless a number is typed, which
-  // is what the placeholder says.
-  iterations: "3", budget: "10", timeLimitHours: "1", queueWaitHours: "24", stopThreshold: "",
+  // Blank leaves the GPU count to Zevo's stage planner.
+  numGpus: "",
+  // Optimization rounds, spend and active runtime are uncapped unless the
+  // operator enters a value. Queueing remains bounded by default so a Slurm
+  // job cannot stay pending indefinitely.
+  iterations: "", budget: "", timeLimitHours: "", queueWaitHours: "48", stopThreshold: "",
 };
 
 /** The effective Validation scorer shown and sent by both launch modes. */
@@ -1893,8 +1894,8 @@ export function RunInputs({
             hint="Backend used to generate predictions; blank defaults to vLLM."
           />
         </div>
-        {/* Limits stay blank by default. The checklist resolves those blanks
-            to "unlimited" (or "not set" for the score threshold). */}
+        {/* User caps stay blank by default. Queue wait is the one bounded
+            operational default and begins at 48 hours. */}
         <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2 lg:grid-cols-[0.75fr_0.85fr_1.25fr_1.65fr_1.1fr]">
           <LimitField label="Iterations" value={iterations} onChange={(v) => onChange({ iterations: v })}
             hint="Maximum optimization rounds; blank means no iteration cap." />
@@ -1905,7 +1906,7 @@ export function RunInputs({
             hint="Active experiment time only; Slurm queue wait is excluded." />
           <LimitField label="Max queue wait (hours)" value={queueWaitHours}
             onChange={(v) => onChange({ queueWaitHours: v })}
-            hint="Maximum Slurm PENDING time; blank defaults to 24 hours (max 168)." />
+            hint="Maximum Slurm PENDING time; blank defaults to 48 hours (max 168)." />
           <NumberField
             label="Stop threshold" value={stopThreshold}
             onChange={(v) => onChange({ stopThreshold: v })}

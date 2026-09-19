@@ -480,7 +480,7 @@ class Run(Base):
     # queue. Queue wait is excluded from max_runtime_hours and every launch has
     # an explicit, bounded allowance greater than 0 and at most 168 hours.
     max_queue_wait_hours: Mapped[float] = mapped_column(
-        Float, default=24.0, server_default="24.0"
+        Float, default=48.0, server_default="48.0"
     )
     # #7 — Zevo model-improvement loop policy. min_delta_per_iter triggers
     # plateau stop when 2+ consecutive iterations move the score by

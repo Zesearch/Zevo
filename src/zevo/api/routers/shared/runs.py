@@ -199,7 +199,7 @@ class RunSummary(BaseModel):
     # Run-only wall-clock cap in hours. 0.0 = unlimited.
     max_runtime_hours: float = 0.0
     # Slurm PENDING time has its own cap and is excluded from duration_s.
-    max_queue_wait_hours: float = 24.0
+    max_queue_wait_hours: float = 48.0
     queue_wait_seconds: int = 0
     queue_waiting: bool = False
     # Actual spend (LLM + GPU) and elapsed wall-clock (finished-started, or
@@ -1828,7 +1828,7 @@ async def _create_auto_run(
     run.max_cost_usd = float(body.max_cost_usd or 0.0)
     run.max_runtime_hours = float(body.max_runtime_hours or 0.0)
     run.max_queue_wait_hours = (
-        24.0 if body.max_queue_wait_hours is None else float(body.max_queue_wait_hours)
+        48.0 if body.max_queue_wait_hours is None else float(body.max_queue_wait_hours)
     )
     run.generation_backend = body.generation_backend or "vllm"
     run.num_gpus = max(0, int(body.num_gpus or 0))
@@ -2256,7 +2256,7 @@ async def create_run(
     # may have a different amount of time available.
     resolved_max_runtime_hours = float(body.max_runtime_hours or 0.0)
     resolved_max_queue_wait_hours = (
-        24.0 if body.max_queue_wait_hours is None
+        48.0 if body.max_queue_wait_hours is None
         else float(body.max_queue_wait_hours)
     )
     resolved_generation_backend = body.generation_backend or "vllm"

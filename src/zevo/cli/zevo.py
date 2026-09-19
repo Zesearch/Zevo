@@ -901,7 +901,7 @@ def run_create(
     ),
     max_queue_wait_hours: Optional[float] = typer.Option(
         None, "--max-queue-wait-hours",
-        help="Maximum Slurm PENDING time per automatic submission (>0, max 168 hours). Omitted = 24 hours. Queue wait does not consume Run runtime.",
+        help="Maximum Slurm PENDING time per automatic submission (>0, max 168 hours). Omitted = 48 hours. Queue wait does not consume Run runtime.",
     ),
     stop_threshold: Optional[float] = typer.Option(
         None, "--stop-threshold",
