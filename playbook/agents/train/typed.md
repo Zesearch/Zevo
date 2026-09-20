@@ -13,6 +13,7 @@
 | `training_method_contracts` | Exact per-method `method_config`, complete loss contract by prompt framing, objective-config keys/recommended starts, `recommended_training_starts` (non-binding best-practice starting values for common TrainingConfig knobs—LoRA rank/alpha/target-modules, learning_rate, effective batch, warmup, epochs, packing), required software-version keys, PEFT/LoRA state, and hash encoding. Copy the machine-readable requirements instead of inferring them; treat `recommended_training_starts` as guidance to start from and deviate from with rationale. |
 | `config_validation_command` | Side-effect-free validator that must pass after the optional tokenizer/data-collator-only example check and before optimizer/model execution. Its Cluster form enforces `training.implementation_config.dataloader_num_workers=0`; preserve the supplied `--cluster` argument. |
 | `telemetry_helper_path` | System-owned callback to copy/import unchanged; it forwards all numeric Trainer logs. |
+| `checkpoint_helper_path` | System-owned checkpoint transaction helper to copy/import unchanged; use it for rank-zero DDP save, bounded sharding, validation, atomic publication, and the commit marker. |
 | `telemetry_interval_steps` | Fixed optimizer-step logging cadence: 20. |
 | `execution_contract` | Mandatory foreground streaming, 4-hour tool deadline, and exact local/remote Run/Ticket environment values. |
 | `base_model` | Original model identity. |

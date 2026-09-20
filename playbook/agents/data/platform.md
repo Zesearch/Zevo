@@ -30,7 +30,7 @@ revisions may select rows only through their explicit `recipe_intent`.
 
 Map only evidence genuinely present in the source into the method family:
 
-- `lora_sft`, `full_sft`: `messages`, `prompt`/`completion`, or `text`, choosing
+- `sft`: `messages`, `prompt`/`completion`, or `text`, choosing
   the representation that preserves the source semantics;
 - `dpo`, `cpo`, `orpo`: `prompt`, `chosen`, `rejected`;
 - `kto`: `prompt`, `completion`, boolean `label`;
@@ -204,9 +204,12 @@ activation.
 On `phase="collect"`, never submit duplicate work. A non-terminal state remains
 deferred. On `COMPLETED`, copy and validate the compact control artifacts and
 return the ordinary successful Data result. On another terminal state, inspect
-the separate exact stdout/stderr files and fail specifically. The backend
-watcher changes the same request from Waiting to Running and wakes this Ticket
-at terminal.
+the separate exact stdout/stderr files and fail specifically. If the failure is
+owned by the generated implementation, the repair activation may provide
+`phase="submit"` with `attempt=2`; repair and upload the script, then return
+deferred so the engine can submit the one bounded replacement job. The backend
+watcher changes the current request from Waiting to Running and wakes this
+Ticket at terminal.
 
 ### `prepare_holdout_data`
 

@@ -52,12 +52,15 @@ trainer = OnlineDPOTrainer(
 )
 ```
 
-Default to PEFT unless `method_config.use_peft=false`. Respect `generation_backend`
-exactly: `hf` means `use_vllm=False`; `vllm` means `use_vllm=True` with the
-supported integration mode. For a single shared GPU allocation, use colocate
-only after checking memory and set a conservative utilization. If the requested
-backend cannot initialize, fail rather than silently changing the run-level
-generation_backend.
+Default to full-parameter training with `method_config.use_peft=false`. Enable
+PEFT only when the Ticket or an explicit user instruction requires LoRA and the
+realized config records `method_config.use_peft=true`. Construct, validate,
+save, and reload that adapter exactly as required by the shared PEFT execution
+contract. Respect `generation_backend` exactly: `hf` means `use_vllm=False`;
+`vllm` means `use_vllm=True` with the supported integration mode. For a single
+shared GPU allocation, use colocate only after checking memory and set a
+conservative utilization. If the requested backend cannot initialize, fail
+rather than silently changing the run-level generation_backend.
 
 Experimental import/config failure must name `trl.__version__`; never substitute
 offline DPO.

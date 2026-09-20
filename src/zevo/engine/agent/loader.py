@@ -77,7 +77,7 @@ class SkillCard:
     A skill is `playbook/skills/<agent>/<skill>/SKILL.md` with `name` + `description`
     frontmatter (the Agent Skills format). `method` is the Skill catalog id
     the orchestrator sets — the skill folder name with hyphens turned back into
-    underscores (`lora-sft` ⇄ `lora_sft`). We never ship the implementation; the
+    underscores (`online-dpo` ⇄ `online_dpo`). We never ship the implementation; the
     skill body is the contract and the agent writes the code.
     """
 
@@ -92,7 +92,7 @@ def _load_skill_pool(agent_dir: Path, allow: list[str]) -> list[SkillCard]:
 
     Every card under `playbook/skills/<agent>/` loads, sorted by name — dropping a new
     SKILL.md in is all it takes. `allow` is the optional `skills:` frontmatter
-    list of METHOD ids (underscore, e.g. `lora_sft`); no agent declares one now,
+    list of METHOD ids (underscore, e.g. `online_dpo`); no agent declares one now,
     but when present it narrows and orders the pool and an unknown name raises,
     which is how you pin an agent to a subset. `agent_dir` is
     `playbook/agents/<id>`; skills come from `playbook/skills/<id>`.
@@ -197,8 +197,10 @@ def _render_skill_pool(cards: list[SkillCard], agent_id: str = "") -> str:
         "For Train, select every unpinned `training_method` yourself from the "
         "available compatible Skills; a non-empty `training_method_pin` is binding "
         "and `configuration_suggestions.training_method` is advisory. "
-        "Invoke the selected Skill (underscores→hyphens, e.g. `lora_sft` → "
-        "`lora-sft`). An unknown selected method is a contract failure. Orchestrator "
+        "Invoke the selected Skill (underscores→hyphens, e.g. `online_dpo` → "
+        "`online-dpo`). Historical `lora_sft`/`full_sft` pins invoke `sft` with "
+        "PEFT enabled/disabled respectively. An unknown selected method is a "
+        "contract failure. Orchestrator "
         "guidance is advisory unless it carries a user pin. We give the contract; "
         "**you write the code**. Echo the method you used back in "
         "`training_method`. Run ONE only."

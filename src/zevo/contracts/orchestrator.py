@@ -448,7 +448,7 @@ class UserRequest(BaseModel):
     training_method: str = Field(
         ...,
         description=(
-            "Pinned Train method, e.g. 'lora_sft'. Use '' to let the Train "
+            "Pinned Train method, e.g. 'sft'. Use '' to let the Train "
             "Agent record Zevo's active Method branch in each train_config.yaml; "
             "the branch changes only after its nested search is exhausted."
         ),

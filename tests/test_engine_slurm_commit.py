@@ -29,6 +29,8 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
 
     script = tmp_path / "train.sbatch"
     script.write_text("#!/bin/bash\necho validated\n", encoding="utf-8")
+    train_program = tmp_path / "train.py"
+    train_program.write_text("print('validated')\n", encoding="utf-8")
     device = InfrastructureDeviceInfo(
         run_id="run-1",
         ticket_id="infra-1",
@@ -92,7 +94,11 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
 
     async def fake_ssh(_info, command, **_kwargs):
         commands.append(command)
-        return {"ok": True, "exit_code": 0, "stdout": "98765;cluster\n", "error": ""}
+        job_id = "98765" if len(commands) == 1 else "98766"
+        return {
+            "ok": True, "exit_code": 0,
+            "stdout": f"{job_id};cluster\n", "error": "",
+        }
 
     monkeypatch.setattr(remote_jobs, "_ssh", fake_ssh)
     async with Session() as session:
@@ -119,6 +125,38 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
         assert "submission_committed" not in row.meta
         assert commands and "sha256sum" in commands[0]
         assert "sbatch --parsable -- /remote/run-1/train-1/train.sbatch" in commands[0]
+
+        row.status = "released"
+        row.released_at = datetime.now(timezone.utc)
+        row.meta = {**row.meta, "scheduler_state": "FAILED"}
+        await session.flush()
+        retry = contract.model_copy(update={
+            "attempt": 2,
+            "retry_of_bookkeeping_row_id": row.id,
+            "retry_of_job_id": row.instance_id,
+        })
+        retry_input = type("StageInput", (), {
+            "slurm_job": retry,
+            "device_info_path": str(device_path),
+        })()
+        with pytest.raises(
+            ValueError, match="only after its generated stage implementation changes",
+        ):
+            await _submit_validated_slurm_stage(
+                session, run=run, ticket=ticket, inp=retry_input,
+                heartbeat_id="heartbeat-2",
+            )
+
+        train_program.write_text("print('repaired')\n", encoding="utf-8")
+        replacement = await _submit_validated_slurm_stage(
+            session, run=run, ticket=ticket, inp=retry_input,
+            heartbeat_id="heartbeat-2",
+        )
+        assert replacement.instance_id == "98766"
+        assert replacement.meta["execution_attempt"] == 2
+        assert replacement.meta["retry_of_bookkeeping_row_id"] == row.id
+        assert replacement.meta["retry_of_job_id"] == "98765"
+        assert len(commands) == 2
 
     await engine.dispose()
 

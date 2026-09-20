@@ -102,8 +102,9 @@ python zevo_parallel_inference.py --predict predict.py --model MODEL_PATH \
   --allocated-gpus SLURM_JOB_GPU_COUNT --gpus-per-worker YAML_TENSOR_PARALLEL_SIZE
 ```
 
-Use absolute paths in the real script. The helper isolates each worker's GPUs
-and temp/cache directories, splits large prepared CSV benchmarks when useful,
+Use absolute paths in the real script. The helper isolates each worker's GPUs,
+HOME, temporary directory, and writable compilation caches (including
+FlashInfer, Triton, TorchInductor, CUDA and vLLM), splits large prepared CSV benchmarks when useful,
 merges results in original row order, and marks each Benchmark complete as
 soon as its shard artifacts are validated, even while a replica continues with
 other Benchmarks. A final generated-row progress event alone is not completion.
@@ -166,6 +167,13 @@ running. For any other terminal state,
 inspect both exact job streams and return a specific failure. The finite job releases its GPUs
 automatically; do not create an Infrastructure release ticket or PATCH
 scheduler-owned state.
+
+If that terminal failure came from generated implementation, command, or
+runtime setup and produced no valid predictions, repair the generated files in
+place. The next repair activation may carry `slurm_job.phase="submit"` with
+`attempt=2`; return `deferred` and let the Engine validate the changed script
+and create the distinct second JOBID. Never resubmit the terminal collect job
+yourself. Only one automatic external re-execution is allowed for a Ticket.
 
 ## Selecting a model-lineage baseline YAML
 

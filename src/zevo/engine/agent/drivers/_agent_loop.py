@@ -112,7 +112,7 @@ SKILL_TOOL = {
         "Load a method skill for this stage. The available skills (and when to "
         "use each) are in your prompt's 'Method Skills' section. Call "
         "action='list' to see them again, or action='load' with name='<skill>' "
-        "(e.g. 'lora-sft') to load that skill's full instructions — then follow "
+        "(e.g. 'sft') to load that skill's full instructions — then follow "
         "them and write the code. Follow the ownership in your typed input: Train "
         "honors `training_method_pin` and otherwise selects from compatible Skills; "
         "Data uses `training_method` only to choose record semantics and selects its "

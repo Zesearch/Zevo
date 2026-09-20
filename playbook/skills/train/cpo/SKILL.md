@@ -45,10 +45,13 @@ trainer = CPOTrainer(
 )
 ```
 
-Do not load or pass a reference model. In this system, default to a LoRA adapter
-unless `method_config.use_peft` is explicitly false. Resolve LoRA fields from
-the ticket/Skill and save an adapter; a deliberate full-parameter run must pass
-the same memory guard as `full_sft` and save complete weights.
+Do not load or pass a reference model. Default to full-parameter training with
+`method_config.use_peft=false`. Enable PEFT only when the Ticket or an explicit
+user instruction requires LoRA and the realized config records
+`method_config.use_peft=true`. Resolve LoRA fields only in that case and save an
+adapter. Construct, validate, save, and reload it exactly as required by the
+shared PEFT execution contract. Full-parameter training must pass the same
+memory guard as full SFT and save complete weights.
 
 If the experimental import or requested config field is absent in the installed
 TRL version, fail with the version and missing symbol. Do not silently replace

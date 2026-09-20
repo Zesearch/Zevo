@@ -39,10 +39,14 @@ trainer = DPOTrainer(
 ```
 
 With PEFT and `ref_model=None`, TRL uses the initial base policy as the implicit
-reference. Default to PEFT in this system unless `method_config.use_peft` is
-explicitly false. A full-parameter DPO run needs memory for both policy and
-reference behavior; use precomputed reference log-probabilities only when the
-installed TRL version and dataset type support it.
+reference. Default to full-parameter training with
+`method_config.use_peft=false`. Enable PEFT only when the Ticket or an explicit
+user instruction requires LoRA and the realized config records
+`method_config.use_peft=true`. Construct, validate, save, and reload that adapter
+exactly as required by the shared PEFT execution contract. A full-parameter DPO
+run needs memory for both policy and reference behavior; use precomputed
+reference log-probabilities only when the installed TRL version and dataset type
+support it.
 
 Never combine incompatible reference modes, including synchronized references
 with PEFT-without-a-standalone-reference or with precomputed reference

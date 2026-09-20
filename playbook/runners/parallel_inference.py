@@ -144,9 +144,16 @@ def _worker_environment(base: dict[str, str], root: Path, devices: list[str]) ->
     env["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
     for key, suffix in (
         ("TMPDIR", ""), ("TMP", ""), ("TEMP", ""),
-        ("XDG_CACHE_HOME", "xdg"), ("TRITON_CACHE_DIR", "triton"),
+        # Some first-use compilers honor XDG while FlashInfer releases have
+        # also used Path.home()/.cache directly. Give every replica both a
+        # distinct HOME and explicit cache roots so two cold starts can never
+        # contend on the same downloader/JIT lock.
+        ("HOME", "home"), ("XDG_CACHE_HOME", "home/.cache"),
+        ("FLASHINFER_CACHE_DIR", "home/.cache/flashinfer"),
+        ("TRITON_CACHE_DIR", "triton"),
         ("TORCHINDUCTOR_CACHE_DIR", "inductor"),
-        ("VLLM_CACHE_ROOT", "vllm"), ("OUTLINES_CACHE_DIR", "outlines"),
+        ("CUDA_CACHE_PATH", "cuda"), ("VLLM_CACHE_ROOT", "vllm"),
+        ("OUTLINES_CACHE_DIR", "outlines"),
     ):
         location = root / suffix
         location.mkdir(parents=True, exist_ok=True)

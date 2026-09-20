@@ -99,7 +99,7 @@ def _stub_data(payload: dict, work_dir: Path) -> BaseModel:
             if Path(str(source)).is_file()
             else hashlib.sha256(str(source).encode()).hexdigest()
         ),
-        training_method=str(payload.get("training_method") or "full_sft"),
+        training_method=str(payload.get("training_method") or "sft"),
         method_format="messages",
         method_ids=methods,
         audit_steps=["validated and materialized the stub training records"],
@@ -300,7 +300,7 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
         diversity_status = "user_pinned"
         method_rationale = "The user pinned the training method for every iteration."
     elif previous is None:
-        method = suggested_method or "lora_sft"
+        method = suggested_method or "sft"
         diversity_status = "initial"
         method_rationale = "Selected the first method from guidance and available evidence."
     else:
@@ -330,9 +330,10 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
         )
     )
     if method in {
-        "dpo", "cpo", "gkd", "grpo", "kto", "online_dpo", "orpo", "rft", "rloo"
+        "sft", "dpo", "cpo", "gkd", "grpo", "kto", "online_dpo", "orpo", "rft", "rloo"
     } and "use_peft" not in method_config:
-        method_config["use_peft"] = True
+        method_config["use_peft"] = False
+    uses_peft = method == "lora_sft" or bool(method_config.get("use_peft", False))
     loss = derive_loss_contract(method, inference.prompt.prompt_framing)
     loss.objective_config = recommended_loss_objective_config(
         method,
@@ -352,7 +353,7 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
             "gradient_accumulation_steps": 1,
             "world_size": 1,
             "effective_batch_size": 1,
-            "learning_rate": 1e-4 if method == "lora_sft" else 2e-5,
+            "learning_rate": 1e-4 if uses_peft else 2e-5,
             "optimizer": "adamw_torch",
             "lr_scheduler_type": "linear",
             "warmup_ratio": 0.0,
@@ -373,14 +374,14 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
                 "rationale": "",
             },
             "seed": 0,
-            "lora_r": 16 if method == "lora_sft" else 0,
-            "lora_alpha": 32 if method == "lora_sft" else 0,
+            "lora_r": 16 if uses_peft else 0,
+            "lora_alpha": 32 if uses_peft else 0,
             "lora_dropout": 0.0,
-            "lora_target_modules": ["all-linear"] if method == "lora_sft" else [],
+            "lora_target_modules": ["all-linear"] if uses_peft else [],
             "implementation_config": {},
             "software_versions": {
                 "torch": "stub", "transformers": "stub", "trl": "stub",
-                **({"peft": "stub"} if method == "lora_sft" else {}),
+                **({"peft": "stub"} if uses_peft else {}),
             },
         }
     )
@@ -389,7 +390,6 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
         "mode": "all", "source_rows": source_rows,
         "selected_source_rows": source_rows, "rationale": "",
     }
-    uses_peft = method == "lora_sft" or bool(method_config.get("use_peft", False))
     if uses_peft:
         training_values["software_versions"]["peft"] = "stub"
     if not uses_peft:
@@ -911,7 +911,7 @@ def _stub_registry(payload: dict, work_dir: Path) -> BaseModel:
             ticket_id=str(payload.get("ticket_id") or "registry-stub"),
             iteration=int(payload.get("iteration") or 0),
             base_model=str(payload.get("base_model") or "stub-base"),
-            training_method=str(payload.get("training_method") or "lora_sft"),
+            training_method=str(payload.get("training_method") or "sft"),
             dataset_source=(
                 str(payload.get("dataset_source") or "stub-dataset")[len("/app/"):]
                 if str(payload.get("dataset_source") or "").startswith("/app/")

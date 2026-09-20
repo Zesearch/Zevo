@@ -26,6 +26,8 @@ args = parser.parse_args()
 members = json.load(open(args.suite, encoding="utf-8"))["members"]
 summaries = []
 print("MASK=" + os.environ["CUDA_VISIBLE_DEVICES"], flush=True)
+print("WORKER_HOME=" + os.environ["HOME"], flush=True)
+print("FLASHINFER_CACHE=" + os.environ["FLASHINFER_CACHE_DIR"], flush=True)
 if os.environ.get("FAKE_FAIL_MASK") == os.environ["CUDA_VISIBLE_DEVICES"]:
     time.sleep(0.2)
     sys.exit(5)
@@ -138,6 +140,12 @@ def test_large_single_benchmark_is_sharded_and_merged_in_original_order(tmp_path
 def test_separate_benchmarks_share_one_job_but_use_distinct_gpus(tmp_path: Path) -> None:
     output, members = _run(tmp_path, [1400, 1300])
     assert "2 independent replica(s)" in output
+    homes = [line.split("=", 1)[1] for line in output.splitlines()
+             if "WORKER_HOME=" in line]
+    flashinfer = [line.split("=", 1)[1] for line in output.splitlines()
+                  if "FLASHINFER_CACHE=" in line]
+    assert len(homes) == 2 and len(set(homes)) == 2
+    assert len(flashinfer) == 2 and len(set(flashinfer)) == 2
     for index, member in enumerate(members):
         with open(member["output"], newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))

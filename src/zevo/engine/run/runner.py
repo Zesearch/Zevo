@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import builtins
 import csv
 import hashlib
 import json
@@ -35,6 +36,7 @@ import re
 import shlex
 import shutil
 import sys
+import symtable
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -774,6 +776,17 @@ async def _slurm_stage_job_contract(
     if cluster:
         job_row = await _latest_slurm_resource_request(session, ticket)
     meta = dict(job_row.meta or {}) if job_row is not None else {}
+    prior_state = str(meta.get("scheduler_state") or "").strip().upper()
+    prior_state = prior_state.split()[0].rstrip("+") if prior_state else ""
+    prior_attempt = max(1, int(meta.get("execution_attempt") or 1))
+    repair_submission = bool(
+        cluster
+        and job_row is not None
+        and str(getattr(ticket, "status", "")) == "repairing"
+        and prior_state in _SLURM_TERMINAL_STATES
+        and prior_state != "COMPLETED"
+        and prior_attempt < 2
+    )
     if cluster and info.cluster is None:
         raise ValueError("cluster stage has no cluster execution route")
     if cluster:
@@ -807,6 +820,11 @@ async def _slurm_stage_job_contract(
                 str((ticket.payload or {}).get("training_method_pin") or "")
                 if stage == "train" else ""
             ),
+            train_use_peft=(
+                bool(((ticket.payload or {}).get("method_config_pins") or {}).get(
+                    "use_peft", False,
+                )) if stage == "train" else False
+            ),
             info=info,
             live_capacity=capacity,
             capacity_error=capacity_error,
@@ -839,7 +857,7 @@ async def _slurm_stage_job_contract(
     remote_ticket_dir = str(PurePosixPath(status_path).parent) if status_path else ""
     return SlurmStageJobContract(
         enabled=cluster,
-        phase="collect" if job_row is not None else "submit",
+        phase=("submit" if job_row is None or repair_submission else "collect"),
         stage=stage if cluster else "",
         estimated_gpus=selection.estimated_gpus if selection is not None else 0,
         resource_plan_source=selection.source if selection is not None else "",
@@ -861,14 +879,33 @@ async def _slurm_stage_job_contract(
         ),
         lifecycle_prologue=slurm_lifecycle_prologue(status_path) if cluster else "",
         runtime_prologue=slurm_runtime_prologue() if cluster else "",
-        bookkeeping_row_id=job_row.id if job_row is not None else "",
-        job_id=job_row.instance_id if job_row is not None else "",
+        attempt=(prior_attempt + 1 if repair_submission else prior_attempt),
+        retry_of_bookkeeping_row_id=(
+            job_row.id if repair_submission
+            else str(meta.get("retry_of_bookkeeping_row_id") or "")
+        ),
+        retry_of_job_id=(
+            job_row.instance_id if repair_submission
+            else str(meta.get("retry_of_job_id") or "")
+        ),
+        bookkeeping_row_id=(
+            job_row.id if job_row is not None and not repair_submission else ""
+        ),
+        job_id=(
+            job_row.instance_id if job_row is not None and not repair_submission else ""
+        ),
         scheduler_state=(
             str(meta.get("scheduler_state") or job_row.status).upper()
-            if job_row is not None else ""
+            if job_row is not None and not repair_submission else ""
         ),
-        scheduler_exit_code=str(meta.get("scheduler_exit_code") or ""),
-        scheduler_reason=str(meta.get("scheduler_reason") or ""),
+        scheduler_exit_code=(
+            str(meta.get("scheduler_exit_code") or "")
+            if job_row is not None and not repair_submission else ""
+        ),
+        scheduler_reason=(
+            str(meta.get("scheduler_reason") or "")
+            if job_row is not None and not repair_submission else ""
+        ),
         num_gpus=(selection.num_gpus if selection is not None else selected_gpus),
         nodes=(selection.nodes if selection is not None else int(info.resource_plan.nodes)),
         max_queue_wait_hours=float(run.max_queue_wait_hours or 48.0),
@@ -968,6 +1005,7 @@ async def _build_train_input(
             )
         ),
         telemetry_helper_path=str(Path(work_dir) / "zevo_train_telemetry.py"),
+        checkpoint_helper_path=str(Path(work_dir) / "zevo_train_checkpoint.py"),
         execution_contract=TrainExecutionContract(
             required_environment=required_environment,
             secret_environment_names=["WANDB_API_KEY"] if wandb_enabled else [],
@@ -2329,6 +2367,83 @@ def _python_memory_helper_problem(path: str) -> str:
     )
 
 
+def _python_checkpoint_helper_problem(path: str) -> str:
+    """Require generated Train code to use the checkpoint transaction helper."""
+    try:
+        body = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"cannot read train_script_path: {exc}"
+    try:
+        tree = ast.parse(body, filename=path)
+    except SyntaxError as exc:
+        return f"cannot parse train_script_path: {exc}"
+    direct_names: set[str] = set()
+    module_names: set[str] = set()
+    accepted = {
+        "save_transformers_model_rank_zero",
+        "commit_checkpoint_directory",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "zevo_train_checkpoint":
+            for imported in node.names:
+                if imported.name in accepted:
+                    direct_names.add(imported.asname or imported.name)
+        elif isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name == "zevo_train_checkpoint":
+                    module_names.add(imported.asname or imported.name)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id in direct_names:
+            return ""
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in accepted
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in module_names
+        ):
+            return ""
+    return (
+        "train.py must import and call the system-owned zevo_train_checkpoint "
+        "transaction helper"
+    )
+
+
+def _python_undefined_name_problem(path: str) -> str:
+    """Cheap F821-style gate for generated programs before GPU submission."""
+    try:
+        source = Path(path).read_text(encoding="utf-8")
+        table = symtable.symtable(source, path, "exec")
+    except (OSError, SyntaxError) as exc:
+        return f"cannot statically validate generated Python: {exc}"
+    module_definitions = {
+        symbol.get_name()
+        for symbol in table.get_symbols()
+        if symbol.is_assigned() or symbol.is_imported() or symbol.is_namespace()
+    }
+    allowed = module_definitions | set(dir(builtins)) | {
+        "__file__", "__name__", "__package__", "__spec__",
+    }
+    missing: set[str] = set()
+
+    def inspect(scope: symtable.SymbolTable) -> None:
+        for symbol in scope.get_symbols():
+            if (
+                symbol.is_referenced()
+                and symbol.is_global()
+                and symbol.get_name() not in allowed
+            ):
+                missing.add(symbol.get_name())
+        for child in scope.get_children():
+            inspect(child)
+
+    inspect(table)
+    if missing:
+        return "generated Python references undefined names: " + ", ".join(sorted(missing))
+    return ""
+
+
 def _slurm_directive_value(body: str, name: str) -> str:
     pattern = re.compile(
         rf"^\s*#SBATCH\s+--{re.escape(name)}(?:=|\s+)(\S+)",
@@ -2397,6 +2512,12 @@ def _slurm_stage_result_problem(
     lowered = body.lower()
     if "sleep infinity" in lowered or "--wrap" in lowered:
         return "cluster stage Slurm script must be a finite direct job, not a holder/wrap"
+    if contract.phase == "submit":
+        static_problem = _python_undefined_name_problem(
+            str(path.with_name(executable_name))
+        )
+        if static_problem:
+            return static_problem
     if executable_name == "train.py":
         if not configuration_path:
             return "cluster Train must report train_config_path before submission handoff"
@@ -2408,6 +2529,11 @@ def _slurm_stage_result_problem(
             )
         except (OSError, ValueError) as exc:
             return f"cluster Train configuration is invalid: {exc}"
+        if contract.phase == "submit":
+            train_script = str(path.with_name("train.py"))
+            checkpoint_problem = _python_checkpoint_helper_problem(train_script)
+            if checkpoint_problem:
+                return checkpoint_problem
     elif (
         executable_name == "predict.py"
         and "--adaptive-vllm-memory"
@@ -3679,6 +3805,29 @@ async def _slurm_watcher_job_is_current(
     )
 
 
+def _slurm_stage_implementation_sha256(contract: SlurmStageJobContract) -> str:
+    """Hash the submitted wrapper and the generated program it launches."""
+    executable = {
+        "data": "prepare_data.py",
+        "train": "train.py",
+        "inference": "predict.py",
+    }.get(contract.stage)
+    if not executable:
+        raise ValueError(f"unsupported Slurm stage implementation: {contract.stage!r}")
+    paths = [Path(contract.script_path), Path(contract.script_path).with_name(executable)]
+    digest = hashlib.sha256()
+    for path in paths:
+        try:
+            body = path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"cannot hash generated stage implementation: {exc}") from exc
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(body)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 async def _submit_validated_slurm_stage(
     session: AsyncSession,
     *,
@@ -3699,8 +3848,24 @@ async def _submit_validated_slurm_stage(
         raise ValueError("engine Slurm commit requires an enabled stage contract")
     if contract.phase != "submit":
         raise ValueError("engine Slurm commit is valid only during submit phase")
-    if await _latest_slurm_resource_request(session, ticket) is not None:
-        raise ValueError("a Slurm resource request already exists for this Ticket")
+    previous = await _latest_slurm_resource_request(session, ticket)
+    if contract.attempt == 1:
+        if previous is not None:
+            raise ValueError("a Slurm resource request already exists for this Ticket")
+    else:
+        previous_meta = dict(previous.meta or {}) if previous is not None else {}
+        previous_state = str(previous_meta.get("scheduler_state") or "").upper()
+        previous_state = previous_state.split()[0].rstrip("+") if previous_state else ""
+        if (
+            previous is None
+            or previous.id != contract.retry_of_bookkeeping_row_id
+            or previous.instance_id != contract.retry_of_job_id
+        ):
+            raise ValueError("the Slurm retry no longer supersedes the newest Ticket job")
+        if previous_state not in _SLURM_TERMINAL_STATES or previous_state == "COMPLETED":
+            raise ValueError("only a terminal failed Slurm job may be re-executed")
+        if int(previous_meta.get("execution_attempt") or 1) + 1 != contract.attempt:
+            raise ValueError("the Slurm retry attempt is not consecutive")
     try:
         info = InfrastructureDeviceInfo.model_validate_json(
             Path(device_info_path).read_text(encoding="utf-8")
@@ -3715,6 +3880,19 @@ async def _submit_validated_slurm_stage(
         ).hexdigest()
     except OSError as exc:
         raise ValueError(f"cannot hash the validated Slurm script: {exc}") from exc
+    implementation_sha256 = _slurm_stage_implementation_sha256(contract)
+    if previous is not None:
+        previous_implementation_sha256 = str(
+            (previous.meta or {}).get("implementation_sha256") or ""
+        )
+        if (
+            previous_implementation_sha256
+            and previous_implementation_sha256 == implementation_sha256
+        ):
+            raise ValueError(
+                "a failed Slurm job may be re-executed only after its generated "
+                "stage implementation changes"
+            )
 
     from zevo.engine.run.remote_jobs import _ssh
 
@@ -3770,6 +3948,11 @@ async def _submit_validated_slurm_stage(
             "remote_workdir": contract.remote_work_dir,
             "status_path": contract.status_path,
             "submission_heartbeat_id": heartbeat_id,
+            "execution_attempt": contract.attempt,
+            "retry_of_bookkeeping_row_id": contract.retry_of_bookkeeping_row_id,
+            "retry_of_job_id": contract.retry_of_job_id,
+            "script_sha256": local_script_sha256,
+            "implementation_sha256": implementation_sha256,
         },
     )
     session.add(row)
@@ -4085,6 +4268,15 @@ async def run_ticket(
         shutil.copyfile(
             telemetry_source,
             Path(work_dir) / "zevo_train_telemetry.py",
+        )
+        checkpoint_source = REPO_ROOT / "playbook" / "runners" / "train_checkpoint.py"
+        if not checkpoint_source.is_file():
+            raise ValueError(
+                f"system training checkpoint helper is missing: {checkpoint_source}"
+            )
+        shutil.copyfile(
+            checkpoint_source,
+            Path(work_dir) / "zevo_train_checkpoint.py",
         )
     if tk.agent_id == "inference":
         memory_source = REPO_ROOT / "playbook" / "runners" / "inference_memory.py"
@@ -5391,17 +5583,36 @@ async def run_ticket(
             else:
                 stage_row = await _latest_slurm_resource_request(session, tk)
                 deferred_stage_row = stage_row
-                if stage_row is None:
-                    if inp.slurm_job.phase == "submit":
-                        # The Agent has only prepared/uploaded the stage. The
-                        # engine submits it after every Result/config/script
+                if inp.slurm_job.phase == "submit":
+                    if inp.slurm_job.attempt == 1 and stage_row is None:
+                        # The Agent has only prepared/uploaded the first stage.
+                        # The engine submits it after every Result/config/script
                         # check below passes.
+                        prepared_slurm_submission = True
+                    elif (
+                        inp.slurm_job.attempt == 2
+                        and stage_row is not None
+                        and stage_row.id
+                        == inp.slurm_job.retry_of_bookkeeping_row_id
+                        and stage_row.instance_id == inp.slurm_job.retry_of_job_id
+                    ):
+                        # A generated implementation failure may be repaired in
+                        # the same Ticket. The old terminal row remains immutable;
+                        # submission below creates a distinct second attempt.
                         prepared_slurm_submission = True
                     else:
                         runtime_contract_mismatches["deferred_status"] = {
-                            "declared": "the exact registered finite Slurm job",
-                            "reported": "no cluster InfraInstance row for this Ticket",
+                            "declared": "a new or exact bounded repair submission",
+                            "reported": (
+                                "the current Slurm bookkeeping rows do not match "
+                                "the submit contract"
+                            ),
                         }
+                elif stage_row is None:
+                    runtime_contract_mismatches["deferred_status"] = {
+                        "declared": "the exact registered finite Slurm job",
+                        "reported": "no cluster InfraInstance row for this Ticket",
+                    }
                 elif str((stage_row.meta or {}).get("status_path") or "") != (
                     inp.slurm_job.status_path
                 ):

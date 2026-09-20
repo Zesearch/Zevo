@@ -6,7 +6,7 @@
 
 import type { ReactNode } from "react";
 
-export type StationState = "idle" | "active" | "done" | "degraded" | "failed" | "cancelled";
+export type StationState = "idle" | "waiting" | "active" | "done" | "degraded" | "failed" | "cancelled";
 
 export type Station = {
   key: string;
@@ -38,6 +38,7 @@ export function ticketAtStation(
 // mid-flight looked identical to one that had finished.
 const COL = {
   idle: "#3B4C5B",
+  waiting: "#5FB0DD",
   active: "#E08D38",
   done: "#4FD1B5",
   degraded: "#A98FD6",

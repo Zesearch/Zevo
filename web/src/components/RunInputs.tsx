@@ -994,7 +994,7 @@ export type RunInputValues = {
   baseModel: string;
   /** Natural-language guidance for an unpinned base-model search. */
   modelQuery: string;
-  /** The training method, e.g. lora_sft. Empty = Zevo picks — which is one of
+  /** The training method, e.g. sft. Empty = Zevo picks — which is one of
    *  the three decisions the autonomy level counts. */
   trainingMethod: string;
   /** Natural-language guidance for an unpinned method search. */
@@ -1003,6 +1003,7 @@ export type RunInputValues = {
    * release accepts Hugging Face owner/model ids only. */
   teacherModel: string;
   rewardModel: string;
+  /** User-facing LoRA choice; serialized as method_config.use_peft. */
   usePeft: "" | "true" | "false";
   promptFraming: string;
   systemPrompt: string;
@@ -1058,6 +1059,23 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   // job cannot stay pending indefinitely.
   iterations: "", budget: "", timeLimitHours: "", queueWaitHours: "48", stopThreshold: "",
 };
+
+export const TRAINING_METHOD_OPTIONS = [
+  "sft", "cpo", "dpo", "gkd", "grpo", "kto",
+  "online_dpo", "orpo", "rft", "rloo",
+] as const;
+
+const LORA_CAPABLE_TRAINING_METHODS = new Set<string>(TRAINING_METHOD_OPTIONS);
+
+export function trainingMethodSupportsLora(method: string): boolean {
+  return LORA_CAPABLE_TRAINING_METHODS.has(method);
+}
+
+export function useLoraLabel(value: unknown): string {
+  return value === true || value === "true"
+    ? "Yes · LoRA adapter"
+    : "No · full parameters";
+}
 
 /** The effective Validation scorer shown and sent by both launch modes. */
 export function validationContractFromInputs(inputs: RunInputValues) {
@@ -1128,7 +1146,9 @@ export function methodConfigFromInputs(inputs: RunInputValues): Record<string, u
   if (inputs.trainingMethod === "online_dpo" && inputs.rewardModel.trim()) {
     config.reward_model = inputs.rewardModel.trim();
   }
-  if (inputs.usePeft) config.use_peft = inputs.usePeft === "true";
+  if (trainingMethodSupportsLora(inputs.trainingMethod)) {
+    config.use_peft = inputs.usePeft === "true";
+  }
   return config;
 }
 
@@ -1572,15 +1592,18 @@ export function TrainingSetupFields({
       <ChoiceField
         label="Training method" value={trainingMethod}
         onChange={(value) => onChange({ trainingMethod: value })}
-        options={[
-          ["lora_sft", "lora_sft"],
-          ["full_sft", "full_sft"], ["cpo", "cpo"], ["dpo", "dpo"],
-          ["gkd", "gkd"], ["grpo", "grpo"], ["kto", "kto"],
-          ["online_dpo", "online_dpo"], ["orpo", "orpo"],
-          ["rft", "rft"], ["rloo", "rloo"],
-        ]}
+        options={TRAINING_METHOD_OPTIONS.map((method): [string, string] => [method, method])}
         hint="Optimization method used to train the model; blank lets Zevo choose."
       />
+      {trainingMethodSupportsLora(trainingMethod) && (
+        <ChoiceField
+          label="Use LoRA"
+          value={usePeft || "false"}
+          onChange={(value) => onChange({ usePeft: value as "true" | "false" })}
+          options={[["false", "No · full parameters"], ["true", "Yes · LoRA adapter"]]}
+          hint="No · full parameters"
+        />
+      )}
       <TextField
         label="Method query" value={methodQuery}
         onChange={(value) => onChange({ methodQuery: value })}
@@ -1603,17 +1626,6 @@ export function TrainingSetupFields({
           onChange={(value) => onChange({ rewardModel: value })}
           required
           hint="Reward model used to rank Online DPO responses; enter its Hugging Face owner/model id."
-        />
-      )}
-      {[
-        "cpo", "dpo", "gkd", "grpo", "kto", "online_dpo", "orpo", "rft", "rloo",
-      ].includes(trainingMethod) && (
-        <ChoiceField
-          label="PEFT"
-          value={usePeft}
-          onChange={(value) => onChange({ usePeft: value as "" | "true" | "false" })}
-          options={[["true", "Use PEFT"], ["false", "Full parameters"]]}
-          hint="Blank uses the Train Skill default."
         />
       )}
     </div>
@@ -1718,8 +1730,8 @@ export function RunInputs({
     { name: "Model query", value: modelQuery.trim() || "not set", overridden: !!modelQuery.trim() },
     { name: "Training method", value: trainingMethod.trim() || "Decided by Zevo", overridden: !!trainingMethod.trim() },
     { name: "Method query", value: methodQuery.trim() || "not set", overridden: !!methodQuery.trim() },
-    ...(["cpo", "dpo", "gkd", "grpo", "kto", "online_dpo", "orpo", "rft", "rloo"].includes(trainingMethod)
-      ? [{ name: "PEFT", value: usePeft === "true" ? "Use PEFT" : usePeft === "false" ? "Full parameters" : "Skill default", overridden: Boolean(usePeft) }]
+    ...(trainingMethodSupportsLora(trainingMethod)
+      ? [{ name: "Use LoRA", value: useLoraLabel(usePeft), overridden: Boolean(usePeft) }]
       : []),
     { name: "Maximum GPUs", value: numGpus.trim() || "unlimited", overridden: !!numGpus.trim() },
     { name: "Generation backend", value: (generation_backend || "vllm").toUpperCase(), overridden: !!generation_backend },

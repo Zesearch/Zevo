@@ -20,6 +20,9 @@ AUXILIARY_MODEL_FIELD_BY_METHOD: dict[str, str] = {
 _AUXILIARY_MODEL_FIELDS = frozenset(AUXILIARY_MODEL_FIELD_BY_METHOD.values())
 
 METHOD_CONFIG_KEYS: dict[str, frozenset[str]] = {
+    "sft": frozenset({"use_peft"}),
+    # Historical persisted Runs may still carry these two method ids. New
+    # requests and Skills use `sft` plus method_config.use_peft.
     "lora_sft": frozenset(),
     "full_sft": frozenset(),
     "dpo": frozenset({"use_peft"}),
@@ -33,11 +36,22 @@ METHOD_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "rloo": frozenset({"use_peft"}),
 }
 
+LEGACY_SFT_METHODS: dict[str, bool] = {
+    "lora_sft": True,
+    "full_sft": False,
+}
+
+# The agent/UI catalogue excludes compatibility-only aliases while validators
+# keep old Runs and saved Settings readable.
+SELECTABLE_TRAINING_METHODS = frozenset(
+    set(METHOD_CONFIG_KEYS) - set(LEGACY_SFT_METHODS)
+)
+
 # Supervised-finetuning family: teaches format and a first pass at reasoning.
 # A reinforcement/verifiable-reward lever is a deliberate next step *after* one
 # of these has established a reasonable baseline (see the orchestrator's
 # reinforcement-progression policy in zevo.engine.method.loop_policy).
-SFT_METHODS = frozenset({"lora_sft", "full_sft"})
+SFT_METHODS = frozenset({"sft", *LEGACY_SFT_METHODS})
 
 # The verifiable-reward progression a SOTA practitioner runs on a task with a
 # deterministic correctness check, IN ORDER, once an SFT baseline exists:
@@ -82,6 +96,19 @@ def normalize_method_config(config: dict[str, Any] | None) -> dict[str, Any]:
     return normalized
 
 
+def canonical_method_selection(
+    training_method: str | None,
+    config: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    """Return the public method/config pair, upgrading historical SFT ids."""
+    method = (training_method or "").strip().lower().replace("-", "_")
+    values = normalize_method_config(config)
+    if method in LEGACY_SFT_METHODS:
+        values["use_peft"] = LEGACY_SFT_METHODS[method]
+        method = "sft"
+    return method, values
+
+
 def method_config_errors(
     training_method: str,
     config: dict[str, Any] | None,
@@ -101,7 +128,7 @@ def method_config_errors(
     if method and method not in METHOD_CONFIG_KEYS:
         errors.append(
             f"unsupported training_method={method!r}; installed methods: "
-            + ", ".join(sorted(METHOD_CONFIG_KEYS))
+            + ", ".join(sorted(SELECTABLE_TRAINING_METHODS))
         )
 
     reserved = sorted(set(values) & RESERVED_METHOD_CONFIG_FIELDS)

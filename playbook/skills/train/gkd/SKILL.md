@@ -58,11 +58,15 @@ trainer = GKDTrainer(
 )
 ```
 
-Load the teacher frozen and in evaluation mode. Default the student to PEFT
-unless `method_config.use_peft=false`; a full-parameter student needs the
-full-SFT memory guard in addition to teacher memory. The run's `generation_backend` does
-not imply vLLM here: current GKDConfig has no shared `use_vllm` contract, so use
-the trainer's supported generation path.
+Load the teacher frozen and in evaluation mode. Default the student to
+full-parameter training with `method_config.use_peft=false`. Enable PEFT only
+when the Ticket or an explicit user instruction requires LoRA and the realized
+config records `method_config.use_peft=true`. Construct, validate, save, and
+reload that adapter exactly as required by the shared PEFT execution contract.
+A full-parameter student needs the full-SFT memory guard in addition to teacher
+memory. The run's
+`generation_backend` does not imply vLLM here: current GKDConfig has no shared
+`use_vllm` contract, so use the trainer's supported generation path.
 
 If the experimental import/config is unavailable, fail with the installed TRL
 version. Do not replace GKD with SFT or select another teacher.

@@ -5,12 +5,15 @@ import { Note } from "./zevo/primitives";
 import { displayFilePath, shortModel, splitDatasetPath } from "../lib/format";
 import {
   MODEL_ID_HINT,
+  TRAINING_METHOD_OPTIONS,
   ScoringSuiteEditor,
   ScoringSuiteManifest,
   TrainingDataField,
   emptyScoringSet,
   normalizeScoringSuite,
   scoringSuiteMissing,
+  trainingMethodSupportsLora,
+  useLoraLabel,
 } from "./RunInputs";
 import { api } from "../lib/api";
 import type { TaskSettingDTO, TaskTestSet } from "../lib/api";
@@ -435,6 +438,9 @@ export function TaskSettingHistory({
                   : s.training_method || "Zevo decides"
               }
               tone={s.training_method ? "text-slate-100" : "text-brass-300"} />
+            {trainingMethodSupportsLora(s.training_method) && (
+              <Fact label="use LoRA" value={useLoraLabel(s.method_config?.use_peft)} />
+            )}
             <Fact label="method query" value={s.method_query || "not set"}
               title={s.method_query || "No method query set"} />
             <Fact label="iters" value={s.iteration_budget ? String(s.iteration_budget) : "∞"}
@@ -658,7 +664,9 @@ function SettingForm({ task, existing, onDone, onCancel }: {
         : v.training_method === "online_dpo"
         ? { reward_model: v.reward_model.trim() }
         : {};
-      if (v.use_peft) method_config.use_peft = v.use_peft === "true";
+      if (trainingMethodSupportsLora(v.training_method)) {
+        method_config.use_peft = v.use_peft === "true";
+      }
       await api(existing ? `${base}/${encodeURIComponent(existing.id)}` : base, {
         method: existing ? "PATCH" : "POST",
         body: JSON.stringify({
@@ -783,20 +791,33 @@ function SettingForm({ task, existing, onDone, onCancel }: {
             placeholder="optional guidance; does not pin an exact model"
           />
         </label>
-        <label className="block">
+        <div className="block">
           <span className="field-label mb-1 block">Training method</span>
           <ThemedSelect
             value={v.training_method}
             onChange={(value) => setV((x) => ({ ...x, training_method: value }))}
-            options={[
-              "lora_sft", "full_sft", "cpo", "dpo", "gkd", "grpo", "kto",
-              "online_dpo", "orpo", "rft", "rloo",
-            ].map((value) => ({ value, label: value }))}
+            options={TRAINING_METHOD_OPTIONS.map((value) => ({ value, label: value }))}
             placeholder="Optimization method used to train the model; blank lets Zevo choose"
             ariaLabel="Training method"
             buttonClassName={cls}
           />
-        </label>
+          {trainingMethodSupportsLora(v.training_method) && (
+            <label className="mt-3 block">
+              <span className="field-label mb-1 block">Use LoRA</span>
+              <ThemedSelect
+                value={v.use_peft || "false"}
+                onChange={put("use_peft")}
+                options={[
+                  { value: "false", label: "No · full parameters" },
+                  { value: "true", label: "Yes · LoRA adapter" },
+                ]}
+                placeholder="No · full parameters"
+                ariaLabel="Use LoRA"
+                buttonClassName={cls}
+              />
+            </label>
+          )}
+        </div>
         <label className="block">
           <span className="field-label mb-1 block">Method query</span>
           <input
@@ -816,24 +837,6 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           <label className="block lg:col-span-2">
             <span className="field-label mb-1 block">Reward model</span>
             <input className={cls} value={v.reward_model} onChange={set("reward_model")} placeholder="Online DPO reward model: Hugging Face owner/model id" />
-          </label>
-        )}
-        {[
-          "cpo", "dpo", "gkd", "grpo", "kto", "online_dpo", "orpo", "rft", "rloo",
-        ].includes(v.training_method) && (
-          <label className="block">
-            <span className="field-label mb-1 block">PEFT</span>
-            <ThemedSelect
-              value={v.use_peft}
-              onChange={put("use_peft")}
-              options={[
-                { value: "true", label: "Use PEFT" },
-                { value: "false", label: "Full parameters" },
-              ]}
-              placeholder="Train Skill default"
-              ariaLabel="PEFT"
-              buttonClassName={cls}
-            />
           </label>
         )}
         <label className="block">

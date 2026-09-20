@@ -9,41 +9,37 @@ from zevo.contracts.configuration import (
     recommended_training_starts,
     train_method_contracts,
 )
-from zevo.contracts.training_methods import METHOD_CONFIG_KEYS
+from zevo.contracts.training_methods import (
+    METHOD_CONFIG_KEYS,
+    SELECTABLE_TRAINING_METHODS,
+)
 
 
 def test_every_method_contract_exposes_recommended_training_starts() -> None:
     contracts = train_method_contracts()
-    assert set(contracts) == set(METHOD_CONFIG_KEYS)
+    assert set(contracts) == set(SELECTABLE_TRAINING_METHODS)
     for method, contract in contracts.items():
         starts = contract["recommended_training_starts"]
         assert starts["values"] == recommended_training_starts(method)
         assert isinstance(starts["guidance"], str) and starts["guidance"]
 
 
-def test_lora_sft_starts_encode_best_practice_adapter_and_rate() -> None:
-    starts = RECOMMENDED_TRAINING_STARTS["lora_sft"]
+def test_explicit_lora_start_encodes_best_practice_adapter() -> None:
+    starts = RECOMMENDED_LORA_ADAPTER_START
     assert starts["lora_r"] == 32
     assert starts["lora_alpha"] == 64
     assert starts["lora_alpha"] == 2 * starts["lora_r"]
     assert starts["lora_dropout"] == pytest.approx(0.05)
     assert starts["lora_target_modules"] == ["all-linear"]
-    assert starts["learning_rate"] == pytest.approx(2e-4)
-    assert starts["effective_batch_size"] >= 32
-    assert starts["packing"] is True
-    assert starts["warmup_ratio"] == pytest.approx(0.03)
-    assert starts["num_epochs"] in (2, 3)
 
 
-def test_full_sft_uses_lower_rate_and_no_adapter() -> None:
-    lora = RECOMMENDED_TRAINING_STARTS["lora_sft"]
-    full = RECOMMENDED_TRAINING_STARTS["full_sft"]
-    assert full["lora_r"] == 0
-    assert full["lora_target_modules"] == []
-    assert full["learning_rate"] == pytest.approx(1e-5)
-    # A LoRA learning rate is roughly an order of magnitude above the
-    # full-finetuning rate (report: LoRA ~2e-4, full-FT ~1e-5).
-    assert lora["learning_rate"] >= 10 * full["learning_rate"]
+def test_sft_defaults_to_full_parameters() -> None:
+    starts = RECOMMENDED_TRAINING_STARTS["sft"]
+    assert starts["lora_r"] == 0
+    assert starts["lora_alpha"] == 0
+    assert starts["lora_dropout"] == pytest.approx(0.0)
+    assert starts["lora_target_modules"] == []
+    assert starts["learning_rate"] == pytest.approx(1e-5)
 
 
 def test_grpo_start_uses_a_much_lower_rate_and_no_packing() -> None:
@@ -52,13 +48,33 @@ def test_grpo_start_uses_a_much_lower_rate_and_no_packing() -> None:
     assert grpo["packing"] is False
 
 
+def test_rft_defaults_to_full_parameter_start() -> None:
+    rft = RECOMMENDED_TRAINING_STARTS["rft"]
+    assert rft["learning_rate"] == pytest.approx(1e-5)
+    assert rft["lora_r"] == 0
+    assert rft["lora_alpha"] == 0
+    assert rft["lora_dropout"] == pytest.approx(0.0)
+    assert rft["lora_target_modules"] == []
+
+
+def test_peft_capable_methods_expose_full_parameter_default() -> None:
+    contracts = train_method_contracts()
+    for method in SELECTABLE_TRAINING_METHODS:
+        keys = METHOD_CONFIG_KEYS[method]
+        defaults = contracts[method]["method_config"]["default_values"]
+        if "use_peft" in keys:
+            assert defaults == {"use_peft": False}
+        else:
+            assert defaults == {}
+
+
 def test_lora_adapter_start_surfaces_only_for_peft_capable_methods() -> None:
     contracts = train_method_contracts()
     for method, contract in contracts.items():
         adapter = contract["recommended_training_starts"][
             "lora_adapter_start_when_peft_active"
         ]
-        peft_capable = method == "lora_sft" or "use_peft" in METHOD_CONFIG_KEYS[method]
+        peft_capable = "use_peft" in METHOD_CONFIG_KEYS[method]
         if peft_capable:
             assert adapter == RECOMMENDED_LORA_ADAPTER_START
         else:
@@ -66,10 +82,10 @@ def test_lora_adapter_start_surfaces_only_for_peft_capable_methods() -> None:
 
 
 def test_recommended_training_starts_returns_isolated_copies() -> None:
-    first = recommended_training_starts("lora_sft")
+    first = recommended_training_starts("sft")
     first["learning_rate"] = 999.0
-    assert RECOMMENDED_TRAINING_STARTS["lora_sft"]["learning_rate"] == pytest.approx(2e-4)
-    assert recommended_training_starts("LORA_SFT")["learning_rate"] == pytest.approx(2e-4)
+    assert RECOMMENDED_TRAINING_STARTS["sft"]["learning_rate"] == pytest.approx(1e-5)
+    assert recommended_training_starts("SFT")["learning_rate"] == pytest.approx(1e-5)
 
 
 @pytest.mark.parametrize("method", ["dpo", "kto", "orpo", "unknown_method", ""])
@@ -77,9 +93,9 @@ def test_methods_without_a_grounded_start_return_empty(method: str) -> None:
     assert recommended_training_starts(method) == {}
 
 
-def test_lora_sft_starts_realize_a_valid_training_config() -> None:
+def test_sft_starts_realize_a_valid_training_config() -> None:
     """Guidance must be structurally realizable, not just documentation."""
-    starts = RECOMMENDED_TRAINING_STARTS["lora_sft"]
+    starts = RECOMMENDED_TRAINING_STARTS["sft"]
     config = TrainingConfig.model_validate({
         "data_selection": {
             "mode": "all", "source_rows": 100,
@@ -118,8 +134,9 @@ def test_lora_sft_starts_realize_a_valid_training_config() -> None:
         "lora_target_modules": starts["lora_target_modules"],
         "implementation_config": {},
         "software_versions": {
-            "torch": "test", "transformers": "test", "trl": "test", "peft": "test",
+            "torch": "test", "transformers": "test", "trl": "test",
         },
     })
     assert config.effective_batch_size == 32
-    assert config.lora_alpha == 2 * config.lora_r
+    assert config.lora_r == 0
+    assert config.lora_target_modules == []

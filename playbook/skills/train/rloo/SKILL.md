@@ -45,10 +45,13 @@ trainer = RLOOTrainer(
 )
 ```
 
-Default to PEFT unless `method_config.use_peft=false`. Honor `generation_backend`
-exactly: HF generation when `hf`; supported vLLM integration when `vllm`.
-Colocate only after a memory check and never silently fall back to another
-backend.
+Default to full-parameter training with `method_config.use_peft=false`. Enable
+PEFT only when the Ticket or an explicit user instruction requires LoRA and the
+realized config records `method_config.use_peft=true`. Construct, validate,
+save, and reload that adapter exactly as required by the shared PEFT execution
+contract. Honor `generation_backend` exactly: HF generation when `hf`;
+supported vLLM integration when `vllm`. Colocate only after a memory check and
+never silently fall back to another backend.
 
 ## Implement and report the fixed objective
 
