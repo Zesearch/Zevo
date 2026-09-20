@@ -22,7 +22,10 @@
    enforces the explicit runtime constraint
    `training.implementation_config.dataloader_num_workers=0`; do not remove or
    bypass its `--cluster` argument.
-6. Generate `train.py` strictly from that YAML and the Skill.
+6. Generate `train.py` strictly from that YAML and the Skill. Import the
+   supplied `checkpoint_helper_path`; generated code does not implement its own
+   checkpoint transaction, DDP rank-zero save barrier, shard policy, atomic
+   rename, or commit marker.
 7. Run concrete dependency/data/model/GPU preflight. Determine whether the
    mandatory large-or-complex-training smoke test below applies, record its
    trigger and exact test plan in `training.implementation_config`, and fail if
@@ -142,6 +145,15 @@ continuation rule below applies. Scheduler-owned job state is read-only to the
 Agent; do not PATCH it. The allocation ends with the finite script and no
 release Ticket follows.
 
+When a terminal non-COMPLETED job failed because of generated implementation,
+command, or runtime setup and no required artifact committed, repair the
+generated files in place and return `deferred`. The Engine may authorize one
+bounded second external execution for the same Ticket. It verifies that the
+implementation changed, creates a distinct attempt/JOBID/log set, and submits it only
+after every deterministic check passes. Never call `sbatch` yourself. If the
+checkpoint helper's commit marker already exists and validates, report that
+artifact instead of repeating expensive training.
+
 If the finite job approaches site walltime before the unchanged training plan
 completes, a graceful pre-walltime hook must save a full resumable trainer state.
 After the backend reports `TIMEOUT`, verify that exact state. This same Train
@@ -186,6 +198,56 @@ Orchestrator guidance is high-level (`direction` and optionally
 PEFT, loss-objective, and rollout values remain Train-owned unless the user
 pinned or advised them through Customized Pipeline.
 
+Training is full-parameter by default. `sft` uses the same
+`method_config.use_peft` switch as every other PEFT-capable method. Realize
+`use_peft=false` unless the current Ticket binding or an explicit user
+instruction requires LoRA/PEFT; only then realize `use_peft=true`. Memory or GPU
+pressure is not permission to switch to an adapter. Select a fitting
+full-parameter distributed strategy, or fail with the resources the requested
+training requires.
+
+A resumed historical Ticket may still pin `full_sft` or `lora_sft`. Invoke the
+unified `sft` Skill, preserve the historical method id in that Ticket's YAML,
+and interpret it as `use_peft=false` or `use_peft=true` respectively. Never
+select either legacy id for new work.
+
+### Shared PEFT execution contract
+
+This contract applies to every method whose trainer accepts `peft_config`,
+including SFT, DPO, CPO, GKD, GRPO, KTO, Online DPO, ORPO, RFT, and RLOO. The
+method Skill defines the objective; it does not replace these adapter rules.
+
+When `method_config.use_peft=false`, pass `peft_config=None`, keep every LoRA
+field zero/empty, do not quantize or freeze trainable model weights, and verify
+that the intended full-model parameters are trainable.
+
+When `method_config.use_peft=true`, construct the config from the resolved YAML,
+never from PEFT library defaults or a placeholder:
+
+```python
+from peft import LoraConfig
+
+peft_config = LoraConfig(
+    r=training.lora_r,
+    lora_alpha=training.lora_alpha,
+    lora_dropout=training.lora_dropout,
+    bias="none",
+    task_type="CAUSAL_LM",
+    target_modules=training.lora_target_modules,
+)
+```
+
+Resolve target modules against the loaded architecture and prefer the supported
+`"all-linear"` selector when appropriate. Pass this exact object to the
+method's trainer. Before training, report PEFT/TRL versions and full versus
+trainable parameter counts; fail when no adapter parameters are trainable or
+unexpected base parameters remain trainable.
+
+Use the supplied checkpoint helper to atomically save only adapter config,
+adapter weights, tokenizer, and required metadata. Reload that artifact against
+the declared base model and run the checkpoint verification before reporting
+success. Do not merge the adapter or copy frozen base weights into its artifact.
+
 One iteration tests one direction. It may change several coupled fields—for
 example learning rate and effective batch size as one optimization-stability
 direction—but the YAML `direction` must make their shared hypothesis explicit.
@@ -203,8 +265,8 @@ The grounded defaults (see the SOTA finetuning report) are:
 
 - LoRA (any PEFT-active method): adapt `all-linear` target modules, `lora_r` 32,
   `lora_alpha` 64 (keep alpha ≈ 2·rank), `lora_dropout` 0.05. A LoRA learning
-  rate is ~10x a full-finetuning rate, so `lora_sft` starts near `2e-4` while
-  `full_sft` starts near `1e-5`. Zero/empty the LoRA fields for full-parameter
+  rate is ~10x a full-finetuning rate, so PEFT SFT starts near `2e-4` while
+  full-parameter SFT starts near `1e-5`. Zero/empty the LoRA fields for full-parameter
   training.
 - Effective batch size ≥ 32, reached through `gradient_accumulation_steps` ×
   `world_size` rather than a large per-device `batch_size`.
@@ -219,7 +281,7 @@ These starts are the same LoRA numbers whenever PEFT is active for any method;
 per method. Do not copy them blindly when data volume, sequence length, or the
 device envelope argues otherwise—record the deviation in the YAML `direction`.
 
-### Distributed strategy and launch (single-GPU default, FSDP, DeepSpeed, multi-node)
+### Distributed strategy and launch (single GPU, FSDP, DeepSpeed, multi-node)
 
 Most iterations run on ONE GPU and need nothing here: omit the optional
 `training.distributed` sub-config (leave it null) and keep
@@ -232,8 +294,8 @@ Reach for a typed `training.distributed` plan only when the model or data no
 longer fits or trains in reasonable time on one GPU. Grounded in the SOTA
 report Section 3, choose by model size vs. available VRAM:
 
-- Single-GPU LoRA SFT (default): 8B-class LoRA/QLoRA on one 24-48GB card. No
-  `distributed` block.
+- Single-GPU LoRA SFT (only when `sft` has explicit PEFT): 8B-class
+  LoRA/QLoRA on one 24-48GB card. No `distributed` block.
 - `backend=ddp` (single- or multi-node): the model replica fits on one GPU and
   you only need to process more data faster. Pure data parallel; no sharding.
 - `backend=fsdp` with `fsdp_sharding=full_shard` (ZeRO-3-equivalent): full-SFT
@@ -328,8 +390,8 @@ iteration; Method transitions do not apply.
 Otherwise, identify the data-signal family before the first choice or an
 Orchestrator-authorized exhausted-branch transition:
 
-- supervised language-model or prompt-completion rows: `lora_sft` or
-  `full_sft` (and GKD only with a valid teacher);
+- supervised language-model or prompt-completion rows: `sft` (and GKD only
+  with a valid teacher);
 - genuine prompt/chosen/rejected preference rows: `dpo`, `cpo`, or `orpo`;
 - prompt-only/reference rows with a trustworthy deterministic reward:
   `grpo`, `rloo`, or `rft`;
@@ -417,8 +479,9 @@ assistant messages, completion targets the completion span, and text targets
 all tokens. The selected Skill/TRL implementation must make that mask real;
 chat-template generation markers alone do not choose the loss.
 
-`full_sft` and `lora_sft` use empty `method_config`; `use_peft` is not a valid
-alias there. Other methods may use only their documented closed keys. Auxiliary
+`sft` and every other PEFT-capable method realize an explicit boolean
+`method_config.use_peft`; do not leave adapter/full behavior implicit. Methods
+may use only their documented closed keys. Auxiliary
 teacher/reward models currently support Hugging Face `owner/model` ids only.
 The selected `training_method_contracts` entry is authoritative for these
 nested key sets; the Skill explains how to realize them in the installed

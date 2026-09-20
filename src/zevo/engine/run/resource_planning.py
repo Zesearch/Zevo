@@ -101,13 +101,13 @@ def _inference_estimate(
 
 
 def _train_estimate(
-    *, base_model: str, training_method: str,
+    *, base_model: str, training_method: str, use_peft: bool,
     info: InfrastructureDeviceInfo, constraints: ClusterGpuConstraints,
 ) -> tuple[int, str]:
     """Estimate the Train stage without treating Infra's route plan as a floor."""
     parameters = model_parameter_billions(base_model)
     method = training_method.strip().lower().replace("-", "_")
-    if parameters is None or method not in {"full_sft", "lora_sft"}:
+    if parameters is None or method not in {"sft", "full_sft", "lora_sft"}:
         return int(info.resource_plan.num_gpus), (
             "model size or Train method has no supported memory estimate; "
             "retained Infrastructure's conservative fallback"
@@ -115,7 +115,7 @@ def _train_estimate(
 
     reported_vram = float(constraints.gpu_vram_gib or 0)
     usable_per_gpu = reported_vram * 0.80 if reported_vram > 0 else 64.0
-    if method == "lora_sft":
+    if method == "lora_sft" or (method == "sft" and use_peft):
         # Frozen BF16 base weights plus adapter/runtime room. Adapter optimizer
         # state is small relative to the frozen model.
         required_gib = parameters * 1_000_000_000 * 2 / (1024 ** 3) * 1.25 + 8.0
@@ -203,6 +203,7 @@ def plan_stage_resources(
     base_model: str,
     info: InfrastructureDeviceInfo,
     training_method: str = "",
+    train_use_peft: bool = False,
     live_capacity: SlurmCapacitySnapshot | None = None,
     capacity_error: str = "",
     maximum_gpus: int = 0,
@@ -245,6 +246,7 @@ def plan_stage_resources(
     if stage == "train":
         estimated, estimate_reason = _train_estimate(
             base_model=base_model, training_method=training_method,
+            use_peft=train_use_peft,
             info=info, constraints=constraints,
         )
     elif stage == "data":

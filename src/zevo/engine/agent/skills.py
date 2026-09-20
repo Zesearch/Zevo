@@ -152,11 +152,14 @@ def list_staged_skills(staged_dir: Path | None) -> list[dict[str, str]]:
 def load_staged_skill(staged_dir: Path | None, name: str) -> str:
     """Full instructions body of one staged skill, or '' if not found.
 
-    Accepts the skill name in either hyphen (`lora-sft`) or underscore
-    (`lora_sft`, the canonical method id) form."""
+    Accepts a skill name in hyphen or underscore form. Historical
+    `lora_sft`/`full_sft` requests resolve to the unified `sft` Skill."""
     if not staged_dir or not name:
         return ""
-    want = {name, name.replace("_", "-"), name.replace("-", "_")}
+    normalized = name.replace("-", "_")
+    if normalized in {"lora_sft", "full_sft"}:
+        normalized = "sft"
+    want = {normalized, normalized.replace("_", "-")}
     for d in Path(staged_dir).iterdir():
         if d.name in want and (d / "SKILL.md").is_file():
             _, _, body = _parse_skill(d / "SKILL.md")

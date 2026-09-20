@@ -24,7 +24,11 @@ from zevo.contracts.prompting import (
     validate_inference_config,
     validate_loss_objective_config,
 )
-from zevo.contracts.training_methods import METHOD_CONFIG_KEYS, method_config_errors
+from zevo.contracts.training_methods import (
+    METHOD_CONFIG_KEYS,
+    SELECTABLE_TRAINING_METHODS,
+    method_config_errors,
+)
 
 # auto = agent-derived scoring; the Data agent scopes the scoring contract first
 # and the engine settles it, then the run proceeds exactly like full_pipeline.
@@ -249,7 +253,7 @@ class PipelineDataRequestPayload(StoredPayload):
         if self.training_method not in METHOD_CONFIG_KEYS:
             raise ValueError(
                 f"unsupported training_method={self.training_method!r}; installed "
-                f"methods: {', '.join(sorted(METHOD_CONFIG_KEYS))}"
+                f"methods: {', '.join(sorted(SELECTABLE_TRAINING_METHODS))}"
             )
         unknown = sorted(set(self.configuration_suggestions) - _DATA_CONFIGURATION_KEYS)
         if unknown:
@@ -406,7 +410,7 @@ class DataPayload(StoredPayload):
             if method not in METHOD_CONFIG_KEYS:
                 raise ValueError(
                     f"unsupported training_method={method!r}; installed methods: "
-                    + ", ".join(sorted(METHOD_CONFIG_KEYS))
+                    + ", ".join(sorted(SELECTABLE_TRAINING_METHODS))
                 )
             expected_signature = data_intent_signature(self.model_dump())
             if self.data_intent_signature and self.data_intent_signature != expected_signature:
@@ -560,7 +564,7 @@ class TrainPayload(StoredPayload):
             if method not in METHOD_CONFIG_KEYS:
                 raise ValueError(
                     f"unsupported suggested training_method={method!r}; installed "
-                    f"methods: {', '.join(sorted(METHOD_CONFIG_KEYS))}"
+                    f"methods: {', '.join(sorted(SELECTABLE_TRAINING_METHODS))}"
                 )
             self.configuration_suggestions["training_method"] = method
         if (self.method_config_pins or self.loss_objective_pins) and not self.training_method_pin:
@@ -689,7 +693,7 @@ def specialist_request_payload_schemas() -> dict[str, Any]:
         for agent_id, model in PIPELINE_REQUEST_PAYLOAD_BY_AGENT.items()
     }
     data_properties = schemas["data"]["properties"]
-    data_properties["training_method"]["enum"] = sorted(METHOD_CONFIG_KEYS)
+    data_properties["training_method"]["enum"] = sorted(SELECTABLE_TRAINING_METHODS)
     data_properties["configuration_suggestions"] = {
         "type": "object",
         "additionalProperties": False,
@@ -712,7 +716,7 @@ def specialist_request_payload_schemas() -> dict[str, Any]:
             "direction": {"type": "string"},
             "training_method": {
                 "type": "string",
-                "enum": sorted(METHOD_CONFIG_KEYS),
+                "enum": sorted(SELECTABLE_TRAINING_METHODS),
             },
         },
         "description": (

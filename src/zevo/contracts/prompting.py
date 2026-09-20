@@ -110,6 +110,7 @@ def validate_decoding_config(value: dict[str, Any] | None) -> dict[str, Any]:
 
 
 LOSS_OBJECTIVE_CONFIG_KEYS: dict[str, frozenset[str]] = {
+    "sft": frozenset({"loss_type"}),
     "lora_sft": frozenset({"loss_type"}),
     "full_sft": frozenset({"loss_type"}),
     "dpo": frozenset({
@@ -155,6 +156,7 @@ LOSS_OBJECTIVE_CONFIG_KEYS: dict[str, frozenset[str]] = {
 # the mathematical objective or rollout/filtering distribution live here;
 # irrelevant optional controls remain absent.
 LOSS_OBJECTIVE_RECOMMENDED_STARTS: dict[str, dict[str, Any]] = {
+    "sft": {"loss_type": "nll"},
     "lora_sft": {"loss_type": "nll"},
     "full_sft": {"loss_type": "nll"},
     "dpo": {
@@ -300,7 +302,7 @@ def derive_loss_contract(training_method: object, prompt_framing: object) -> Los
     framing = normalize_prompt_framing(prompt_framing, allow_empty=not method)
     if not method:
         return LossContract(objective="not_applicable", target_scope="not_applicable")
-    if method in {"lora_sft", "full_sft"}:
+    if method in {"sft", "lora_sft", "full_sft"}:
         if is_chat_framing(framing):
             scope: LossTargetScope = "assistant_messages"
         elif framing == "completion":

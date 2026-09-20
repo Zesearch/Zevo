@@ -152,6 +152,7 @@ h1, h2, h3, .font-display {
   box-shadow: 0 0 10px -1px rgba(224, 141, 56, 0.85), 0 0 0 1px rgba(224, 141, 56, 0.25);
   animation: lamp-pulse 1.8s ease-in-out infinite;
 }
+.lamp-waiting { background: #5fb0dd; box-shadow: 0 0 10px -1px rgba(95, 176, 221, 0.8); }
 .lamp-coral { background: var(--coral); box-shadow: 0 0 10px -1px rgba(242, 111, 88, 0.8); }
 .lamp-idle  { background: #3b4c5b; }
 

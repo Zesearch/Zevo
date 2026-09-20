@@ -206,10 +206,11 @@ def test_cluster_site_skills_are_shared_with_gpu_stage_agents(
 def test_train_loads_its_pool():
     bp = load_agent("train")
     methods = {s.method for s in bp.skills}
-    # The SFT pair and the preference family are the pool's backbone; asserting
+    # Unified SFT and the preference family are the pool's backbone; asserting
     # the whole list would break every time a method is added, which is a thing
     # that is supposed to be easy.
-    assert {"lora_sft", "full_sft", "dpo", "grpo"} <= methods
+    assert {"sft", "dpo", "grpo"} <= methods
+    assert {"lora_sft", "full_sft"}.isdisjoint(methods)
     assert "# Skills" in bp.instructions
     assert bp.output_schema.__name__ == "TrainResult"
 
@@ -281,7 +282,7 @@ def test_specialists_own_skill_selection_not_orchestrator():
     assert "# Downstream Skill Catalog" not in orchestrator.instructions
     assert orchestrator.skills == []
     assert {skill.name for skill in load_agent("train").skills} >= {
-        "lora-sft", "dpo", "grpo",
+        "sft", "dpo", "grpo",
     }
     assert {skill.name for skill in load_agent("data").skills} >= {
         "reformat-csv", "reformat-jsonl",

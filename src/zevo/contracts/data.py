@@ -27,7 +27,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from zevo.contracts._base import AgentResult, AgentTaskInput
 from zevo.contracts.infrastructure import SlurmStageJobContract
-from zevo.contracts.training_methods import METHOD_CONFIG_KEYS
+from zevo.contracts.training_methods import (
+    METHOD_CONFIG_KEYS,
+    SELECTABLE_TRAINING_METHODS,
+)
 
 
 DATA_METHOD_IDS = frozenset({
@@ -669,7 +672,7 @@ class DataTaskInput(AgentTaskInput):
             if method not in METHOD_CONFIG_KEYS:
                 raise ValueError(
                     f"unsupported training_method={method!r}; installed methods: "
-                    + ", ".join(sorted(METHOD_CONFIG_KEYS))
+                    + ", ".join(sorted(SELECTABLE_TRAINING_METHODS))
                 )
             if not is_sha256(self.data_intent_signature):
                 raise ValueError(

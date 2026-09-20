@@ -253,6 +253,18 @@ class SlurmStageJobContract(BaseModel):
     stderr_path: str = ""
     lifecycle_prologue: str = ""
     runtime_prologue: str = ""
+    attempt: int = Field(
+        1,
+        ge=1,
+        le=2,
+        description=(
+            "Engine-owned external execution attempt. Attempt 1 is the first "
+            "submission; attempt 2 is the single bounded re-execution allowed "
+            "after a generated implementation failure."
+        ),
+    )
+    retry_of_bookkeeping_row_id: str = ""
+    retry_of_job_id: str = ""
     bookkeeping_row_id: str = ""
     job_id: str = ""
     scheduler_state: str = ""
@@ -348,6 +360,16 @@ class SlurmStageJobContract(BaseModel):
             self.scheduler_exit_code, self.scheduler_reason,
         )):
             raise ValueError("a new Slurm submission cannot carry prior job state")
+        if self.attempt == 1 and any((
+            self.retry_of_bookkeeping_row_id, self.retry_of_job_id,
+        )):
+            raise ValueError("the first Slurm attempt cannot supersede a prior job")
+        if self.attempt > 1 and not (
+            self.retry_of_bookkeeping_row_id and self.retry_of_job_id
+        ):
+            raise ValueError(
+                "a Slurm re-execution requires the exact superseded row and JOBID"
+            )
         if self.phase == "collect" and not (
             self.bookkeeping_row_id and self.job_id and self.scheduler_state
         ):

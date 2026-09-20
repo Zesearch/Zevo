@@ -403,7 +403,9 @@ def test_ticket_payloads_expose_only_execution_operations() -> None:
 def test_orchestrator_receives_closed_payload_and_binding_authorities() -> None:
     schemas = specialist_request_payload_schemas()
     methods = schemas["data"]["properties"]["training_method"]["enum"]
-    assert "full_sft" in methods
+    assert "sft" in methods
+    assert "full_sft" not in methods
+    assert "lora_sft" not in methods
     train_advice = schemas["train"]["properties"]["configuration_suggestions"]
     assert train_advice["additionalProperties"] is False
     assert set(train_advice["properties"]) == {"direction", "training_method"}
@@ -1181,10 +1183,10 @@ def test_train_yaml_copies_prompt_and_records_immediate_parent(tmp_path: Path) -
         ticket_id="train-r-002",
         run_id="r",
         iteration=2,
-            dataset_path="/tmp/data.jsonl",
-            dataset_rows=1,
-            validation_dataset_path="/tmp/validation.jsonl",
-            validation_answer_fields=["answer"],
+        dataset_path="/tmp/data.jsonl",
+        dataset_rows=1,
+        validation_dataset_path="/tmp/validation.jsonl",
+        validation_answer_fields=["answer"],
         data_signature="d" * 64,
         inference_config_path=str(inference_path),
         expected_inference_config_sha256=file_sha256(inference_path),
@@ -1195,6 +1197,7 @@ def test_train_yaml_copies_prompt_and_records_immediate_parent(tmp_path: Path) -
             "<absolute-yaml-path>"
         ),
         telemetry_helper_path=str(tmp_path / "zevo_train_telemetry.py"),
+        checkpoint_helper_path=str(tmp_path / "zevo_train_checkpoint.py"),
         execution_contract=TrainExecutionContract(
             required_environment={"RUN_ID": "r", "TICKET_ID": "train-r-002"},
             slurm_step_name="zevo-train-r-002",
@@ -1269,8 +1272,8 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
         "data_signature": "d" * 64,
     }, tmp_path / "train2")
     second_config = load_train_config(second.train_config_path)
-    assert first_config.training_method == "lora_sft"
-    assert second_config.training_method == "lora_sft"
+    assert first_config.training_method == "sft"
+    assert second_config.training_method == "sft"
     assert second_config.method_diversity_status == "retained_in_branch"
 
     third = _stub_train({
@@ -1285,19 +1288,52 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
         "inference_config_path": str(inference_path),
         "training_method_pin": "",
         "configuration_pins": {},
-        "configuration_suggestions": {"training_method": "full_sft"},
+        "configuration_suggestions": {"training_method": "dpo"},
         "branch_transition": {
             "level": "method",
-            "exhausted_branch": "lora_sft with supervised data branch A",
+            "exhausted_branch": "sft with supervised data branch A",
             "validation_evidence": "Validation plateaued across two inner directions.",
-            "next_branch": "full_sft with compatible supervised data",
+            "next_branch": "dpo with compatible preference data",
         },
         "data_signature": "d" * 64,
     }, tmp_path / "train3")
     third_config = load_train_config(third.train_config_path)
-    assert third_config.training_method == "full_sft"
+    assert third_config.training_method == "dpo"
     assert third_config.method_diversity_status == "varied"
     assert "exhausted" in third_config.method_selection_rationale.lower()
+
+
+def test_peft_capable_stub_method_requires_explicit_opt_in(tmp_path: Path) -> None:
+    inference_path = _write_inference_config(tmp_path)
+    common = {
+        "operation": "train",
+        "iteration": 1,
+        "base_model": "Qwen/Qwen3-0.6B-Base",
+        "model_source": "base_model",
+        "parent_selection_rationale": "Initial adaptation starts from Baseline.",
+        "inference_config_path": str(inference_path),
+        "training_method_pin": "grpo",
+        "data_signature": "d" * 64,
+    }
+    default_result = _stub_train(
+        {**common, "ticket_id": "train-full-default"},
+        tmp_path / "grpo-full",
+    )
+    explicit_lora_result = _stub_train(
+        {
+            **common,
+            "ticket_id": "train-explicit-lora",
+            "method_config_pins": {"use_peft": True},
+        },
+        tmp_path / "grpo-lora",
+    )
+
+    assert load_train_config(default_result.train_config_path).method_config == {
+        "use_peft": False,
+    }
+    assert load_train_config(explicit_lora_result.train_config_path).method_config == {
+        "use_peft": True,
+    }
 
 
 def test_train_input_rejects_broken_iteration_chain(tmp_path: Path) -> None:
@@ -1319,6 +1355,7 @@ def test_train_input_rejects_broken_iteration_chain(tmp_path: Path) -> None:
             "<absolute-yaml-path>"
         ),
         telemetry_helper_path=str(tmp_path / "zevo_train_telemetry.py"),
+        checkpoint_helper_path=str(tmp_path / "zevo_train_checkpoint.py"),
         execution_contract=TrainExecutionContract(
             required_environment={"RUN_ID": "r", "TICKET_ID": "train-r-002"},
             slurm_step_name="zevo-train-r-002",
@@ -1363,9 +1400,15 @@ def test_evaluation_remains_a_typed_system_stage() -> None:
 
 def test_nested_configuration_key_contracts_are_explicit() -> None:
     methods = train_method_contracts()
-    assert methods["full_sft"]["method_config"]["allowed_keys"] == []
+    assert methods["sft"]["method_config"]["allowed_keys"] == ["use_peft"]
+    assert methods["sft"]["method_config"]["default_values"] == {
+        "use_peft": False,
+    }
     assert methods["dpo"]["method_config"]["required_keys"] == ["use_peft"]
-    assert "loss_type" in methods["full_sft"]["loss_objective_config"][
+    assert methods["dpo"]["method_config"]["default_values"] == {
+        "use_peft": False,
+    }
+    assert "loss_type" in methods["sft"]["loss_objective_config"][
         "required_realized_keys"
     ]
     mapping = inference_mapping_contract()

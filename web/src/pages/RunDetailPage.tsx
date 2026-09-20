@@ -42,6 +42,28 @@ function isTerminalResourceRequest(instance: InfraInstanceDTO): boolean {
       && TERMINAL_SLURM_STATES.has(slurmState(instance)));
 }
 
+type StationTicket = Pick<RunDetail["tickets"][number], "status" | "created_at" | "updated_at">;
+
+/** Summarize a stage by its current work, otherwise by its latest attempt.
+ * Historical failures must not keep a stage red after a newer retry succeeds. */
+function stationStateFromTickets(tickets: StationTicket[]): StationState {
+  if (!tickets.length) return "idle";
+  if (tickets.some((ticket) => ticket.status === "running" || ticket.status === "repairing")) {
+    return "active";
+  }
+
+  const latest = [...tickets].sort((a, b) =>
+    a.created_at.localeCompare(b.created_at) || a.updated_at.localeCompare(b.updated_at),
+  ).at(-1)!;
+
+  if (["queued", "awaiting_input", "waiting_external"].includes(latest.status)) return "waiting";
+  if (["succeeded", "skipped"].includes(latest.status)) return "done";
+  if (latest.status === "degraded") return "degraded";
+  if (latest.status === "failed") return "failed";
+  if (latest.status === "cancelled") return "cancelled";
+  return "idle";
+}
+
 // Aggregate a run's tickets into the six loop stations by Ticket.agent_id.
 function stationsFrom(
   detail: RunDetail | undefined,
@@ -49,15 +71,7 @@ function stationsFrom(
 ): Station[] {
   return LOOP_STATIONS.map((st) => {
     const t = (detail?.tickets ?? []).filter((x) => ticketAtStation(x, st));
-    let state: StationState = "idle";
-    if (t.length) {
-      if (t.some((x) => x.status === "running" || x.status === "repairing")) state = "active";
-      else if (t.some((x) => x.status === "failed")) state = "failed";
-      else if (t.some((x) => x.status === "degraded")) state = "degraded";
-      else if (t.every((x) => ["succeeded", "skipped"].includes(x.status))) state = "done";
-      else if (t.every((x) => ["succeeded", "skipped", "cancelled"].includes(x.status))) state = "cancelled";
-      else state = "idle";
-    }
+    const state = stationStateFromTickets(t);
     // WAKES, not tickets. The caption always said "how many times this stage's
     // agent has been called", and the number underneath was how many tickets it
     // owned — the same thing only while every ticket runs exactly once. A stage
@@ -1370,13 +1384,7 @@ export function RunDetailPage() {
   // an agent and can be running, done or failed like any other.
   const supervisorState: StationState = useMemo(() => {
     const ts = (run?.tickets ?? []).filter((x) => agentIdOf(x) === "orchestrator");
-    if (!ts.length) return "idle";
-    if (ts.some((x) => x.status === "running" || x.status === "repairing")) return "active";
-    if (ts.some((x) => x.status === "failed")) return "failed";
-    if (ts.some((x) => x.status === "degraded")) return "degraded";
-    if (ts.every((x) => ["succeeded", "skipped"].includes(x.status))) return "done";
-    if (ts.every((x) => ["succeeded", "skipped", "cancelled"].includes(x.status))) return "cancelled";
-    return "idle";
+    return stationStateFromTickets(ts);
   }, [run?.tickets]);
   const ws = useRunWebsocket(runId);
   // Keep the active tab in the URL (?tab=...) so navigating into a ticket and
@@ -1607,6 +1615,7 @@ export function RunDetailPage() {
               legend only has to explain the lamp colours. */}
           <div className="mt-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm text-slate-400">
             <span className="flex items-center gap-1.5"><span className="lamp lamp-running" /> running</span>
+            <span className="flex items-center gap-1.5"><span className="lamp lamp-waiting" /> waiting</span>
             <span className="flex items-center gap-1.5"><span className="lamp lamp-idle" /> idle</span>
             <span className="flex items-center gap-1.5"><span className="lamp lamp-live" /> done</span>
             <span className="flex items-center gap-1.5"><span className="lamp lamp-coral" /> failed</span>

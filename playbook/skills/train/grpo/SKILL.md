@@ -48,11 +48,14 @@ trainer = GRPOTrainer(
 )
 ```
 
-Default to PEFT unless `method_config.use_peft=false`. Respect `generation_backend`:
-`hf` sets `use_vllm=False`; `vllm` sets it true with a supported mode. On the
-shared single-node allocation, colocate is appropriate only when policy,
-training state, KV cache, and rollout batch fit together. Fail rather than
-silently changing a requested backend.
+Default to full-parameter training with `method_config.use_peft=false`. Enable
+PEFT only when the Ticket or an explicit user instruction requires LoRA and the
+realized config records `method_config.use_peft=true`. Construct, validate,
+save, and reload that adapter exactly as required by the shared PEFT execution
+contract. Respect `generation_backend`: `hf` sets `use_vllm=False`; `vllm` sets
+it true with a supported mode. On the shared single-node allocation, colocate is
+appropriate only when policy, training state, KV cache, and rollout batch fit
+together. Fail rather than silently changing a requested backend.
 
 ## Implement and report the fixed objective
 

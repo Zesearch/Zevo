@@ -19,14 +19,14 @@ from zevo.contracts.training_methods import (
 
 
 def _train_payload(**updates):
-    method = str(updates.pop("training_method", "lora_sft"))
+    method = str(updates.pop("training_method", "sft"))
     loss = updates.pop("loss_contract", derive_loss_contract(method, "chat"))
     if hasattr(loss, "objective_config"):
         loss.objective_config = recommended_loss_objective_config(
             method, loss.objective_config,
         )
     method_config = updates.pop("method_config", {})
-    if method in {"dpo", "cpo", "gkd", "grpo", "kto", "online_dpo", "orpo", "rft", "rloo"}:
+    if method in {"sft", "dpo", "cpo", "gkd", "grpo", "kto", "online_dpo", "orpo", "rft", "rloo"}:
         method_config = {"use_peft": True, **method_config}
     loss_body = loss.model_dump() if hasattr(loss, "model_dump") else dict(loss)
     objective = str(loss_body.get("objective") or "unknown")
@@ -371,6 +371,20 @@ def test_executed_train_yaml_requires_explicit_peft_choice() -> None:
         TrainRunConfig.model_validate(payload)
 
 
+def test_sft_full_parameter_mode_uses_the_same_method() -> None:
+    payload = _train_payload(method_config={"use_peft": False})
+    payload["training"].update({
+        "lora_r": 0,
+        "lora_alpha": 0,
+        "lora_dropout": 0.0,
+        "lora_target_modules": [],
+    })
+    payload["training"]["software_versions"].pop("peft")
+    parsed = TrainRunConfig.model_validate(payload)
+    assert parsed.training_method == "sft"
+    assert parsed.method_config == {"use_peft": False}
+
+
 def test_executed_train_yaml_rejects_missing_common_runtime_value() -> None:
     payload = _train_payload()
     payload["training"].pop("optimizer")
@@ -407,6 +421,19 @@ def test_method_config_is_part_of_exact_setting_identity() -> None:
     other = {"training_method": "gkd", "method_config": {"teacher_model": "Qwen/Qwen3-14B"}}
     assert setting_identity(base) == setting_identity(same_from_query)
     assert setting_identity(base) != setting_identity(other)
+
+
+def test_legacy_sft_setting_ids_map_to_unified_sft_modes() -> None:
+    assert setting_identity({
+        "training_method": "full_sft", "method_config": {},
+    }) == setting_identity({
+        "training_method": "sft", "method_config": {"use_peft": False},
+    })
+    assert setting_identity({
+        "training_method": "lora_sft", "method_config": {},
+    }) == setting_identity({
+        "training_method": "sft", "method_config": {"use_peft": True},
+    })
 
 
 def test_experiment_preferences_are_run_only_not_setting_identity() -> None:

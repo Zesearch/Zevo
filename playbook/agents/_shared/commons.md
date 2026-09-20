@@ -13,7 +13,7 @@ One heartbeat handles one activation of a Ticket:
 5. POST a `Done:` message.
 6. Emit one final JSON object and exit.
 
-Finite cluster Train and Inference jobs are the exception to step 5. Their
+Finite cluster Data, Train, and Inference jobs are the exception to step 5. Their
 submission activation POSTs `Waiting:` after the JOBID is registered and
 returns `deferred`; it must never say `Done:`. The backend Scheduler publishes
 `Running:` when Slurm starts the job. On the collect activation, the Agent
@@ -21,6 +21,15 @@ validates and reports the artifacts without posting `Done:` itself; the runner
 publishes `Done:` only after the typed Result and every required artifact have
 passed engine validation. Thus `Done:` always means the stage is genuinely
 complete, never merely submitted or deferred.
+
+When a generated implementation fails in a terminal Slurm job, a repair
+activation may receive `phase="submit"`, `attempt=2`, and the exact superseded
+bookkeeping row and JOBID. Reuse verified work, change the generated implementation,
+upload it to the assigned path, and return `deferred`; the engine verifies that
+the implementation changed and submits one distinct replacement job. It never reuses
+the failed JOBID and permits no third external execution for the same Ticket.
+If a valid committed artifact already exists, report that artifact instead of
+submitting replacement compute.
 
 Every workflow Ticket is one complete execution activation. Inference selects
 its baseline configuration and generates predictions in one heartbeat; Train

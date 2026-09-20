@@ -33,6 +33,7 @@ from zevo.contracts.orchestrator import (
     validate_validation_suite,
 )
 from zevo.contracts.training_methods import (
+    canonical_method_selection,
     method_config_errors,
     normalize_method_config,
 )
@@ -679,6 +680,9 @@ class SettingMatchDTO(BaseModel):
 
 def _setting_dto(s: TaskSetting, *, run_count: int = 0, best_test_score: float | None = None,
                  last_run_at: str = "", last_run_id: str = "", last_run_name: str = "") -> dict:
+    training_method, method_config = canonical_method_selection(
+        s.training_method, s.method_config,
+    )
     return {
         "id": s.id,
         "name": s.name or "",
@@ -705,8 +709,8 @@ def _setting_dto(s: TaskSetting, *, run_count: int = 0, best_test_score: float |
         "validation_evaluation_script": s.validation_evaluation_script or "",
         "validation_evaluator_sha256": s.validation_evaluator_sha256 or "",
         "base_model": s.base_model or "",
-        "training_method": s.training_method or "",
-        "method_config": dict(s.method_config or {}),
+        "training_method": training_method,
+        "method_config": method_config,
         "data_query": s.data_query or "",
         "model_query": s.model_query or "",
         "method_query": s.method_query or "",
@@ -904,6 +908,15 @@ def setting_identity(src) -> tuple:
         _has_validation_suite(raw_validation_suite)
         or str(get("validation_set") or "").strip()
     )
+    raw_method_config = get("method_config") or {}
+    if isinstance(raw_method_config, str):
+        try:
+            raw_method_config = json.loads(raw_method_config) if raw_method_config.strip() else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_method_config = {}
+    training_method, method_config = canonical_method_selection(
+        str(get("training_method") or ""), raw_method_config,
+    )
     # These scalar fields are only a compatibility projection of a Validation
     # suite.  Canonicalize them from the suite itself so an un-frozen browser
     # request (which may still carry the first member's metric) and the stored
@@ -934,7 +947,11 @@ def setting_identity(src) -> tuple:
         _norm_setting_value(
             field,
             "" if derived_validation and field in _DERIVED_VALIDATION_IDENTITY_FIELDS
-            else suite_projection.get(field, get(field)),
+            else (
+                training_method if field == "training_method"
+                else method_config if field == "method_config"
+                else suite_projection.get(field, get(field))
+            ),
         )
         for field in _SETTING_IDENTITY_FIELDS
     )
@@ -1137,6 +1154,16 @@ def _validate_method_config(body: SettingBody) -> None:
         raise HTTPException(400, "; ".join(errors))
 
 
+def _canonicalize_setting_method(body: SettingBody) -> SettingBody:
+    method, config = canonical_method_selection(
+        body.training_method, body.method_config,
+    )
+    return body.model_copy(update={
+        "training_method": method,
+        "method_config": config,
+    })
+
+
 @router.post("/tasks/{name}/settings", status_code=201, response_model=SettingDTO)
 async def create_task_setting(
     name: str, body: SettingBody, db: AsyncSession = Depends(get_db),
@@ -1153,6 +1180,7 @@ async def create_task_setting(
     body, validation_evaluator_sha256 = await _resolve_setting_validation_contract(
         body, task,
     )
+    body = _canonicalize_setting_method(body)
     _validate_method_config(body)
     key = setting_identity(body.model_dump())
     existing = (await db.execute(
@@ -1222,6 +1250,7 @@ async def update_task_setting(
     body, validation_evaluator_sha256 = await _resolve_setting_validation_contract(
         body, task,
     )
+    body = _canonicalize_setting_method(body)
     _validate_method_config(body)
     row = await db.get(TaskSetting, setting_id)
     if row is None or row.task_name != name:

@@ -33,6 +33,7 @@ from zevo.contracts.prompting import (
 from zevo.contracts.training_methods import (
     AUXILIARY_MODEL_FIELD_BY_METHOD,
     METHOD_CONFIG_KEYS,
+    SELECTABLE_TRAINING_METHODS,
     method_config_errors,
     normalize_method_config,
 )
@@ -82,9 +83,23 @@ RECOMMENDED_LORA_ADAPTER_START: dict[str, Any] = {
 # different values with a recorded rationale, and TrainingConfig performs no
 # validation against this table. Only method-appropriate knobs the research
 # report grounds are listed; a method absent here has no specific start beyond
-# the generic YAML defaults. LoRA fields appear only where PEFT is the
-# recommended default; when a method is run full-parameter, zero/empty them.
+# the generic YAML defaults. Canonical PEFT-capable methods start in
+# full-parameter mode with zero/empty LoRA fields; the old split SFT entries
+# remain only so historical train_config.yaml files retain their guidance.
 RECOMMENDED_TRAINING_STARTS: dict[str, dict[str, Any]] = {
+    "sft": {
+        "num_epochs": 3,
+        "learning_rate": 1e-5,
+        "lr_scheduler_type": "cosine",
+        "warmup_ratio": 0.03,
+        "effective_batch_size": 32,
+        "packing": True,
+        "lora_r": 0,
+        "lora_alpha": 0,
+        "lora_dropout": 0.0,
+        "lora_target_modules": [],
+    },
+    # Compatibility starts for historical train_config.yaml files.
     "lora_sft": {
         "num_epochs": 3,
         "learning_rate": 2e-4,
@@ -108,12 +123,15 @@ RECOMMENDED_TRAINING_STARTS: dict[str, dict[str, Any]] = {
     },
     "rft": {
         "num_epochs": 2,
-        "learning_rate": 2e-4,
+        "learning_rate": 1e-5,
         "lr_scheduler_type": "cosine",
         "warmup_ratio": 0.03,
         "effective_batch_size": 32,
         "packing": True,
-        **RECOMMENDED_LORA_ADAPTER_START,
+        "lora_r": 0,
+        "lora_alpha": 0,
+        "lora_dropout": 0.0,
+        "lora_target_modules": [],
     },
     "grpo": {
         "num_epochs": 1,
@@ -142,7 +160,7 @@ def recommended_training_starts(training_method: object) -> dict[str, Any]:
 def train_method_contracts() -> dict[str, Any]:
     """Exact method/loss key sets supplementing the generic YAML mappings."""
     contracts: dict[str, Any] = {}
-    for method in sorted(METHOD_CONFIG_KEYS):
+    for method in sorted(SELECTABLE_TRAINING_METHODS):
         method_keys = sorted(METHOD_CONFIG_KEYS[method])
         dependency = AUXILIARY_MODEL_FIELD_BY_METHOD.get(method)
         method_required = [
@@ -152,6 +170,9 @@ def train_method_contracts() -> dict[str, Any]:
             "method_config": {
                 "allowed_keys": method_keys,
                 "required_keys": method_required,
+                "default_values": (
+                    {"use_peft": False} if "use_peft" in method_keys else {}
+                ),
                 "value_contracts": {
                     key: (
                         "boolean" if key == "use_peft"
@@ -183,7 +204,7 @@ def train_method_contracts() -> dict[str, Any]:
                 "values": recommended_training_starts(method),
                 "lora_adapter_start_when_peft_active": (
                     dict(RECOMMENDED_LORA_ADAPTER_START)
-                    if (method == "lora_sft" or "use_peft" in method_keys)
+                    if "use_peft" in method_keys
                     else None
                 ),
             },
@@ -203,12 +224,8 @@ def train_method_contracts() -> dict[str, Any]:
             "runtime_contract": {
                 "required_software_versions": ["torch", "transformers", "trl"],
                 "peft_activation": (
-                    "always"
-                    if method == "lora_sft"
-                    else (
-                        "when method_config.use_peft is true"
-                        if "use_peft" in method_keys else "never"
-                    )
+                    "when method_config.use_peft is true"
+                    if "use_peft" in method_keys else "never"
                 ),
                 "additional_software_version_when_peft_active": "peft",
                 "lora_fields_when_peft_inactive": {

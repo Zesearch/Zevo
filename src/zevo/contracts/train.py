@@ -148,6 +148,15 @@ class TrainTaskInput(AgentTaskInput):
             "replace it with a loss-only callback."
         ),
     )
+    checkpoint_helper_path: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "System-owned checkpoint transaction helper copied beside train.py. "
+            "Use it for bounded sharding, rank-zero DDP save, structural "
+            "validation, atomic publication, and the commit marker."
+        ),
+    )
     telemetry_interval_steps: Literal[20] = Field(
         20,
         description="Fixed training-log cadence in optimizer steps.",

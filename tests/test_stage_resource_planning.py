@@ -119,7 +119,7 @@ def test_train_estimates_its_own_gpu_count_and_data_starts_small() -> None:
         plan_gpus=8, plan_nodes=2, constraints=_beta_constraints(),
     )
     train = plan_stage_resources(
-        stage="train", base_model="org/32B", training_method="full_sft",
+        stage="train", base_model="org/32B", training_method="sft",
         info=info, maximum_gpus=8,
     )
     data = plan_stage_resources(
@@ -180,20 +180,20 @@ def _partial_node_constraints() -> dict:
 def test_train_uses_smallest_safe_tier_even_when_more_gpus_are_idle() -> None:
     info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
     full = plan_stage_resources(
-        stage="train", base_model="org/32B", training_method="full_sft",
+        stage="train", base_model="org/32B", training_method="sft",
         info=info, live_capacity=SlurmCapacitySnapshot((4, 4), 8),
     )
     assert (full.num_gpus, full.nodes, full.gpus_per_node) == (4, 1, 4)
     assert full.source == "live Slurm capacity"
 
     reduced = plan_stage_resources(
-        stage="train", base_model="org/32B", training_method="full_sft",
+        stage="train", base_model="org/32B", training_method="sft",
         info=info, live_capacity=SlurmCapacitySnapshot((4, 4), 6),
     )
     assert (reduced.num_gpus, reduced.nodes, reduced.gpus_per_node) == (4, 1, 4)
 
     queued = plan_stage_resources(
-        stage="train", base_model="org/32B", training_method="full_sft",
+        stage="train", base_model="org/32B", training_method="sft",
         info=info, live_capacity=SlurmCapacitySnapshot((2, 2), 2),
     )
     assert queued.num_gpus == 4
@@ -204,13 +204,13 @@ def test_full_train_needs_more_gpus_when_each_gpu_has_less_vram() -> None:
     constraints = {**_partial_node_constraints(), "gpu_vram_gib": 80}
     info = _cluster_info(plan_gpus=4, constraints=constraints)
     selected = plan_stage_resources(
-        stage="train", base_model="org/32B", training_method="full_sft",
+        stage="train", base_model="org/32B", training_method="sft",
         info=info,
     )
     assert (selected.estimated_gpus, selected.num_gpus) == (8, 8)
     with pytest.raises(ValueError, match="no valid train GPU tier"):
         plan_stage_resources(
-            stage="train", base_model="org/32B", training_method="full_sft",
+            stage="train", base_model="org/32B", training_method="sft",
             info=info, maximum_gpus=4,
         )
 
@@ -219,8 +219,8 @@ def test_lora_and_inference_do_not_take_extra_gpus_merely_because_they_are_free(
     info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
     capacity = SlurmCapacitySnapshot((8, 8), 16)
     lora = plan_stage_resources(
-        stage="train", base_model="org/32B", training_method="lora_sft",
-        info=info, live_capacity=capacity,
+        stage="train", base_model="org/32B", training_method="sft",
+        train_use_peft=True, info=info, live_capacity=capacity,
     )
     inference = plan_stage_resources(
         stage="inference", base_model="org/32B",
@@ -274,7 +274,7 @@ def test_small_inference_uses_one_model_group_even_with_idle_gpus() -> None:
 def test_probe_failure_keeps_minimum_safe_shape() -> None:
     info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
     selected = plan_stage_resources(
-        stage="train", base_model="org/32B", training_method="full_sft",
+        stage="train", base_model="org/32B", training_method="sft",
         info=info, capacity_error="Slurm capacity probe timed out",
     )
     assert selected.num_gpus == 4
@@ -285,7 +285,7 @@ def test_train_uses_infra_fallback_when_model_size_is_unknown() -> None:
     info = _cluster_info(plan_gpus=8, constraints=_partial_node_constraints())
     selected = plan_stage_resources(
         stage="train", base_model="org/model-without-size",
-        training_method="full_sft", info=info,
+        training_method="sft", info=info,
     )
     assert selected.num_gpus == 8
     assert "conservative fallback" in selected.rationale
@@ -303,14 +303,14 @@ def test_train_uses_infra_fallback_when_method_is_not_selected() -> None:
 def test_pinned_train_world_size_is_exact_and_must_fit() -> None:
     info = _cluster_info(plan_gpus=8, constraints=_partial_node_constraints())
     selected = plan_stage_resources(
-        stage="train", base_model="org/32B", training_method="full_sft",
+        stage="train", base_model="org/32B", training_method="sft",
         info=info, train_world_size_pin=6, maximum_gpus=8,
     )
     assert (selected.estimated_gpus, selected.num_gpus, selected.nodes) == (4, 6, 1)
     assert selected.source == "pinned Train world_size"
     with pytest.raises(ValueError, match="below estimated GPU requirement"):
         plan_stage_resources(
-            stage="train", base_model="org/32B", training_method="full_sft",
+            stage="train", base_model="org/32B", training_method="sft",
             info=info, train_world_size_pin=2,
         )
 
@@ -346,7 +346,8 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     run = SimpleNamespace(gpu_provider="cluster", num_gpus=8, max_queue_wait_hours=24)
     ticket = SimpleNamespace(
         id="train-run-001", run_id="run-1",
-        payload={"base_model": "org/32B", "training_method_pin": "full_sft"},
+        status="queued",
+        payload={"base_model": "org/32B", "training_method_pin": "sft"},
     )
     observed = []
     job_row = None
@@ -371,7 +372,6 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert submit.phase == "submit"
     assert (submit.num_gpus, submit.nodes) == (4, 1)
     assert observed == ["probe"]
-
     script = tmp_path / "train.sbatch"
     script.write_text("\n".join((
         "#!/bin/bash",
@@ -383,6 +383,12 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
         submit.lifecycle_prologue,
         "python train.py",
     )), encoding="utf-8")
+    (tmp_path / "train.py").write_text(
+        "from zevo_train_checkpoint import commit_checkpoint_directory\n"
+        "if False:\n"
+        "    commit_checkpoint_directory('/tmp/staging', '/tmp/final')\n",
+        encoding="utf-8",
+    )
     config_path = tmp_path / "train_config.yaml"
     config_path.write_text("test stub", encoding="utf-8")
     training = SimpleNamespace(
@@ -412,6 +418,55 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert collect.phase == "collect"
     assert (collect.num_gpus, collect.nodes) == (6, 2)
     assert observed == ["probe"]
+
+    ticket.status = "repairing"
+    job_row.status = "released"
+    job_row.meta = {
+        "nodes": 2,
+        "gpus_per_node": 3,
+        "scheduler_state": "FAILED",
+        "execution_attempt": 1,
+    }
+    retry = asyncio.run(contract())
+    assert retry.phase == "submit"
+    assert retry.attempt == 2
+    assert retry.retry_of_bookkeeping_row_id == "request-1"
+    assert retry.retry_of_job_id == "12345"
+    assert retry.bookkeeping_row_id == ""
+    assert retry.job_id == ""
+    assert observed == ["probe"]
+
+    job_row.meta.update({
+        "execution_attempt": 2,
+        "retry_of_bookkeeping_row_id": "request-1",
+        "retry_of_job_id": "12345",
+    })
+    exhausted = asyncio.run(contract())
+    assert exhausted.phase == "collect"
+    assert exhausted.attempt == 2
+
+
+def test_generated_python_static_gate_catches_undefined_names(tmp_path) -> None:
+    script = tmp_path / "train.py"
+    script.write_text(
+        "def main():\n"
+        "    return retention['strategy']\n",
+        encoding="utf-8",
+    )
+    assert runner._python_undefined_name_problem(str(script)) == (
+        "generated Python references undefined names: retention"
+    )
+
+
+def test_generated_python_static_gate_accepts_imports_and_builtins(tmp_path) -> None:
+    script = tmp_path / "predict.py"
+    script.write_text(
+        "import json\n"
+        "def main(value):\n"
+        "    return len(json.dumps(value))\n",
+        encoding="utf-8",
+    )
+    assert runner._python_undefined_name_problem(str(script)) == ""
 
 
 def test_inference_stage_contract_uses_prepared_suite_size(tmp_path, monkeypatch) -> None:

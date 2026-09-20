@@ -18,6 +18,8 @@ import {
   TrainingSetupFields,
   EMPTY_RUN_INPUTS,
   methodConfigFromInputs,
+  trainingMethodSupportsLora,
+  useLoraLabel,
   normalizeScoringSuite,
   scoringSuiteMissing,
   computeTargetValue,
@@ -428,6 +430,9 @@ export function NewRunModal({
     { name: "Base model", value: inputs.baseModel.trim() || "Selected by Zevo", overridden: !!inputs.baseModel.trim() },
     { name: "Model query", value: inputs.modelQuery.trim() || "not set", overridden: !!inputs.modelQuery.trim() },
     { name: "Training method", value: inputs.trainingMethod.trim() || "Decided by Zevo", overridden: !!inputs.trainingMethod.trim() },
+    ...(trainingMethodSupportsLora(inputs.trainingMethod)
+      ? [{ name: "Use LoRA", value: useLoraLabel(inputs.usePeft), overridden: Boolean(inputs.usePeft) }]
+      : []),
     { name: "Method query", value: inputs.methodQuery.trim() || "not set", overridden: !!inputs.methodQuery.trim() },
     { name: "Maximum GPUs", value: inputs.numGpus.trim() || "unlimited", overridden: !!inputs.numGpus.trim() },
     { name: "Generation backend", value: (inputs.generation_backend || "vllm").toUpperCase(), overridden: !!inputs.generation_backend },

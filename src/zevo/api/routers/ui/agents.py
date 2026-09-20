@@ -54,7 +54,7 @@ class AgentDTO(BaseModel):
     output_schema: str
     skills: list[str] = Field(default_factory=list)  # playbook skill names
     # The same pool with each card's own description, so the console can say
-    # what a skill IS. A bare list of slugs told you `lora-sft` exists and
+    # what a skill IS. A bare list of slugs told you `sft` exists and
     # nothing about when it is the right choice.
     skill_cards: list["SkillCardDTO"] = Field(default_factory=list)
     identity_path: str = ""
