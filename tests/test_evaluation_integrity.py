@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
-from zevo.api.file_integrity import publish_upload, assert_unreferenced
+from zevo.api.file_integrity import publish_upload
 from zevo.engine.artifact_validation import _semantic_fingerprint, semantic_record_fingerprints
 from zevo.engine.method.evaluation_identity import (
     snapshot_test_contract, inference_identity, complete_identity, compatible_identities,
@@ -38,72 +38,23 @@ def test_numeric_and_reordered_populations_overlap(tmp_path):
     assert semantic_record_fingerprints(str(left), excluded_fields=["answer"]) & semantic_record_fingerprints(str(right), excluded_fields=["answer"])
 
 
-def test_upload_is_atomic_immutable_and_idempotent(tmp_path):
+def test_upload_replaces_live_file_atomically_and_is_idempotent(tmp_path):
     target = tmp_path / "train.csv"
     assert publish_upload(BytesIO(b"original"), target, max_bytes=20) == 8
     assert publish_upload(BytesIO(b"original"), target, max_bytes=20) == 8
-    for content, limit, status in [(b"replacement", 3, 413), (b"replacement", 20, 409)]:
-        with pytest.raises(HTTPException) as error:
-            publish_upload(BytesIO(content), target, max_bytes=limit)
-        assert error.value.status_code == status
-        assert target.read_bytes() == b"original"
+    with pytest.raises(HTTPException) as error:
+        publish_upload(BytesIO(b"replacement"), target, max_bytes=3)
+    assert error.value.status_code == 413
+    assert target.read_bytes() == b"original"
+    assert publish_upload(BytesIO(b"replacement"), target, max_bytes=20) == 11
+    assert target.read_bytes() == b"replacement"
     class FailingSource:
         def read(self, _size):
             raise OSError("upload interrupted")
     with pytest.raises(OSError):
         publish_upload(FailingSource(), target, max_bytes=20)
-    assert target.read_bytes() == b"original"
+    assert target.read_bytes() == b"replacement"
     assert list(tmp_path.iterdir()) == [target]
-
-
-def test_file_reference_scan_skips_prose_before_filesystem_resolution(
-    tmp_path, monkeypatch,
-):
-    import zevo.api.file_integrity as integrity
-
-    monkeypatch.setattr(integrity, "files_root", lambda: str(tmp_path / "files"))
-    monkeypatch.setattr(integrity, "holdout_root", lambda: str(tmp_path / "private"))
-    roots = integrity._file_roots()
-    real_resolve = Path.resolve
-    resolved: list[str] = []
-
-    def tracked_resolve(path: Path, *args, **kwargs) -> Path:
-        resolved.append(str(path))
-        return real_resolve(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "resolve", tracked_resolve)
-    prose = "The agent considered several models and produced a long explanation."
-    assert integrity._file_key(prose, roots) is None
-    assert resolved == []
-    managed = tmp_path / "files" / "example" / "test.csv"
-    assert integrity._file_key(str(managed), roots) == Path("example/test.csv")
-    assert resolved == [str(managed)]
-
-
-@pytest.mark.asyncio
-async def test_delete_rejects_saved_and_historical_references(tmp_path, monkeypatch):
-    monkeypatch.setenv("ZEVO_FILES_ROOT", str(tmp_path / "files"))
-    # Patch the shared root resolvers rather than depending on deployment env.
-    import zevo.api.file_integrity as integrity
-    monkeypatch.setattr(integrity, "files_root", lambda: str(tmp_path / "files"))
-    monkeypatch.setattr(integrity, "holdout_root", lambda: str(tmp_path / "private"))
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    async with async_sessionmaker(engine, expire_on_commit=False)() as db:
-        run = Run(id="historical", status="success", task_name="a", metric="accuracy", metric_direction="max", holdout={"test_set": "/run/zevo-holdout/files/example/test.csv"})
-        db.add(run)
-        await db.commit()
-        with pytest.raises(HTTPException) as error:
-            await assert_unreferenced(db, [tmp_path / "files/example"])
-        assert error.value.status_code == 409
-        with pytest.raises(HTTPException):
-            await assert_unreferenced(db, [tmp_path / "files/example/test.csv"])
-        await assert_unreferenced(db, [tmp_path / "files/unrelated"])
-        await db.delete(run)
-        await db.commit()
-        await assert_unreferenced(db, [tmp_path / "files/example"])
-    await engine.dispose()
 
 
 def _suite(tmp_path):
@@ -261,7 +212,7 @@ def test_remote_standalone_helper_matches_scheduler_identity():
         assert remote["_semantic_fingerprint"](sample) == _semantic_fingerprint(sample)
 
 
-def test_concurrent_uploads_never_overwrite_the_winner(tmp_path):
+def test_concurrent_uploads_publish_only_complete_versions(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     target = tmp_path / "dataset.csv"
     def upload(content):
@@ -272,6 +223,6 @@ def test_concurrent_uploads_never_overwrite_the_winner(tmp_path):
             return (error.status_code, content)
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(upload, [b"version-one", b"version-two"]))
-    assert sorted(code for code, _ in results) == [200, 409]
-    assert target.read_bytes() == next(content for code, content in results if code == 200)
+    assert sorted(code for code, _ in results) == [200, 200]
+    assert target.read_bytes() in {b"version-one", b"version-two"}
     assert list(tmp_path.iterdir()) == [target]

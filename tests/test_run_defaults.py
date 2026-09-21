@@ -284,9 +284,7 @@ async def test_preflight_provider_check_ignores_deterministic_runner(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_task_evaluation_contract_is_immutable_after_a_run_exists() -> None:
-    from fastapi import HTTPException
-
+async def test_task_evaluation_contract_can_change_after_a_run_exists() -> None:
     from zevo.api.routers.ui.tasks import TaskPatch, update_task
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -317,21 +315,78 @@ async def test_task_evaluation_contract_is_immutable_after_a_run_exists() -> Non
         db.add(Run(metric="accuracy", id="stable-run", task_name="stable-task"))
         await db.commit()
 
-        with pytest.raises(HTTPException) as exc:
-            await update_task(
-                "stable-task",
-                TaskPatch(test_sets=[{
-                    "name": "quality",
-                    "test_set": "/test.jsonl",
-                    "inference_query": "Answer {input}.",
-                    "sample_submission": "/sample.jsonl",
-                    "metric": "token_f1",
-                    "answer_fields": ["answer"],
-                }]),
-                db=db,
-            )
-        assert exc.value.status_code == 409
-        assert "evaluation contract is immutable" in str(exc.value.detail)
+        updated = await update_task(
+            "stable-task",
+            TaskPatch(test_sets=[{
+                "name": "quality",
+                "test_set": "/test.jsonl",
+                "inference_query": "Answer {input}.",
+                "sample_submission": "/sample.jsonl",
+                "metric": "token_f1",
+                "answer_fields": ["answer"],
+            }]),
+            db=db,
+        )
+        assert updated.metric == "token_f1"
+        historical = await db.get(Run, "stable-run")
+        assert historical is not None
+        assert historical.metric == "accuracy"
+        from zevo.engine.run.input_snapshots import detect_input_changes
+
+        current_task = await db.get(Task, "stable-task")
+        assert current_task is not None
+        assert detect_input_changes(historical, current_task) == [{
+            "kind": "task", "name": "stable-task", "status": "modified",
+        }]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_deleting_task_removes_live_settings_but_keeps_run_snapshot() -> None:
+    from zevo.api.routers.ui.tasks import delete_task
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    async with Session() as db:
+        db.add(Task(
+            name="delete-me", task_objective="objective",
+            test_sets=[{
+                "name": "quality", "test_set": "/test.jsonl",
+                "inference_query": "Answer {input}.",
+                "sample_submission": "/sample.jsonl", "metric": "accuracy",
+                "answer_fields": ["answer"], "metric_direction": "max",
+            }],
+            test_set="/test.jsonl", test_answer_fields=["answer"],
+            test_sample_submission="/sample.jsonl", metric_type="builtin",
+            evaluation_script="", metric="accuracy", metric_direction="max",
+        ))
+        setting = TaskSetting(task_name="delete-me", name="s1")
+        db.add(setting)
+        await db.flush()
+        run = Run(
+            id="kept-run", task_name="delete-me", setting_id=setting.id,
+            setting_name="s1", task_objective="objective", metric="accuracy",
+        )
+        db.add(run)
+        await db.commit()
+
+        await delete_task("delete-me", db=db)
+
+        assert await db.get(Task, "delete-me") is None
+        assert await db.get(TaskSetting, setting.id) is None
+        kept = await db.get(Run, "kept-run")
+        assert kept is not None
+        assert kept.task_name == "delete-me"
+        assert kept.setting_name == "s1"
+        assert kept.setting_id is None
+        from zevo.engine.run.input_snapshots import detect_input_changes
+
+        assert detect_input_changes(kept, None) == [{
+            "kind": "task", "name": "delete-me", "status": "deleted",
+        }]
 
     await engine.dispose()
 

@@ -82,6 +82,20 @@ def test_ties_are_dense_and_missing_improvement_is_unranked() -> None:
     assert ranked["a"]["improvement_rank"] == 1
     assert ranked["b"]["improvement_rank"] == 1
     assert ranked["c"]["improvement_rank"] is None
+
+
+def test_edited_task_contracts_are_ranked_separately() -> None:
+    older = _cell("older", score=0.95, improvement=0.2)
+    newer = _cell("newer", score=0.60, improvement=0.1)
+    older["evaluation_contract"] = "contract-a"
+    newer["evaluation_contract"] = "contract-b"
+
+    ranked = {cell["run_id"]: cell for cell in _rank_cells([older, newer], by="base")}
+
+    assert ranked["older"]["champion_test_score_rank"] == 1
+    assert ranked["newer"]["champion_test_score_rank"] == 1
+
+
 def test_champion_is_compared_with_its_own_model_lineage_baseline() -> None:
     history = [
         {"iteration": 0, "source": "baseline", "base_model": "model-a", "score": 0.60, "test_score": 0.58},

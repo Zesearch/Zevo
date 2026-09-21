@@ -571,6 +571,12 @@ export type RunDetail = RunSummary & {
   /** The model that DROVE the agents, not the one they trained. Empty until the
    *  first heartbeat lands. */
   harness_model: string;
+  /** Live Task/File objects that no longer match this Run's launch snapshot. */
+  input_changes: Array<{
+    kind: "task" | "file";
+    name: string;
+    status: "modified" | "deleted";
+  }>;
   /** Current candidate's named Validation/Test suite progress. */
   benchmark_progress?: BenchmarkProgress;
   tickets: Array<{

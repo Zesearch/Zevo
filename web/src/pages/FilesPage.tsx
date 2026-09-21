@@ -107,12 +107,8 @@ export function FilesPage() {
   const [busy, setBusy] = useState("");
 
   async function deleteFileSet(name: string) {
-    // Say what survives. A task's runs keep their name as plain text; a
-    // dataset's files are the thing a finished run POINTED at, so deleting one
-    // is not the same kind of safe and the prompt should not imply it is.
     if (!window.confirm(
-      `Delete "${name}" and every file in it? A run that used it keeps its ` +
-      `results, but its inputs will no longer be on disk.`
+      `Delete "${name}" and every file in it? Runs already started from it keep their launch snapshots.`
     )) return;
     setBusy(name);
     setError(null);

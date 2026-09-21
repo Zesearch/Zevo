@@ -25,6 +25,21 @@ function shortBenchmarkName(name: string): string {
   return (pieces.length > 1 ? pieces.slice(1).join("·") : name).trim();
 }
 
+function runStopReason(status: string, reason: string): { label: string; detail: string } {
+  const label = status === "cancelled"
+    ? "Cancelled by user"
+    : status === "halted"
+      ? "Halted by system"
+      : status === "failed"
+        ? "Failed"
+        : status === "degraded"
+          ? "Completed with issues"
+          : "Stopped";
+  let detail = reason.trim().replace(/^Run stopped;\s*/i, "");
+  if (status === "cancelled" && /^cancelled by user\.?$/i.test(detail)) detail = "";
+  return { label, detail };
+}
+
 const TERMINAL_SLURM_STATES = new Set([
   "BOOT_FAIL", "CANCELLED", "COMPLETED", "DEADLINE", "FAILED",
   "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "TIMEOUT",
@@ -1470,6 +1485,22 @@ export function RunDetailPage() {
         <HeaderTelemetry run={run} runId={runId} />
       </Bezel>
 
+      {!!run.input_changes?.length && (
+        <div role="status" className="mb-5 rounded-bezel border border-brass-500/30 bg-brass-500/10 px-4 py-3 text-sm text-brass-200">
+          <strong>Inputs changed after this Run started.</strong>{" "}
+          {run.input_changes.map((change, index) => (
+            <Fragment key={`${change.kind}:${change.name}`}>
+              {index > 0 ? "; " : ""}
+              <span className="font-mono">
+                {change.kind === "task" ? "Task" : "File"} {change.name}
+              </span>{" "}
+              was {change.status}
+            </Fragment>
+          ))}.{" "}
+          This Run continues to use its launch snapshot; the current versions apply to future Runs.
+        </div>
+      )}
+
       {run.lifecycle?.finalization && !run.is_terminal && (
         <div role="status" className="mb-5 rounded border border-hair p-3 text-sm">Finalizing the result: new optimization work has stopped while evaluation and model preservation finish. {run.lifecycle.finalization.deadline_at && <>Deadline: {new Date(run.lifecycle.finalization.deadline_at).toLocaleString()}.</>}</div>
       )}
@@ -1487,7 +1518,10 @@ export function RunDetailPage() {
         </div>
       ) : run.status !== "success" && run.halted_reason ? (
         <div className="mb-5 rounded-bezel border border-coral-500/30 bg-coral-500/10 p-3 text-sm text-coral-300">
-          halted: {run.halted_reason}
+          {(() => {
+            const reason = runStopReason(run.status, run.halted_reason);
+            return <><strong>{reason.label}</strong>{reason.detail ? `: ${reason.detail}` : "."}</>;
+          })()}
           {run.cancel_outcome.hf_url && (
             <> · <a href={run.cancel_outcome.hf_url} target="_blank" rel="noreferrer" className="underline">open on the Hub</a></>
           )}

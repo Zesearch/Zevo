@@ -18,7 +18,7 @@ from zevo.paths import files_root, uploads_root
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import case, delete as sa_delete, func, select
+from sqlalchemy import case, delete as sa_delete, func, select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.database import get_db
@@ -427,6 +427,43 @@ def task_to_user_request(t: Task) -> UserRequest:
     )
 
 
+async def _preserve_legacy_task_snapshots(db: AsyncSession, task: Task) -> None:
+    """Record the pre-edit Task definition on Runs created before snapshots.
+
+    The Test contract was immutable for every such Run, and the Run already
+    stores its launch objective. Combining those two facts reconstructs the
+    exact reusable Task definition without inventing a visible revision row.
+    """
+    from zevo.engine.run.input_snapshots import (
+        record_evaluation_identity,
+        task_definition_snapshot,
+    )
+
+    runs = (await db.execute(
+        select(Run).where(Run.task_name == task.name)
+    )).scalars().all()
+    for run in runs:
+        snapshot = dict(run.input_snapshot or {})
+        if isinstance(snapshot.get("task"), dict):
+            continue
+        # A current-format Run with no Task snapshot was an intentionally
+        # unsaved custom launch, even if a same-named Task appeared later.
+        if snapshot.get("version") == 1 and not snapshot.get("legacy_preserved"):
+            continue
+        snapshot["version"] = 1
+        snapshot.setdefault("local_inputs_copied", False)
+        snapshot["task"] = task_definition_snapshot(
+            task, task_objective=run.task_objective or task.task_objective,
+        )
+        snapshot.setdefault("files", [])
+        snapshot.setdefault("sources", {})
+        snapshot.setdefault("evaluation_sha256", "")
+        snapshot["legacy_preserved"] = True
+        run.input_snapshot = record_evaluation_identity(
+            snapshot, dict(run.holdout or {}),
+        )
+
+
 @router.get("/tasks", response_model=list[TaskDTO])
 async def list_tasks(db: AsyncSession = Depends(get_db)) -> list[TaskDTO]:
     rows = (await db.execute(select(Task).order_by(Task.name))).scalars().all()
@@ -513,42 +550,21 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
     if not changed:
         return _dto(t)
 
-    evaluation_fields = ("test_sets",)
-
-    def normalized(field_name: str, value: Any) -> Any:
-        if field_name == "test_sets":
-            return tuple(
-                tuple(sorted(_with_source_rows(
-                    TaskTestSet.model_validate(item), role="test",
-                ).model_dump(
-                    exclude={"source_rows"},
-                ).items()))
-                for item in (value or [])
-            )
-        return value.strip() if isinstance(value, str) else value
-
-    changed_evaluation_fields = [
-        field_name
-        for field_name in evaluation_fields
-        if field_name in changed
-        and changed[field_name] is not None
-        and normalized(field_name, changed[field_name])
-        != normalized(field_name, getattr(t, field_name))
-    ]
-    if changed_evaluation_fields:
-        run_count = int((await db.execute(
-            select(func.count()).select_from(Run).where(Run.task_name == name)
-        )).scalar_one())
-        if run_count:
-            raise HTTPException(
-                409,
-                "a task's evaluation contract is immutable after it has runs; "
-                f"cannot change {', '.join(changed_evaluation_fields)}. Create "
-                "a new task for a different test setup, metric, or target.",
-            )
+    await _preserve_legacy_task_snapshots(db, t)
 
     if "test_sets" in changed and changed["test_sets"] is not None:
         supplied = [TaskTestSet.model_validate(item) for item in changed["test_sets"]]
+        from zevo.api.file_integrity import preserve_legacy_run_inputs
+        from zevo.engine.run.input_snapshots import catalogue_names
+
+        for file_set_name in catalogue_names(
+            value
+            for item in supplied
+            for value in (
+                item.test_set, item.sample_submission, item.evaluation_script,
+            )
+        ):
+            await preserve_legacy_run_inputs(db, file_set_name)
         protected = await _protect_test_suite(supplied)
         primary = protected[0]
         single = len(protected) == 1
@@ -578,10 +594,18 @@ async def update_task(name: str, body: TaskPatch, db: AsyncSession = Depends(get
 
 @router.delete("/tasks/{name}")
 async def delete_task(name: str, db: AsyncSession = Depends(get_db)) -> dict:
-    if not await db.get(Task, name):
+    task = await db.get(Task, name)
+    if task is None:
         raise HTTPException(404, f"task {name!r} not found.")
-    # Runs store task_name as a plain string, so deleting a definition never
-    # orphans or rewrites run history.
+    await _preserve_legacy_task_snapshots(db, task)
+    # Settings are reusable children of the live Task, not historical Run
+    # evidence. Runs keep their own setting/request snapshots, so removing both
+    # current objects cannot rewrite prior execution history.
+    setting_ids = select(TaskSetting.id).where(TaskSetting.task_name == name)
+    await db.execute(
+        sa_update(Run).where(Run.setting_id.in_(setting_ids)).values(setting_id=None)
+    )
+    await db.execute(sa_delete(TaskSetting).where(TaskSetting.task_name == name))
     await db.execute(sa_delete(Task).where(Task.name == name))
     await db.commit()
     return {"deleted": True, "name": name}

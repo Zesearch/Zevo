@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from zevo.contracts._base import StrictBody
 from zevo.api.ui_access import is_trusted_ui_request
 from zevo.api.database import get_db
-from zevo.api.file_integrity import assert_unreferenced, publish_upload
+from zevo.api.file_integrity import preserve_legacy_run_inputs, publish_upload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.engine.dataset_profiler import (
@@ -318,6 +318,7 @@ def _set_dir(name: str) -> Path:
 @router.post("/files", response_model=FileSetDTO)
 async def upload_dataset(
     background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
     file: UploadFile = File(...),
     name: str = Form(""),
     role: str = Form(""),
@@ -376,8 +377,20 @@ async def upload_dataset(
             )
         stored_name = f"{_FILE_ROLE_NAMES[wanted_role]}{suffix}"
     target_path = target_dir / stored_name
+    # A Test member already lives in the private mirror. When it is edited
+    # through the Files dialog without re-declaring its role, replace that live
+    # member in place instead of creating a public duplicate that Test readers
+    # would ignore.
+    if not private_upload:
+        private_candidate = _private_set_dir(dataset_dir) / sub / stored_name
+        if private_candidate.is_file() and not target_path.exists():
+            storage_dir = _private_set_dir(dataset_dir)
+            target_dir = private_candidate.parent
+            target_path = private_candidate
     if not target_dir.resolve().is_relative_to(storage_dir.resolve()):
         raise HTTPException(400, "upload folder escapes its file set")
+    if target_path.is_file():
+        await preserve_legacy_run_inputs(db, ds_name)
     size = publish_upload(file.file, target_path, max_bytes=200 * 1024 * 1024)
     # F.2 — fire-and-forget profiler so the dataset has structured
     # context ready before any agent inspects it. Errors are swallowed
@@ -393,12 +406,15 @@ class NoteBody(StrictBody):
 
 
 @router.put("/files/{name}/note", response_model=FileSetDTO)
-async def set_dataset_note(name: str, body: NoteBody) -> FileSetDTO:
+async def set_dataset_note(
+    name: str, body: NoteBody, db: AsyncSession = Depends(get_db),
+) -> FileSetDTO:
     """Set what a dataset IS. Kept in the dataset's own source.json so it
     travels with the files rather than living in a table beside them."""
     d = _set_dir(name)
     if not d.is_dir():
         raise HTTPException(404, f"file set {name!r} not found")
+    await preserve_legacy_run_inputs(db, name)
     src = _read_source(d) or FileSetSource()
     src.note = body.note.strip()
     (d / "source.json").write_text(json.dumps(src.model_dump(), indent=2) + "\n")
@@ -433,7 +449,9 @@ def _role_of(split: str) -> str:
 
 
 @router.post("/files/{name}/remote", response_model=FileSetDTO)
-async def add_dataset_remote(name: str, body: RemoteBody) -> FileSetDTO:
+async def add_dataset_remote(
+    name: str, body: RemoteBody, db: AsyncSession = Depends(get_db),
+) -> FileSetDTO:
     """Add a HuggingFace id (or URL) as one of the dataset's files.
 
     A dataset can be partly on disk and partly fetched — ifeval ships its test
@@ -444,6 +462,7 @@ async def add_dataset_remote(name: str, body: RemoteBody) -> FileSetDTO:
     """
     d = _set_dir(name.strip().replace(" ", "_"))
     d.mkdir(parents=True, exist_ok=True)
+    await preserve_legacy_run_inputs(db, d.name)
     ident = body.id.strip()
     if not ident:
         raise HTTPException(400, "id is required")
@@ -484,6 +503,7 @@ class RemotePatchBody(StrictBody):
 @router.patch("/files/{name}/remote/{ident:path}", response_model=FileSetDTO)
 async def patch_dataset_remote(
     name: str, ident: str, body: RemotePatchBody, split: str = "",
+    db: AsyncSession = Depends(get_db),
 ) -> FileSetDTO:
     """Fix a remote's role/split/config in place.
 
@@ -495,6 +515,7 @@ async def patch_dataset_remote(
     d = _set_dir(name)
     if not d.is_dir():
         raise HTTPException(404, f"file set {name!r} not found")
+    await preserve_legacy_run_inputs(db, name)
     src = _read_source(d) or FileSetSource()
     matches = [r for r in src.remote if r.id == ident
                and (not split or (r.split or "") == split)]
@@ -518,7 +539,10 @@ async def patch_dataset_remote(
 
 
 @router.delete("/files/{name}/remote/{ident:path}", response_model=FileSetDTO)
-async def delete_dataset_remote(name: str, ident: str, split: str = "") -> FileSetDTO:
+async def delete_dataset_remote(
+    name: str, ident: str, split: str = "",
+    db: AsyncSession = Depends(get_db),
+) -> FileSetDTO:
     """Drop a remote entry. Nothing is deleted anywhere — it was never stored.
 
     `?split=` picks which entry when the dataset lists the same repo more than
@@ -528,6 +552,7 @@ async def delete_dataset_remote(name: str, ident: str, split: str = "") -> FileS
     d = _set_dir(name)
     if not d.is_dir():
         raise HTTPException(404, f"file set {name!r} not found")
+    await preserve_legacy_run_inputs(db, name)
     src = _read_source(d) or FileSetSource()
     kept = [r for r in src.remote
             if not (r.id == ident and (not split or (r.split or "") == split))]
@@ -556,7 +581,7 @@ async def delete_file_set_member(
         raise HTTPException(404, f"{filename!r} is not a file of file set {name!r}")
     if target.name in _META_FILES:
         raise HTTPException(400, f"{filename!r} is bookkeeping, not data")
-    await assert_unreferenced(db, [target])
+    await preserve_legacy_run_inputs(db, name)
     target.unlink()
     # An emptied subfolder is not a file the dataset has; leaving it behind
     # makes the next listing show a folder with nothing in it.
@@ -575,13 +600,15 @@ async def delete_file_set_member(
 
 
 @router.delete("/files/{name}", status_code=204)
-async def delete_dataset(name: str, db: AsyncSession = Depends(get_db)) -> Response:
-    """Remove an unreferenced file-set version, preserving saved provenance."""
+async def delete_dataset(
+    name: str, db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Delete the live File object; existing Runs retain their own snapshots."""
     d = _set_dir(name)
     private = _private_set_dir(d)
     if not d.is_dir() and not private.is_dir():
         raise HTTPException(404, f"file set {name!r} not found")
-    await assert_unreferenced(db, [d, private])
+    await preserve_legacy_run_inputs(db, name)
     if d.is_dir():
         shutil.rmtree(d)
     if private.is_dir():

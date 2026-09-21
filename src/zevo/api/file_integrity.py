@@ -1,7 +1,8 @@
-"""Immutable upload publication and reference-aware catalogue removal."""
+"""Atomic publication for mutable Files-catalogue uploads."""
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -11,7 +12,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from zevo.db import Run, Task, TaskSetting, Ticket, WorkProduct
+from zevo.db import Run, Ticket, WorkProduct
+from zevo.engine.run.input_snapshots import (
+    file_set_fingerprint,
+    record_evaluation_identity,
+    snapshot_local_input,
+)
 from zevo.paths import files_root, holdout_root
 
 
@@ -21,11 +27,11 @@ def _digest(path: Path) -> str:
 
 
 def publish_upload(source: BinaryIO, destination: Path, *, max_bytes: int) -> int:
-    """Publish complete bytes once, without replacing an existing version.
+    """Atomically publish complete bytes, replacing the live File if needed.
 
-    A hard link is an atomic no-clobber publish on the same filesystem. An
-    identical retry is idempotent; different content requires a new filename
-    or file set. Failures only remove our staging file, never prior data.
+    The staging file is fsynced before ``replace``. An interrupted upload never
+    damages the current File, while a successful upload becomes the new live
+    version in one filesystem operation. Existing Runs read their own copies.
     """
     staged: Path | None = None
     try:
@@ -39,98 +45,215 @@ def publish_upload(source: BinaryIO, destination: Path, *, max_bytes: int) -> in
                 out.write(chunk)
             out.flush()
             os.fsync(out.fileno())
-        try:
-            os.link(staged, destination)
-        except FileExistsError:
-            # Never follow a caller/worker-created symlink during publication.
-            if (destination.is_symlink() or not destination.is_file()
-                    or destination.stat().st_size != written
-                    or _digest(destination) != _digest(staged)):
-                raise HTTPException(409, "This filename already contains a different version. Upload with a new filename or file-set name; existing versions are immutable.")
+        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+            raise HTTPException(409, "The destination is not a regular file.")
+        if (destination.is_file() and destination.stat().st_size == written
+                and _digest(destination) == _digest(staged)):
+            return written
+        os.replace(staged, destination)
+        staged = None
         return written
     finally:
         if staged is not None:
             staged.unlink(missing_ok=True)
 
 
-def _strings(value: Any):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for child in value.values():
-            yield from _strings(child)
-    elif isinstance(value, (list, tuple)):
-        for child in value:
-            yield from _strings(child)
-
-
-def _file_roots() -> tuple[Path, ...]:
-    """Resolve managed roots once per integrity scan, not once per stored value."""
-    raw_roots = (
-        Path(files_root()),
-        Path(holdout_root()) / "files",
-        Path("/app/data/files"),
-        Path("/run/zevo-holdout/files"),
-        Path("data/files"),
+def _catalogue_reference(value: str, name: str) -> tuple[Path, bool] | None:
+    """Return a logical Files member and whether its bytes are private."""
+    raw = Path(str(value or "").strip())
+    if not str(value or "").strip():
+        return None
+    roots = (
+        (Path(files_root()), False),
+        (Path("/app/data/files"), False),
+        (Path("data/files"), False),
+        (Path(holdout_root()) / "files", True),
+        (Path("/run/zevo-holdout/files"), True),
     )
-    roots: list[Path] = []
-    for root in raw_roots:
+    for root, private in roots:
         try:
-            resolved = root.resolve()
-        except OSError:
-            continue
-        if resolved not in roots:
-            roots.append(resolved)
-    return tuple(roots)
-
-
-def _file_key(value: str, roots: tuple[Path, ...] | None = None) -> Path | None:
-    """Unify public/private and host/container spellings before comparing.
-
-    Most strings in Run and Ticket JSON are prose, prompts, or model output.
-    Reject those lexically before ``Path.resolve`` touches the filesystem; an
-    unreferenced deletion otherwise resolves thousands of arbitrary strings.
-    """
-    raw = Path(value.strip())
-    roots = roots if roots is not None else _file_roots()
-    root_names = {root.name for root in roots}
-    if not root_names.intersection(raw.parts):
-        return None
-    try:
-        resolved = raw.resolve()
-    except OSError:
-        return None
-    for root in roots:
-        try:
-            return resolved.relative_to(root)
+            relative = raw.relative_to(root)
         except ValueError:
             continue
+        if not relative.parts or relative.parts[0] != name:
+            return None
+        # Use the configured public spelling as the logical key. The private
+        # snapshot helper resolves it to the protected mirror when required.
+        return Path(files_root()) / relative, private
     return None
 
 
-async def assert_unreferenced(db: AsyncSession, paths: list[Path]) -> None:
-    """Fail closed while a saved task, setting, run or artifact uses an asset.
+def _rewrite_catalogue_references(
+    value: Any, *, run_id: str, name: str,
+) -> tuple[Any, bool]:
+    if isinstance(value, str):
+        reference = _catalogue_reference(value, name)
+        if reference is None:
+            return value, False
+        logical, private = reference
+        copied = snapshot_local_input(run_id, str(logical), private=private)
+        return (copied, copied != str(logical))
+    if isinstance(value, dict):
+        changed = False
+        out = {}
+        for key, child in value.items():
+            out[key], child_changed = _rewrite_catalogue_references(
+                child, run_id=run_id, name=name,
+            )
+            changed = changed or child_changed
+        return out, changed
+    if isinstance(value, list):
+        changed = False
+        out = []
+        for child in value:
+            rewritten, child_changed = _rewrite_catalogue_references(
+                child, run_id=run_id, name=name,
+            )
+            out.append(rewritten)
+            changed = changed or child_changed
+        return out, changed
+    return value, False
 
-    Historical Runs count too: removing their input changes reproducibility.
-    A file-set reference covers every member, not just a named leaf. Deleting
-    the owning records or creating a new file-set version is an explicit step.
+
+def _remote_ids(name: str) -> set[str]:
+    source = Path(files_root()) / name / "source.json"
+    try:
+        payload = json.loads(source.read_text())
+    except (OSError, TypeError, ValueError):
+        return set()
+    return {
+        str(item.get("id") or "")
+        for item in (payload.get("remote") or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
+def _contains_remote_reference(value: Any, identifiers: set[str]) -> bool:
+    if not identifiers:
+        return False
+    if isinstance(value, str):
+        return value.strip() in identifiers
+    if isinstance(value, dict):
+        return any(_contains_remote_reference(child, identifiers) for child in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_remote_reference(child, identifiers) for child in value)
+    return False
+
+
+async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
+    """Move pre-snapshot Run references off one live File before mutation.
+
+    Files were immutable before Run snapshots were introduced, so the current
+    bytes are the same bytes a legacy Run launched with. The first mutation
+    copies them into each affected Run and rewrites its stored paths. Later
+    edits to the same File skip those Runs once its name is recorded in
+    ``preserved_file_sets``; other referenced Files are preserved independently.
     """
-    roots = _file_roots()
-    targets = [
-        key for path in paths
-        if (key := _file_key(str(path), roots)) is not None
+    # Serialize the one-time conversion with concurrent File edits. The first
+    # request commits the snapshot before touching live bytes; later requests
+    # then observe ``preserved_file_sets`` and leave that snapshot untouched.
+    runs = (await db.execute(select(Run).with_for_update())).scalars().all()
+    legacy = [
+        run for run in runs
+        if not (run.input_snapshot or {}).get("local_inputs_copied")
+        and name not in set((run.input_snapshot or {}).get("preserved_file_sets") or [])
     ]
-    if not targets:
-        raise HTTPException(409, "Cannot prove this file is safe to remove")
-    for model in (Task, TaskSetting, Run, Ticket, WorkProduct):
-        # Read plain stored values, never relationships or external assets.
-        rows = (await db.execute(select(model))).scalars().all()
-        for row in rows:
-            values = [getattr(row, column.key) for column in model.__table__.columns]
-            for value in _strings(values):
-                key = _file_key(value, roots)
-                if key is not None and any(
-                    key == target or key.is_relative_to(target) or target.is_relative_to(key)
-                    for target in targets
-                ):
-                    raise HTTPException(409, "This file is referenced by a saved task, setting, run or artifact. Keep this version or remove its references before deleting it.")
+    if not legacy:
+        return
+    run_ids = [run.id for run in legacy]
+    tickets = (await db.execute(
+        select(Ticket).where(Ticket.run_id.in_(run_ids))
+    )).scalars().all()
+    ticket_by_id = {ticket.id: ticket for ticket in tickets}
+    products = (await db.execute(
+        select(WorkProduct).where(WorkProduct.ticket_id.in_(list(ticket_by_id)))
+    )).scalars().all() if ticket_by_id else []
+    tickets_by_run: dict[str, list[Ticket]] = {}
+    for ticket in tickets:
+        tickets_by_run.setdefault(ticket.run_id, []).append(ticket)
+    products_by_run: dict[str, list[WorkProduct]] = {}
+    for product in products:
+        ticket = ticket_by_id.get(product.ticket_id)
+        if ticket is not None:
+            products_by_run.setdefault(ticket.run_id, []).append(product)
+
+    fingerprint = file_set_fingerprint(name)
+    remote_ids = _remote_ids(name)
+    touched = False
+    for run in legacy:
+        changed = False
+        original_holdout = dict(run.holdout or {})
+        original_request: dict[str, Any] = {}
+        for ticket in tickets_by_run.get(run.id, []):
+            if ticket.id == run.supervisor_ticket_id and isinstance(ticket.payload, dict):
+                request = ticket.payload.get("user_request")
+                if isinstance(request, dict):
+                    original_request = dict(request)
+                    break
+        referenced = any(
+            _contains_remote_reference(getattr(run, field), remote_ids)
+            for field in ("holdout", "decision_pins", "customizations", "model_lineages")
+        )
+        referenced = referenced or any(
+            _contains_remote_reference(getattr(ticket, field), remote_ids)
+            for ticket in tickets_by_run.get(run.id, [])
+            for field in ("payload", "inputs", "customization")
+        )
+
+        for field in ("holdout", "decision_pins", "customizations", "model_lineages"):
+            rewritten, field_changed = _rewrite_catalogue_references(
+                getattr(run, field), run_id=run.id, name=name,
+            )
+            if field_changed:
+                setattr(run, field, rewritten)
+                changed = True
+        for ticket in tickets_by_run.get(run.id, []):
+            for field in ("payload", "inputs", "customization"):
+                rewritten, field_changed = _rewrite_catalogue_references(
+                    getattr(ticket, field), run_id=run.id, name=name,
+                )
+                if field_changed:
+                    setattr(ticket, field, rewritten)
+                    changed = True
+        for product in products_by_run.get(run.id, []):
+            rewritten_path, path_changed = _rewrite_catalogue_references(
+                product.path, run_id=run.id, name=name,
+            )
+            rewritten_meta, meta_changed = _rewrite_catalogue_references(
+                product.meta, run_id=run.id, name=name,
+            )
+            if path_changed:
+                product.path = rewritten_path
+            if meta_changed:
+                product.meta = rewritten_meta
+            changed = changed or path_changed or meta_changed
+            referenced = referenced or _contains_remote_reference(
+                (product.path, product.meta), remote_ids,
+            )
+        if not changed and not referenced:
+            continue
+        snapshot = dict(run.input_snapshot or {})
+        snapshot["version"] = 1
+        snapshot.setdefault("local_inputs_copied", False)
+        snapshot["preserved_file_sets"] = sorted({
+            *list(snapshot.get("preserved_file_sets") or []), name,
+        })
+        snapshot.setdefault("task", None)
+        known_files = {
+            str(item.get("name") or ""): dict(item)
+            for item in (snapshot.get("files") or []) if isinstance(item, dict)
+        }
+        if fingerprint:
+            known_files[name] = {"name": name, "sha256": fingerprint}
+        snapshot["files"] = [known_files[key] for key in sorted(known_files) if key]
+        snapshot.setdefault("sources", {
+            "dataset": str(original_request.get("dataset") or ""),
+            "test_sets": list(original_holdout.get("test_sets") or []),
+            "validation_sets": list(original_holdout.get("validation_sets") or []),
+        })
+        snapshot.setdefault("evaluation_sha256", "")
+        snapshot["legacy_preserved"] = True
+        run.input_snapshot = record_evaluation_identity(snapshot, original_holdout)
+        touched = True
+    if touched:
+        await db.commit()

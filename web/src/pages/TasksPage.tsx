@@ -265,7 +265,7 @@ export function TasksPage() {
   async function deleteTask(name: string) {
     // Runs keep their task_name as plain text, so history is untouched — say so
     // rather than letting the prompt imply past runs are at stake.
-    if (!window.confirm(`Delete the task "${name}"? Runs already started from it are not affected.`)) return;
+    if (!window.confirm(`Delete the task "${name}" and its saved settings? Runs already started from it keep their launch snapshots.`)) return;
     setBusy(name);
     try {
       await api(`/tasks/${encodeURIComponent(name)}`, { method: "DELETE" });
