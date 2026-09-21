@@ -406,3 +406,23 @@ async def test_a_run_with_no_supervisor_is_unaffected(session):
     counts = await _close_finished_runs(session)
     assert counts["failed"] == 1   # terminal, no model registered
     assert (await session.get(Run, "r4")).status == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('instruction_status,wakeup_status', [
+    ('delivered', None), ('needs_input', None),
+    ('scheduled', 'queued'), ('applied', 'running'),
+])
+async def test_instruction_replacement_prevents_premature_run_close(session, instruction_status, wakeup_status):
+    from zevo.db import RunInstruction
+    run = Run(id='steering-run', metric='accuracy', status='running')
+    train = _ticket('steering-train', run.id, 'train', status='cancelled')
+    train.error_message = 'current activation superseded by Run instruction request-1'
+    session.add_all([run, train, RunInstruction(id='request-1', run_id=run.id, body='Revise and retry', status=instruction_status)])
+    if wakeup_status:
+        session.add(AgentWakeupRequest(agent_id='train', ticket_id=train.id, source='on_demand', status=wakeup_status, payload={'run_instruction_id': 'request-1'}))
+    await session.commit()
+    assert await _close_finished_runs(session) == {'success': 0, 'degraded': 0, 'failed': 0}
+    await session.refresh(run)
+    assert run.status == 'running'
+    assert run.finished_at is None
