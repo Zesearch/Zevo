@@ -1118,6 +1118,25 @@ async def decide_run_instruction(
     return (await _instruction_dto_list(db, [row]))[0]
 
 
+@router.get("/runs/{run_id}/input-changes")
+async def get_run_input_changes(
+    run_id: str, request: Request, db: AsyncSession = Depends(get_db),
+) -> dict:
+    # This can contain private Test configuration/file previews. Never expose
+    # it to optimization agents, including after the Run finishes.
+    if not is_trusted_ui_request(request):
+        raise HTTPException(403, "Input comparisons are available in the dashboard only")
+    run = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(404, f"run {run_id} not found")
+    from fastapi.concurrency import run_in_threadpool
+    from zevo.db import Task
+    from zevo.engine.run.input_snapshots import input_change_details
+
+    task = await db.get(Task, run.task_name) if run.task_name else None
+    return {"changes": await run_in_threadpool(input_change_details, run, task)}
+
+
 @router.get("/runs/{run_id}", response_model=RunDetail)
 async def get_run(
     run_id: str,
