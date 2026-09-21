@@ -94,7 +94,7 @@ async def test_terminal_run_not_reactivated() -> None:
     Session = await _session()
     stale = datetime.now(timezone.utc) - _dt.timedelta(hours=1)
     async with Session() as db:
-        await _seed(db, ticket_updated=stale, run_status="halted")
+        await _seed(db, ticket_updated=stale, run_status="failed")
         n = await _reactivate_stuck_repairing_tickets(db, stale_ticket_seconds=60)
         assert n == 0
         assert await _wakeup_count(db) == 0

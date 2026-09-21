@@ -1690,7 +1690,7 @@ async def _run_list(*, show_all: bool, limit: int, api_base: str) -> None:
     table.add_column("improvement", justify="right")
     table.add_column("started")
     color = {"running": "yellow", "success": "green", "failed": "red",
-             "cancelled": "dim", "halted": "red"}
+             "cancelled": "dim"}
     for x in runs:
         st = str(x.get("status", ""))
         # The same paired held-out outcomes as Runs in the web UI.
@@ -2820,7 +2820,7 @@ async def _dashboard(*, window: str) -> None:
     }[window]
     cutoff = datetime.now(timezone.utc) - window_delta if window_delta else None
     run_time = 0.0
-    terminal = {"success", "degraded", "failed", "cancelled", "halted"}
+    terminal = {"success", "degraded", "failed", "cancelled"}
     for run in runs:
         duration = run.get("duration_s")
         if run.get("status") not in terminal or not isinstance(duration, (int, float)) or duration < 0:

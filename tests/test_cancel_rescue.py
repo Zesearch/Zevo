@@ -207,7 +207,7 @@ async def test_reconciler_leaves_cancel_requested_runs_open(tmp_path, monkeypatc
         await _seed(db, tmp_path, history=[], checkpoints=[],
                     max_cost_usd=10.0, cancel_requested_at=datetime.now(timezone.utc))
         assert await _watchdog_halt_over_budget_runs(db) == 0
-        assert await _close_finished_runs(db) == {"success": 0, "degraded": 0, "failed": 0, "halted": 0}
+        assert await _close_finished_runs(db) == {"success": 0, "degraded": 0, "failed": 0}
         run = await db.get(Run, "r1")
         assert run.status == "running"
 

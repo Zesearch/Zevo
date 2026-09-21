@@ -34,8 +34,10 @@ from zevo.contracts.training_methods import (
 # and the engine settles it, then the run proceeds exactly like full_pipeline.
 RunMode = Literal["full_pipeline", "customized_pipeline", "single_stage", "auto"]
 RunStatus = Literal[
-    "planning", "running", "success", "degraded", "failed", "halted", "cancelled",
+    "planning", "running", "success", "degraded", "failed", "cancelled",
 ]
+# ``halted`` is accepted here only while old database rows are migrated/read.
+# It is no longer part of the API contract and no new Run may enter it.
 TERMINAL_RUN_STATUSES = frozenset(
     {"success", "degraded", "failed", "halted", "cancelled"}
 )

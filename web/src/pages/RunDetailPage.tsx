@@ -28,14 +28,13 @@ function shortBenchmarkName(name: string): string {
 function runStopReason(status: string, reason: string): { label: string; detail: string } {
   const label = status === "cancelled"
     ? "Cancelled by user"
-    : status === "halted"
-      ? "Halted by system"
-      : status === "failed"
+    : status === "failed"
         ? "Failed"
         : status === "degraded"
           ? "Completed with issues"
           : "Stopped";
   let detail = reason.trim().replace(/^Run stopped;\s*/i, "");
+  if (/^Finalizing at limit:/i.test(detail)) detail = "";
   if (status === "cancelled" && /^cancelled by user\.?$/i.test(detail)) detail = "";
   return { label, detail };
 }
@@ -1441,8 +1440,10 @@ export function RunDetailPage() {
     return <div className="w-full px-[max(1.5rem,1.5vw)] py-8 text-sm text-dim">Acquiring telemetry…</div>;
   }
 
-  const live = !["success", "degraded", "failed", "halted", "cancelled"].includes(run.status);
+  const live = !["success", "degraded", "failed", "cancelled"].includes(run.status);
   const stations = stationsFrom(run, wakesByTicket);
+  const terminalIssues = run.lifecycle?.terminal_outcome?.issues ?? [];
+  const stopTrigger = run.lifecycle?.terminal_outcome?.stop_trigger;
 
   return (
     <div className="w-full px-[max(1.5rem,1.5vw)] py-8">
@@ -1504,6 +1505,11 @@ export function RunDetailPage() {
       {run.lifecycle?.finalization && !run.is_terminal && (
         <div role="status" className="mb-5 rounded border border-hair p-3 text-sm">Finalizing the result: new optimization work has stopped while evaluation and model preservation finish. {run.lifecycle.finalization.deadline_at && <>Deadline: {new Date(run.lifecycle.finalization.deadline_at).toLocaleString()}.</>}</div>
       )}
+      {run.is_terminal && stopTrigger?.message && (
+        <div role="status" className="mb-5 rounded border border-hair p-3 text-sm text-slate-300">
+          {stopTrigger.message}
+        </div>
+      )}
       {run.cancel_outcome.status === "preservation_failed" ? (
         <div role="alert" className="mb-5 rounded border border-coral-500/40 p-3 text-sm text-coral-300">
           <strong>Checkpoint preservation needs attention.</strong> {run.cancel_outcome.error || run.cancel_outcome.note}
@@ -1516,10 +1522,24 @@ export function RunDetailPage() {
             ? `pushing the champion checkpoint to ${run.cancel_policy.hf_repo_id}`
             : "copying the champion checkpoint off the box"} before the GPU is released…
         </div>
-      ) : run.status !== "success" && run.halted_reason ? (
+      ) : run.status !== "success" && (terminalIssues.length > 0 || run.halted_reason) ? (
         <div className="mb-5 rounded-bezel border border-coral-500/30 bg-coral-500/10 p-3 text-sm text-coral-300">
           {(() => {
             const reason = runStopReason(run.status, run.halted_reason);
+            if (terminalIssues.length > 0) {
+              const issueText = terminalIssues.map((issue) => issue.message).join(" ");
+              return <>
+                <strong>{reason.label}:</strong>
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  {terminalIssues.map((issue, index) => (
+                    <li key={`${issue.code}:${issue.ticket_id ?? index}`}>{issue.message}</li>
+                  ))}
+                </ul>
+                {reason.detail && !issueText.includes(reason.detail) && (
+                  <p className="mt-2">{reason.detail}</p>
+                )}
+              </>;
+            }
             return <><strong>{reason.label}</strong>{reason.detail ? `: ${reason.detail}` : "."}</>;
           })()}
           {run.cancel_outcome.hf_url && (

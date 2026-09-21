@@ -87,7 +87,8 @@ async def test_over_cost_stops_training_but_permits_finalization(monkeypatch) ->
         n = await _watchdog_halt_over_budget_runs(db)
         assert n == 1
         run = await db.get(Run, "r1")
-        assert run.status == "running" and "cost" in run.halted_reason
+        assert run.status == "running" and run.halted_reason == ""
+        assert run.lifecycle["finalization"]["stop_trigger"]["code"] == "cost_limit"
         assert run.lifecycle["finalization"]["deadline_at"]
         assert (await db.get(Ticket, "train-1")).status == "failed"
         assert (await db.get(Ticket, "orch-1")).status == "running"
@@ -104,7 +105,13 @@ async def test_iteration_cap_starts_bounded_finalization(monkeypatch) -> None:
         n = await _watchdog_halt_over_budget_runs(db)
         assert n == 1
         run = await db.get(Run, "r1")
-        assert run.status == "running" and "iterations" in run.halted_reason
+        assert run.status == "running" and run.halted_reason == ""
+        assert run.lifecycle["finalization"]["stop_trigger"] == {
+            "code": "iteration_limit",
+            "current": 3,
+            "limit": 3,
+            "message": "Stopped after completing 3 of 3 iterations.",
+        }
         assert run.lifecycle["finalization"]["deadline_at"]
 
 
@@ -166,7 +173,8 @@ async def test_finalization_deadline_enters_preservation_before_cleanup(monkeypa
         assert run.status == "running"  # resource cleanup must wait for retention
         assert run.cancel_requested_at is not None
         assert run.cancel_policy["weights"] == "download"
-        assert run.lifecycle["rescue_terminal_status"] == "halted"
+        assert run.lifecycle["rescue_terminal_status"] == "failed"
+        assert run.lifecycle["finalization"]["expired_at"]
         assert (await db.get(Ticket,"orch-1")).status == "failed"
     await Session.kw["bind"].dispose()
 
@@ -256,5 +264,5 @@ async def test_stale_final_step_does_not_extend_the_window(monkeypatch):
         await _watchdog_halt_over_budget_runs(db)
         run = await db.get(Run, "r1")
         assert run.cancel_requested_at is not None
-        assert run.lifecycle["rescue_terminal_status"] == "halted"
+        assert run.lifecycle["rescue_terminal_status"] == "failed"
         assert (await db.get(Ticket, "orch-1")).status == "failed"

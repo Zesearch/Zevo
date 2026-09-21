@@ -31,7 +31,6 @@ export function statusToneFor(status: string): StatusTone {
     case "planning":
       return { dot: "bg-skyx-400 shadow-glow-brass", text: "text-skyx-300", ring: "border-skyx-500/30 bg-skyx-500/10" };
     case "failed":
-    case "halted":
       return { dot: "bg-coral-400 shadow-glow-coral", text: "text-coral-300", ring: "border-coral-500/30 bg-coral-500/10" };
     case "degraded":
       return { dot: "bg-lilac-400", text: "text-lilac-300", ring: "border-lilac-500/30 bg-lilac-500/10" };

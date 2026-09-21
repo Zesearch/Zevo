@@ -325,7 +325,7 @@ async def test_vram_floor_selects_a_verified_eligible_allocation(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_status", ["success", "failed", "halted", "cancelled"])
+@pytest.mark.parametrize("terminal_status", ["success", "failed", "cancelled"])
 async def test_terminal_run_retains_cards_until_confirmed_cleanup(client, sessionmaker_, terminal_status):
     allocs = _allocs(("101", 2))
     async with sessionmaker_() as s:

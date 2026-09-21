@@ -92,7 +92,9 @@ Return exactly one `SupervisorAction`:
 
 - always echo the current Orchestrator `ticket_id` exactly;
 - `emit_ticket`: you created one child and return its id;
-- `mark_done`: you first PATCHed a non-empty summary and terminal success;
+- `mark_done`: you first PATCHed a non-empty summary and terminal
+  `success`/`degraded`; the engine decides between them from unresolved
+  execution issues, while reaching a configured limit remains normal;
 - `mark_failed`: you first PATCHed the precise terminal failure;
 - `wait`: a required child is genuinely active or awaiting user input.
 

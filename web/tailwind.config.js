@@ -125,7 +125,6 @@ export default {
           done:        PHOSPHOR[400],
           success:     PHOSPHOR[400],
           failed:      CORAL[400],
-          halted:      CORAL[400],
           degraded:    LILAC[400],
           skipped:     NIGHT[500],
         },

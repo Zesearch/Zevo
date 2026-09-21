@@ -24,7 +24,7 @@ async def _session():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_status", sorted(TERMINAL_RUN_STATUSES))
+@pytest.mark.parametrize("terminal_status", sorted(TERMINAL_RUN_STATUSES - {"halted"}))
 async def test_run_ticket_noops_on_terminal_run(terminal_status: str) -> None:
     Session = await _session()
     async with Session() as db:

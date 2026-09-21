@@ -314,7 +314,7 @@ class Run(Base):
             name="ck_runs_mode",
         ),
         CheckConstraint(
-            "status IN ('planning', 'running', 'success', 'degraded', 'failed', 'halted', 'cancelled')",
+            "status IN ('planning', 'running', 'success', 'degraded', 'failed', 'cancelled')",
             name="ck_runs_status",
         ),
         CheckConstraint(
@@ -396,7 +396,7 @@ class Run(Base):
     # native templates, while a baseline and descendants of the same base must
     # render identically.
     model_lineages: Mapped[dict[str, Any]] = mapped_column(JsonCol, default=dict)
-    # planning | running | success | degraded | failed | halted | cancelled.
+    # planning | running | success | degraded | failed | cancelled.
     # `degraded` = the run produced a registered model AND something failed:
     # real work came out of it, but not all of it, so it is neither a clean
     # success nor a write-off. Terminal status vocabulary lives in contracts/tickets.py.
