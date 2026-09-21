@@ -230,3 +230,28 @@ async def test_first_file_mutation_moves_legacy_run_references_to_run_snapshot(
         assert copied_test.read_text() == "question,answer\nold,1\n"
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_comparison_inherits_run_detail_access_checks(monkeypatch):
+    from fastapi import FastAPI, HTTPException
+    from httpx import ASGITransport, AsyncClient
+    from zevo.api.routers.shared import runs
+    from zevo.api import ui_access
+
+    monkeypatch.setattr(ui_access, "_ui_access_token", lambda: "dashboard-token")
+    app = FastAPI()
+    app.include_router(runs.router)
+
+    async def deny_run():
+        raise HTTPException(404, "run not visible")
+
+    async def unused_db():
+        yield None
+
+    app.dependency_overrides[runs.get_run] = deny_run
+    app.dependency_overrides[runs.get_db] = unused_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/runs/other-users-run/input-changes", headers={"x-zevo-ui-access": "dashboard-token"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == "run not visible"
