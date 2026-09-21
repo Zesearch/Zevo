@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.db import Run, Ticket, WorkProduct
 from zevo.engine.run.input_snapshots import (
-    file_set_fingerprint,
+    file_set_snapshot,
     record_evaluation_identity,
     snapshot_local_input,
 )
@@ -177,7 +177,7 @@ async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
         if ticket is not None:
             products_by_run.setdefault(ticket.run_id, []).append(product)
 
-    fingerprint = file_set_fingerprint(name)
+    file_snapshot = file_set_snapshot(name)
     remote_ids = _remote_ids(name)
     touched = False
     for run in legacy:
@@ -243,8 +243,8 @@ async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
             str(item.get("name") or ""): dict(item)
             for item in (snapshot.get("files") or []) if isinstance(item, dict)
         }
-        if fingerprint:
-            known_files[name] = {"name": name, "sha256": fingerprint}
+        if file_snapshot:
+            known_files[name] = file_snapshot
         snapshot["files"] = [known_files[key] for key in sorted(known_files) if key]
         snapshot.setdefault("sources", {
             "dataset": str(original_request.get("dataset") or ""),

@@ -445,6 +445,15 @@ async def _preserve_legacy_task_snapshots(db: AsyncSession, task: Task) -> None:
     for run in runs:
         snapshot = dict(run.input_snapshot or {})
         if isinstance(snapshot.get("task"), dict):
+            # Upgrade fingerprint-only snapshots while the verified original
+            # definition is still available, before this edit changes it.
+            if "definition" not in snapshot["task"]:
+                original = task_definition_snapshot(
+                    task, task_objective=run.task_objective or task.task_objective,
+                )
+                if original["sha256"] == snapshot["task"].get("sha256"):
+                    snapshot["task"] = original
+                    run.input_snapshot = snapshot
             continue
         # A current-format Run with no Task snapshot was an intentionally
         # unsaved custom launch, even if a same-named Task appeared later.

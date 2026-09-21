@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, Fragment } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
 import { StopCircle, ChevronRight, ChevronDown, Clock, ListChecks, Package, ArrowLeft, Layers3, ScrollText } from "lucide-react";
+import { InputChangesNotice } from "../components/InputChangesNotice";
 import { TrainingMonitor } from "../components/TrainingMonitor";
 import { RunInstructionPanel } from "../components/RunInstructionPanel";
 import { StepTimeline } from "../components/StepTimeline";
@@ -1486,21 +1487,7 @@ export function RunDetailPage() {
         <HeaderTelemetry run={run} runId={runId} />
       </Bezel>
 
-      {!!run.input_changes?.length && (
-        <div role="status" className="mb-5 rounded-bezel border border-brass-500/30 bg-brass-500/10 px-4 py-3 text-sm text-brass-200">
-          <strong>Inputs changed after this Run started.</strong>{" "}
-          {run.input_changes.map((change, index) => (
-            <Fragment key={`${change.kind}:${change.name}`}>
-              {index > 0 ? "; " : ""}
-              <span className="font-mono">
-                {change.kind === "task" ? "Task" : "File"} {change.name}
-              </span>{" "}
-              was {change.status}
-            </Fragment>
-          ))}.{" "}
-          This Run continues to use its launch snapshot; the current versions apply to future Runs.
-        </div>
-      )}
+      <InputChangesNotice run={run} />
 
       {run.lifecycle?.finalization && !run.is_terminal && (
         <div role="status" className="mb-5 rounded border border-hair p-3 text-sm">Finalizing the result: new optimization work has stopped while evaluation and model preservation finish. {run.lifecycle.finalization.deadline_at && <>Deadline: {new Date(run.lifecycle.finalization.deadline_at).toLocaleString()}.</>}</div>

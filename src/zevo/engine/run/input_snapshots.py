@@ -59,7 +59,7 @@ def task_definition_snapshot(
         ).strip(),
         "test_sets": _without_derived_fields(suite),
     }
-    return {"name": str(task.name), "sha256": digest_json(contract)}
+    return {"name": str(task.name), "sha256": digest_json(contract), "definition": contract}
 
 
 def _managed_files_member(value: str) -> Path | None:
@@ -119,6 +119,55 @@ def file_set_fingerprint(name: str) -> str | None:
     return _digest_catalogue_entries(name, entries)
 
 
+def file_set_snapshot(name: str) -> dict[str, Any] | None:
+    """Keep bounded previews and metadata, never an entire dataset in the DB."""
+    parts = Path(name).parts
+    if not parts or Path(name).is_absolute() or ".." in parts:
+        return None
+    # Old online snapshots sometimes fingerprinted the shared `_t` root.
+    # That identity may still support a warning, never a cross-tenant preview.
+    if parts[0] == "_t" and len(parts) < 3:
+        fingerprint = file_set_fingerprint(name)
+        return {"name": name, "sha256": fingerprint} if fingerprint else None
+    exists, entries = _catalogue_entries(name)
+    if not exists:
+        return None
+    return _file_set_snapshot(name, entries)
+
+
+@lru_cache(maxsize=128)
+def _file_set_snapshot(name: str, entries: tuple[tuple[str, str, int, int], ...]) -> dict[str, Any]:
+    import csv
+
+    public, private = _catalogue_dirs(name)
+    manifest = []
+    text_budget = 128 * 1024
+    for namespace, relative, size, _ in entries:
+        path = (private if namespace == "private" else public) / relative
+        with path.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        item: dict[str, Any] = {"path": relative, "storage": namespace, "size": size, "sha256": digest}
+        if path.suffix.lower() == ".csv":
+            try:
+                with path.open(encoding="utf-8-sig") as source:
+                    header = source.readline(65536)
+                if header.endswith("\n") or size < 65536:
+                    item["columns"] = next(csv.reader([header]), [])
+            except (UnicodeError, csv.Error):
+                pass
+        elif path.suffix.lower() in {".txt", ".md", ".py", ".json", ".yaml", ".yml"} and size <= min(32768, text_budget):
+            try:
+                item["text"] = path.read_text(encoding="utf-8")
+                text_budget -= size
+            except UnicodeError:
+                pass
+        manifest.append(item)
+    fingerprint = digest_json([
+        {key: item[key] for key in ("storage", "path", "sha256")} for item in manifest
+    ])
+    return {"name": name, "sha256": fingerprint, "entries": manifest}
+
+
 def _remote_catalogue_names(identifier: str) -> set[str]:
     root = Path(files_root())
     if not identifier or not root.is_dir():
@@ -145,7 +194,13 @@ def _catalogue_names(values: Iterable[str]) -> set[str]:
             continue
         relative = _managed_files_member(value)
         if relative is not None and relative.parts:
-            names.add(relative.parts[0])
+            if ".." in relative.parts:
+                continue
+            if relative.parts[0] == "_t":
+                if len(relative.parts) >= 3:
+                    names.add(Path(*relative.parts[:3]).as_posix())
+            else:
+                names.add(relative.parts[0])
         else:
             names.update(_remote_catalogue_names(value))
     return names
@@ -156,7 +211,7 @@ def catalogue_names(values: Iterable[str]) -> list[str]:
     return sorted(_catalogue_names(values))
 
 
-def request_file_snapshots(request: Any) -> list[dict[str, str]]:
+def request_file_snapshots(request: Any) -> list[dict[str, Any]]:
     """Identity every Files object explicitly used by a launch request."""
     values = [str(getattr(request, "dataset", "") or "")]
     for item in effective_test_suite(request):
@@ -165,9 +220,9 @@ def request_file_snapshots(request: Any) -> list[dict[str, str]]:
         values.extend((item.test_set, item.sample_submission, item.evaluation_script))
     names = sorted(_catalogue_names(values))
     return [
-        {"name": name, "sha256": digest}
+        snapshot
         for name in names
-        if (digest := file_set_fingerprint(name)) is not None
+        if (snapshot := file_set_snapshot(name)) is not None
     ]
 
 
@@ -198,9 +253,9 @@ def launch_auto_input_snapshot(request: Any) -> dict[str, Any]:
         "local_inputs_copied": True,
         "task": None,
         "files": [
-            {"name": name, "sha256": digest}
+            snapshot
             for name in names
-            if (digest := file_set_fingerprint(name)) is not None
+            if (snapshot := file_set_snapshot(name)) is not None
         ],
         "sources": {"dataset": str(getattr(request, "dataset", "") or "")},
         "evaluation_sha256": "",
@@ -333,3 +388,81 @@ def detect_input_changes(run: Any, task: Any | None) -> list[dict[str, str]]:
         elif current != item.get("sha256"):
             changes.append({"kind": "file", "name": name, "status": "modified"})
     return changes
+
+
+def input_change_details(run: Any, task: Any | None) -> list[dict[str, Any]]:
+    """Dashboard-only comparison; historical values must match their saved hash."""
+    snapshot = dict(getattr(run, "input_snapshot", None) or {})
+    groups = []
+
+    def differences(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
+        if before == after:
+            return []
+        if isinstance(before, dict) and isinstance(after, dict):
+            return [row for key in sorted(before.keys() | after.keys())
+                    for row in differences(before.get(key), after.get(key), f"{path} / {key}".strip(" /"))]
+        if isinstance(before, list) and isinstance(after, list) and before and after and all(
+            isinstance(x, dict) and x.get("name") for x in before + after
+        ) and len({x["name"] for x in before}) == len(before) and len({x["name"] for x in after}) == len(after):
+            return differences({x["name"]: x for x in before}, {x["name"]: x for x in after}, path)
+        return [{"field": path, "before": before, "after": after}]
+
+    for change in detect_input_changes(run, task):
+        group: dict[str, Any] = {**change, "fields": [], "note": ""}
+        if change["kind"] == "task":
+            saved = snapshot.get("task") or {}
+            before = saved.get("definition")
+            if before is None:
+                # Older Runs may retain the full original contract separately.
+                for suite in [(snapshot.get("sources") or {}).get("test_sets"),
+                              (getattr(run, "holdout", None) or {}).get("test_sets")]:
+                    candidate = {"task_objective": str(getattr(run, "task_objective", "") or "").strip(),
+                                 "test_sets": _without_derived_fields(suite)}
+                    if suite and digest_json(candidate) == saved.get("sha256"):
+                        before = candidate
+                        break
+            if before is not None and digest_json(before) == saved.get("sha256"):
+                after = task_definition_snapshot(task)["definition"] if task is not None else None
+                group["fields"] = differences(before, after) if after is not None else [
+                    {"field": key, "before": value, "after": None} for key, value in before.items()
+                ]
+            else:
+                group["note"] = "This older Run saved a fingerprint only. Its original Task definition is unavailable for comparison."
+        else:
+            saved = next(x for x in snapshot.get("files", []) if x.get("name") == change["name"])
+            parts = Path(change["name"]).parts
+            if "entries" not in saved or (parts and parts[0] == "_t" and len(parts) < 3):
+                group["note"] = "This older Run has no saved file manifest. The File changed, but its original contents cannot be compared."
+            else:
+                current = file_set_snapshot(change["name"])
+                before_files = {x["storage"] + "/" + x["path"]: x for x in saved["entries"]}
+                after_files = {x["storage"] + "/" + x["path"]: x for x in (current or {}).get("entries", [])}
+                for key in sorted(before_files.keys() | after_files.keys()):
+                    old, new = before_files.get(key), after_files.get(key)
+                    if old and new and old["sha256"] == new["sha256"]:
+                        continue
+                    def display(value: dict | None) -> dict:
+                        return {k: v for k, v in (value or {}).items() if k not in {"path", "storage"}}
+                    group["fields"].extend(differences(display(old), display(new), key))
+                group["note"] = "Small text files include saved text. Datasets show size, columns when available, and content fingerprints; rows are not expanded."
+        # Bound diff work for long user-authored instructions. Full values are
+        # still available even when line highlighting is omitted.
+        from difflib import SequenceMatcher
+        for field in group["fields"]:
+            before, after = field["before"], field["after"]
+            if isinstance(before, str) and isinstance(after, str) and len(before) + len(after) <= 65536:
+                left, right = before.splitlines(), after.splitlines()
+                if len(left) + len(right) > 2000:
+                    continue
+                field["before_lines"], field["after_lines"] = [], []
+                for tag, a, b, c, d in SequenceMatcher(None, left, right).get_opcodes():
+                    field["before_lines"].extend(
+                        {"text": left[i] + ("\n" if i < len(left) - 1 else ""), "changed": tag != "equal"}
+                        for i in range(a, b)
+                    )
+                    field["after_lines"].extend(
+                        {"text": right[i] + ("\n" if i < len(right) - 1 else ""), "changed": tag != "equal"}
+                        for i in range(c, d)
+                    )
+        groups.append(group)
+    return groups

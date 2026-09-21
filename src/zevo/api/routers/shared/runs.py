@@ -1214,6 +1214,29 @@ async def get_run(
     )
 
 
+@router.get("/runs/{run_id}/input-changes")
+async def get_run_input_changes(
+    run_id: str, request: Request, db: AsyncSession = Depends(get_db),
+    authorized_detail: RunDetail = Depends(get_run),
+) -> dict:
+    # Reuse the existing Run-detail dependency so hosted distributions retain
+    # their ownership/share checks when they synchronize this endpoint.
+    # This can contain private Test configuration/file previews. Never expose
+    # it to optimization agents, including after the Run finishes.
+    if not is_trusted_ui_request(request):
+        raise HTTPException(403, "Input comparisons are available in the dashboard only")
+    run = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(404, f"run {run_id} not found")
+    from fastapi.concurrency import run_in_threadpool
+    from zevo.db import Task
+    from zevo.engine.run.input_snapshots import input_change_details
+
+    task_key = getattr(run, "task_id", run.task_name)
+    task = await db.get(Task, task_key) if task_key else None
+    return {"changes": await run_in_threadpool(input_change_details, run, task)}
+
+
 class CreateRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
