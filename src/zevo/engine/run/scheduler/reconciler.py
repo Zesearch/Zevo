@@ -1538,6 +1538,19 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
             closed_runs.append(r)
             continue
 
+        # Steering temporarily cancels the old activation before its replacement
+        # can start. Terminal Ticket badges alone do not mean this Run is done.
+        if await instruction_gate_active(session, r.id):
+            continue
+        instruction_wakes = (await session.execute(
+            select(AgentWakeupRequest).where(
+                AgentWakeupRequest.ticket_id.in_([t.id for t in tickets]),
+                AgentWakeupRequest.status.in_(["queued", "running"]),
+            )
+        )).scalars().all()
+        if any((w.payload or {}).get("run_instruction_id") for w in instruction_wakes):
+            continue
+
         statuses = {t.status for t in tickets}
         non_terminal = statuses - TERMINAL_TICKET_STATUSES
         if non_terminal:
