@@ -225,7 +225,13 @@ def test_train_requires_smoke_test_for_large_or_complex_runtime_paths():
     assert "GPU count alone is neither a trigger nor an exemption" in instructions
     assert "forward/backward/optimizer steps" in instructions
     assert "same finite Slurm allocation" in instructions
-    assert "does not require an immediate full-model checkpoint" in instructions
+    assert "exact parent checkpoint" in instructions
+    assert "real sampler, dataloader, collator" in instructions
+    assert "full scheduler/warmup horizon" in instructions
+    assert "Immediately save a complete resumable checkpoint" in instructions
+    assert "perform a real restore" in instructions
+    assert "an `on_step_end` callback alone is insufficient" in instructions
+    assert "A smaller model or separate toy training loop does not satisfy" in instructions
 
 
 def test_data_loads_its_pool():

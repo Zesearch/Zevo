@@ -47,7 +47,7 @@ class PromptContract(BaseModel):
         description=(
             "Exactly 'chat', 'chat:<template-model>' with no whitespace, "
             "'completion', or 'text'. The model reasoning type records the "
-            "selected model's verified template class."
+            "selected execution mode verified against the model's template."
         ),
     )
     model_reasoning_type: ModelReasoningType = "non_thinking"
