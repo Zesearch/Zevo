@@ -275,6 +275,9 @@ async def settle_scoping(
     run.validation_metric = agent_request.validation_metric
     run.validation_metric_direction = agent_request.validation_metric_direction
     run.holdout = holdout
+    from zevo.engine.run.input_snapshots import record_evaluation_identity
+
+    run.input_snapshot = record_evaluation_identity(run.input_snapshot, holdout)
     run.scoring_settled = True
     # decision_pins already holds the immutable optimization-side Auto request;
     # scoping is not allowed to add or rewrite any of those decisions.

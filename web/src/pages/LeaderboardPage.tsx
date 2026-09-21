@@ -47,6 +47,8 @@ type ScoreCell = {
   version_tag?: string;  // Model board: the model this row IS
   run_name?: string;
   run_id: string;
+  started_at: string;
+  evaluation_contract: string;
   baseline_test_score: number | null;
   champion_test_score: number;
   champion_test_score_rank: number;
@@ -158,6 +160,7 @@ export function LeaderboardPage() {
   // launch dialog already holds it, so this is a cache hit, not a round trip.
   const { data: tasks = [] } = useSWR<TaskDef[]>("/api/tasks");
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedContract, setSelectedContract] = useState<string | null>(null);
 
   // The active sortable outcome also drives the bar.
   const activeMeasureId = board.measures.includes(measureId) ? measureId : board.measures[0];
@@ -196,8 +199,33 @@ export function LeaderboardPage() {
     if (active !== selected) setSelected(active);
   }, [active, selected]);
   const task = tasks.find((t) => t.name === active) ?? null;
-  const metricDirection = task?.metric_direction
-    ?? cells.find((c) => c.task_name === active)?.metric_direction
+  const contractOptions = useMemo(() => {
+    const grouped = new Map<string, { key: string; latest: string; runs: number }>();
+    for (const cell of cells) {
+      if (cell.task_name !== active) continue;
+      const key = cell.evaluation_contract || `unknown:${cell.run_id}`;
+      const known = grouped.get(key);
+      if (known) {
+        known.runs += 1;
+        if (cell.started_at > known.latest) known.latest = cell.started_at;
+      } else {
+        grouped.set(key, { key, latest: cell.started_at, runs: 1 });
+      }
+    }
+    return [...grouped.values()].sort((a, b) => b.latest.localeCompare(a.latest));
+  }, [cells, active]);
+  const activeContract = selectedContract
+    && contractOptions.some((option) => option.key === selectedContract)
+    ? selectedContract
+    : contractOptions[0]?.key ?? null;
+  useEffect(() => {
+    if (activeContract !== selectedContract) setSelectedContract(activeContract);
+  }, [activeContract, selectedContract]);
+  const metricDirection = cells.find((c) =>
+    c.task_name === active
+    && (c.evaluation_contract || `unknown:${c.run_id}`) === activeContract
+  )?.metric_direction
+    ?? task?.metric_direction
     ?? "max";
 
   // A newly selected task starts in its natural best-first score order. This
@@ -212,7 +240,8 @@ export function LeaderboardPage() {
   const rows = useMemo(() => {
     if (!active) return [];
     return cells
-      .filter((c) => c.task_name === active)
+      .filter((c) => c.task_name === active
+        && (c.evaluation_contract || `unknown:${c.run_id}`) === activeContract)
       .map((c) => ({
         model: c.model,
         // The setting behind it: its name, and what it decided.
@@ -241,7 +270,7 @@ export function LeaderboardPage() {
       }))
       .filter((r): r is Row => r.value != null)
       .sort((a, b) => sortOrder === "asc" ? a.value - b.value : b.value - a.value);
-  }, [cells, active, measure, settingColor, sortOrder]);
+  }, [cells, active, activeContract, measure, settingColor, sortOrder]);
 
   /** The rows, in the groups the board wants. The model board is one flat list
    *  — every model the task saved, best first. The harness board splits by
@@ -361,6 +390,24 @@ export function LeaderboardPage() {
               >
                 all settings
               </button>
+              {contractOptions.length > 1 && (
+                <label className="flex items-center gap-2 font-mono text-2xs text-slate-500">
+                  Evaluation
+                  <select
+                    value={activeContract ?? ""}
+                    onChange={(event) => setSelectedContract(event.target.value)}
+                    className="rounded-md border border-hair bg-canvas px-2 py-1 text-slate-300"
+                  >
+                    {contractOptions.map((option, index) => (
+                      <option key={option.key} value={option.key}>
+                        {index === 0 ? "Latest" : "Earlier"} · {option.latest
+                          ? new Date(option.latest).toLocaleDateString()
+                          : "unknown date"} · {option.runs} run{option.runs === 1 ? "" : "s"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
             {boardId === "base" && (
               <button

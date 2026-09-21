@@ -1462,6 +1462,26 @@ def decide_run_status(*, has_registered_model: bool, failed_ticket_ids: list[str
     return "failed" if failed_ticket_ids else "halted"
 
 
+async def _supervisor_activation_pending(
+    session: AsyncSession, supervisor_ticket_id: str,
+) -> bool:
+    """Whether the stable supervisor Ticket already has work in flight.
+
+    The Orchestrator reuses one Ticket for every activation, so its Ticket status
+    is not a reliable indication that a wakeup is queued or running.  The wakeup
+    row covers both the pre-launch queue and the complete activation lifetime.
+    Reconciler recovery must wait for that activation to settle before deciding
+    that a handoff, Journal update, or finalization wake was missed.
+    """
+    pending = (await session.execute(
+        select(AgentWakeupRequest.id).where(
+            AgentWakeupRequest.ticket_id == supervisor_ticket_id,
+            AgentWakeupRequest.status.in_(("queued", "running")),
+        ).limit(1)
+    )).scalar_one_or_none()
+    return pending is not None
+
+
 async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
     """Close out runs whose tickets are all in terminal state.
 
@@ -1495,12 +1515,23 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
             # Still work pending (including external scheduler wait) -- leave alone.
             continue
 
+        supervisor = next((t for t in tickets if t.agent_id == "orchestrator"), None)
+        if (
+            supervisor is not None
+            and await _supervisor_activation_pending(session, supervisor.id)
+        ):
+            # A stable supervisor Ticket can still say ``succeeded`` while its
+            # next wakeup is queued/running.  Let that activation observe the
+            # live state before the reconciler concludes that anything was
+            # missed.  If the condition remains after it finishes, the next
+            # reconciliation pass will enqueue the exact recovery then.
+            continue
+
         from zevo.engine.run.lifecycle import finalization as run_finalization
         if run_finalization(r) and not r.registry_version_tag:
             # Failed optimization must not shortcut bounded retention just
             # because its supervisor activation also ended. Wake once; the
             # watchdog will request deterministic rescue at the deadline.
-            supervisor = next((t for t in tickets if t.agent_id == "orchestrator"), None)
             if supervisor is not None:
                 existing = (await session.execute(select(AgentWakeupRequest.id).where(
                     AgentWakeupRequest.ticket_id == supervisor.id,
@@ -1528,7 +1559,6 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
         # it by asking again (queue_wakeup coalesces, so this cannot storm), and
         # leave the run open. Once the supervisor runs, it is the newest thing in
         # the run and this stops matching.
-        supervisor = next((t for t in tickets if t.agent_id == "orchestrator"), None)
         if supervisor is not None:
             sup_seen = _aware(supervisor.updated_at)
             unseen = [

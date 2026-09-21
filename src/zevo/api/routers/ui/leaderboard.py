@@ -165,6 +165,14 @@ def _rank_cells(cells: list[dict], *, by: str) -> list[dict]:
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for cell in cells:
         scope = (cell["task_name"],)
+        # A Task name can outlive several edited evaluation definitions. Never
+        # assign one numeric rank across different held-out populations. Older
+        # unit-test/consumer dictionaries without this field retain their
+        # historical grouping; API cells always provide it.
+        if "evaluation_contract" in cell:
+            scope += (
+                cell.get("evaluation_contract") or f"unknown:{cell.get('run_id', '')}",
+            )
         if by == "harness":
             scope += (tuple(cell.get("setting_key") or []),)
         groups[scope].append(cell)
@@ -217,7 +225,8 @@ async def leaderboard(
                Run.champion_test_score, Run.started_at,
                Run.finished_at, Run.history, Run.metric, Run.metric_direction,
                Run.validation_metric_direction,
-               Run.iteration_budget, Run.max_cost_usd, Run.stop_threshold)
+               Run.iteration_budget, Run.max_cost_usd, Run.stop_threshold,
+               Run.input_snapshot)
         .where(
             Run.champion_test_score.is_not(None),
             Run.task_name != "",
@@ -227,6 +236,29 @@ async def leaderboard(
     if not runs:
         return {"by": by, "cells": [], "models": []}
     by_id = {r.id: r for r in runs}
+
+    # New Runs persist this at setup. Derive the same Test-contract identity
+    # from measured evidence for older Runs so editing a Task never mixes their
+    # ranks merely because the display name stayed the same.
+    from zevo.engine.method.evaluation_identity import digest_json
+
+    evaluation_contract_by_run: dict[str, str] = {}
+    events = (await db.execute(
+        select(ScoreEvent.run_id, ScoreEvent.extras)
+        .where(ScoreEvent.run_id.in_(list(by_id)), ScoreEvent.split == "test")
+    )).all()
+    for run_id, extras in events:
+        identity = (extras or {}).get("evaluation_identity") if isinstance(extras, dict) else None
+        contract = (
+            (identity.get("contract") or {}).get("test_contract")
+            if isinstance(identity, dict) else None
+        )
+        if isinstance(contract, dict):
+            evaluation_contract_by_run[run_id] = digest_json(contract)
+    for run in runs:
+        stored = (run.input_snapshot or {}).get("evaluation_sha256")
+        if stored:
+            evaluation_contract_by_run[run.id] = str(stored)
 
     settings = await _setting_by_run(db, [r.id for r in runs])
     saved = await _saved_settings(db)
@@ -279,9 +311,11 @@ async def leaderboard(
         )
         return {
             "task_name": r.task_name, "run_id": r.id, "run_name": r.run_name or "",
+            "started_at": r.started_at.isoformat() if r.started_at else "",
             "metric": r.metric,
             "metric_direction": r.metric_direction,
             "champion_test_score": r.champion_test_score,
+            "evaluation_contract": evaluation_contract_by_run.get(r.id, ""),
             # the untuned probe this run measured itself against, on the test
             # set; null when the run never took one or it was never measured.
             "baseline_test_score": baseline,

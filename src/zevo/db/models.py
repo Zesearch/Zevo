@@ -384,6 +384,13 @@ class Run(Base):
     # Specialist-selected values live in inference_config.yaml and the
     # per-iteration train_config.yaml artifacts.
     decision_pins: Mapped[dict[str, Any]] = mapped_column(JsonCol, default=dict)
+    # Immutable identity of the reusable Task and Files catalogue entries at
+    # launch.  The Run reads copied input bytes from its own directories; this
+    # metadata only lets the UI say whether the live catalogue objects were
+    # later edited or deleted.
+    input_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JsonCol, default=dict, server_default="{}"
+    )
     # Exact tokenizer/template signatures are comparable only inside one base
     # model lineage. Different base models may legitimately ship different
     # native templates, while a baseline and descendants of the same base must

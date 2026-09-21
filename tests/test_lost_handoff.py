@@ -321,6 +321,82 @@ async def test_repair_does_not_storm(session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending_status", ["queued", "running"])
+async def test_reconciler_waits_for_pending_supervisor_before_journal_repair(
+    session, pending_status,
+):
+    """Do not enqueue the stale wake seen beside Train in run be25e90e.
+
+    Evaluation has written the factual Journal row and every Ticket currently
+    looks terminal, but an existing supervisor activation is already responsible
+    for consuming that state.  Recovery is needed only if the row remains
+    incomplete after that activation finishes.
+    """
+    session.add(Run(
+        metric="accuracy",
+        id=f"journal-{pending_status}",
+        agent_objective="o",
+        status="running",
+        supervisor_ticket_id=f"orchestrate-journal-{pending_status}-001",
+        history=[{
+            "iteration": 0,
+            "source": "baseline",
+            "score": 0.25,
+            "action": "",
+            "result": "",
+            "analysis": "",
+            "next": "",
+        }],
+    ))
+    supervisor = _ticket(
+        f"orchestrate-journal-{pending_status}-001",
+        f"journal-{pending_status}",
+        "orchestrator",
+        updated_ago=10,
+    )
+    session.add_all([
+        supervisor,
+        _ticket(
+            f"eval-journal-{pending_status}-001",
+            f"journal-{pending_status}",
+            "evaluation",
+            updated_ago=100,
+        ),
+        AgentWakeupRequest(
+            id=f"existing-{pending_status}-wake",
+            agent_id="orchestrator",
+            ticket_id=supervisor.id,
+            source="handoff",
+            status=pending_status,
+            reason="evaluation completed",
+        ),
+    ])
+    await session.commit()
+
+    counts = await _close_finished_runs(session)
+
+    assert counts == {"success": 0, "degraded": 0, "failed": 0, "halted": 0}
+    wakes = (await session.execute(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == supervisor.id,
+    ))).scalars().all()
+    assert [wake.id for wake in wakes] == [f"existing-{pending_status}-wake"]
+
+    # If the existing activation settles without filling the Journal, the next
+    # pass still performs the intended recovery; the guard does not hide stalls.
+    wakes[0].status = "completed"
+    wakes[0].finished_at = dt.datetime.now(dt.timezone.utc)
+    await session.commit()
+    await _close_finished_runs(session)
+
+    wakes = (await session.execute(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == supervisor.id,
+    ).order_by(AgentWakeupRequest.created_at))).scalars().all()
+    assert len(wakes) == 2
+    assert wakes[-1].status == "queued"
+    assert "complete Journal fields" in wakes[-1].reason
+
+
+@pytest.mark.asyncio
 async def test_a_run_with_no_supervisor_is_unaffected(session):
     """Single-agent runs have no supervisor to owe anything."""
     session.add(Run(metric="accuracy", id="r4", agent_objective="o", status="running"))

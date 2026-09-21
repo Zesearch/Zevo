@@ -260,6 +260,9 @@ class RunDetail(RunSummary):
     # trained. Same definition the harness leaderboard ranks by, so the strip
     # and the board cannot name a run's harness differently.
     harness_model: str = ""
+    # Differences between the live reusable Task/Files and the immutable
+    # versions this Run started with. Empty means no tracked source changed.
+    input_changes: list[dict[str, str]] = Field(default_factory=list)
 
 
 class RunInstructionDTO(BaseModel):
@@ -1160,11 +1163,18 @@ async def get_run(
         else _agent_history(r.history or [])
     )
     from zevo.api.routers.ui.leaderboard import _harness_by_run
+    from zevo.db import Task
+    from zevo.engine.run.input_snapshots import detect_input_changes
+    from fastapi.concurrency import run_in_threadpool
+
+    live_task = await db.get(Task, r.task_name) if r.task_name else None
+    input_changes = await run_in_threadpool(detect_input_changes, r, live_task)
     return RunDetail(
         **base.model_dump(),
         agent_cost_usd=round(snap.llm_cost_usd, 6),
         gpu_cost_usd=round(snap.gpu_cost_usd, 6),
         harness_model=(await _harness_by_run(db, [run_id])).get(run_id, ""),
+        input_changes=input_changes,
         history=history,
         benchmark_progress=_benchmark_progress(
             r, tickets, reveal_holdout=reveal_holdout,
@@ -1839,6 +1849,10 @@ async def _create_auto_run(
     from zevo.engine.persistence import create_run as persist_create
     from zevo.engine.run.scoping import new_scoping_ticket
     from zevo.engine.run.wakeup import queue_wakeup
+    from zevo.engine.run.input_snapshots import (
+        launch_auto_input_snapshot, snapshot_auto_request,
+    )
+    from fastapi.concurrency import run_in_threadpool
 
     auto_request = body.user_request
     if not isinstance(auto_request, AutoUserRequest):  # pragma: no cover - pinned by the request validator
@@ -1936,10 +1950,21 @@ async def _create_auto_run(
     run.model_lineages = {}
     run.customizations = {}
     run.holdout = {}
+    run.input_snapshot = await run_in_threadpool(
+        launch_auto_input_snapshot, auto_request,
+    )
     run.supervisor_ticket_id = ""
     await db.flush()
 
-    scope = new_scoping_ticket(run, auto_request)
+    scoped_request = await run_in_threadpool(
+        snapshot_auto_request, run.id, auto_request,
+    )
+    if auto_request.dataset and scoped_request.dataset != auto_request.dataset:
+        pins = dict(run.decision_pins or {})
+        pins["dataset_source"] = auto_request.dataset
+        pins["dataset"] = scoped_request.dataset
+        run.decision_pins = pins
+    scope = new_scoping_ticket(run, scoped_request)
     db.add(scope)
     run.status = "running"
     await db.commit()
@@ -2276,6 +2301,15 @@ async def create_run(
         )
         db.add(task_row)
 
+    # Capture the reusable objects before any local path is rewritten to the
+    # Run-owned copy below. This is the identity the detail page compares with
+    # today's Task and Files catalogue.
+    from zevo.engine.run.input_snapshots import launch_input_snapshot
+
+    input_snapshot = await run_in_threadpool(
+        launch_input_snapshot, task_row, user_request,
+    )
+
     # A task states the PROBLEM; the sentences that say which model, which
     # method and whether the training data is handed over describe the SETTING,
     # and this run's setting is the one in front of us — not the one whichever
@@ -2499,6 +2533,19 @@ async def create_run(
     # Ticket join the same transaction. A single commit lands them all (below).
     await db.flush()
 
+    # Every local input becomes Run-owned before split settlement or any Agent
+    # can read it. Editing/deleting the live File therefore affects only future
+    # Runs, including while this Run is still active.
+    from zevo.engine.run.input_snapshots import snapshot_user_request
+
+    source_dataset = user_request.dataset
+    source_dataset_split = user_request.dataset_split
+    source_dataset_config = user_request.dataset_config
+    user_request = await run_in_threadpool(
+        snapshot_user_request, run.id, user_request,
+    )
+    run.input_snapshot = input_snapshot
+
     # Create the ONE supervisor ticket for this run. The orchestrator is a
     # single agent with a single work order: this same orchestrate-...-001 is
     # re-woken on every child completion, across every Zevo model-improvement loop, so
@@ -2543,15 +2590,15 @@ async def create_run(
     # actually record, not the primary scalar projection used to enter setup.
     run.validation_metric = agent_request.validation_metric
     run.validation_metric_direction = agent_request.validation_metric_direction
-    if user_request.dataset:
+    if source_dataset:
         # The user owns the source, while split settlement owns the exact file
         # workers may train on.  Preserve both meanings instead of comparing a
         # generated train-minus-validation path with the original upload.
         pins = dict(run.decision_pins or {})
-        pins["dataset_source"] = user_request.dataset
+        pins["dataset_source"] = source_dataset
         pins["dataset"] = agent_request.dataset
-        pins["dataset_source_split"] = user_request.dataset_split
-        pins["dataset_source_config"] = user_request.dataset_config
+        pins["dataset_source_split"] = source_dataset_split
+        pins["dataset_source_config"] = source_dataset_config
         pins["dataset_split"] = agent_request.dataset_split
         pins["dataset_config"] = agent_request.dataset_config
         run.decision_pins = pins
@@ -2564,7 +2611,10 @@ async def create_run(
     # training file into the run's own directory, where no cached profile
     # exists — and the profile describes the data's shape, which dropping a
     # tenth of the rows does not change.
-    profile = _dataset_profile_for(user_request.dataset)
+    profile = _dataset_profile_for(source_dataset)
+    from zevo.engine.run.input_snapshots import record_evaluation_identity
+
+    run.input_snapshot = record_evaluation_identity(run.input_snapshot, holdout)
     # The payload (incl. the G.1 budget snapshot the orchestrator sees from
     # turn 0) is assembled in zevo.engine.run.supervisor, shared with the
     # post-scoping settlement of an `auto` Run so both start identically.
@@ -2846,6 +2896,7 @@ async def get_run_request(
         )).scalar_one_or_none()
         if sup is not None and isinstance(sup.payload, dict):
             req = sup.payload.get("user_request") or {}
+    source_snapshot = dict((run.input_snapshot or {}).get("sources") or {})
 
     def _training_data() -> dict:
         """Training data is not always a path.
@@ -2854,7 +2905,7 @@ async def get_run_request(
         for the data agent to satisfy — the capybara task does the latter, and calling
         that "not given" would be wrong: it IS specified, just not as a file.
         """
-        src = data_source(str(req.get("dataset") or ""))
+        src = data_source(str(source_snapshot.get("dataset") or req.get("dataset") or ""))
         if src["kind"] != "none":
             return src
         query = str(req.get("data_query") or "").strip()
@@ -2878,7 +2929,18 @@ async def get_run_request(
     holdout = dict(run.holdout or {}) if reveal_holdout else {}
 
     def _from(key: str) -> dict:
-        return data_source(str(req.get(key) or holdout.get(key) or ""))
+        lane = "validation" if key.startswith("validation_") else "test"
+        members = source_snapshot.get(f"{lane}_sets") or []
+        source_key = {
+            f"{lane}_set": "test_set",
+            f"{lane}_sample_submission": "sample_submission",
+            f"{lane}_evaluation_script": "evaluation_script",
+        }.get(key, "")
+        original = (
+            str((members[0] or {}).get(source_key) or "")
+            if source_key and members and isinstance(members[0], dict) else ""
+        )
+        return data_source(str(original or req.get(key) or holdout.get(key) or ""))
 
     # The questions-only copies are not inputs any more — the data agent derives
     # them from these fields, so the fields are what there is to show.
