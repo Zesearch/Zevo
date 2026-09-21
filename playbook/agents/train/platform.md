@@ -360,27 +360,58 @@ not trigger this rule. Determine parameter count from verified model config or
 weight metadata when the model id does not contain a reliable size hint; do not
 assume an unknown model is small.
 
-The test must exercise the realized code rather than a separate toy
-implementation:
+The smoke test is the opening steps of the real training run, using the exact
+parent checkpoint, resolved training configuration, actual training data, and
+production execution path. A smaller model or separate toy training loop does
+not satisfy this requirement. An optional small-model environment probe may
+precede it, but cannot replace it.
 
-1. Before the expensive parent load, run a short distributed compatibility
-   check with the exact launcher, backend, precision, optimizer class and
-   kwargs, sharding/offload path, gradient clipping, and training-step code on
-   a small representative module. Complete at least two
-   forward/backward/optimizer steps. Abort on an unsupported distributed
-   operator, mixed local/sharded state, collective stall, or non-finite update.
-2. Clean up the smoke-test model and temporary state after it passes, then load
-   the real parent and start the declared training schedule. Keep this inside
-   the same finite Slurm allocation so the Run does not release GPUs, queue
-   again, or load the large parent twice.
+1. Prepare the actual dataset and load the real parent with the declared
+   launcher, topology, precision, optimizer, sharding/offload, and gradient
+   accumulation settings. Exercise the real sampler, dataloader, collator, and
+   method-specific forward/rollout/reward path to produce the first batch.
+   Validate data access against the installed library versions and actual data
+   scale; avoid repeated expensive conversion or full-dataset work per lookup
+   or rank when it can be prepared once and reused. Do not substitute a tiny
+   dataset or bypass the sampler to make the smoke test pass.
+2. Complete at least two forward/backward/optimizer steps on the real model.
+   Check finite loss and gradients, optimizer-step advancement, and telemetry.
+   The steps count toward the declared training schedule. Keep its full
+   scheduler/warmup horizon and data order; do not implement smoke by replacing
+   the full plan with `max_steps=2`, shortening epochs, or lowering the declared
+   batch size or sequence length. A declared plan with fewer than two optimizer
+   steps must exercise all of its steps without adding extra updates.
+3. Immediately save a complete resumable checkpoint through the framework's
+   distributed checkpoint API and the supplied checkpoint helper. Include the
+   model or adapter, optimizer, scheduler, step counters, RNG, and any method-
+   specific state required to resume the same plan. All required ranks must
+   participate. Verify all expected files/shards and perform a real restore
+   through the framework's supported resume path, checking restored counters
+   and state and successful continuation on the next scheduled step. File
+   existence or a weights-only reload is not sufficient. This recovery
+   checkpoint is separate from the optional weights-only branch-point retention
+   policy; do not publish smoke completion as the final Train result.
+4. After verification, continue the unchanged plan inside the same finite Slurm
+   allocation (or the same instance/cloud job). Reuse the loaded model and
+   Trainer where the framework supports restoration in place; otherwise use its
+   supported restore lifecycle within that allocation. Do not load another copy
+   of the large base model or return to the resource queue. Preserve completed
+   steps and data/RNG position rather than replaying the opening updates. A
+   plan already finished at the smoke boundary needs no extra optimizer step.
 
-The smoke test does not require an immediate full-model checkpoint. Save and
-verify resumable checkpoints at the normal cadence selected for the real
-training plan. Give the smoke phase an explicit timeout and progress marker. On
-failure, dump all rank stacks where possible, report the exact operation, leave
-no success artifact, and release the allocation. Record the trigger, tested
-topology, completed operations, and elapsed time in
-`training.implementation_config` and the local log.
+Only the number of initial training steps is bounded; the real data path and
+configuration remain intact. Full-dataset evaluation and a full training epoch
+are not prerequisites for passing smoke. Record the trigger, exact plan,
+phase-specific timeouts, and checks in `training.implementation_config` before
+submission. Emit progress and elapsed time for data/sampler preparation, first
+batch, first optimizer step, checkpoint save, restore, and continuation. Use
+finite timeouts appropriate to the model/data/checkpoint size, including a
+watchdog that can detect a blocked first batch or step while the training loop
+is not returning; an `on_step_end` callback alone is insufficient. On timeout
+or failure, capture the last operation and all rank stacks where possible,
+report failure, and exit the job to release its resources rather than remaining
+silently running. Record measured steps, checks, and timings in the job log and
+Train result. Success requires the real-path checks, not process liveness.
 
 ### Method branch selection
 
@@ -420,7 +451,9 @@ YAML at runtime and pass it unchanged to every `apply_chat_template` call. Do
 not reconstruct it from `model_reasoning_type`, probe a preferred value, or hard-code
 model-specific thinking controls in generated Train code. An empty mapping means pass no
 extra template kwargs; it does not authorize Train to invent one. Do not repeat
-these keys under `training.implementation_config`.
+these keys under `training.implementation_config`. Preserve explicit `false`
+values used to disable thinking. Native empty reasoning delimiters may be part
+of the non-thinking rendering; they are not supervised reasoning content.
 
 Before training, use the same rendering function that the real data pipeline
 will call to perform a synthetic smoke check:
@@ -440,10 +473,11 @@ will call to perform a synthetic smoke check:
 This check verifies the frozen contract; it must never select or rewrite it. A
 mismatch means repair the rendering/collator implementation or report a real
 tokenizer/version incompatibility. Do not mutate the Inference YAML to make the
-check pass. A later bounded GPU runtime smoke test may validate forward/backward,
-distributed execution, telemetry, and saving in an isolated output directory;
-it also may not change the frozen prompt/template contract or become the
-reported final checkpoint.
+check pass. The mandatory GPU runtime smoke test, when triggered, covers the
+opening steps of actual training, distributed execution, telemetry, and
+checkpoint save/restore as specified above. It preserves the frozen
+prompt/template contract; its recovery checkpoint is not by itself the final
+Train result.
 
 All serialized SHA-256 values use one representation: exactly 64 lowercase
 hexadecimal characters with no `sha256:` prefix. Copy `data_signature` and

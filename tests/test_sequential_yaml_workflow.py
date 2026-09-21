@@ -175,17 +175,21 @@ def test_template_kwargs_are_explicit_and_exclude_execution_controls(
 
     body = yaml.safe_load(path.read_text(encoding="utf-8"))
     body["template_kwargs"] = {"enable_thinking": False}
-    with pytest.raises(ValidationError, match="non-thinking models omit"):
+    assert InferenceRunConfig.model_validate(body).template_kwargs == {"enable_thinking": False}
+    body["prompt"]["model_reasoning_type"] = "thinking"
+    with pytest.raises(ValidationError, match="contradicts"):
         InferenceRunConfig.model_validate(body)
 
     body = yaml.safe_load(path.read_text(encoding="utf-8"))
     body["prompt_example"]["rendered_prompt"] += "<think>\n\n</think>\n"
+    assert InferenceRunConfig.model_validate(body).prompt.model_reasoning_type == "non_thinking"
+    body["prompt"]["model_reasoning_type"] = "thinking"
     with pytest.raises(ValidationError, match="reasoning content"):
         InferenceRunConfig.model_validate(body)
 
     body = yaml.safe_load(path.read_text(encoding="utf-8"))
     body["prompt_example"]["rendered_prompt"] += "<think>reason</think>\n"
-    with pytest.raises(ValidationError, match="must not contain think tags"):
+    with pytest.raises(ValidationError, match="must not contain active think tags"):
         InferenceRunConfig.model_validate(body)
 
     body = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -1428,3 +1432,36 @@ def test_orchestrator_request_payloads_do_not_accept_api_owned_keys() -> None:
             "parent_selection_rationale": "Initial adaptation starts from Baseline.",
             "configuration_pins": {},
         })
+
+
+@pytest.mark.parametrize("empty_span", ["", "<think>\n\n</think>\n"])
+def test_disabled_thinking_survives_inference_to_train(tmp_path: Path, empty_span: str) -> None:
+    inference_path = _write_inference_config(tmp_path)
+    body = yaml.safe_load(inference_path.read_text())
+    body["template_kwargs"] = {"enable_thinking": False}
+    body["prompt_example"]["rendered_prompt"] += empty_span
+    inference_path.write_text(yaml.safe_dump(body))
+    assert load_inference_config(inference_path).template_kwargs == {"enable_thinking": False}
+    result = _stub_train({
+        "operation": "train", "ticket_id": "train-r-001", "iteration": 1,
+        "base_model": "Qwen/Qwen3-0.6B-Base", "model_source": "base_model",
+        "parent_selection_rationale": "Initial adaptation starts from Baseline.",
+        "inference_config_path": str(inference_path), "training_method_pin": "sft",
+        "configuration_pins": {}, "configuration_suggestions": {},
+        "data_signature": "d" * 64,
+    }, tmp_path / "train")
+    config = load_train_config(result.train_config_path)
+    assert config.template_kwargs == {"enable_thinking": False}
+    assert config.prompt_alignment.rendered_prompt == body["prompt_example"]["rendered_prompt"]
+    train = config.model_dump()
+    train["template_kwargs"]["enable_thinking"] = True
+    with pytest.raises(ValidationError, match="contradicts"):
+        TrainRunConfig.model_validate(train)
+    train = config.model_dump()
+    train["template_kwargs"]["enable_thinking"] = "false"
+    with pytest.raises(ValidationError, match="must be boolean"):
+        TrainRunConfig.model_validate(train)
+    train = config.model_dump()
+    train["prompt_alignment"]["rendered_prompt"] += "<think>active reasoning</think>"
+    with pytest.raises(ValidationError, match="must not contain active think tags"):
+        TrainRunConfig.model_validate(train)

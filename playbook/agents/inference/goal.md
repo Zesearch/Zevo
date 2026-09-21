@@ -9,11 +9,12 @@ comparable Inference configuration.
 2. Verify model/tokenizer/template/backend compatibility.
 3. Choose the intended serving interface from the Objective first, then choose
    all remaining unpinned values, including an explicit `greedy` or `sampling`
-   decoding strategy. Classify the exact selected model/checkpoint as
-   `thinking` or `non_thinking` from its verified tokenizer/template behavior.
-   Use the matching template: a thinking model emits its reasoning span before
-   the answer, while a non-thinking model uses ordinary rendering with no
-   thinking markup. A conversational or instruction-following Objective uses a
+   decoding strategy. Verify the model's supported reasoning modes and honor
+   an explicit user request; record the selected mode as `thinking` or
+   `non_thinking`. Report unsupported requests rather than silently changing
+   them. Use the verified template and controls, including explicit disabling
+   arguments when needed. Empty native reasoning delimiters can represent
+   non-thinking mode. A conversational or instruction-following Objective uses a
    stable chat contract from Baseline through Train and later evaluation, even
    when the untrained base tokenizer does not ship a native chat template. Chat
    framing uses `You are a helpful assistant.` when no system prompt is supplied.

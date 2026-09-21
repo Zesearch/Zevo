@@ -193,17 +193,19 @@ Do not treat `0`, `null`, `""`, or a missing suggestion as a requested value.
 Record whether each actual suggestion was accepted or adjusted. Record
 self-selected values when no suggestion existed.
 
-Classify the exact selected model/checkpoint as either `thinking` or
-`non_thinking` by verifying its tokenizer and template on the assigned runtime;
-do not infer the class from a family name alone. This is a model property, not
-an Agent preference, Orchestrator suggestion, or user pin. Record the result as
-`prompt.model_reasoning_type`. A thinking model uses its verified thinking
-template and emits reasoning content before the answer. A non-thinking model
-uses its ordinary template with no thinking-specific arguments or markup.
-These are the only two model classes. A chat prompt always has a system message;
-the empty user value canonicalizes to `You are a helpful assistant.`
-Completion/text framing has no system message and is valid only for a
-non-thinking model.
+Verify the exact model/checkpoint's supported reasoning modes and template on
+the assigned runtime; do not infer support from a family name alone. Record
+the selected execution mode as `prompt.model_reasoning_type` (`thinking` or
+`non_thinking`). Model capability, template defaults, and the selected mode
+are distinct. Honor explicit user requests, including those in `model_query`;
+if unsupported or conflicting, report the conflict rather than silently
+adjusting the request. Without a request, use verified model/runtime evidence
+to select and explain the mode. A thinking mode emits reasoning before the
+answer. A non-thinking mode may require an explicit disabling argument and
+native empty reasoning delimiters. An omitted argument is not proof of disabled
+thinking. A chat prompt always has a system message; an empty user value
+canonicalizes to `You are a helpful assistant.` Completion/text framing has
+no system message and is valid only for non-thinking mode.
 
 Choose framing for the target behavior, not for what the untrained base happens
 to do best before improvement:
@@ -231,16 +233,19 @@ this and every other serialized representation.
 Also resolve and record `template_kwargs`: the exact extra keyword mapping
 passed to `tokenizer.apply_chat_template` for both the synthetic example and
 every real row. Probe support on the assigned tokenizer/runtime rather than
-assuming a model family accepts a named control. A thinking model may, for
-example, require `{"enable_thinking": true}`. A non-thinking model uses the
-verified ordinary rendering path and no thinking-specific kwarg. Record the exact template source/hash
-and never patch its rendered text afterward.
-`tokenize`, `add_generation_prompt`, and return-shape controls
-are execution controls, not `template_kwargs`. The prediction script must load
-this mapping from YAML; never hard-code a second copy or repeat its keys under
-`implementation_config`. When `enable_thinking` is present it must be `true`
-and must agree with `prompt.model_reasoning_type=thinking`; a non-thinking model
-does not serialize that kwarg.
+assuming a model family accepts a named control. When supported,
+`enable_thinking=true` must agree with thinking mode and `enable_thinking=false`
+with non-thinking mode. Preserve explicit disabling arguments; omitting them
+can restore a model's thinking default. Models without that control use their
+verified native mechanism. Record the exact template source/hash and never
+patch its rendered text afterward. Empty native `<think></think>` blocks can
+represent disabled thinking; tag presence alone does not establish the mode.
+`tokenize`, `add_generation_prompt`, and return-shape controls are execution
+controls, not `template_kwargs`. The prediction script must load this mapping
+from YAML; never hard-code a second copy or repeat its keys under
+`implementation_config`. Verify the selected behavior on a bounded generation
+probe before the full prediction job. If the probe contradicts an explicit
+request, resolve or report it; do not label the configuration compliant.
 
 The task mapping belongs under `measurement.inference_config`; supported keys
 are `input_fields`, `answer_regex`, `answer_column`, `batch_size`, `stop`, and —

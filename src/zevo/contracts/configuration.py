@@ -279,6 +279,11 @@ def _think_blocks(value: str) -> list[str]:
     return _THINK_BLOCK_RE.findall(value)
 
 
+def _without_empty_think_blocks(value: str) -> str:
+    # Native templates may close an empty reasoning span to disable thinking.
+    return re.sub(r"<think>\s*</think>", "", value, flags=re.IGNORECASE)
+
+
 class PromptMessageExample(BaseModel):
     """One synthetic message before tokenizer/template rendering."""
 
@@ -632,22 +637,20 @@ class InferenceRunConfig(BaseModel):
             enable_thinking = self.template_kwargs["enable_thinking"]
             if not isinstance(enable_thinking, bool):
                 raise ValueError("template_kwargs.enable_thinking must be boolean")
-            if enable_thinking is not True:
-                raise ValueError(
-                    "non-thinking models omit template_kwargs.enable_thinking"
-                )
-            if self.prompt.model_reasoning_type != "thinking":
+            if enable_thinking != (self.prompt.model_reasoning_type == "thinking"):
                 raise ValueError(
                     "template_kwargs.enable_thinking contradicts the selected "
                     "model reasoning type"
                 )
         rendered_prompt = self.prompt_example.rendered_prompt
-        if any(not block.strip() for block in _think_blocks(rendered_prompt)):
+        if self.prompt.model_reasoning_type == "thinking" and any(
+            not block.strip() for block in _think_blocks(rendered_prompt)
+        ):
             raise ValueError("thinking-model rendering requires reasoning content")
         if self.prompt.model_reasoning_type == "non_thinking" and _contains_think_tag(
-            rendered_prompt
+            _without_empty_think_blocks(rendered_prompt)
         ):
-            raise ValueError("non-thinking model rendering must not contain think tags")
+            raise ValueError("non-thinking model rendering must not contain active think tags")
         if self.prompt.model_reasoning_type == "thinking" and not _contains_think_tag(
             rendered_prompt
         ):
@@ -1315,11 +1318,7 @@ class TrainRunConfig(BaseModel):
             enable_thinking = self.template_kwargs["enable_thinking"]
             if not isinstance(enable_thinking, bool):
                 raise ValueError("template_kwargs.enable_thinking must be boolean")
-            if enable_thinking is not True:
-                raise ValueError(
-                    "non-thinking models omit template_kwargs.enable_thinking"
-                )
-            if self.prompt.model_reasoning_type != "thinking":
+            if enable_thinking != (self.prompt.model_reasoning_type == "thinking"):
                 raise ValueError(
                     "template_kwargs.enable_thinking contradicts the selected "
                     "model reasoning type"
@@ -1328,16 +1327,17 @@ class TrainRunConfig(BaseModel):
             self.prompt_alignment.rendered_prompt,
             *self.training_data_example.rendered_sequences.values(),
         ]
-        if any(
+        if self.prompt.model_reasoning_type == "thinking" and any(
             not block.strip()
             for rendered in rendered_values
             for block in _think_blocks(rendered)
         ):
             raise ValueError("thinking-model training rendering requires reasoning content")
         if self.prompt.model_reasoning_type == "non_thinking" and any(
-            _contains_think_tag(rendered) for rendered in rendered_values
+            _contains_think_tag(_without_empty_think_blocks(rendered))
+            for rendered in rendered_values
         ):
-            raise ValueError("non-thinking model training rendering must not contain think tags")
+            raise ValueError("non-thinking model training rendering must not contain active think tags")
         if self.prompt.model_reasoning_type == "thinking" and not any(
             any(block.strip() for block in _think_blocks(rendered))
             for rendered in self.training_data_example.rendered_sequences.values()

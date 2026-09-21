@@ -50,10 +50,11 @@ second mapping in the script. Never copy a Validation/Test answer or example
 reference into it. For chat, the first message is the realized system prompt;
 for completion/text, `messages` is empty.
 
-`model_reasoning_type` is either `thinking` or `non_thinking`, derived by
-Baseline Inference from the exact model/checkpoint tokenizer and template. The
-rendered prompt, template kwargs, and measured output must match that model
-class. It is not a work-order pin or advisory choice.
+`model_reasoning_type` records the selected execution mode, either `thinking`
+or `non_thinking`. Baseline Inference verifies support against the exact model,
+tokenizer, and template and honors explicit user requests. The rendered prompt,
+template kwargs, and measured output must agree with that mode. Report an
+unsupported request rather than silently substituting the model default.
 
 Return exactly one `InferenceResult`. Its top-level artifact fields describe
 the primary benchmark; on success, its `suite_members` must contain exactly

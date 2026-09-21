@@ -24,7 +24,12 @@ branch points; this is never a requirement to save every epoch or step.
    sequence(s), and loss/context spans, then write and validate
    `train_config.yaml` before training.
 7. Preflight the actual data/method/model/GPU/dependencies, train in the
-   foreground, and verify the expected checkpoint interface. When selective
+   foreground, and verify the expected checkpoint interface. For large or
+   complex training, follow the mandatory runtime smoke protocol: real model,
+   real data/sampler, opening optimizer steps, and a verified resumable
+   checkpoint save/restore before continuing the unchanged plan in the same
+   allocation. A toy model is not a substitute. Recovery checkpoints carry
+   training state independently of optional branch-point retention. When selective
    retention would answer a concrete later question or protect against late
    degradation, record a bounded retention policy and save model weights only.
 
