@@ -11,7 +11,7 @@
 | `checkpoint_path` | Empty for baseline; required for trained checkpoints. |
 | `branch_transition` | Engine-validated exhausted-branch record; only a later Base-model baseline uses `level=base_model`. |
 | `scoring_set` | Questions-only rows; preserve row order. |
-| `sample_submission` | Exact output-column contract. |
+| `sample_submission` | Exact output-column contract with illustrative example values. |
 | `inference_data_profile_path` | Required only when selecting the baseline config. |
 | `inference_config_path` | Required whenever reusing the baseline config. |
 | `inference_config_schema` | Exact machine-readable key/type authority for `inference_config.yaml`; never infer keys from examples or prior Runs. |
