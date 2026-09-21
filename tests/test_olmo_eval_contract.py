@@ -30,15 +30,15 @@ def module_at(relative: str, name: str):
     return module
 
 
-test_eval = module_at("data/files/OLMo-3.1-Evaluation-Data/evaluator.py", "olmo_test_eval")
+test_eval = module_at("tests/fixtures/olmo/evaluation/evaluator.py", "olmo_test_eval")
 math_eval = module_at(
-    "data/files/OLMo-3.1-Validation-Data/math-hard-evaluator.py", "olmo_math_eval",
+    "tests/fixtures/olmo/validation/math-hard-evaluator.py", "olmo_math_eval",
 )
 validation_eval = module_at(
-    "data/files/OLMo-3.1-Validation-Data/evaluator.py", "olmo_validation_eval",
+    "tests/fixtures/olmo/validation/evaluator.py", "olmo_validation_eval",
 )
 safety_eval = module_at(
-    "data/files/OLMo-3.1-Validation-Data/safety-wildjailbreak-evaluator.py",
+    "tests/fixtures/olmo/validation/safety-wildjailbreak-evaluator.py",
     "olmo_safety_eval",
 )
 task_update = module_at("ops/update_olmo_eval_contract.py", "olmo_task_update")
@@ -232,7 +232,7 @@ def test_frozen_scorer_protocol_runs_in_subprocess_from_cached_verdict(tmp_path)
     env.pop("OPENAI_API_KEY", None)
     env["PYTHONPATH"] = str(ROOT / "src")
     result = subprocess.run([
-        sys.executable, str(ROOT / "data/files/OLMo-3.1-Validation-Data/evaluator.py"),
+        sys.executable, str(ROOT / "tests/fixtures/olmo/validation/evaluator.py"),
         str(predictions), str(scoring), str(metrics),
     ], env=env, text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
@@ -313,7 +313,7 @@ def test_preflight_blocks_model_judge_without_openai_api_key(monkeypatch):
         task_objective="test", metric_type="custom",
         metric="pairwise_win_rate_vs_reference_model_judge",
         metric_direction="max",
-        evaluation_script=str(ROOT / "data/files/OLMo-3.1-Evaluation-Data/evaluator.py"),
+        evaluation_script=str(ROOT / "tests/fixtures/olmo/evaluation/evaluator.py"),
         training_method="", dataset="", base_model="",
         test_set="/data/test.csv", test_answer_fields=["output"],
         test_sample_submission="/data/submission.csv",

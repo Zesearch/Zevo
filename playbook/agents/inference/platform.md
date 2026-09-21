@@ -458,9 +458,20 @@ the YAML's ordered input mapping. Generate one real model reply per row. Write
 exactly the sample-submission columns in exactly their order. Never prefill,
 duplicate, filter, reorder, or synthesize replies to make the file complete.
 
+Sample submissions illustrate the output schema. Populate identifiers from the
+assigned inputs and output values from each actual model response, following
+the Task's field definitions.
+
+Apply deterministic extraction to the generated response, preserving the
+requested answer structure and content. Retain the original decoded completion
+in the configured raw-output artifact. Use an empty string for a missing
+extracted value unless the Task specifies another missing-value representation.
+Pin extraction behavior with the baseline and reuse it unchanged.
+
 Before success require:
 
-- non-empty predictions and exactly one row per input row;
+- a non-empty predictions file and exactly one row per input row; an empty
+  extracted field is valid when extraction failed as described above;
 - exact submission columns/order;
 - stable ids/order where present;
 - real model output retained even when parsing fails;
