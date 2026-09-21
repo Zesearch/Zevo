@@ -224,6 +224,40 @@ will receive and reuse that same contract. Do not switch Baseline to completion
 merely because the starting model is a base model, and do not silently adopt a
 different native template after training.
 
+### Structured conversation inputs
+
+When the task explicitly asks to continue a conversation supplied in a record,
+set `measurement.inference_config.conversation_field` to that input field.
+Set `conversation_fallback_field` only when the task declares a plain prompt
+fallback; both fields must be in `input_fields`. A field named `messages` alone
+is not sufficient: quoted conversations in classification/analysis tasks remain
+ordinary task data. In conversation mode, `inference_query` describes how to
+interpret the record; do not interpolate it into an extra user turn.
+
+Decode a JSON-string conversation or accept its already-parsed list. Preserve
+role, content, and order, including historical assistant replies, then apply
+the recorded chat template once with `add_generation_prompt=True`. A nonempty
+conversation is authoritative: do not append `prompt` or duplicate the final
+user turn. Only an empty/missing conversation uses the declared fallback as a
+single user turn. Prepend the configured system message only if the history
+has no system message. Never replace a record's existing system instructions.
+Malformed JSON, unsupported role/content structures, or a missing final user
+turn must produce a clear input error, not a silent flattening or fallback.
+For the supported text-only system/user/assistant shape, the reference behavior
+is `zevo.contracts.prompting.conversation_messages`; generated runtime code
+must follow the same behavior without depending on unavailable remote modules.
+
+Verify the real prompt builder with synthetic user/assistant/user history,
+an empty-history fallback, and malformed JSON before generation (tokenizer-only,
+no GPU model load). Assert the preserved turns and exactly one final user turn;
+confirm the fallback is absent when history exists. The YAML `prompt_example`
+uses a JSON string of synthetic role/content turns for `conversation_field`,
+with every content exactly `<INPUT:field>` for that field. Other input values
+keep their plain `<INPUT:field>` placeholders. Render this structured example
+through the same path as real rows; never create a separate flat example to
+satisfy validation. Record the input interpretation in YAML before Baseline
+and preserve it in reuse mode.
+
 For chat, capture the exact tokenizer/template source and the bare SHA-256 of
 the exact template text—exactly 64 lowercase hexadecimal characters with no
 `sha256:` prefix—plus the special-token ids. `prompt_framing="chat"` alone is
@@ -248,7 +282,8 @@ probe before the full prediction job. If the probe contradicts an explicit
 request, resolve or report it; do not label the configuration compliant.
 
 The task mapping belongs under `measurement.inference_config`; supported keys
-are `input_fields`, `answer_regex`, `answer_column`, `batch_size`, `stop`, and —
+are `input_fields`, `answer_regex`, `answer_column`, `batch_size`, `stop`,
+`conversation_field`, `conversation_fallback_field`, and —
 for multiple-choice option scoring — `scoring_mode` and `option_fields`.
 Use `inference_mapping_contract` as the machine-readable authority for which are
 required and for their value types.

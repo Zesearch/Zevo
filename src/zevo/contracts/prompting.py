@@ -6,6 +6,7 @@ searchable decisions.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Literal
 
@@ -352,7 +353,7 @@ def validate_inference_config(
     config = dict(value or {})
     supported = {
         "input_fields", "inference_query", "answer_regex", "answer_column",
-        "batch_size", "stop",
+        "batch_size", "stop", "conversation_field", "conversation_fallback_field",
         # Opt-in multiple-choice option-scoring mode. Default (key absent) is
         # unchanged free generation. When set to "option_loglikelihood",
         # Inference scores each answer option under the frozen prompt and writes
@@ -364,7 +365,7 @@ def validate_inference_config(
     unknown = sorted(set(config) - supported)
     if unknown:
         raise ValueError("unsupported inference_config keys: " + ", ".join(unknown))
-    for key in ("inference_query", "answer_regex", "answer_column"):
+    for key in ("inference_query", "answer_regex", "answer_column", "conversation_field", "conversation_fallback_field"):
         if key in config and not isinstance(config[key], str):
             raise ValueError(f"inference_config.{key} must be a string")
     if "inference_query" in config and not config["inference_query"].strip():
@@ -377,6 +378,18 @@ def validate_inference_config(
             raise ValueError(f"inference_config.{key} must be a list of non-empty strings")
     if "input_fields" in config and len(config["input_fields"]) != len(set(config["input_fields"])):
         raise ValueError("inference_config.input_fields must not contain duplicates")
+    conversation = config.get("conversation_field")
+    fallback = config.get("conversation_fallback_field")
+    if "conversation_field" in config and not conversation:
+        raise ValueError("conversation_field must not be empty")
+    if "conversation_fallback_field" in config and (not conversation or not fallback):
+        raise ValueError("conversation_fallback_field requires conversation_field")
+    if conversation:
+        fields = config.get("input_fields", [])
+        if conversation not in fields or (fallback and fallback not in fields):
+            raise ValueError("conversation fields must be declared in input_fields")
+        if conversation == fallback:
+            raise ValueError("conversation and fallback fields must differ")
     if "scoring_mode" in config:
         if config["scoring_mode"] not in ("generate", "option_loglikelihood"):
             raise ValueError(
@@ -454,3 +467,35 @@ def render_inference_query(
             instruction,
         ).strip()
     return f"{instruction}\n\n{joined}".strip()
+
+
+def conversation_messages(config: dict[str, Any], row: dict[str, Any], *, system_prompt: str) -> list[dict[str, str]]:
+    """Render an explicitly declared conversation without duplicating its last turn."""
+    field = config["conversation_field"]
+    value = row.get(field)
+    if isinstance(value, str):
+        value = json.loads(value) if value.strip() else []
+    if value is None:
+        value = []
+    if not isinstance(value, list):
+        raise ValueError("conversation input must be a list of role/content messages")
+    messages = []
+    for turn in value:
+        if (not isinstance(turn, dict) or set(turn) != {"role", "content"}
+                or turn["role"] not in {"system", "user", "assistant"}
+                or not isinstance(turn["content"], str) or not turn["content"].strip()):
+            raise ValueError("unsupported conversation turn; do not flatten or discard fields")
+        messages.append(dict(turn))
+    if not messages:
+        fallback = config.get("conversation_fallback_field")
+        text = row.get(fallback) if fallback else None
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("empty conversation requires a nonempty fallback prompt")
+        messages = [{"role": "user", "content": text}]
+    if messages[-1]["role"] != "user":
+        raise ValueError("conversation continuation requires a final user turn")
+    if any(m["role"] == "system" for m in messages[1:]):
+        raise ValueError("system messages must precede conversation turns")
+    if messages[0]["role"] != "system":
+        messages.insert(0, {"role": "system", "content": system_prompt})
+    return messages

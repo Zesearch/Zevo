@@ -1465,3 +1465,44 @@ def test_disabled_thinking_survives_inference_to_train(tmp_path: Path, empty_spa
     train["prompt_alignment"]["rendered_prompt"] += "<think>active reasoning</think>"
     with pytest.raises(ValidationError, match="must not contain active think tags"):
         TrainRunConfig.model_validate(train)
+
+
+def test_structured_conversation_example_preserves_roles_and_rejects_flattening(tmp_path):
+    from zevo.contracts.prompting import conversation_messages
+    config = yaml.safe_load(_write_inference_config(tmp_path).read_text())
+    mapping = config['measurement']['inference_config']
+    mapping.update(input_fields=['messages', 'prompt'], conversation_field='messages',
+                   conversation_fallback_field='prompt', inference_query='Continue the supplied conversation.')
+    turns = [{'role': role, 'content': '<INPUT:messages>'} for role in ('user', 'assistant', 'user')]
+    inputs = {'messages': json.dumps(turns), 'prompt': '<INPUT:prompt>'}
+    messages = conversation_messages(mapping, inputs, system_prompt='You are a helpful assistant.')
+    rendered = ''.join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in messages) + '<|im_start|>assistant\n'
+    config['prompt_example'] = dict(input_values=inputs, messages=messages, rendered_prompt=rendered)
+    assert InferenceRunConfig.model_validate(config).prompt_example.messages[-1].role == 'user'
+    assert '<INPUT:prompt>' not in rendered
+    config['prompt_example']['messages'] = [messages[0], {'role': 'user', 'content': inputs['messages']}]
+    with pytest.raises(ValidationError, match='preserve conversation roles'):
+        InferenceRunConfig.model_validate(config)
+
+
+def test_conversation_runtime_nonempty_empty_and_malformed_inputs():
+    from zevo.contracts.prompting import conversation_messages, validate_inference_config
+    mapping = validate_inference_config(dict(input_fields=['messages', 'prompt'],
+        conversation_field='messages', conversation_fallback_field='prompt', answer_column='prediction'))
+    history = [{'role': 'user', 'content': 'Answer in English.'},
+               {'role': 'assistant', 'content': 'Understood.'},
+               {'role': 'user', 'content': 'Explain photosynthesis.'}]
+    for value in (history, json.dumps(history)):
+        messages = conversation_messages(mapping, {'messages': value, 'prompt': 'DUPLICATE'}, system_prompt='System')
+        assert messages == [{'role': 'system', 'content': 'System'}, *history]
+    for empty in (None, '', [], '[]'):
+        assert conversation_messages(mapping, {'messages': empty, 'prompt': 'Fallback'}, system_prompt='System')[-1] == {'role': 'user', 'content': 'Fallback'}
+    for bad in ('{broken', '{}', [{'role': 'tool', 'content': 'unsupported'}], history[:-1]):
+        with pytest.raises(ValueError):
+            conversation_messages(mapping, {'messages': bad, 'prompt': 'Do not silently fall back'}, system_prompt='System')
+    with pytest.raises(ValueError, match='fallback'):
+        conversation_messages(mapping, {'messages': []}, system_prompt='System')
+    existing = [{'role': 'system', 'content': 'Dataset system'}, *history]
+    assert conversation_messages(mapping, {'messages': existing}, system_prompt='Default') == existing
+    with pytest.raises(ValueError, match='declared'):
+        validate_inference_config({**mapping, 'conversation_field': 'unknown'})
