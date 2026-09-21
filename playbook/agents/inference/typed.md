@@ -48,7 +48,12 @@ Build `prompt_example` from synthetic placeholders through the same rendering
 function and recorded `template_kwargs` used by `predict.py`. Never hard-code a
 second mapping in the script. Never copy a Validation/Test answer or example
 reference into it. For chat, the first message is the realized system prompt;
-for completion/text, `messages` is empty.
+for completion/text, `messages` is empty. For explicitly declared conversation
+input, the `conversation_field` example value is a JSON-encoded synthetic
+user/assistant/user list whose contents are all `<INPUT:field>`; render its
+actual turns, not the JSON text. The optional `conversation_fallback_field`
+remains a plain placeholder and must not appear as an extra turn when history
+is nonempty. Also verify the empty-history path with a separate synthetic probe.
 
 `model_reasoning_type` records the selected execution mode, either `thinking`
 or `non_thinking`. Baseline Inference verifies support against the exact model,

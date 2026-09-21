@@ -48,6 +48,8 @@ def inference_mapping_contract() -> dict[str, Any]:
                 "non-empty string; supports {input} or recognised {field} "
                 "placeholders; other braces remain literal text"
             ),
+            "conversation_field": "optional input field containing ordered role/content messages (JSON or list); chat only",
+            "conversation_fallback_field": "optional plain user-prompt field, used only when the conversation is empty",
             "answer_regex": "string",
             "answer_column": "string",
             "batch_size": "integer >= 1",
@@ -321,12 +323,23 @@ class InferencePromptExample(BaseModel):
 
     @model_validator(mode="after")
     def require_synthetic_inputs(self) -> "InferencePromptExample":
-        expected = {key: f"<INPUT:{key}>" for key in self.input_values}
-        if self.input_values != expected:
-            raise ValueError(
-                "prompt_example.input_values must use exact <INPUT:field> placeholders"
-            )
-        if not any(value in self.rendered_prompt for value in self.input_values.values()):
+        placeholders = []
+        for key, value in self.input_values.items():
+            placeholder = f"<INPUT:{key}>"
+            placeholders.append(placeholder)
+            if value == placeholder:
+                continue
+            try:
+                turns = json.loads(value)
+            except (ValueError, TypeError):
+                turns = None
+            if (not isinstance(turns, list) or not turns or any(
+                not isinstance(turn, dict) or set(turn) != {"role", "content"}
+                or turn["role"] not in {"user", "assistant"}
+                or turn["content"] != placeholder for turn in turns
+            )):
+                raise ValueError("prompt_example.input_values must use exact <INPUT:field> placeholders or synthetic conversation turns containing only that placeholder")
+        if not any(value in self.rendered_prompt for value in placeholders):
             raise ValueError("rendered_prompt must contain at least one declared input placeholder")
         return self
 
@@ -560,7 +573,23 @@ class InferenceRunConfig(BaseModel):
         inference_query = str(
             self.measurement.inference_config.get("inference_query") or ""
         )
-        if inference_query:
+        conversation_field = self.measurement.inference_config.get("conversation_field")
+        if conversation_field:
+            from zevo.contracts.prompting import conversation_messages
+            if not (framing == "chat" or framing.startswith("chat:")):
+                raise ValueError("conversation input requires chat framing")
+            if any(value != f"<INPUT:{key}>" for key, value in self.prompt_example.input_values.items() if key != conversation_field):
+                raise ValueError("only conversation_field may use structured synthetic turns")
+            expected_messages = conversation_messages(
+                self.measurement.inference_config, dict(self.prompt_example.input_values),
+                system_prompt=self.prompt.system_prompt,
+            )
+            if [message.model_dump() for message in self.prompt_example.messages] != expected_messages:
+                raise ValueError("prompt_example must preserve conversation roles and order without appending the fallback")
+        else:
+            if any(value != f"<INPUT:{key}>" for key, value in self.prompt_example.input_values.items()):
+                raise ValueError("structured synthetic inputs require conversation_field")
+        if inference_query and not conversation_field:
             from zevo.contracts.prompting import render_inference_query
 
             expected_user = render_inference_query(
