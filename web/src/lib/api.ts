@@ -36,7 +36,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ----- Types (mirror backend Pydantic DTOs; keep in sync manually for now) -----
 
-export type RunStatus = "planning" | "running" | "success" | "degraded" | "failed" | "halted" | "cancelled";
+export type RunStatus = "planning" | "running" | "success" | "degraded" | "failed" | "cancelled";
 export type RunMode = "auto" | "full_pipeline" | "customized_pipeline" | "single_stage";
 /** Where an Auto run's held-out evaluation came from once scoping settled it.
  *  Empty while scoping is still running (and for every non-Auto run). */
@@ -343,7 +343,21 @@ export type CancelOutcome = {
 };
 
 export type RunSummary = {
-  lifecycle?: { finalization?: { started_at?: string; deadline_at?: string; reason?: string } };
+  lifecycle?: {
+    finalization?: {
+      started_at?: string;
+      deadline_at?: string;
+      reason?: string;
+      expired_at?: string;
+      stop_trigger?: RunStopTrigger;
+    };
+    terminal_outcome?: {
+      stop_trigger?: RunStopTrigger | null;
+      issues?: RunTerminalIssue[];
+      registered_model?: string;
+    };
+    rescue_terminal_status?: string;
+  };
   id: string;
   task_name: string;
   // What the user called this execution; required by every current launch.
@@ -414,6 +428,22 @@ export type RunSummary = {
   customizations: Record<string, unknown>;
   decision_pins: Record<string, unknown>;
   model_lineages: Record<string, Record<string, unknown>>;
+};
+
+export type RunStopTrigger = {
+  code: "iteration_limit" | "runtime_limit" | "cost_limit" | "configured_limit" | string;
+  message: string;
+  current?: number;
+  limit?: number;
+};
+
+export type RunTerminalIssue = {
+  code: string;
+  message: string;
+  ticket_id?: string;
+  agent_id?: string;
+  lane?: string;
+  iteration?: number;
 };
 
 export type TicketDTO = {

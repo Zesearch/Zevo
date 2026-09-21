@@ -266,7 +266,7 @@ async def test_a_completion_the_supervisor_never_saw_wakes_it_instead_of_closing
     # Nothing closed: the run is still open, waiting on the wake this test is
     # about. `degraded` joined the tally when a failed ticket stopped being
     # outvoted by a registered model.
-    assert counts == {"success": 0, "degraded": 0, "failed": 0, "halted": 0}
+    assert counts == {"success": 0, "degraded": 0, "failed": 0}
     assert (await session.get(Run, "r1")).status == "running"   # left open
     wakes = (await session.execute(
         select(AgentWakeupRequest).where(
@@ -290,7 +290,7 @@ async def test_a_run_the_supervisor_has_seen_out_requests_explicit_finalization(
     await session.commit()
 
     counts = await _close_finished_runs(session)
-    assert counts == {"success": 0, "degraded": 0, "failed": 0, "halted": 0}
+    assert counts == {"success": 0, "degraded": 0, "failed": 0}
     assert (await session.get(Run, "r2")).status == "running"
     wake = (await session.execute(select(AgentWakeupRequest).where(
         AgentWakeupRequest.ticket_id == "orchestrate-r2-001",
@@ -375,7 +375,7 @@ async def test_reconciler_waits_for_pending_supervisor_before_journal_repair(
 
     counts = await _close_finished_runs(session)
 
-    assert counts == {"success": 0, "degraded": 0, "failed": 0, "halted": 0}
+    assert counts == {"success": 0, "degraded": 0, "failed": 0}
     wakes = (await session.execute(select(AgentWakeupRequest).where(
         AgentWakeupRequest.ticket_id == supervisor.id,
     ))).scalars().all()
@@ -404,5 +404,5 @@ async def test_a_run_with_no_supervisor_is_unaffected(session):
     await session.commit()
 
     counts = await _close_finished_runs(session)
-    assert counts["halted"] == 1   # terminal, no model registered
-    assert (await session.get(Run, "r4")).status == "halted"
+    assert counts["failed"] == 1   # terminal, no model registered
+    assert (await session.get(Run, "r4")).status == "failed"

@@ -1065,8 +1065,10 @@ class SupervisorAction(StrictResult):
       - 'emit_ticket' -- it created (via curl) a child ticket and
                          optionally tells us its id for breadcrumbs.
       - 'mark_done'   -- usable work is complete; the orchestrator has already
-                         atomically PATCHed a non-empty Run summary and
-                         Run.status=success.
+                         atomically PATCHed a non-empty Run summary and a
+                         terminal success/degraded status. The engine resolves
+                         that distinction from outstanding execution issues;
+                         reaching a configured limit is not an issue.
       - 'mark_failed' -- the run cannot continue; the orchestrator has already
                          PATCHed Run.status=failed with a specific reason.
       - 'wait'        -- there's nothing to do this iteration; the runner

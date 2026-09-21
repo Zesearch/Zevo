@@ -239,8 +239,8 @@ async def get_run_timeline(
 async def run_timeline_ws(websocket: WebSocket, run_id: str) -> None:
     """Backlog + live-tail run timeline.
 
-    Closes when the parent Run reaches a terminal status (success /
-    failed / halted) AND the latest snapshot has been delivered.
+    Closes when the parent Run reaches a terminal status and the latest
+    snapshot has been delivered.
     """
     await websocket.accept()
     Session = get_session_factory()
@@ -297,7 +297,7 @@ async def run_timeline_ws(websocket: WebSocket, run_id: str) -> None:
                     "ticket_id": "",
                     "agent_id": "",
                     "payload": {
-                        "status": r.status,
+                        "status": "failed" if r.status == "halted" else r.status,
                         "best_validation_score": r.best_validation_score,
                         "halted_reason": r.halted_reason or "",
                     },

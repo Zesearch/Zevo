@@ -16,8 +16,8 @@ This module is the bookkeeping job that closes the loop:
 
   2. Run-status repair -- an all-terminal pipeline is handed back to its
      supervisor for one explicit final decision. Only the supervisor may mark a
-     clean `success`; the reconciler may report `degraded`, `failed`, or
-     `halted` when that decision cannot be completed honestly.
+     clean `success`; the reconciler reports `degraded` when a usable model
+     survives an issue and `failed` when no usable result survives.
 
 The reconciler is idempotent: running it twice is a no-op the second
 time. It is safe to call from the daemon's main loop on every tick and
@@ -1309,7 +1309,7 @@ async def _watchdog_halt_over_budget_runs(session: AsyncSession) -> int:
         select(Run).where(Run.status.in_(["planning", "running"])).with_for_update(skip_locked=True)
     )).scalars().all()
 
-    halted = 0
+    transitions = 0
     reaped_tickets: list[Ticket] = []
     for r in open_runs:
         cap_cost = float(r.max_cost_usd or 0.0)
@@ -1324,15 +1324,34 @@ async def _watchdog_halt_over_budget_runs(session: AsyncSession) -> int:
 
         snap = await snapshot_for_run(session, r.id)
         reasons: list[str] = []
+        stop_triggers: list[dict[str, object]] = []
         if cap_cost > 0 and snap.over_budget:
             reasons.append(f"cost ${snap.spent_usd:.2f} >= cap ${cap_cost:.2f}")
+            stop_triggers.append({
+                "code": "cost_limit",
+                "current": round(float(snap.spent_usd), 2),
+                "limit": cap_cost,
+                "message": f"Stopped after reaching the ${cap_cost:g} cost limit.",
+            })
         if cap_time > 0 and snap.over_time_limit:
             reasons.append(
                 f"runtime {snap.elapsed_runtime_hours:.2f}h >= cap {cap_time:.2f}h"
             )
+            stop_triggers.append({
+                "code": "runtime_limit",
+                "current": round(float(snap.elapsed_runtime_hours), 2),
+                "limit": cap_time,
+                "message": f"Stopped after reaching the {cap_time:g}-hour runtime limit.",
+            })
         completed = int(r.iterations_completed or 0)
         if cap_iters > 0 and completed >= cap_iters:
             reasons.append(f"iterations {completed} >= budget {cap_iters}")
+            stop_triggers.append({
+                "code": "iteration_limit",
+                "current": completed,
+                "limit": cap_iters,
+                "message": f"Stopped after completing {completed} of {cap_iters} iterations.",
+            })
         from zevo.engine.run.lifecycle import FINALIZATION_SECONDS, finalization, finalization_allows
         state = finalization(r)
         if not reasons and not state:
@@ -1343,10 +1362,16 @@ async def _watchdog_halt_over_budget_runs(session: AsyncSession) -> int:
                 "started_at": now.isoformat(),
                 "deadline_at": (now + _dt.timedelta(seconds=FINALIZATION_SECONDS)).isoformat(),
                 "reason": "; ".join(reasons),
+                "stop_trigger": stop_triggers[0],
+                "stop_triggers": stop_triggers,
             }
             r.lifecycle = {**dict(r.lifecycle or {}), "finalization": state}
-            r.halted_reason = "Finalizing at limit: " + state["reason"]
-            halted += 1
+            # Reaching a configured limit is a normal stop trigger. The live
+            # finalization banner reads lifecycle.finalization; halted_reason
+            # is reserved for a real terminal problem.
+            if str(r.halted_reason or "").startswith("Finalizing at limit:"):
+                r.halted_reason = ""
+            transitions += 1
         deadline = _aware(datetime.fromisoformat(state["deadline_at"]))
         tickets = (await session.execute(select(Ticket).where(Ticket.run_id == r.id))).scalars().all()
         # The window bounds idle time between finalization steps, not the
@@ -1382,11 +1407,16 @@ async def _watchdog_halt_over_budget_runs(session: AsyncSession) -> int:
             r.cancel_requested_at = now
             r.cancel_policy = CancelWeightsPolicy().model_dump(mode="json")
             r.cancel_outcome = {}
-            r.lifecycle = {**dict(r.lifecycle or {}), "rescue_terminal_status": "halted"}
+            state["expired_at"] = now.isoformat()
+            r.lifecycle = {
+                **dict(r.lifecycle or {}),
+                "finalization": state,
+                "rescue_terminal_status": "failed",
+            }
             r.halted_reason = "Finalization deadline reached; preserving checkpoint before release"
-            halted += 1
+            transitions += 1
 
-    if halted or reaped_tickets:
+    if transitions or reaped_tickets:
         await session.commit()
         # cancel_run_remote_jobs self-filters to train/inference and step-kills
         # zevo-<ticket> (never the shared allocation). Best-effort.
@@ -1397,7 +1427,7 @@ async def _watchdog_halt_over_budget_runs(session: AsyncSession) -> int:
             except Exception as e:
                 log.warning("%s remote-job reap after watchdog halt failed: %s",
                             _RECONCILER_TAG, e)
-    return halted
+    return transitions
 
 
 async def _close_stale_terminal_heartbeats(
@@ -1459,7 +1489,7 @@ def decide_run_status(*, has_registered_model: bool, failed_ticket_ids: list[str
     # from the incidental fact that all worker Tickets are terminal.
     if has_registered_model:
         return "degraded"
-    return "failed" if failed_ticket_ids else "halted"
+    return "failed"
 
 
 async def _supervisor_activation_pending(
@@ -1485,14 +1515,13 @@ async def _supervisor_activation_pending(
 async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
     """Close out runs whose tickets are all in terminal state.
 
-    Returns counts by terminal status applied: {"success", "failed",
-    "halted"}.
+    Returns counts by terminal status applied.
     """
     open_runs = (await session.execute(
         select(Run).where(Run.status.in_(["planning", "running"]))
     )).scalars().all()
 
-    counts: dict[str, int] = {"success": 0, "degraded": 0, "failed": 0, "halted": 0}
+    counts: dict[str, int] = {"success": 0, "degraded": 0, "failed": 0}
     closed_runs: list[Run] = []
     for r in open_runs:
         if r.cancel_requested_at is not None:
@@ -1501,11 +1530,11 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
             select(Ticket).where(Ticket.run_id == r.id)
         )).scalars().all()
         if not tickets:
-            # Run with no tickets at all -- safe to halt.
-            r.status = "halted"
+            # A Run with no work and no usable result failed to start.
+            r.status = "failed"
             r.halted_reason = f"{_RECONCILER_TAG} no tickets exist for this run"
             r.finished_at = datetime.now(timezone.utc)
-            counts["halted"] += 1
+            counts["failed"] += 1
             closed_runs.append(r)
             continue
 
@@ -1604,7 +1633,18 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
                 )
                 continue
 
-        failed_ids = sorted(t.id for t in tickets if t.status == "failed")
+        from zevo.engine.run.outcome import (
+            issue_summary,
+            lifecycle_with_terminal_outcome,
+            terminal_outcome,
+            unresolved_ticket_issues,
+        )
+        unresolved_issues = unresolved_ticket_issues(tickets)
+        failed_ids = sorted(
+            str(issue.get("ticket_id") or "")
+            for issue in unresolved_issues
+            if issue.get("ticket_id")
+        )
 
         # A clean run is not over merely because every worker Ticket is over.
         # Give the supervisor one explicit finalization wake. If it completes
@@ -1638,19 +1678,28 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
                 continue
 
             has_model = await _run_produced_registered_model(session, r)
-            new_status = "degraded" if has_model else "halted"
+            new_status = "degraded" if has_model else "failed"
+            finalization_issue = {
+                "code": "supervisor_finalization_missing",
+                "ticket_id": r.supervisor_ticket_id,
+                "agent_id": "orchestrator",
+                "lane": "optimization",
+                "iteration": int(r.iterations_completed or 0),
+                "message": "The final Run decision did not complete.",
+            }
             r.status = new_status
-            r.halted_reason = (
-                f"{_RECONCILER_TAG} supervisor finalization wake "
-                f"{finalization.id[:8]} ended as {finalization.status} without "
-                "an explicit terminal Run decision"
+            r.lifecycle = lifecycle_with_terminal_outcome(
+                r, tickets, extra_issues=[finalization_issue],
+            )
+            r.halted_reason = issue_summary(
+                dict(r.lifecycle.get("terminal_outcome") or {})
             )
             r.finished_at = datetime.now(timezone.utc)
             counts[new_status] += 1
             closed_runs.append(r)
             continue
 
-        # Decide degraded/failed/halted. Clean success is never inferred here.
+        # Decide degraded/failed. Clean success is never inferred here.
         #
         # A registered model used to win outright, so a run that produced one
         # closed as `success` no matter what had failed along the way — and the
@@ -1668,27 +1717,15 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
         )
 
         r.status = new_status
-        if not r.halted_reason:
-            if new_status == "degraded":
-                # Name what did not finish. "degraded" on its own tells a reader
-                # something is missing without saying which number to distrust.
-                r.halted_reason = (
-                    f"{_RECONCILER_TAG} a model was registered, but "
-                    f"{len(failed_ids)} ticket(s) failed: "
-                    f"{', '.join(failed_ids[:5])}"
-                    + (f" (+{len(failed_ids) - 5} more)" if len(failed_ids) > 5 else "")
-                )
-            elif new_status == "failed":
-                r.halted_reason = (
-                    f"{_RECONCILER_TAG} all tickets terminal, "
-                    f"failed: {', '.join(failed_ids[:5])}"
-                    + (f" (+{len(failed_ids) - 5} more)" if len(failed_ids) > 5 else "")
-                )
-            else:
-                r.halted_reason = (
-                    f"{_RECONCILER_TAG} all tickets terminal but no model "
-                    f"registered (supervisor never closed the loop)"
-                )
+        r.lifecycle = lifecycle_with_terminal_outcome(r, tickets)
+        outcome = terminal_outcome(r, tickets)
+        if new_status in {"degraded", "failed"}:
+            r.halted_reason = issue_summary(outcome)
+        elif not r.halted_reason:
+            r.halted_reason = (
+                f"{_RECONCILER_TAG} all tickets terminal but no model "
+                "registered (supervisor never closed the loop)"
+            )
         r.finished_at = datetime.now(timezone.utc)
         counts[new_status] += 1
         closed_runs.append(r)
@@ -1792,7 +1829,7 @@ async def reconcile_runs_and_tickets(
     """Run the full reconciliation pass.
 
     Returns a dict suitable for log printing, e.g.
-        {"tickets_failed": 2, "runs_closed": {"success": 0, "failed": 1, "halted": 1}}
+        {"tickets_failed": 2, "runs_closed": {"success": 0, "degraded": 0, "failed": 2}}
     """
     Session = get_session_factory()
     report: dict[str, Any] = {
@@ -1804,7 +1841,7 @@ async def reconcile_runs_and_tickets(
         "heartbeats_closed": 0,
         "slurm_jobs_checked": 0,
         "slurm_tickets_resumed": 0,
-        "runs_closed": {"success": 0, "degraded": 0, "failed": 0, "halted": 0},
+        "runs_closed": {"success": 0, "degraded": 0, "failed": 0},
         "resources_released": 0,
     }
     try:

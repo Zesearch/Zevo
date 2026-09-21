@@ -7,7 +7,7 @@ import { api, type RunInstructionDTO } from "../lib/api";
 import { fmtDate } from "../lib/format";
 import { Bezel, Kicker } from "./zevo/primitives";
 
-const TERMINAL_RUN_STATUSES = new Set(["success", "degraded", "failed", "halted", "cancelled"]);
+const TERMINAL_RUN_STATUSES = new Set(["success", "degraded", "failed", "cancelled"]);
 
 export function RunInstructionPanel({
   runId, runStatus, cancelling = false,

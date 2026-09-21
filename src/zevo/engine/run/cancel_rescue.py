@@ -413,7 +413,12 @@ async def _finish_cancel(run_id: str) -> None:
                 if error and policy.discard_on_failure and local is None:
                     outcome["discarded_after_failure"] = True
                 run.cancel_outcome = outcome
-                run.status = str((run.lifecycle or {}).get("rescue_terminal_status") or "cancelled")
+                terminal_status = str(
+                    (run.lifecycle or {}).get("rescue_terminal_status") or "cancelled"
+                )
+                # Finish rescue rows created by an older server using the
+                # current terminal vocabulary.
+                run.status = "failed" if terminal_status == "halted" else terminal_status
                 run.halted_reason = "Run stopped; " + _describe(outcome)
                 run.finished_at = now
             await session.commit()

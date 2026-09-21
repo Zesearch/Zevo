@@ -121,6 +121,10 @@ Rules:
    or Base-model branch. Stop only when every credible branch allowed by the
    autonomy level has been exhausted, or another terminal condition applies,
    rather than chasing numerical noise.
+   `degraded` is reserved for an unresolved required-stage problem when a
+   usable model still exists. A configured limit is only the normal stop
+   trigger, and an earlier failed Ticket that a later successful work order
+   replaced is no longer an unresolved problem.
 10. Never request held-out Test paths, artifacts, or scores.
 11. A Specialist-owned output/execution defect is repaired automatically on
     the same Ticket for at most three attempts; you are not woken between those

@@ -661,6 +661,12 @@ def _summary(
     holdout: bool = False, queue_wait_seconds: int = 0,
     queue_waiting: bool = False,
 ) -> RunSummary:
+    # Old rows may still contain the retired ``halted`` value before the data
+    # migration runs. Publicly it has the same meaning as failed.
+    public_status = "failed" if r.status == "halted" else r.status
+    public_lifecycle = dict(r.lifecycle or {})
+    if public_lifecycle.get("rescue_terminal_status") == "halted":
+        public_lifecycle["rescue_terminal_status"] = "failed"
     baseline, best_trained = _baseline_and_best(r)
     derived_best_validation = validation_best_score(
         r.history, r.validation_metric_direction,
@@ -675,14 +681,14 @@ def _summary(
         setting_name=r.setting_name or "",
         task_objective=r.task_objective or "",
         agent_objective=r.agent_objective or "",
-        status=r.status, is_terminal=r.status in TERMINAL_RUN_STATUSES,
+        status=public_status, is_terminal=r.status in TERMINAL_RUN_STATUSES,
         summary=r.summary,
         registry_version_tag=r.registry_version_tag,
         halted_reason="" if r.status == "success" else r.halted_reason,
         cancelling=r.cancel_requested_at is not None and r.status not in TERMINAL_RUN_STATUSES,
         cancel_policy=dict(r.cancel_policy or {}),
         cancel_outcome=dict(r.cancel_outcome or {}),
-        lifecycle=dict(r.lifecycle or {}),
+        lifecycle=public_lifecycle,
         started_at=r.started_at.isoformat() if r.started_at else "",
         finished_at=r.finished_at.isoformat() if r.finished_at else None,
         iteration_budget=r.iteration_budget,
@@ -1157,6 +1163,13 @@ async def get_run(
         queue_waiting=run_id in queue_waiting,
         holdout=reveal_holdout,
     )
+    base_payload = base.model_dump()
+    if r.status in TERMINAL_RUN_STATUSES:
+        # Derive this on reads as well as writes so historical Runs immediately
+        # gain accurate issue text without mutating production rows or running
+        # a data backfill.
+        from zevo.engine.run.outcome import lifecycle_with_terminal_outcome
+        base_payload["lifecycle"] = lifecycle_with_terminal_outcome(r, tickets)
     from zevo.engine.run.runner import _agent_history
     history = (
         list(r.history or []) if reveal_holdout
@@ -1170,7 +1183,7 @@ async def get_run(
     live_task = await db.get(Task, r.task_name) if r.task_name else None
     input_changes = await run_in_threadpool(detect_input_changes, r, live_task)
     return RunDetail(
-        **base.model_dump(),
+        **base_payload,
         agent_cost_usd=round(snap.llm_cost_usd, 6),
         gpu_cost_usd=round(snap.gpu_cost_usd, 6),
         harness_model=(await _harness_by_run(db, [run_id])).get(run_id, ""),
@@ -1387,8 +1400,7 @@ async def patch_run(
     requests status="success", the server verifies that the run has no
     failed tickets and no still-running tickets. If either check fails,
     we reject with 409 + a structured error listing the blockers, so
-    the orchestrator either retries the failed steps or marks the run
-    failed/halted honestly.
+    the orchestrator either retries the failed steps or marks the run failed.
     """
     # Journal facts, held-out scores, and the final supervisor decision all
     # update the same Run row. Lock it so a JSON history merge cannot overwrite
@@ -1444,9 +1456,15 @@ async def patch_run(
 
     if body.status is not None:
         from zevo.engine.run.lifecycle import finalization
+        from zevo.engine.run.outcome import (
+            issue_summary,
+            lifecycle_with_terminal_outcome,
+            unresolved_ticket_issues,
+        )
         if (body.status in TERMINAL_RUN_STATUSES and finalization(r)
                 and not r.registry_version_tag and r.cancel_requested_at is None):
             raise HTTPException(409, "Run is finalizing: preserve the checkpoint in Registry or request checkpoint-preserving cancellation before ending it")
+        terminal_tickets: list[Ticket] = []
         if body.status in TERMINAL_RUN_STATUSES:
             from zevo.engine.observe.run_metrics import incomplete_journal_entries
             incomplete = incomplete_journal_entries(r.history)
@@ -1462,16 +1480,22 @@ async def patch_run(
                         "required_fields": ["action", "result", "analysis", "next"],
                     },
                 )
-        if body.status == "success":
-            tickets = (
+            terminal_tickets = list((
                 await db.execute(select(Ticket).where(Ticket.run_id == run_id))
-            ).scalars().all()
-            failed = sorted(t.id for t in tickets if t.status == "failed")
+            ).scalars().all())
+        effective_status = body.status
+        if body.status in {"success", "degraded"}:
+            issues = unresolved_ticket_issues(terminal_tickets)
+            failed = sorted(
+                str(issue.get("ticket_id") or "")
+                for issue in issues
+                if issue.get("ticket_id")
+            )
             # The supervisor performs this PATCH during its own final heartbeat,
             # so that one Ticket is necessarily `running`. Every child must be
             # terminal; no other unfinished Ticket is exempt.
             still_running = sorted(
-                t.id for t in tickets
+                t.id for t in terminal_tickets
                 if t.id != r.supervisor_ticket_id
                 and t.status in ("queued", "running", "repairing", "awaiting_input", "waiting_external")
             )
@@ -1482,7 +1506,7 @@ async def patch_run(
                 blockers.append("no retained registry model")
             if int(r.iterations_completed or 0) < 1:
                 blockers.append("no trained iteration completed Validation evaluation")
-            if failed or still_running or blockers:
+            if body.status == "success" and (failed or still_running or blockers):
                 raise HTTPException(
                     409,
                     {
@@ -1498,8 +1522,57 @@ async def patch_run(
                         "blockers": blockers,
                     },
                 )
-        r.status = body.status
+            if body.status == "degraded":
+                if still_running:
+                    raise HTTPException(
+                        409,
+                        {
+                            "error": "cannot finish run while child Tickets are active",
+                            "unfinished_tickets": still_running,
+                        },
+                    )
+                # The Agent may describe reaching a planned limit as degraded.
+                # The engine owns the final classification: a retained model,
+                # complete Journal and no unresolved worker issue is success.
+                if not issues and not blockers:
+                    effective_status = "success"
+        r.status = effective_status
         if body.status in TERMINAL_RUN_STATUSES:
+            extra_issues: list[dict[str, Any]] = []
+            supplied_reason = str(body.halted_reason or "").strip()
+            if (
+                effective_status == "degraded"
+                and not unresolved_ticket_issues(terminal_tickets)
+                and blockers
+            ):
+                extra_issues.append({
+                    "code": "incomplete_run",
+                    "ticket_id": "",
+                    "agent_id": "",
+                    "lane": "",
+                    "iteration": int(r.iterations_completed or 0),
+                    "message": "Run completion is incomplete: " + "; ".join(blockers) + ".",
+                })
+            if (
+                effective_status == "failed"
+                and supplied_reason
+                and not supplied_reason.startswith("Finalizing at limit:")
+            ):
+                extra_issues.append({
+                    "code": "run_ended_incomplete",
+                    "ticket_id": "",
+                    "agent_id": "",
+                    "lane": "",
+                    "iteration": int(r.iterations_completed or 0),
+                    "message": supplied_reason,
+                })
+            r.lifecycle = lifecycle_with_terminal_outcome(
+                r, terminal_tickets, extra_issues=extra_issues,
+            )
+            if effective_status == "degraded":
+                r.halted_reason = issue_summary(
+                    dict(r.lifecycle.get("terminal_outcome") or {})
+                )
             r.finished_at = datetime.now(timezone.utc)
     # Reaching a planned limit is normal completion, not a halt. Keep this
     # invariant even if a later PATCH tries to add a reason to a success.
@@ -1607,7 +1680,7 @@ async def cancel_run(
             reason="cancelled by user (terminal Run cleanup)",
         )
         return {
-            "status": r.status,
+            "status": "failed" if r.status == "halted" else r.status,
             "run_id": run_id,
             "note": "already terminal; cleaned any leaked Ticket task and provider resource",
             "remote_jobs_cancelled": remote_jobs_cancelled,

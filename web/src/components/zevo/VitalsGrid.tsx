@@ -69,7 +69,7 @@ export function VitalsGrid() {
 
   const active = runs.filter((r) => !r.is_terminal).length;
   const succeeded = runs.filter((r) => r.status === "success").length;
-  // failed / cancelled / halted all mean "did not deliver"; one count says so.
+  // Failed means the Run did not deliver a usable result.
   const failed = runs.filter((r) =>
     r.status === "failed").length;
 

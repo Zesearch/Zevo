@@ -1121,6 +1121,34 @@ def test_run_summary_derives_best_validation_from_validation_history() -> None:
     assert summary.best_validation_score == 0.4
 
 
+def test_legacy_halted_run_is_exposed_as_failed() -> None:
+    run = Run(
+        metric="accuracy", validation_metric="token_f1",
+        validation_metric_direction="max",
+        id="legacy-halted", task_name="legacy", run_name="legacy",
+        task_objective="legacy", agent_objective="legacy",
+        mode="full_pipeline", metric_direction="max", customizations={},
+        status="halted", summary="", registry_version_tag="",
+        halted_reason="Finalization timed out.", history=[], holdout={},
+        num_gpus=1, iteration_budget=1, iterations_completed=0,
+        stop_threshold=None, best_validation_score=None, max_cost_usd=0.0,
+        lifecycle={"rescue_terminal_status": "halted"},
+    )
+
+    summary = _summary(run)
+
+    assert summary.status == "failed"
+    assert summary.is_terminal is True
+    assert summary.lifecycle["rescue_terminal_status"] == "failed"
+
+
+def test_run_patch_contract_rejects_retired_halted_status() -> None:
+    from zevo.api.routers.shared.runs import PatchRunRequest
+
+    with pytest.raises(ValidationError):
+        PatchRunRequest(status="halted")
+
+
 def test_setting_rejects_legacy_single_validation_fields() -> None:
     """A single Validation benchmark uses one validation_sets member."""
     import pytest
@@ -1182,7 +1210,7 @@ def test_a_failed_ticket_stops_a_run_reading_as_a_clean_success() -> None:
         has_registered_model=True,
         failed_ticket_ids=["holdout-infer-28845478-008"]) == "degraded"
     assert decide_run_status(has_registered_model=False, failed_ticket_ids=["x"]) == "failed"
-    assert decide_run_status(has_registered_model=False, failed_ticket_ids=[]) == "halted"
+    assert decide_run_status(has_registered_model=False, failed_ticket_ids=[]) == "failed"
 
     # A degraded run is OVER. Leaving it out of the terminal set means every
     # daemon keeps picking it up and the UI counts it as still going.
@@ -1318,6 +1346,116 @@ async def test_supervisor_can_explicitly_finish_its_run() -> None:
         )
         assert updated.halted_reason == ""
         assert (await db.get(Run, "explicit-success")).halted_reason == ""
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_planned_limit_does_not_make_a_clean_run_degraded() -> None:
+    from datetime import datetime, timezone
+
+    from zevo.api.routers.shared.runs import PatchRunRequest, patch_run
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    complete = {
+        "iteration": 1, "source": "trained", "score": 0.5,
+        "action": "trained", "result": "Validation measured.",
+        "analysis": "The measured result supports stopping.", "next": "Retain model.",
+    }
+    async with Session() as db:
+        db.add(Run(
+            id="normal-limit", task_name="task", status="running",
+            metric="accuracy", validation_metric="accuracy",
+            supervisor_ticket_id="orchestrate-normal-001",
+            registry_version_tag="M-normal", iterations_completed=1,
+            iteration_budget=1, history=[complete], summary="Champion retained.",
+            lifecycle={"finalization": {"reason": "iterations 1 >= budget 1"}},
+            started_at=datetime.now(timezone.utc),
+        ))
+        db.add(Ticket(
+            id="orchestrate-normal-001", run_id="normal-limit",
+            agent_id="orchestrator", status="running", payload={},
+        ))
+        db.add(Ticket(
+            id="registry-normal-001", run_id="normal-limit",
+            agent_id="registry", status="succeeded", payload={}, iteration=1,
+        ))
+        await db.commit()
+
+        result = await patch_run(
+            "normal-limit",
+            PatchRunRequest(
+                status="degraded",
+                halted_reason="Finalizing at limit: iterations 1 >= budget 1",
+            ),
+            db,
+        )
+        row = await db.get(Run, "normal-limit")
+        assert result.status == "success"
+        assert row.status == "success"
+        assert row.halted_reason == ""
+        assert row.lifecycle["terminal_outcome"]["issues"] == []
+        assert row.lifecycle["terminal_outcome"]["stop_trigger"]["code"] == "iteration_limit"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_degraded_reason_uses_only_unresolved_latest_work() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from zevo.api.routers.shared.runs import PatchRunRequest, patch_run
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    complete = {
+        "iteration": 1, "source": "trained", "score": 0.5,
+        "action": "trained", "result": "Validation measured.",
+        "analysis": "The measured result supports stopping.", "next": "Retain model.",
+    }
+    async with Session() as db:
+        db.add(Run(
+            id="unresolved-issue", task_name="task", status="running",
+            metric="accuracy", validation_metric="accuracy",
+            supervisor_ticket_id="orchestrate-issue-001",
+            registry_version_tag="M-issue", iterations_completed=1,
+            iteration_budget=1, history=[complete], summary="Champion retained.",
+            lifecycle={"finalization": {"reason": "iterations 1 >= budget 1"}},
+            started_at=now,
+        ))
+        db.add_all([
+            Ticket(id="orchestrate-issue-001", run_id="unresolved-issue",
+                   agent_id="orchestrator", status="running", payload={}, created_at=now),
+            Ticket(id="train-issue-001", run_id="unresolved-issue", agent_id="train",
+                   status="failed", iteration=1, payload={"operation": "train"}, created_at=now),
+            Ticket(id="train-issue-002", run_id="unresolved-issue", agent_id="train",
+                   status="succeeded", iteration=1, payload={"operation": "train"},
+                   created_at=now + timedelta(seconds=1)),
+            Ticket(id="holdout-infer-issue-002", run_id="unresolved-issue",
+                   agent_id="inference", lane="held_out_test", status="failed",
+                   iteration=1, payload={"operation": "inference"},
+                   created_at=now + timedelta(seconds=2)),
+            Ticket(id="registry-issue-001", run_id="unresolved-issue",
+                   agent_id="registry", status="succeeded", iteration=1,
+                   payload={}, created_at=now + timedelta(seconds=3)),
+        ])
+        await db.commit()
+
+        result = await patch_run(
+            "unresolved-issue", PatchRunRequest(status="degraded"), db,
+        )
+        row = await db.get(Run, "unresolved-issue")
+        issues = row.lifecycle["terminal_outcome"]["issues"]
+        assert result.status == "degraded"
+        assert [item["ticket_id"] for item in issues] == ["holdout-infer-issue-002"]
+        assert "Held-out Test inference did not complete" in row.halted_reason
+        assert "train-issue-001" not in row.halted_reason
 
     await engine.dispose()
 
