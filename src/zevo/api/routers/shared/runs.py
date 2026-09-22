@@ -884,6 +884,14 @@ _COST_SORT = "cost"
 _IMPROVEMENT_SORT = "improvement"
 
 
+@router.get("/runs/statistics")
+async def run_statistics(db: AsyncSession = Depends(get_db)) -> dict:
+    """Aggregate the complete visible catalogue, independently of list pagination."""
+    from zevo.engine.observe.dashboard import aggregate_runs
+
+    return await aggregate_runs(db, select(Run), _queue_wait_state_for_runs)
+
+
 @router.get("/runs", response_model=list[RunSummary])
 async def list_runs(
     response: Response,

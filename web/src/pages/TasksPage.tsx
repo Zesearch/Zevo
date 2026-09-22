@@ -163,6 +163,7 @@ function TestFiles({
     { label: "data", path: item.test_set, value: "" },
     { label: "inference query", path: "", value: item.inference_query },
     { label: "answer fields", path: "", value: item.answer_fields.join(", ") },
+    ...(item.metric_type === "builtin" ? [{ label: "prediction column", path: "", value: item.prediction_column || "Auto" }] : []),
     {
       label: "metric",
       path: "",

@@ -1,3 +1,4 @@
+import { PredictionColumnField } from "./PredictionColumnField";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { CheckCircle2, ChevronRight, Plus, Trash2, Upload, X } from "lucide-react";
@@ -169,6 +170,12 @@ export function ScoringSuiteManifest({
                   {short(item.sample_submission)}
                 </p>
               </div>
+              {item.metric_type === "builtin" && (
+                <div>
+                  <div className="field-label mb-1 !text-slate-500">Prediction column</div>
+                  <p className="font-mono text-slate-300">{item.prediction_column || "Auto"}</p>
+                </div>
+              )}
               {item.metric_type === "custom" && (
                 <div className="sm:col-span-2">
                   <div className="field-label mb-1 !text-slate-500">Evaluation script</div>
@@ -257,6 +264,7 @@ export function normalizeScoringSuite(items: TaskTestSet[]): TaskTestSet[] {
     inference_query: item.inference_query.trim(),
     sample_submission: item.sample_submission.trim(),
     metric: item.metric.trim().toLowerCase(),
+    prediction_column: item.metric_type === "builtin" ? item.prediction_column?.trim() || "" : "",
     answer_fields: item.answer_fields.map((field) => field.trim()).filter(Boolean),
     evaluation_script: item.metric_type === "custom" ? item.evaluation_script.trim() : "",
     evaluator_sha256: item.metric_type === "custom" ? item.evaluator_sha256 : "",
@@ -363,7 +371,7 @@ export function ScoringSuiteEditor({
                   options={[
                     ...BUILTIN_METRICS.map((value) => ({
                       value,
-                      label: value === "pass_at_1" ? "pass@1 · code execution" : value,
+                      label: value,
                     })),
                     { value: "__other__", label: "Other (custom script)" },
                   ]}
@@ -396,6 +404,13 @@ export function ScoringSuiteEditor({
                 />
               </div>
             </div>
+            {item.metric_type === "builtin" && (
+              <PredictionColumnField
+                sample={item.sample_submission} dataset={item.test_set}
+                answerFields={item.answer_fields} value={item.prediction_column || ""}
+                onChange={(value) => update(index, { prediction_column: value })}
+              />
+            )}
             {item.metric_type === "custom" && (
               <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2">
                 <div>
@@ -1134,8 +1149,6 @@ export const MODEL_ID_HINT =
 
 export const BUILTIN_METRICS = [
   "accuracy", "exact_match", "f1", "token_f1", "bleu", "rouge_l",
-  "mc_loglikelihood", "accuracy_norm",
-  "pass_at_1",
 ];
 
 export function methodConfigFromInputs(inputs: RunInputValues): Record<string, unknown> {

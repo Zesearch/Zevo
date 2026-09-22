@@ -349,7 +349,13 @@ class EvaluationRunnerDriver:
                         "prediction", "code", "completion", "solution",
                     }
                 ]
-                if len(code_columns) == 1:
+                selected_column = inp.evaluation_config.get("prediction_column", "")
+                if selected_column and selected_column not in binding.prediction_columns:
+                    output = _failed(inp.ticket_id, "Selected prediction column is absent from submission outputs")
+                    return DriverRunResult(output=output, exit_code=1, driver=self.name)
+                if selected_column:
+                    prediction_column = selected_column
+                elif len(code_columns) == 1:
                     prediction_column = code_columns[0]
                 elif len(binding.prediction_columns) == 1:
                     prediction_column = binding.prediction_columns[0]
@@ -564,8 +570,8 @@ class EvaluationRunnerDriver:
                     output = _failed(
                         inp.ticket_id,
                         "built-in evaluation requires sample_submission to "
-                        "identify exactly one prediction column; use a custom "
-                        "evaluator for multi-output submissions",
+                        "identify exactly one prediction column; select the "
+                        "prediction column for multi-output submissions",
                         f"route={route}",
                     )
                     return DriverRunResult(

@@ -1393,7 +1393,8 @@ async def _build_evaluation_suite_members(
                 evaluation_script=member_script,
                 evaluator_sha256=str(item.get("evaluator_sha256") or ""),
                 answer_fields=list(item.get("answer_fields") or []),
-                evaluation_config={},
+                evaluation_config=({"prediction_column": item["prediction_column"]}
+                                   if item.get("prediction_column") else {}),
                 code_execution_adapter=str(item.get("code_execution_adapter") or ""),
             ))
     return members
@@ -6982,7 +6983,8 @@ async def _spawn_validation_eval(
         payload={
             "test_set_name": marker,
             "metric": str(item.get("metric") or ""),
-            "evaluation_config": {},
+            "evaluation_config": ({"prediction_column": item["prediction_column"]}
+                                  if item.get("prediction_column") else {}),
             "scoring_set": str(item.get("validation_set") or ""),
             "evaluation_script": str(item.get("evaluation_script") or ""),
             "evaluator_sha256": str(item.get("evaluator_sha256") or ""),
@@ -7254,7 +7256,8 @@ async def _spawn_holdout_eval(
         input_format="typed",
         payload={
             "test_set_name": test_set_name,
-            "metric": item["metric"], "evaluation_config": {},
+            "metric": item["metric"], "evaluation_config": ({"prediction_column": item["prediction_column"]}
+                                  if item.get("prediction_column") else {}),
             "scoring_set": item["test_set"],
             "evaluation_script": str(item.get("evaluation_script") or ""),
             "evaluator_sha256": str(item.get("evaluator_sha256") or ""),

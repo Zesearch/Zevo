@@ -390,7 +390,7 @@ async def test_independent_validation_suite_keeps_all_test_rows(
     tests = [
         TaskTestSet(**{
             **_member("math"), "test_set": math,
-            "sample_submission": math_sample,
+            "sample_submission": math_sample, "prediction_column": "prediction",
         }),
         TaskTestSet(**{
             **_member("qa", "exact_match"), "test_set": qa,
@@ -400,7 +400,7 @@ async def test_independent_validation_suite_keeps_all_test_rows(
     validation = [
         TaskTestSet(**{
             **_member("GSM8K"), "test_set": Path(gsm).name,
-            "sample_submission": gsm_sample,
+            "sample_submission": gsm_sample, "prediction_column": "prediction",
         }),
         TaskTestSet(**{
             **_member("ARC Challenge", "exact_match"), "test_set": arc,
@@ -448,6 +448,9 @@ async def test_independent_validation_suite_keeps_all_test_rows(
     assert agent_request.validation_sets == []
     assert agent_request.validation_metric == "suite_average"
 
+
+    assert holdout["test_sets"][0]["prediction_column"] == "prediction"
+    assert holdout["validation_sets"][0]["prediction_column"] == "prediction"
 
 @pytest.mark.asyncio
 async def test_run_setup_normalizes_relative_validation_and_private_test_paths(

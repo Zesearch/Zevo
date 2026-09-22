@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+
+import pytest
 from pathlib import Path
 
 from zevo.contracts.evaluation import EvaluationSuiteMemberInput, EvaluationTaskInput
@@ -374,3 +376,25 @@ def test_builtin_prediction_column_is_derived_from_sample_submission(
     assert result.output.status == "succeeded"
     metrics = json.loads(Path(result.output.metrics_path).read_text())
     assert metrics["score"] == 1.0
+
+
+@pytest.mark.parametrize("metric", ["accuracy", "f1"])
+@pytest.mark.parametrize("column", ["prediction", "complete_prediction", "missing"])
+def test_builtin_scores_selected_output_column(tmp_path: Path, metric: str, column: str) -> None:
+    predictions, gold, sample = (tmp_path / name for name in ("pred.csv", "gold.csv", "sample.csv"))
+    _write_csv(predictions, [{"id": "1", "complete_prediction": "wrong", "prediction": "B"}])
+    _write_csv(gold, [{"id": "1", "answer": "B"}])
+    _write_csv(sample, [{"id": "", "complete_prediction": "", "prediction": ""}])
+    result, _ = _run(EvaluationTaskInput(
+        ticket_id="selected-column", predictions_path=str(predictions),
+        scoring_set=str(gold), sample_submission=str(sample), evaluation_script="",
+        answer_fields=["answer"], metric=metric,
+        evaluation_config={"prediction_column": column},
+    ), tmp_path / "work")
+    if column == "missing":
+        assert result.output.status == "failed"
+        assert "prediction column" in result.output.error_message
+    else:
+        assert result.output.status == "succeeded"
+        metrics = json.loads(Path(result.output.metrics_path).read_text())
+        assert metrics["score"] == (1.0 if column == "prediction" else 0.0)

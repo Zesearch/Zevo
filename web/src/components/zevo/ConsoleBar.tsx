@@ -10,7 +10,7 @@
 // in its own header, and ⌘K reaches it from anywhere.
 import useSWR from "swr";
 import { Command } from "lucide-react";
-import type { ModelDTO, RunSummary } from "../../lib/api";
+import type { ModelDTO, RunStatistics } from "../../lib/api";
 import { fmtCost, fmtDuration } from "../../lib/format";
 import logoUrl from "../../assets/zevo-logo.png";
 import { fireCommand } from "../../lib/commands";
@@ -30,19 +30,14 @@ function Vital({ label, value, live = false }: { label: string; value: string; l
 }
 
 export function ConsoleBar() {
-  const { data: runs, error: runsError } = useSWR<RunSummary[]>("/api/runs?limit=500", { refreshInterval: 4000 });
+  const { data: stats, error: runsError } = useSWR<RunStatistics>("/api/runs/statistics", { refreshInterval: 4000 });
   const { data: registry, error: modelsError } = useSWR<ModelDTO[]>("/api/models");
   const { data: cost, error: costError } = useSWR<CostTotal>("/api/cost/total", { refreshInterval: 15000 });
 
-  // Run summaries are deliberately bounded; the model catalogue is complete.
-  const runsKnown = !!runs && !runsError;
-  const active = runsKnown ? runs.filter((r) => r.status === "running").length : null;
+  const runsKnown = !!stats && !runsError;
+  const active = runsKnown ? stats.active : null;
   const models = registry && !modelsError ? registry.length : null;
-  const completedTime = runsKnown ? runs.reduce((sum, r) => (
-    r.is_terminal && r.duration_s != null && Number.isFinite(r.duration_s) && r.duration_s >= 0
-      ? sum + r.duration_s
-      : sum
-  ), 0) : null;
+  const completedTime = runsKnown ? stats.runtime_seconds.all : null;
   const burn = cost && !costError ? fmtCost(cost.total_usd) : "—";
 
   const mac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -67,9 +62,9 @@ export function ConsoleBar() {
       </div>
 
       <div className="hidden items-center gap-5 border-l border-hair pl-5 xl:flex">
-        <Vital label="Active · latest 500 runs" value={active === null ? "—" : String(active)} live={active !== null && active > 0} />
+        <Vital label="Active runs" value={active === null ? "—" : String(active)} live={active !== null && active > 0} />
         <Vital label="Saved Models" value={models === null ? "—" : String(models)} />
-        <Vital label="Time · latest 500 runs" value={completedTime === null ? "—" : fmtDuration(completedTime)} />
+        <Vital label="Run time" value={completedTime === null ? "—" : fmtDuration(completedTime)} />
         <Vital label="Cost" value={burn} />
       </div>
 
