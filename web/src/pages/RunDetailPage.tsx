@@ -1,3 +1,4 @@
+import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
 import { useState, useMemo, useEffect, Fragment } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
@@ -478,15 +479,19 @@ function PipelineTimeline({
     [run.tickets],
   );
   const supervisorId = supervisor?.id ?? "";
-  const orchestratorWakes = useMemo(
+  const rawOrchestratorWakes = useMemo(
     () => heartbeats
       .filter((h) => h.agent_id === "orchestrator" && h.ticket_id === supervisorId)
       .sort((a, b) => a.started_at.localeCompare(b.started_at)),
     [heartbeats, supervisorId],
   );
+  const orchestratorWakes = useMemo(
+    () => heartbeatGroups(rawOrchestratorWakes).map(settledHeartbeat),
+    [rawOrchestratorWakes],
+  );
   const wakeIndex = useMemo(
-    () => new Map(orchestratorWakes.map((heartbeat, index) => [heartbeat.id, index])),
-    [orchestratorWakes],
+    () => new Map(rawOrchestratorWakes.map((heartbeat, index) => [heartbeat.id, index])),
+    [rawOrchestratorWakes],
   );
   const ticketById = useMemo(
     () => new Map(run.tickets.map((ticket) => [ticket.id, ticket])),
@@ -683,48 +688,12 @@ function PipelineTimeline({
                     const active = !!selId && selectedId === selId;
                     const live = heartbeat.is_live;
                     const activationFailed = !!heartbeat.finished_at && heartbeat.exit_code !== 0;
-                    // Preserve every activation in the Timeline, but render its
-                    // settled outcome: a failed activation immediately followed
-                    // by a successful repair of the same supervisor Ticket is
-                    // successful here. The raw exit/error remains in its detail.
-                    const nextWake = orchestratorWakes[wake + 1];
-                    const recovered = heartbeat.action !== "mark_failed"
-                      && activationFailed
-                      && nextWake?.ticket_id === heartbeat.ticket_id
-                      && !!nextWake.finished_at
-                      && nextWake.exit_code === 0;
-                    const failed = heartbeat.action === "mark_failed"
-                      || (activationFailed && !recovered);
-                    // A parse failure can erase the projected action/child from
-                    // this Heartbeat even though the child Ticket was committed.
-                    // Recover that display metadata from the one normal-lane
-                    // Ticket actually created before the repair wake, so this
-                    // row still says e.g. "Start Evaluation" instead of the
-                    // uninformative "Orchestrator" fallback.
-                    const committedChild = recovered && !heartbeat.action
-                      ? Array.from(ticketById.values())
-                        .filter((ticket) => (
-                          agentIdOf(ticket) !== "orchestrator"
-                          && ticket.lane !== "held_out_test"
-                          && ticket.created_at >= heartbeat.started_at
-                          && ticket.created_at < nextWake.started_at
-                        ))
-                        .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-                      : undefined;
-                    const displayedHeartbeat = committedChild
-                      ? {
-                        ...heartbeat,
-                        action: "emit_ticket",
-                        child_ticket_id: committedChild.id,
-                      }
-                      : heartbeat;
-                    const displayedSummary = heartbeat.action_summary || (
-                      committedChild
-                        ? `Created ${committedChild.id}${
-                          committedChild.summary ? ` · ${committedChild.summary}` : ""
-                        }`
-                        : ""
-                    );
+                    const failed = heartbeat.action === "mark_failed" || activationFailed;
+                    const repairGroup = heartbeatGroups(rawOrchestratorWakes)
+                      .find((group) => group[0].id === heartbeat.id);
+                    const recovered = !failed && !live && (repairGroup?.length ?? 0) > 1;
+                    const displayedHeartbeat = heartbeat;
+                    const displayedSummary = heartbeat.action_summary;
                     return (
                       <li key={`orchestrator-${heartbeat.id}`} className="relative">
                         {showConnector && (
@@ -975,15 +944,21 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
   // every time.
   const [events, setEvents] = useState<EventEnvelope[]>([]);
   const [seek, setSeek] = useState<{ ts: string; n: number }>({ ts: "", n: 0 });
-  const [selectedActivation, setSelectedActivation] = useState<number | undefined>(wake);
+  const [selectedActivation, setSelectedActivation] = useState<number | undefined>(undefined);
   const chronological = [...heartbeats].sort((a, b) => a.started_at.localeCompare(b.started_at));
-  const effectiveWake = selectedActivation;
+  const orchestrationGroup = t?.agent_id === "orchestrator"
+    ? heartbeatGroups(chronological).find((group) => group.some((heartbeat) =>
+        heartbeat.id === chronological[wake ?? chronological.length - 1]?.id))
+    : undefined;
+  const defaultWake = orchestrationGroup?.at(-1);
+  const effectiveWake = selectedActivation ?? (defaultWake
+    ? chronological.findIndex((heartbeat) => heartbeat.id === defaultWake.id) : wake);
   const picked = showUnrecordedFailure
     ? undefined
     : effectiveWake !== undefined ? chronological[effectiveWake] : heartbeats[0];
   const hbId = picked?.id;
   useEffect(() => {
-    setSelectedActivation(wake);
+    setSelectedActivation(undefined);
   }, [ticketId, wake]);
   // Clear on switch. LiveTranscript resets its own feed per heartbeat, but this
   // copy would otherwise keep the previous activation's steps on screen until
@@ -1096,11 +1071,8 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
           </Link>
         </div>
       </div>
-      {/* The supervisor is already represented by one labelled row per wake in
-          the timeline on the left. Repeating every wake as an Activation strip
-          here adds control-plane noise without helping the reader understand a
-          model stage. Specialist tickets retain the selector because their
-          multiple executions can carry different runtime evidence. */}
+      {/* Specialist executions share this selector; supervisor repairs are
+          scoped to the selected decision in Overview below. */}
       {t.agent_id !== "orchestrator" && chronological.length > 1 && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
           <span className="font-mono text-[11px] uppercase tracking-wider text-dim">Activations</span>
@@ -1129,6 +1101,23 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
       <div className="space-y-4 p-4">
         <div className="rounded-bezel border border-hair bg-canvas/40 p-3">
           <div className="mb-2"><Kicker strong>Overview</Kicker></div>
+          {orchestrationGroup && orchestrationGroup.length > 1 && (
+            <div className="mb-3 rounded-bezel border border-hair px-3 py-2.5">
+              <div className="mb-2 font-mono text-[11px] uppercase tracking-wider text-dim">Repair</div>
+              <div className="flex flex-wrap gap-2">
+                {orchestrationGroup.map((heartbeat, index) => (
+                  <button key={heartbeat.id} type="button"
+                    onClick={() => setSelectedActivation(chronological.findIndex((item) => item.id === heartbeat.id))}
+                    className={`rounded-full border px-2.5 py-1 font-mono text-[11px] transition ${heartbeat.id === picked?.id
+                      ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
+                      : "border-hair text-slate-400 hover:text-slate-200"}`}
+                  >
+                    {index === 0 ? "Initial" : `Repair ${index}`} · {heartbeat.is_live ? "Running" : heartbeat.exit_code === 0 ? "Succeeded" : "Failed"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {showUnrecordedFailure && (
             <div className="mb-3 rounded-bezel border border-coral-500/30 bg-coral-500/[0.07] p-3 text-sm text-coral-200">
               <div className="font-semibold">The next Orchestrator activation failed before the agent started</div>
@@ -1392,7 +1381,9 @@ export function RunDetailPage() {
     return m;
   }, [executionHeartbeats]);
   const supervisorWakes = useMemo(
-    () => executionHeartbeats.filter((h) => h.agent_id === "orchestrator").length,
+    () => heartbeatGroups(executionHeartbeats
+      .filter((h) => h.agent_id === "orchestrator")
+      .sort((a, b) => a.started_at.localeCompare(b.started_at))).length,
     [executionHeartbeats],
   );
   // The hub's lamp, by the same rule the rim stations use — the supervisor is
