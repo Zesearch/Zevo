@@ -1058,6 +1058,7 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
     )
     : [];
   const parallelWorkers = Number(latestInferenceProgress?.extras?.parallel_workers || 0);
+  const activations = t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : chronological;
   return (
     <Bezel className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hair p-4">
@@ -1071,21 +1072,21 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
           </Link>
         </div>
       </div>
-      {/* Specialist executions share this selector; supervisor repairs are
-          scoped to the selected decision in Overview below. */}
-      {t.agent_id !== "orchestrator" && chronological.length > 1 && (
+      {activations.length > 1 && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
           <span className="font-mono text-[11px] uppercase tracking-wider text-dim">Activations</span>
-          {chronological.map((heartbeat, index) => {
+          {activations.map((heartbeat, index) => {
             const active = heartbeat.id === picked?.id;
-            const label = heartbeat.operation
+            const label = t.agent_id === "orchestrator"
+              ? index === 0 ? "Initial" : `Repair ${index}`
+              : heartbeat.operation
               ? operationCaption(t, heartbeat.operation, heartbeat.activation_phase)
               : `Activation ${index + 1}`;
             return (
               <button
                 key={heartbeat.id}
                 type="button"
-                onClick={() => setSelectedActivation(index)}
+                onClick={() => setSelectedActivation(chronological.findIndex((item) => item.id === heartbeat.id))}
                 className={`rounded-full border px-2.5 py-1 font-mono text-[11px] transition ${
                   active
                     ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
@@ -1101,23 +1102,6 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
       <div className="space-y-4 p-4">
         <div className="rounded-bezel border border-hair bg-canvas/40 p-3">
           <div className="mb-2"><Kicker strong>Overview</Kicker></div>
-          {orchestrationGroup && orchestrationGroup.length > 1 && (
-            <div className="mb-3 rounded-bezel border border-hair px-3 py-2.5">
-              <div className="mb-2 font-mono text-[11px] uppercase tracking-wider text-dim">Repair</div>
-              <div className="flex flex-wrap gap-2">
-                {orchestrationGroup.map((heartbeat, index) => (
-                  <button key={heartbeat.id} type="button"
-                    onClick={() => setSelectedActivation(chronological.findIndex((item) => item.id === heartbeat.id))}
-                    className={`rounded-full border px-2.5 py-1 font-mono text-[11px] transition ${heartbeat.id === picked?.id
-                      ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
-                      : "border-hair text-slate-400 hover:text-slate-200"}`}
-                  >
-                    {index === 0 ? "Initial" : `Repair ${index}`} · {heartbeat.is_live ? "Running" : heartbeat.exit_code === 0 ? "Succeeded" : "Failed"}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
           {showUnrecordedFailure && (
             <div className="mb-3 rounded-bezel border border-coral-500/30 bg-coral-500/[0.07] p-3 text-sm text-coral-200">
               <div className="font-semibold">The next Orchestrator activation failed before the agent started</div>
