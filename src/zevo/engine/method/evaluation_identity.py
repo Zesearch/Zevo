@@ -56,6 +56,8 @@ def snapshot_test_contract(suite: list[dict[str, Any]]) -> dict[str, Any] | None
                 "metric_type": kind, "metric": member["metric"],
                 "metric_direction": member.get("metric_direction") or "max",
                 "answer_fields": answers, "inference_query": query,
+                **({"prediction_column": member["prediction_column"]}
+                   if member.get("prediction_column") else {}),
                 "scorer_sha256": scorer,
                 "code_execution_adapter": member.get("code_execution_adapter") or "",
             })

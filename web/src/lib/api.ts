@@ -62,6 +62,7 @@ export type TaskTestSet = {
   metric_type: MetricType;
   metric: string;
   answer_fields: string[];
+  prediction_column?: string;
   metric_direction: MetricDirection;
   evaluation_script: string;
   evaluator_sha256: string;
@@ -666,4 +667,18 @@ export type ModelDTO = {
   /** `model_path`, absolute on the host. Empty when the deployment did not say
    *  where the repo lives, or when this version kept no model. */
   model_path_abs: string;
+};
+
+
+export type RunStatistics = {
+  total: number;
+  active: number;
+  succeeded: number;
+  failed: number;
+  runtime_seconds: Record<string, number>;
+  improvements: Array<{
+    key: string; taskName: string; metric: string; metricDirection: "max" | "min";
+    runCount: number; averageBaseline: number; averageEvolved: number;
+    averageImprovement: number; bestScore: number;
+  }>;
 };

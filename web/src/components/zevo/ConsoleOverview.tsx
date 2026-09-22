@@ -1,79 +1,12 @@
 // ZEVO's system-level outcome summary. Runs stay on the Runs page; this panel
 // groups completed test outcomes by task because two tasks may use different
 // metrics or opposite target directions.
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import useSWR from "swr";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import type { RunSummary } from "../../lib/api";
+import type { RunStatistics } from "../../lib/api";
 import { fmtMetric, isPercentageMetric } from "../../lib/format";
 import { Bezel, Kicker, Note, Readout } from "./primitives";
-
-type Point = {
-  taskName: string;
-  baseline: number;
-  evolved: number;
-  improvement: number;
-  metric: string;
-  metricDirection: "max" | "min";
-};
-
-type TaskSummary = {
-  key: string;
-  taskName: string;
-  metric: string;
-  metricDirection: "max" | "min";
-  runCount: number;
-  averageBaseline: number;
-  averageEvolved: number;
-  averageImprovement: number;
-  bestScore: number;
-};
-
-function pointFrom(run: RunSummary): Point | null {
-  const baseline = run.baseline_test_score;
-  const evolved = run.champion_test_score;
-  if (baseline == null || evolved == null) return null;
-
-  return {
-    taskName: run.task_name,
-    baseline,
-    evolved,
-    improvement: run.metric_direction === "min" ? baseline - evolved : evolved - baseline,
-    metric: run.metric,
-    metricDirection: run.metric_direction,
-  };
-}
-
-function summarizeByTask(points: Point[]): TaskSummary[] {
-  const groups = new Map<string, Point[]>();
-  for (const point of points) {
-    // Metric and target are part of the group boundary. If a task definition
-    // changes later, unlike outcomes are not silently averaged together.
-    const key = `${point.taskName}\u0000${point.metric}\u0000${point.metricDirection}`;
-    const group = groups.get(key) ?? [];
-    group.push(point);
-    groups.set(key, group);
-  }
-
-  const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
-  return [...groups.entries()]
-    .map(([key, outcomes]) => {
-      const first = outcomes[0];
-      const evolved = outcomes.map((outcome) => outcome.evolved);
-      return {
-        key,
-        taskName: first.taskName,
-        metric: first.metric,
-        metricDirection: first.metricDirection,
-        runCount: outcomes.length,
-        averageBaseline: mean(outcomes.map((outcome) => outcome.baseline)),
-        averageEvolved: mean(evolved),
-        averageImprovement: mean(outcomes.map((outcome) => outcome.improvement)),
-        bestScore: first.metricDirection === "min" ? Math.min(...evolved) : Math.max(...evolved),
-      };
-    })
-    .sort((a, b) => a.taskName.localeCompare(b.taskName) || a.metric.localeCompare(b.metric));
-}
 
 function scoreNumber(value: number, metric: string): string {
   return isPercentageMetric(metric)
@@ -86,30 +19,19 @@ function delta(value: number, metric: string): string {
 }
 
 export function ConsoleOverview() {
-  const { data: runs = [], isLoading, error, mutate } = useSWR<RunSummary[]>("/api/runs?limit=500", {
+  const { data: stats, isLoading, error, mutate } = useSWR<RunStatistics>("/api/runs/statistics", {
     refreshInterval: 10000,
   });
   const [selectedKey, setSelectedKey] = useState("");
   const [tasksOpen, setTasksOpen] = useState(true);
 
-  const summaries = useMemo(
-    () => summarizeByTask(
-      runs
-        .filter((run) => (
-          (run.status === "success" || run.status === "degraded")
-          && Boolean(run.registry_version_tag)
-        ))
-        .map(pointFrom)
-        .filter((point): point is Point => point !== null),
-    ),
-    [runs],
-  );
+  const summaries = stats?.improvements ?? [];
   const selected = summaries.find((summary) => summary.key === selectedKey) ?? summaries[0] ?? null;
   const improved = summaries.filter((summary) => summary.averageImprovement > 0).length;
 
   const title = (
     <div className="flex items-center gap-2">
-      <Kicker strong className="!text-sm">Model improvement · recent 500 runs</Kicker>
+      <Kicker strong className="!text-sm">Model improvement</Kicker>
       <Note size={14}>
         Improvement is the test-score change from Zero, the baseline model, to models evolved by Zevo. Tasks stay separate because their metrics and targets may differ.
       </Note>

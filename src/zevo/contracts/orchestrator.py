@@ -90,6 +90,7 @@ class TaskTestSet(BaseModel):
     metric_type: Literal["builtin", "custom"] = "builtin"
     metric: str = Field(min_length=1, max_length=64)
     answer_fields: list[str] = Field(min_length=1)
+    prediction_column: str = ""
     metric_direction: Literal["max", "min"] = "max"
     evaluation_script: str = ""
     evaluator_sha256: str = Field("", pattern=r"^(?:|[0-9a-f]{64})$")
@@ -110,6 +111,7 @@ class TaskTestSet(BaseModel):
         self.name = self.name.strip()
         self.test_set = self.test_set.strip()
         self.inference_query = self.inference_query.strip()
+        self.prediction_column = self.prediction_column.strip() if self.metric_type == "builtin" else ""
         self.sample_submission = self.sample_submission.strip()
         self.metric = self.metric.strip().lower()
         self.evaluation_script = self.evaluation_script.strip()

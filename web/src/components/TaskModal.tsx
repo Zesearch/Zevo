@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Modal } from "./Modal";
 import { FileSlot, TrainingDataField } from "./RunInputs";
+import { PredictionColumnField } from "./PredictionColumnField";
 import { ThemedSelect } from "./ThemedSelect";
 import { api } from "../lib/api";
 
@@ -14,6 +15,7 @@ export type TaskTestSetRecord = {
   metric_type: "builtin" | "custom";
   metric: string;
   answer_fields: string[];
+  prediction_column?: string;
   metric_direction: "max" | "min";
   evaluation_script: string;
   evaluator_sha256: string;
@@ -31,8 +33,6 @@ type TestSetDraft = Omit<TaskTestSetRecord, "answer_fields"> & {
 
 const BUILTIN_TASK_METRICS = [
   "accuracy", "exact_match", "f1", "token_f1", "bleu", "rouge_l",
-  "mc_loglikelihood", "accuracy_norm",
-  "pass_at_1",
 ];
 
 const field =
@@ -134,6 +134,7 @@ export function TaskModal({
         metric_type: item.metric_type,
         metric: item.metric.trim().toLowerCase(),
         answer_fields: answerFields(item.answer_fields),
+        prediction_column: item.metric_type === "builtin" ? item.prediction_column?.trim() || "" : "",
         metric_direction: item.metric_direction,
         evaluation_script: item.metric_type === "custom"
           ? item.evaluation_script.trim() : "",
@@ -280,7 +281,7 @@ export function TaskModal({
                       options={[
                         ...BUILTIN_TASK_METRICS.map((value) => ({
                           value,
-                          label: value === "pass_at_1" ? "pass@1 · code execution" : value,
+                          label: value,
                         })),
                         { value: "__other__", label: "Other (custom script)" },
                       ]}
@@ -314,6 +315,14 @@ export function TaskModal({
                     />
                   </div>
                 </div>
+
+                {item.metric_type === "builtin" && (
+                  <PredictionColumnField
+                    sample={item.sample_submission} dataset={item.test_set}
+                    answerFields={answerFields(item.answer_fields)} value={item.prediction_column || ""}
+                    onChange={(value) => updateTestSet(index, "prediction_column", value)}
+                  />
+                )}
 
                 {item.metric_type === "custom" && (
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
