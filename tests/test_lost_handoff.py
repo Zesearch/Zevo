@@ -322,6 +322,59 @@ async def test_repair_does_not_storm(session):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pending_status", ["queued", "running"])
+async def test_terminal_evaluation_waits_for_activation_handoff(session, pending_status):
+    """Evaluation's terminal commit precedes creation of the Test branch."""
+    run = Run(id="measurement-handoff", metric="accuracy", status="running",
+              supervisor_ticket_id="measurement-supervisor")
+    supervisor = _ticket("measurement-supervisor", run.id, "orchestrator",
+                         updated_ago=300)
+    evaluation = _ticket("measurement-eval", run.id, "evaluation", updated_ago=10)
+    wake = AgentWakeupRequest(
+        id="measurement-wake", ticket_id=evaluation.id, agent_id="evaluation",
+        source="handoff", status=pending_status,
+    )
+    session.add_all([run, supervisor, evaluation, wake])
+    await session.commit()
+
+    # All Tickets appear finished, but the normal handoff still owns the wake.
+    await _close_finished_runs(session)
+    assert run.status == "running"
+    assert (await session.execute(select(AgentWakeupRequest))).scalars().all() == [wake]
+
+    # The activation creates Test work before it finishes. Keep waiting for
+    # that work even after the Evaluation wake itself has settled.
+    holdout = _ticket("measurement-test", run.id, "inference", status="queued")
+    holdout.lane = "held_out_test"
+    evaluation.supervisor_wake_deferred = True
+    wake.status = "completed"
+    session.add(holdout)
+    await session.commit()
+    await _close_finished_runs(session)
+    assert (await session.execute(select(AgentWakeupRequest))).scalars().all() == [wake]
+
+
+@pytest.mark.asyncio
+async def test_settled_evaluation_with_lost_handoff_can_still_recover(session):
+    run = Run(id="lost-evaluation", metric="accuracy", status="running",
+              supervisor_ticket_id="lost-eval-supervisor")
+    supervisor = _ticket("lost-eval-supervisor", run.id, "orchestrator",
+                         updated_ago=300)
+    evaluation = _ticket("lost-eval", run.id, "evaluation", updated_ago=10)
+    session.add_all([run, supervisor, evaluation, AgentWakeupRequest(
+        ticket_id=evaluation.id, agent_id="evaluation", source="handoff",
+        status="completed",
+    )])
+    await session.commit()
+    await _close_finished_runs(session)
+    wakes = (await session.execute(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == supervisor.id,
+    ))).scalars().all()
+    assert len(wakes) == 1
+    assert "lost-eval" in wakes[0].reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_status", ["queued", "running"])
 async def test_reconciler_waits_for_pending_supervisor_before_journal_repair(
     session, pending_status,
 ):

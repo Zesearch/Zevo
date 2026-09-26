@@ -1800,6 +1800,7 @@ def test_pipeline_evaluation_payload_is_stamped_with_scoring_contract() -> None:
         "answer_fields": ["response"],
         "sample_submission": "/task/val_sample.csv",
         "metric": "token_f1",
+        "evaluation_config": {},
     }
 
 

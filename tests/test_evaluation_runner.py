@@ -398,3 +398,32 @@ def test_builtin_scores_selected_output_column(tmp_path: Path, metric: str, colu
         assert result.output.status == "succeeded"
         metrics = json.loads(Path(result.output.metrics_path).read_text())
         assert metrics["score"] == (1.0 if column == "prediction" else 0.0)
+
+
+@pytest.mark.parametrize("column", ["prediction", "complete_prediction"])
+def test_pipeline_evaluation_carries_frozen_prediction_column(tmp_path: Path, column: str) -> None:
+    from zevo.api.routers.shared.tickets import _stamp_pipeline_payload
+    from zevo.db import Run, Ticket
+    from zevo.engine.run.runner import _build_evaluation_input
+
+    predictions, gold, sample = (tmp_path / name for name in ("pred.csv", "gold.csv", "sample.csv"))
+    _write_csv(predictions, [{"id": "1", "complete_prediction": "wrong", "prediction": "B"}])
+    _write_csv(gold, [{"id": "1", "answer": "B"}])
+    _write_csv(sample, [{"id": "", "complete_prediction": "", "prediction": ""}])
+    run = Run(id="pipeline-column", mode="full_pipeline", validation_metric="accuracy",
+              holdout={"validation_sets": [{
+                  "name": "QA", "validation_set": str(gold), "metric": "accuracy",
+                  "metric_type": "builtin", "sample_submission": str(sample),
+                  "answer_fields": ["answer"], "prediction_column": column,
+              }]})
+    payload = _stamp_pipeline_payload(run=run, agent_id="evaluation", payload={})
+    ticket = Ticket(id="pipeline-eval", run_id=run.id, agent_id="evaluation",
+                    lane="optimization", payload=payload, customization={})
+    inp = _build_evaluation_input(
+        ticket, payload, {"predictions": {"path": str(predictions)}}, "", run,
+    )
+    assert inp.evaluation_config["prediction_column"] == column
+    result, _ = _run(inp, tmp_path / "work")
+    assert result.output.status == "succeeded", result.output.error_message
+    metrics = json.loads(Path(result.output.metrics_path).read_text())
+    assert metrics["score"] == (1.0 if column == "prediction" else 0.0)
