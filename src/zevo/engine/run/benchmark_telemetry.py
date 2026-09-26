@@ -23,6 +23,15 @@ def benchmark_names(holdout: Mapping[str, Any], suite: str) -> list[str]:
     return names or ([fallback] if holdout.get(singular) else [])
 
 
+def is_preflight_progress(marker: Mapping[str, Any]) -> bool:
+    """Separate implementation checks from measurements of the scoring suite."""
+    scope = str(marker.get("progress_scope") or "").strip()
+    if scope:
+        return scope == "preflight"
+    # Compatibility for already-submitted jobs that used a synthetic probe ID.
+    return str(marker.get("benchmark_id") or "").strip() == "probe"
+
+
 def resolve_benchmark_id(
     marker: Mapping[str, Any], names: list[str], suite: str,
 ) -> str | None:
@@ -33,6 +42,8 @@ def resolve_benchmark_id(
     readable after a backend update. An explicitly invalid ID is never
     silently replaced by a plausible name or index.
     """
+    if is_preflight_progress(marker):
+        return None
     raw_id = str(marker.get("benchmark_id") or "").strip()
     known = {benchmark_id(suite, index) for index in range(len(names))}
     if raw_id:
@@ -58,6 +69,13 @@ def canonical_benchmark_marker(
     names = benchmark_names(holdout, suite)
     identity = resolve_benchmark_id(marker, names, suite)
     result = dict(marker)
+    if is_preflight_progress(marker):
+        result["progress_scope"] = "preflight"
+        phase = str(marker.get("phase") or "")
+        result["phase"] = (
+            phase if phase.startswith("preflight") else f"preflight:{phase}"
+        )
+        return result
     if identity is not None:
         index = int(identity.rsplit(":", 1)[1])
         result["benchmark_id"] = identity

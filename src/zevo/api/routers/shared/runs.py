@@ -66,6 +66,7 @@ from zevo.engine.ssh_auth import ssh_base_args
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_id,
     benchmark_names,
+    is_preflight_progress,
     resolve_benchmark_id,
 )
 from zevo.contracts.customizations import RunCustomizations
@@ -545,6 +546,8 @@ def _benchmark_progress(
         unmatched_progress: set[tuple[str, str, str]] = set()
         for event in completion_events or []:
             marker = dict(event.extras or {})
+            if is_preflight_progress(marker):
+                continue
             identity = resolve_benchmark_id(marker, names, suite)
             if identity is not None and event.ticket_id in focused_inference_ids:
                 inference_done.add(identity)

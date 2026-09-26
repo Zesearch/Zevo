@@ -1013,6 +1013,28 @@ def test_benchmark_progress_uses_identity_not_display_name() -> None:
     assert progress["validation"]["inference_completed"] == 0
     assert progress["validation"]["unmatched_progress"] == 1
 
+    # A completed preflight must neither complete a benchmark nor report an
+    # unmapped benchmark. Include the historical marker from submitted jobs.
+    preflights = [completed({
+        "benchmark_id": "probe", "benchmark_name": "probe",
+        "benchmark_index": 1, "benchmark_total": 1,
+    }), completed({
+        "progress_scope": "preflight", "benchmark_id": "validation:1",
+        "benchmark_name": "Chat · Dolly",
+    })]
+    progress = _benchmark_progress(
+        run, [inference], reveal_holdout=False,
+        completion_events=[*preflights, by_id],
+    )
+    assert progress["validation"]["inference_completed"] == 1
+    assert progress["validation"]["unmatched_progress"] == 0
+    progress = _benchmark_progress(
+        run, [inference], reveal_holdout=False,
+        completion_events=[*preflights, unknown],
+    )
+    assert progress["validation"]["inference_completed"] == 0
+    assert progress["validation"]["unmatched_progress"] == 1
+
 
 @pytest.mark.asyncio
 async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:

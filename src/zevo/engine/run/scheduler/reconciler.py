@@ -47,6 +47,7 @@ from zevo.contracts.infrastructure import (
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_progress_phase,
     canonical_benchmark_marker,
+    is_preflight_progress,
 )
 from zevo.engine.observe.run_metrics import incomplete_journal_entries
 from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
@@ -298,7 +299,7 @@ async def _persist_slurm_execution_marker(
         name = benchmark_progress_phase(
             name, str(payload.get("benchmark_id") or benchmark_name),
         )
-    if benchmark_name:
+    if benchmark_name and not is_preflight_progress(payload):
         if ticket is not None and ticket.agent_id == "inference":
             try:
                 benchmark_index = int(payload.get("benchmark_index") or 0)
@@ -1542,13 +1543,18 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
         # can start. Terminal Ticket badges alone do not mean this Run is done.
         if await instruction_gate_active(session, r.id):
             continue
-        instruction_wakes = (await session.execute(
+        pending_wakes = (await session.execute(
             select(AgentWakeupRequest).where(
                 AgentWakeupRequest.ticket_id.in_([t.id for t in tickets]),
                 AgentWakeupRequest.status.in_(["queued", "running"]),
             )
         )).scalars().all()
-        if any((w.payload or {}).get("run_instruction_id") for w in instruction_wakes):
+        # A terminal Ticket is committed before its activation finishes the
+        # measurement and handoff work. In particular, Evaluation still needs
+        # to create the held-out branch and defer the supervisor wake. Treat
+        # the whole wakeup lifetime as active work, for every agent, so this
+        # window cannot be mistaken for a lost handoff or a finished Run.
+        if pending_wakes:
             continue
 
         statuses = {t.status for t in tickets}

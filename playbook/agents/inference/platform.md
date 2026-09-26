@@ -280,6 +280,9 @@ from YAML; never hard-code a second copy or repeat its keys under
 `implementation_config`. Verify the selected behavior on a bounded generation
 probe before the full prediction job. If the probe contradicts an explicit
 request, resolve or report it; do not label the configuration compliant.
+For generation probes and smoke checks, emit progress with
+`progress_scope: "preflight"` and `phase: "preflight"`. Reserve benchmark
+identity and suite position fields for the full benchmark measurement.
 
 The task mapping belongs under `measurement.inference_config`; supported keys
 are `input_fields`, `answer_regex`, `answer_column`, `batch_size`, `stop`,

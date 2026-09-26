@@ -1,6 +1,7 @@
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_progress_phase,
     canonical_benchmark_marker,
+    resolve_benchmark_id,
 )
 
 
@@ -47,3 +48,20 @@ def test_canonical_marker_uses_id_or_ordered_slot_not_name() -> None:
         "benchmark_name": "B", "benchmark_index": 1, "benchmark_total": 2,
     }, heldout, "held_out_test")
     assert reordered["benchmark_id"] == "test:1"
+
+
+def test_preflight_is_retained_without_becoming_a_benchmark() -> None:
+    holdout = {"validation_sets": [{"name": "Math"}]}
+    for raw in [
+        {"benchmark_id": "probe", "benchmark_name": "probe"},
+        {"progress_scope": "preflight", "benchmark_id": "validation:0"},
+    ]:
+        marker = canonical_benchmark_marker(
+            {**raw, "phase": "generate", "step": 1, "total": 1},
+            holdout, "optimization",
+        )
+        assert marker["progress_scope"] == "preflight"
+        assert marker["phase"] == "preflight:generate"
+        assert marker["step"] == 1
+        assert resolve_benchmark_id(marker, ["Math"], "validation") is None
+        assert canonical_benchmark_marker(marker, holdout, "optimization") == marker

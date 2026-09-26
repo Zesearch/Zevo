@@ -36,6 +36,7 @@ from zevo.engine.method.score_direction import is_better
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_progress_phase,
     canonical_benchmark_marker,
+    is_preflight_progress,
 )
 from zevo.contracts._base import StrictBody
 from zevo.contracts.tickets import (
@@ -367,6 +368,13 @@ def _stamp_pipeline_payload(
         stamped["metric"] = str(
             primary_validation.get("metric") or run.validation_metric
         )
+        evaluation_config = dict(stamped.get("evaluation_config") or {})
+        prediction_column = str(primary_validation.get("prediction_column") or "")
+        if prediction_column:
+            evaluation_config["prediction_column"] = prediction_column
+        else:
+            evaluation_config.pop("prediction_column", None)
+        stamped["evaluation_config"] = evaluation_config
     return stamped
 
 
@@ -1752,7 +1760,8 @@ async def post_progress(
         }
         extras = {k: v for k, v in body.items() if k not in reserved}
         benchmark_name = str(body.get("benchmark_name") or "").strip()
-        if benchmark_name and ticket.agent_id == "inference":
+        if (benchmark_name and ticket.agent_id == "inference"
+                and not is_preflight_progress(body)):
             try:
                 benchmark_index = int(body.get("benchmark_index") or 0)
                 benchmark_total = int(body.get("benchmark_total") or 0)
