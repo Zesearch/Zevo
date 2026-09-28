@@ -697,7 +697,7 @@ def _cancel_inactive_slurm_status_streams(active_row_ids: set[str]) -> None:
 
 
 async def _query_slurm_job(
-    *, connection: dict[str, Any], job_id: str,
+    *, connection: dict[str, Any], job_id: str, outcome_path: str = "",
 ) -> tuple[str, str, str, datetime | None]:
     """Return state, exit code, reason, and actual start for one exact job."""
     if not re.fullmatch(r"[0-9]+(?:_[0-9]+)?", job_id):
@@ -716,6 +716,9 @@ async def _query_slurm_job(
           "sed -n 's/.*Reason=\\([^ ]*\\).*/\\1/p' | head -n 1 || true); "
         + "printf 'QUEUE=%s\\nACCOUNTING=%s\\nREASON=%s\\n' \"$q\" \"$a\" \"$r\""
     )
+    if outcome_path:
+        import shlex
+        command += "; if [ -f " + shlex.quote(outcome_path) + " ]; then printf '\\nWORKLOAD='; cat " + shlex.quote(outcome_path) + "; fi"
     args = [
         *ssh_base_args(
             key_path=str(connection.get("key") or ""),
@@ -738,7 +741,7 @@ async def _query_slurm_job(
     values: dict[str, str] = {}
     for line in stdout.decode("utf-8", errors="replace").splitlines():
         key, sep, value = line.partition("=")
-        if sep and key in {"QUEUE", "ACCOUNTING", "REASON"}:
+        if sep and key in {"QUEUE", "ACCOUNTING", "REASON", "WORKLOAD"}:
             values[key] = value.strip()
     accounting = values.get("ACCOUNTING", "")
     acct_parts = accounting.split("|")
@@ -748,7 +751,70 @@ async def _query_slurm_job(
     state = _normalise_slurm_state(values.get("QUEUE", ""))
     if not state:
         state = _normalise_slurm_state(acct_state)
+    if values.get("WORKLOAD"):
+        import json
+        outcome = json.loads(values["WORKLOAD"])
+        code = int(outcome["exit_code"])
+        retained = state in {"RUNNING", "PENDING", "CONFIGURING"}
+        reason = ("[workload-retained] " if retained else "[workload-released] ") + str(outcome.get("error") or "workload exited")
+        return ("COMPLETED" if code == 0 else "FAILED"), str(code) + ":0", reason, started_at
     return state, exit_code.strip(), values.get("REASON", "").strip(), started_at
+
+
+async def _reconcile_slurm_allocation_owners(session: AsyncSession) -> int:
+    """Observe allocation lifetime independently of completed child Tickets.
+
+    Never consume workload outcomes or wake a Ticket here. Missing accounting
+    and transient SSH failures are unknown, not proof that hardware was released.
+    """
+    rows = (await session.execute(
+        select(InfraInstance, Run).join(Run, Run.id == InfraInstance.run_id).where(
+            InfraInstance.provider == "cluster",
+            InfraInstance.released_at.is_(None),
+        )
+    )).all()
+    now = datetime.now(timezone.utc)
+    checked = 0
+    for row, run in rows:
+        meta = dict(row.meta or {})
+        if not meta.get("controller_directory") or meta.get("allocation_owner_row_id"):
+            continue
+        due = _meta_datetime(meta.get("allocation_monitor_next_at"))
+        if due and due > now:
+            continue
+        meta["allocation_monitor_next_at"] = (now + _dt.timedelta(seconds=60)).isoformat()
+        try:
+            connection = await _slurm_connection(run, session)
+            if not connection or not connection.get("host") or not connection.get("user"):
+                raise RuntimeError("cluster SSH connection is unavailable")
+            state, code, reason, started = await _query_slurm_job(
+                connection=connection, job_id=row.instance_id)
+            checked += 1
+            meta["allocation_state"] = state or "UNKNOWN"
+            meta["allocation_exit_code"] = code
+            meta.pop("allocation_monitor_error", None)
+            if state in _SLURM_TERMINAL_STATES:
+                row.released_at = now
+                row.status = "released"
+                row.release_reason = f"Slurm allocation {state}: {reason}"[:2000]
+                aliases = (await session.execute(select(InfraInstance).where(
+                    InfraInstance.run_id == run.id,
+                    InfraInstance.provider == "cluster",
+                    InfraInstance.instance_id == row.instance_id,
+                    InfraInstance.released_at.is_(None),
+                ))).scalars().all()
+                for alias in aliases:
+                    alias.released_at = now
+                    alias.status = "released"
+                    alias.release_reason = row.release_reason
+            elif state == "RUNNING":
+                row.status = "ready"
+                row.ready_at = row.ready_at or started or now
+        except Exception as exc:
+            meta["allocation_monitor_error"] = str(exc)[:1000]
+        row.meta = meta
+    await session.commit()
+    return checked
 
 
 async def _reconcile_slurm_stage_jobs(
@@ -878,6 +944,7 @@ async def _reconcile_slurm_stage_jobs(
                 try:
                     state, exit_code, reason, started_at = await _query_slurm_job(
                         connection=connection, job_id=row.instance_id,
+                        **({"outcome_path": str(meta["controller_outcome_path"])} if meta.get("controller_outcome_path") else {}),
                     )
                     checked += 1
                     meta.pop("monitor_error", None)
@@ -960,8 +1027,16 @@ async def _reconcile_slurm_stage_jobs(
             # observed RUNNING timestamp above.
             if state == "COMPLETED" and row.ready_at is None:
                 row.ready_at = row.created_at
-            row.status = "released" if state == "COMPLETED" else "failed"
-            row.released_at = row.released_at or now
+            retained_owner = (
+                row.released_at is None
+                and bool(meta.get("controller_directory"))
+                and not meta.get("allocation_owner_row_id")
+                and str(meta.get("scheduler_reason") or "").startswith("[workload-retained]")
+            )
+            row.status = ("ready" if retained_owner
+                          else "released" if state == "COMPLETED" else "failed")
+            if not retained_owner:
+                row.released_at = row.released_at or now
             row.release_reason = str(
                 meta.get("scheduler_reason") or f"Slurm job {state.lower()}"
             )[:2000]
@@ -1869,6 +1944,8 @@ async def reconcile_runs_and_tickets(
             report["slurm_jobs_checked"] = checked
             report["slurm_tickets_resumed"] = resumed
         async with Session() as s:
+            report["slurm_allocations_checked"] = await _reconcile_slurm_allocation_owners(s)
+        async with Session() as s:
             report["tickets_failed"] = await _sweep_stuck_tickets(s, stale_ticket_seconds)
         # Recover repairing tickets whose retry wakeup was lost, so their run
         # doesn't wedge forever with pending-but-dead work.
@@ -1901,6 +1978,9 @@ async def reconcile_runs_and_tickets(
             report["runs_closed"] = await _close_finished_runs(s)
         async with Session() as s:
             report["resources_released"] = await _cleanup_terminal_resources(s)
+        async with Session() as s:
+            from zevo.engine.run.gpu_lifecycle import reconcile_stage_releases
+            report["stage_release_retries"] = await reconcile_stage_releases(s)
     except SQLAlchemyError:
         log.exception("reconciler aborted (DB error); will retry next tick")
     return report

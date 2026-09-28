@@ -253,7 +253,7 @@ export function CustomizedRunForm({
 
   function setDetailedInput(patch: Partial<RunInputValues>) {
     const runOnlyKeys = new Set<keyof RunInputValues>([
-      "gpuProvider", "cloudBackend", "sshHostId", "numGpus", "generation_backend",
+      "gpuProvider", "cloudBackend", "sshHostId", "numGpus", "gpuAllocationMode", "generation_backend",
       "timeLimitHours", "queueWaitHours",
       "promptFraming", "systemPrompt", "lossObjectiveConfig", "inferenceConfig",
       "decodingStrategy", "maxNewTokens", "temperature", "topP", "topK",
@@ -438,6 +438,7 @@ export function CustomizedRunForm({
         ...(inputs.gpuProvider === "cloud" && inputs.cloudBackend ? { cloud_backend: inputs.cloudBackend } : {}),
         ...(["cluster", "instance"].includes(inputs.gpuProvider) && inputs.sshHostId ? { ssh_host_id: inputs.sshHostId } : {}),
         num_gpus: Number(inputs.numGpus) || 0,
+        gpu_allocation_mode: inputs.gpuAllocationMode,
         ...(inputs.generation_backend ? { generation_backend: inputs.generation_backend } : {}),
         ...(pickedSetting ? { setting_id: pickedSetting } : {}),
         ...(!pickedSetting && saveSetting

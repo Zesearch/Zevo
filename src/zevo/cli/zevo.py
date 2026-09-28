@@ -797,6 +797,9 @@ def run_create(
         "", "--model-query",
         help="Natural-language guidance for Zevo when --base-model is blank.",
     ),
+    gpu_allocation_mode: str = typer.Option(
+        "per_stage", "--gpu-allocation-mode", help="GPU lifetime: per_stage or per_run; both retain GPUs during bug repair.",
+    ),
     gpu_provider: str = typer.Option(
         "", "--gpu-provider", help="where to get the GPU: cluster (SSH login node + finite Slurm jobs) | cloud (rent through Vast.ai or Lambda Cloud) | instance (fixed directly reachable GPU host, no Slurm). Empty defaults to instance.",
     ),
@@ -987,6 +990,7 @@ def run_create(
             base_model=base_model,
             model_query=model_query,
             gpu_provider=gpu_provider,
+            gpu_allocation_mode=gpu_allocation_mode,
             num_gpus=num_gpus,
             dataset=dataset,
             dataset_split=dataset_split,
@@ -1041,7 +1045,7 @@ def run_create(
 
 async def _run_create(
     *, objective: str, task: str, run_name: str,
-    base_model: str, model_query: str = "", gpu_provider: str, num_gpus: int,
+    base_model: str, model_query: str = "", gpu_provider: str, num_gpus: int, gpu_allocation_mode: str = "per_stage",
     dataset: str, test_set: str, test_sets: str,
     dataset_split: str, dataset_config: str, data_query: str,
     answer_fields: str, validation_sets: str,
@@ -1078,6 +1082,7 @@ async def _run_create(
             run_opts["max_queue_wait_hours"] = max_queue_wait_hours
         if generation_backend:
             run_opts["generation_backend"] = generation_backend
+        run_opts["gpu_allocation_mode"] = gpu_allocation_mode
         if gpu_provider:
             run_opts["gpu_provider"] = gpu_provider
         # A run-level knob like the ones above, NOT a user_request override:

@@ -72,6 +72,7 @@ class PreflightBody(BaseModel):
     # Mirror CreateRunRequest: execution runtime is top-level and never part of
     # UserRequest. A missing provider resolves to the concrete Settings default.
     gpu_provider: Literal["cluster", "cloud", "instance"] | None = None
+    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_stage"
     cloud_backend: Literal["", "vastai", "lambda"] = ""
     ssh_host_id: str = ""
     num_gpus: int | None = Field(None, ge=0)

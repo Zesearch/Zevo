@@ -159,44 +159,43 @@ user-supplied GPU maximum remain fixed; zero means unlimited. Infrastructure
 selects a concrete positive count and must not exceed a positive limit.
 For cluster this is an access-route planning estimate, not the GPU minimum for
 each later Slurm job. Train and Inference choose their own stage job shapes.
-Use one `purpose="train"` route before initial Data. A train-sized route is also
-valid for Baseline/candidate Inference, so keep and reuse that exact device
-artifact through Data, Train, and Inference. Do not provision another host just
-to change the purpose label. If the route is no longer healthy, provision a new
-train route and create a new Data ticket on it; a remote dataset pointer must
-never be attached to a different host.
+Use one `purpose="train"` route before initial Data. Read
+`runtime.gpu_allocation_mode`; this is independent of provider and is fixed
+for the Run. Both modes retain resources while the same Ticket is repairing.
+Do not emit a release or replacement merely because a generated program failed.
 
-For a cloud release, read the
-exact `instance_id` from the successful Infrastructure result/device artifact
-that served the just-finished GPU stage and emit:
+- `per_stage`: each GPU stage acquires resources, retries on those resources,
+  and the backend releases them only after terminal validation. For cloud and
+  fixed instance, provision a fresh device artifact before the next GPU stage
+  after release. Rebind the consumer to that artifact. For cloud, stage inputs
+  must be durable backend artifacts: upload them to the new host; never reuse
+  paths that lived only on the previous rental. Rerun Data when its only valid
+  dataset was remote, and preserve a local prepared dataset for future stages.
+  CPU-only preparation shares the first consumer's route; it does not require
+  an extra rental/release cycle.
+- `per_run`: provision the train-sized route once at the beginning. Reuse it
+  throughout Data, Train and Inference, including iterations. Do not create
+  Infrastructure release tickets between stages. The backend releases owned
+  resources when the Run completes, is cancelled, or finally fails. Serialize
+  GPU consumers on this allocation; do not run competing stages concurrently.
 
-```json
-{
-  "agent_id": "infrastructure",
-  "iteration": 1,
-  "payload": {"operation": "release", "instance_id": "<exact Zevo-owned id>"},
-  "inputs": {},
-  "run_id": "<run-id>"
-}
-```
+For Slurm, the backend submits a finite allocation controller from the first
+validated stage script. Stage programs are child workloads; their exit does
+not itself return the GPUs. Repair dispatches a corrected workload on the same
+healthy allocation. Full-run mode uses the train resource envelope from the
+beginning. Slurm walltime, preemption and node loss can still end an allocation.
+Per-run preparation/handoffs have no fixed idle timeout; per-stage controllers
+retain a 30-minute idle limit. Only then acquire a replacement.
+Never submit empty holder jobs yourself, scancel retained allocations, or
+create Infrastructure release tickets for cluster access. The backend owns
+allocation release, while each stage still reports its own execution outcome.
 
-Use the actual iteration and never release an instance id inferred from a job
-name. Do not emit this release for `provider=instance`.
-
-Resource lifetime depends on provider:
-
-- `cluster`: Infrastructure validates a reusable login/scheduler/storage route
-  and holds no GPU. Each Inference ticket writes and submits `predict.sbatch`;
-  each Train ticket writes and submits `train.sbatch`. The script executes the
-  stage directly and exits with it. That stage registers its exact JOBID,
-  accepts PENDING up to Run `max_queue_wait_hours`, and marks it terminal after
-  outputs/checkpoints are verified. Queue wait is excluded from Run runtime.
-  Never create an Infrastructure release ticket for cluster access.
-- `instance`: keep one healthy Run lease across stages. Before reuse, verify
-  the allocation and exact indices still exist. If it expired, release only the
-  stale Zevo lease and provision again, which attaches to another eligible
-  user-started RUNNING allocation; never submit or cancel the user allocation.
-- `cloud` retains its API-owned rental lifecycle.
+For fixed instances, release returns the Run's GPU lease and stops its own
+processes; it never shuts down the operator's server. A fresh live idle probe
+and lease are required before using returned cards again. For cloud, release
+destroys the owned rental. Before per-stage cloud release, Train must mirror
+all selectable checkpoints to the backend and return local artifact paths.
+Do not delete remote work directories as part of stage completion.
 
 When cluster Train approaches walltime, require periodic verified checkpoints
 and a graceful exit before Slurm kills the finite job. If a complete trainer
@@ -639,3 +638,9 @@ precise terminal failure when no valid changed work order exists. When a usable
 result exists and a normal stop condition is met, run final Registry once and
 then finish successfully. Return `wait` only for a genuinely live,
 `repairing`, or human-blocked child.
+
+For Slurm `per_run`, the current shared execution route requires a single-node
+resource plan so Data and Inference can execute on the same GPU set as Train.
+Use `per_stage` for multi-node training. Resource planning happens during
+Infrastructure; the backend acquires the allocation with the first GPU
+workload rather than spending allocation time on initial CPU-only planning.

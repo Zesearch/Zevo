@@ -124,7 +124,7 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
         assert row.meta["remote_script"] == contract.remote_script_path
         assert "submission_committed" not in row.meta
         assert commands and "sha256sum" in commands[0]
-        assert "sbatch --parsable -- /remote/run-1/train-1/train.sbatch" in commands[0]
+        assert "sbatch --parsable -- /remote/run-1/.zevo-allocations/heartbeat-1/controller.sbatch" in commands[0]
 
         row.status = "released"
         row.released_at = datetime.now(timezone.utc)

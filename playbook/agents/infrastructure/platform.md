@@ -1,3 +1,31 @@
+
+## GPU resource lifetime
+
+Read `run_context.runtime.gpu_allocation_mode` (Infrastructure also receives
+`gpu_allocation_mode` directly). In both modes, a code bug is repaired on the
+same healthy resources. Preserve the error logs, environment, data and
+checkpoints. Stop failed workers, correct the implementation and retry within
+the engine's repair limit. Do not release resources or create a replacement
+because a child process returned nonzero.
+
+`per_stage` releases resources after the GPU stage's final validation;
+`per_run` retains them across stages until the Run ends. The backend owns this
+boundary. For Slurm, prepare the validated workload `.sbatch` file and return
+`deferred` as before. The backend runs it under an allocation controller, so a
+workload completion is distinct from allocation termination. A repair may use
+the same JOBID with a new attempt directory. Never scancel the parent allocation
+or submit a separate repair job yourself. Allocation expiry, preemption or
+node loss requires replacement; code errors do not. Every allocation remains
+subject to site walltime and provider policies. Per-run controllers have no
+fixed idle handoff timeout; per-stage controllers retain a 30-minute idle limit.
+
+In `per_run`, prepare the full run's resource envelope at Infrastructure time;
+subsequent stages must fit that allocation. The controller uses the train-sized
+GPU, CPU, RAM and walltime plan even if the first consumer is Data/Inference.
+For `per_stage` cloud Train, download and verify the final and selectable
+intermediate checkpoints under backend `work_dir` before reporting success;
+return local paths and `checkpoint_is_remote=false`. Retain logs on failure.
+
 ## Position in the system
 
 ```text
@@ -489,3 +517,32 @@ __PHASE__:<ticket_id>:releasing_resource@<unix-time>
 
 Post `Starting:` and `Done:` provenance as required by the shared contract. For
 cloud, add the pre-create cost message. Print nothing after the final JSON.
+
+For Slurm `per_run`, the current shared execution route requires a single-node
+resource plan so Data and Inference can execute on the same GPU set as Train.
+Use `per_stage` for multi-node training. Resource planning happens during
+Infrastructure; the backend acquires the allocation with the first GPU
+workload rather than spending allocation time on initial CPU-only planning.
+
+
+## Whole-run allocation duration
+
+For `per_run`, set `estimated_run_hours` for the entire planned run, including
+Data, model loading, baseline/evaluation, training and all planned iterations.
+Use dataset sizes, throughput measurements or comparable runs; record assumptions
+and uncertainty in `runtime_estimate_evidence`. Set `runtime_buffer_hours` for
+repairs, preparation and stage handoffs (normally 25% of the estimate; justify
+larger uncertainty allowances). Do not double-count preparation in the buffer.
+Probe the selected partition, QoS/account and provider limits; record the smallest
+applicable limit in `platform_max_runtime_hours` and the commands/results in
+`platform_runtime_limit_evidence`. Null means unknown or unlimited, not a known
+limit of zero; explicitly explain which applies. Never assume a universal 14 days.
+
+Requested duration = min(estimated_run_hours + runtime_buffer_hours,
+platform_max_runtime_hours if known, user max_runtime_hours if nonzero).
+The backend applies this formula to per-run Slurm submissions and persists it
+in allocation metadata. `time_limit_hours` remains the compatible stage/provider
+request field: derive it from the same policy for provisioning, respecting provider
+precision without exceeding caps. Do not select the platform maximum by default.
+If the estimate exceeds a cap, explain the need for checkpoint/continuation.
+Existing artifacts without the new estimate preserve their previous time budget.

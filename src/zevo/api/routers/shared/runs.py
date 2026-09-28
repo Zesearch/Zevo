@@ -1307,6 +1307,7 @@ class CreateRunRequest(BaseModel):
         ),
     )
     gpu_provider: Literal["cluster", "cloud", "instance"] | None = None
+    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_stage"
     # Optional verified SSH profile for a cluster/instance run.
     ssh_host_id: str = ""
     # Which cloud to rent on when gpu_provider == "cloud" (pins Vast.ai vs Lambda
@@ -2027,6 +2028,7 @@ async def _create_auto_run(
     run.generation_backend = body.generation_backend or "vllm"
     run.num_gpus = max(0, int(body.num_gpus or 0))
     run.gpu_provider = resolved_gpu_provider
+    run.gpu_allocation_mode = body.gpu_allocation_mode
     run.ssh_host_id = (
         (compute.ssh_host_id or None)
         if resolved_gpu_provider in ("cluster", "instance") else None
@@ -2097,6 +2099,7 @@ async def _create_auto_run(
             "iteration_budget": run.iteration_budget,
             "stop_threshold": run.stop_threshold,
             "gpu_provider": run.gpu_provider,
+            "gpu_allocation_mode": run.gpu_allocation_mode,
         },
     )
     return CreateRunResponse(run_id=run.id, status="running")
@@ -2601,6 +2604,7 @@ async def create_run(
     run.generation_backend = resolved_generation_backend
     run.num_gpus = max(0, int(body.num_gpus or 0))
     run.gpu_provider = resolved_gpu_provider
+    run.gpu_allocation_mode = body.gpu_allocation_mode
     # NULL (not '') when no profile is selected: ssh_host_id is a real FK to
     # ssh_hosts now, and '' could never satisfy it. All readers already treat
     # falsy/None as "use the deployment-level fallback".
@@ -2756,6 +2760,7 @@ async def create_run(
             "iteration_budget": run.iteration_budget,
             "stop_threshold": run.stop_threshold,
             "gpu_provider": run.gpu_provider,
+            "gpu_allocation_mode": run.gpu_allocation_mode,
         },
     )
 
@@ -2931,6 +2936,7 @@ class RunRequestDTO(BaseModel):
     max_runtime_hours: float
     max_queue_wait_hours: float
     gpu_provider: Literal["cluster", "cloud", "instance"]
+    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_stage"
     num_gpus: int
     generation_backend: Literal["hf", "vllm"]
     # Each file, classified the same way the Tasks list classifies a task's
@@ -3095,6 +3101,7 @@ async def get_run_request(
         max_runtime_hours=float(run.max_runtime_hours or 0.0),
         max_queue_wait_hours=float(run.max_queue_wait_hours or 0.0),
         gpu_provider=run.gpu_provider,
+        gpu_allocation_mode=run.gpu_allocation_mode,
         num_gpus=max(0, int(run.num_gpus or 0)),
         generation_backend=run.generation_backend,
         files=files,

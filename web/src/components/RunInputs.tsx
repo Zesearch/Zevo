@@ -1038,6 +1038,7 @@ export type RunInputValues = {
   sshHostId: string;
   /** Maximum GPUs the Run may use at once. Empty means no upper bound;
    *  Infrastructure selects a concrete positive count. */
+  gpuAllocationMode: "per_stage" | "per_run";
   numGpus: string;
   generation_backend: GenerationBackend | "";
   iterations: string;
@@ -1068,6 +1069,7 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   sshHostId: "",
   generation_backend: "",
   // Blank leaves the GPU count to Zevo's stage planner.
+  gpuAllocationMode: "per_stage",
   numGpus: "",
   // Optimization rounds, spend and active runtime are uncapped unless the
   // operator enters a value. Queueing remains bounded by default so a Slurm
@@ -1652,7 +1654,7 @@ export function RunInputs({
   datasetSplit, datasetConfig, dataQuery,
   baseModel, modelQuery, trainingMethod, methodQuery,
   teacherModel, rewardModel, usePeft,
-  gpuProvider, cloudBackend, sshHostId, numGpus, generation_backend,
+  gpuProvider, cloudBackend, sshHostId, numGpus, gpuAllocationMode, generation_backend,
   iterations, budget, timeLimitHours, queueWaitHours, stopThreshold,
   onChange, extra, requiredPrefix, optionalPrefix, beforeChecklist,
   requiredMissing = [], requiredPrefixValues = [], taskTestSuite,
@@ -1911,6 +1913,12 @@ export function RunInputs({
             min={1}
             placeholder=""
             hint="Maximum GPUs Zevo may use at once; the actual plan may use fewer. Blank means unlimited."
+          />
+          <ChoiceField
+            label="GPU allocation" value={gpuAllocationMode}
+            onChange={(v) => onChange({ gpuAllocationMode: v as "per_stage" | "per_run" })}
+            options={[["per_stage", "Per stage"], ["per_run", "Entire run"]]}
+            hint="Both modes retain GPUs during bounded bug repair. Entire run also retains them between stages."
           />
           <ChoiceField
             label="Generation backend" value={generation_backend}
