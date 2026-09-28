@@ -26,6 +26,40 @@ For `per_stage` cloud Train, download and verify the final and selectable
 intermediate checkpoints under backend `work_dir` before reporting success;
 return local paths and `checkpoint_is_remote=false`. Retain logs on failure.
 
+## Large-scale preprocessing performance
+
+Apply this requirement to full-dataset scans, tokenization, length statistics,
+sorting, grouping, reordering, and materialization, including preparation inside
+a training job. Choose algorithms and data-access patterns that scale with the
+actual workload. Use batch operations, vectorization, or measured parallelism
+where appropriate. Avoid repeated disk, remote, or lazy Dataset lookups inside
+per-example loops or sorting keys/comparators. Materialize repeatedly accessed
+compact metadata, such as sequence lengths, once in memory when it fits the
+memory budget; otherwise use bounded batches or an external-memory algorithm.
+
+Before the first full execution of a new or changed preparation path, benchmark
+a representative sample of the permitted input on the assigned data plane.
+Include long and multi-turn examples where present. Measure throughput, peak
+memory, and time per step, then estimate full-dataset cost with explicit
+assumptions. A benchmark subset is only a performance probe and must not replace
+the required full training dataset. Reuse applicable measurements when the
+implementation, input characteristics, and runtime are unchanged.
+
+During execution, report separate progress and elapsed time for scanning,
+tokenization, ordering, and writing, as applicable. Investigate sustained stalls
+or substantial deviations from the estimate; identify and address the bottleneck
+instead of waiting indefinitely or blindly repeating the same expensive work.
+Cache deterministic intermediate results and reuse them only after verifying
+that the input, relevant configuration, and implementation still match.
+
+Performance optimizations must preserve the experiment's data selection,
+tokenization, labels, random-seed behavior, grouping, and ordering semantics,
+including tie handling. Verify equivalence on representative inputs before the
+full run. If an optimization would change those semantics, state the change
+explicitly and follow the experiment's change policy rather than treating it as
+a performance-only implementation detail. Do not require a particular library
+or GPU acceleration without evidence that it improves the measured bottleneck.
+
 ## Dispatch
 
 ### `prepare_run_data`
