@@ -325,6 +325,10 @@ class Run(Base):
             "gpu_provider IN ('instance', 'cluster', 'cloud')",
             name="ck_runs_gpu_provider",
         ),
+        CheckConstraint(
+            "gpu_allocation_mode IN ('per_stage', 'per_run')",
+            name="ck_runs_gpu_allocation_mode",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -514,6 +518,9 @@ class Run(Base):
     num_gpus: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     gpu_provider: Mapped[str] = mapped_column(
         String(16), default="instance", server_default="instance"
+    )
+    gpu_allocation_mode: Mapped[str] = mapped_column(
+        String(16), default="per_stage", server_default="per_stage"
     )
     # Verified SSH profile selected for a cluster/instance run. NULL means use
     # the matching deployment-level ZEVO_CLUSTER_* / ZEVO_INSTANCE_* fallback.

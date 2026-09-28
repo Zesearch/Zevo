@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.database import get_db
-from zevo.db import GpuLease
+from zevo.db import GpuLease, Run, Ticket
 from zevo.contracts.infrastructure import (
     GpuAllocationCandidate,
     GpuLeaseGrant,
@@ -262,6 +262,13 @@ async def release(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, int]:
     """Give back every card `run_id` holds."""
+    run = await db.get(Run, run_id)
+    if run is not None and run.status not in {"success", "degraded", "failed", "cancelled"}:
+        repairing = (await db.execute(select(Ticket.id).where(
+            Ticket.run_id == run_id, Ticket.status == "repairing",
+        ).limit(1))).scalar_one_or_none()
+        if repairing or run.gpu_allocation_mode == "per_run":
+            raise HTTPException(409, "GPU lease is retained for repair or the active run; cancel the run to release it")
     res = await db.execute(
         update(GpuLease)
         .where(GpuLease.run_id == run_id, GpuLease.released_at.is_(None))

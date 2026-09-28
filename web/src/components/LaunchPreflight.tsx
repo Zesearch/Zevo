@@ -3,13 +3,14 @@ import { api } from "../lib/api";
 import type { RunInputValues } from "./RunInputs";
 
 type Result = { status: "ready" | "risky" | "blocked"; summary: string; items: Array<{ code: string; severity: string; message: string; hint: string }> };
-type Draft = { mode?: string; user_request?: unknown; gpu_provider?: string; cloud_backend?: string; ssh_host_id?: string; num_gpus?: number; generation_backend?: string; customizations?: unknown };
+type Draft = { mode?: string; user_request?: unknown; gpu_provider?: string; gpu_allocation_mode?: string; cloud_backend?: string; ssh_host_id?: string; num_gpus?: number; generation_backend?: string; customizations?: unknown };
 
 export function useLaunchPreflight() {
   const [review, setReview] = useState<{ key: string; result: Result } | null>(null);
   async function check(body: Draft) {
     const payload = {
       mode: body.mode ?? "full_pipeline", user_request: body.user_request,
+      gpu_allocation_mode: body.gpu_allocation_mode,
       gpu_provider: body.gpu_provider, cloud_backend: body.cloud_backend,
       ssh_host_id: body.ssh_host_id, num_gpus: body.num_gpus,
       generation_backend: body.generation_backend, customizations: body.customizations,
@@ -31,7 +32,7 @@ export function useLaunchPreflight() {
 export function LaunchLimitsSummary({ inputs }: { inputs: RunInputValues }) {
   const limit = (value: string, unit = "") => Number(value) > 0 ? `${value}${unit}` : "Unlimited";
   return <aside aria-label="Execution limits" className="rounded border border-hair bg-raised p-3 text-xs leading-relaxed">
-    <strong>Execution limits:</strong> {limit(inputs.iterations)} rounds · {Number(inputs.budget) > 0 ? `$${inputs.budget}` : "Unlimited spend"} · {limit(inputs.timeLimitHours, " hours")} · {limit(inputs.numGpus)} GPUs · {inputs.queueWaitHours.trim() || "48"} hours queue wait.
+    <strong>GPU allocation:</strong> {inputs.gpuAllocationMode === "per_run" ? "Entire run" : "Per stage"}. <strong>Execution limits:</strong> {limit(inputs.iterations)} rounds · {Number(inputs.budget) > 0 ? `$${inputs.budget}` : "Unlimited spend"} · {limit(inputs.timeLimitHours, " hours")} · {limit(inputs.numGpus)} GPUs · {inputs.queueWaitHours.trim() || "48"} hours queue wait.
     <p className="mt-1 text-slate-400">Rounds, spend, active runtime, and GPU count start without a user cap. Slurm queue wait defaults to 48 hours. Budgets include estimated agent and rented GPU costs.</p>
   </aside>;
 }

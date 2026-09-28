@@ -864,3 +864,34 @@ async def test_slurm_watcher_honors_persisted_backoff(session, monkeypatch) -> N
     assert await _reconcile_slurm_stage_jobs(session) == (0, 0)
     await session.refresh(ticket)
     assert ticket.status == "waiting_external"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason,retained', [
+    ('[workload-retained] implementation failed', True),
+    ('[workload-released] implementation failed', False),
+    ('node failed', False),
+])
+async def test_workload_failure_and_allocation_loss_are_distinct(session, monkeypatch, reason, retained):
+    import zevo.engine.run.scheduler.reconciler as reconciler
+    ticket = Ticket(id='train-retained', run_id='r1', agent_id='train',
+                    status='waiting_external', payload={}, inputs={})
+    job = InfraInstance(instance_id='56789', provider='cluster', status='ready',
+        run_id='r1', ticket_id=ticket.id,
+        meta=dict(scheduler_state='RUNNING', submission_committed=True,
+                  controller_directory='/allocation', controller_outcome_path='/allocation/outcomes/attempt.json'))
+    session.add_all([ticket, job])
+    await session.commit()
+    async def connection(*args, **kwargs):
+        return dict(host='cluster', port=22, user='u')
+    async def failed(*args, **kwargs):
+        assert kwargs['outcome_path'] == '/allocation/outcomes/attempt.json'
+        return 'FAILED', '1:0', reason, None
+    monkeypatch.setattr(reconciler, '_slurm_connection', connection)
+    monkeypatch.setattr(reconciler, '_query_slurm_job', failed)
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 1)
+    await session.refresh(ticket)
+    await session.refresh(job)
+    assert ticket.status == 'queued'
+    assert (job.released_at is None) is retained
+    assert job.meta['scheduler_state'] == 'FAILED'

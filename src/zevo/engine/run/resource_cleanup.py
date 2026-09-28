@@ -105,7 +105,7 @@ async def release_cluster(session, row: InfraInstance, run: Run) -> bool:
     if ticket is None or ticket.run_id != run.id:
         raise ValueError("Slurm cleanup Ticket does not belong to the Run")
     job_id = _safe_ticket_id(row.instance_id)
-    command = _slurm_job_kill_command(job_id, row.ticket_id)
+    command = _slurm_job_kill_command(job_id, str((row.meta or {}).get("allocation_owner_ticket_id") or row.ticket_id))
     # scancel accepting a request is not confirmation that the job released.
     command += (
         f" && remaining=$(squeue -h -j {job_id} -o '%i')"
@@ -139,7 +139,7 @@ async def cleanup_run_resources(session, run: Run, *, force: bool = False, retry
     results = []
     now = datetime.now(timezone.utc)
     for row in rows:
-        if row.released_at is not None:
+        if row.released_at is not None or (row.meta or {}).get("allocation_owner_row_id"):
             continue
         meta = dict(row.meta or {})
         if not force and meta.get("auto_release") is False:
@@ -176,6 +176,11 @@ async def cleanup_run_resources(session, run: Run, *, force: bool = False, retry
             row.released_at = now
             row.release_reason = "provider release confirmed"
             meta.pop("cleanup_next_at", None)
+            for alias in rows:
+                if (alias.meta or {}).get("allocation_owner_row_id") == row.id and alias.released_at is None:
+                    alias.released_at = now
+                    alias.status = "released"
+                    alias.release_reason = "owning allocation release confirmed"
         else:
             meta["cleanup_next_at"] = (now + timedelta(seconds=min(300, 5 * 2 ** min(attempts, 6)))).isoformat()
         row.meta = meta
@@ -187,7 +192,7 @@ async def cleanup_run_resources(session, run: Run, *, force: bool = False, retry
         from zevo.engine.run.remote_jobs import cancel_run_remote_jobs
         tickets = list((await session.execute(select(Ticket).where(Ticket.run_id == run.id))).scalars().all())
         stopped = await cancel_run_remote_jobs(session, tickets)
-        if all(item.get("ok") for item in stopped):
+        if all(item.get("ok", not item.get("attempted", False)) for item in stopped):
             await session.execute(update(GpuLease).where(
                 GpuLease.run_id == run.id, GpuLease.released_at.is_(None),
             ).values(released_at=now, release_reason="Ticket processes stopped"))

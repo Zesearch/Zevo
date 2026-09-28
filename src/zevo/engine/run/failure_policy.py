@@ -62,6 +62,11 @@ _TERMINAL: tuple[tuple[str, re.Pattern[str], str], ...] = (
 )
 
 _ORCHESTRATOR: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("resource_lifetime", re.compile(
+        r"GPU lease has been released|cloud instance has been released|"
+        r"already owns a cloud instance|retained allocation is busy|"
+        r"does not fit the retained run allocation", re.I),
+     "rebind or schedule the next stage against a valid owned allocation"),
     ("upstream_binding", re.compile(
         r"inputs? unresolvable|unresolved input binding|upstream ticket|"
         r"source_ticket_id|work product.*(?:missing|not found)", re.I),

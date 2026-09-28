@@ -190,6 +190,8 @@ async def snapshot_for_run(session: AsyncSession, run_id: str) -> BudgetSnapshot
     )).scalars().all()
     gpu_cost = 0.0
     for r in rows:
+        if (r.meta or {}).get("allocation_owner_row_id"):
+            continue
         if not r.created_at:
             continue
         if not is_rented(r.provider):

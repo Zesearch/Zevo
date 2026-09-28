@@ -1,3 +1,31 @@
+
+## GPU resource lifetime
+
+Read `run_context.runtime.gpu_allocation_mode` (Infrastructure also receives
+`gpu_allocation_mode` directly). In both modes, a code bug is repaired on the
+same healthy resources. Preserve the error logs, environment, data and
+checkpoints. Stop failed workers, correct the implementation and retry within
+the engine's repair limit. Do not release resources or create a replacement
+because a child process returned nonzero.
+
+`per_stage` releases resources after the GPU stage's final validation;
+`per_run` retains them across stages until the Run ends. The backend owns this
+boundary. For Slurm, prepare the validated workload `.sbatch` file and return
+`deferred` as before. The backend runs it under an allocation controller, so a
+workload completion is distinct from allocation termination. A repair may use
+the same JOBID with a new attempt directory. Never scancel the parent allocation
+or submit a separate repair job yourself. Allocation expiry, preemption or
+node loss requires replacement; code errors do not. Every allocation remains
+subject to site walltime and provider policies. Per-run controllers have no
+fixed idle handoff timeout; per-stage controllers retain a 30-minute idle limit.
+
+In `per_run`, prepare the full run's resource envelope at Infrastructure time;
+subsequent stages must fit that allocation. The controller uses the train-sized
+GPU, CPU, RAM and walltime plan even if the first consumer is Data/Inference.
+For `per_stage` cloud Train, download and verify the final and selectable
+intermediate checkpoints under backend `work_dir` before reporting success;
+return local paths and `checkpoint_is_remote=false`. Retain logs on failure.
+
 ## Execution order
 
 1. Resolve the output directory and validate all input files.
@@ -76,7 +104,7 @@ Inference execution. Put `slurm_job.nodes` and `slurm_job.num_gpus` /
 `cluster.env_setup`, and, when `memory_helper_path` is supplied, import the
 copied `zevo_inference_memory` helper to check allocated GPUs using the
 recorded absolute target. Run the inference workload in the foreground and
-exit with it. One suite is one `sbatch` and one allocation; parallel replicas
+exit with it. One suite is one workload on the assigned allocation; parallel replicas
 may each load the model once inside that allocation. The file is the actual inference job, not an
 empty allocation. Never use `sleep infinity`, `salloc`, `srun --overlap`,
 `--wrap`, or resource flags on the `sbatch` command line.
@@ -164,15 +192,14 @@ local `.out` path as `log_path` without POSTing `Done:`; the engine publishes it
 only after accepting the Result and artifacts. Collect never parses or replays
 the copied log into telemetry: the live watcher owns progress while the job is
 running. For any other terminal state,
-inspect both exact job streams and return a specific failure. The finite job releases its GPUs
-automatically; do not create an Infrastructure release ticket or PATCH
+inspect both exact job streams and return a specific failure. The backend retains the allocation through repair and releases it according to the selected mode; do not create an Infrastructure release ticket or PATCH
 scheduler-owned state.
 
 If that terminal failure came from generated implementation, command, or
 runtime setup and produced no valid predictions, repair the generated files in
 place. The next repair activation may carry `slurm_job.phase="submit"` with
 `attempt=2`; return `deferred` and let the Engine validate the changed script
-and create the distinct second JOBID. Never resubmit the terminal collect job
+and dispatch a new attempt on the retained allocation when it is healthy. Never resubmit the terminal collect job
 yourself. Only one automatic external re-execution is allowed for a Ticket.
 
 ## Selecting a model-lineage baseline YAML

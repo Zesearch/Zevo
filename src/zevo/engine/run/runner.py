@@ -606,6 +606,15 @@ async def _build_infra_input(
         raise ValueError(f"run {ticket.run_id}: unsupported gpu_provider={provider!r}")
 
     release = payload.get("operation") == "release"
+    if release and (getattr(run, "gpu_allocation_mode", None) or "per_stage") == "per_run" and run.status not in TERMINAL_RUN_STATUSES:
+        raise ValueError("run-scoped GPU resources are retained until the run ends; complete the run and let the backend release them")
+    if not release and provider == "cloud":
+        live = (await session.execute(select(InfraInstance).where(
+            InfraInstance.run_id == run.id, InfraInstance.provider == "cloud",
+            InfraInstance.released_at.is_(None),
+        ).limit(1))).scalar_one_or_none()
+        if live is not None and live.ticket_id != ticket.id:
+            raise ValueError("this Run already owns a cloud instance; reuse its device_info or wait for confirmed stage release")
     cloud_backend = str(payload.get("cloud_backend") or "").strip().lower()
     if cloud_backend not in ("", "vastai", "lambda"):
         raise ValueError(
@@ -718,6 +727,7 @@ async def _build_infra_input(
         num_gpus=_num_gpus(run),
         max_queue_wait_hours=float(run.max_queue_wait_hours or 0.0),
         resource_context=dict(specialist_context or {}),
+        gpu_allocation_mode=getattr(run, "gpu_allocation_mode", None) or "per_stage",
         gpu_lease_request_schema=GpuLeaseRequest.model_json_schema(),
         gpu_lease_grant_schema=GpuLeaseGrant.model_json_schema(),
         infra_instance_create_schema=CreateInfraInstanceBody.model_json_schema(),
@@ -771,6 +781,28 @@ async def _slurm_stage_job_contract(
             f"stage provider {expected_provider!r} differs from Infrastructure "
             f"provider {info.provider!r}"
         )
+    if not cluster:
+        from zevo.db import GpuLease
+        if expected_provider == "instance":
+            recorded = list((await session.execute(select(GpuLease).where(
+                GpuLease.run_id == run.id,
+            ))).scalars().all())
+            if recorded and not any(row.released_at is None for row in recorded):
+                raise ValueError("GPU lease has been released; provision a fresh device_info before the next stage")
+            live_cards = [row for row in recorded if row.released_at is None]
+            if live_cards and (
+                {row.gpu_index for row in live_cards} != {device.index for device in info.gpu.devices}
+                or any(row.ticket_id and row.ticket_id != info.ticket_id for row in live_cards)
+            ):
+                raise ValueError("GPU lease has been released or replaced; bind the fresh device_info for its exact cards")
+        else:
+            recorded = list((await session.execute(select(InfraInstance).where(
+                InfraInstance.run_id == run.id,
+                InfraInstance.instance_id == info.instance_id,
+                InfraInstance.provider == "cloud",
+            ))).scalars().all())
+            if recorded and all(row.released_at is not None for row in recorded):
+                raise ValueError("cloud instance has been released; provision a fresh device_info before the next stage")
     maximum_gpus = _num_gpus(run)
     job_row = None
     if cluster:
@@ -785,7 +817,7 @@ async def _slurm_stage_job_contract(
         and str(getattr(ticket, "status", "")) == "repairing"
         and prior_state in _SLURM_TERMINAL_STATES
         and prior_state != "COMPLETED"
-        and prior_attempt < 2
+        and prior_attempt <= MAX_REPAIR_ATTEMPTS
     )
     if cluster and info.cluster is None:
         raise ValueError("cluster stage has no cluster execution route")
@@ -850,8 +882,22 @@ async def _slurm_stage_job_contract(
                 f"Infrastructure selected {selected_gpus} GPUs outside Run maximum {limit}"
             )
         selection = None
+    if cluster and (getattr(run, "gpu_allocation_mode", None) or "per_stage") == "per_run":
+        from dataclasses import replace
+        if info.resource_plan.nodes != 1:
+            raise ValueError("per_run currently requires a single-node allocation so Data and Inference can reuse it; use per_stage for multi-node training")
+        if maximum_gpus and info.resource_plan.num_gpus > maximum_gpus:
+            raise ValueError("run allocation exceeds the Run GPU maximum")
+        if info.resource_plan.num_gpus < selection.estimated_gpus:
+            raise ValueError("stage does not fit the retained run allocation; Infrastructure must plan enough GPUs for Train")
+        selection = replace(
+            selection, num_gpus=int(info.resource_plan.num_gpus),
+            nodes=int(info.resource_plan.nodes),
+            gpus_per_node=int(info.resource_plan.num_gpus) // int(info.resource_plan.nodes),
+            source="run allocation", rationale="reuse the train-sized run resource plan",
+        )
     status_path = (
-        str(PurePosixPath(info.cluster.workdir) / ticket.id / SLURM_STATUS_FILENAME)
+        str(PurePosixPath(info.cluster.workdir) / ticket.id / f"attempt-{prior_attempt + 1 if repair_submission else prior_attempt}" / SLURM_STATUS_FILENAME)
         if cluster and info.cluster is not None else ""
     )
     remote_ticket_dir = str(PurePosixPath(status_path).parent) if status_path else ""
@@ -1736,6 +1782,7 @@ async def _build_specialist_context(
         ],
         "runtime": {
             "gpu_provider": run.gpu_provider,
+            "gpu_allocation_mode": getattr(run, "gpu_allocation_mode", None) or "per_stage",
             "num_gpus": run.num_gpus,
             "generation_backend": run.generation_backend,
             "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),
@@ -3897,32 +3944,11 @@ async def _submit_validated_slurm_stage(
 
     from zevo.engine.run.remote_jobs import _ssh
 
-    remote_script = shlex.quote(contract.remote_script_path)
-    command = (
-        "if ! command -v sbatch >/dev/null 2>&1; then "
-        "if [ -r /etc/profile.d/modules.sh ]; then "
-        ". /etc/profile.d/modules.sh >/dev/null 2>&1; "
-        "if command -v module >/dev/null 2>&1; then "
-        "module load default-environment >/dev/null 2>&1 || true; fi; fi; fi; "
-        "command -v sbatch >/dev/null 2>&1 "
-        "|| { echo slurm-sbatch-unavailable >&2; exit 127; }; "
-        f"test -s {remote_script} "
-        "|| { echo staged-slurm-script-missing >&2; exit 2; }; "
-        f"test \"$(sha256sum {remote_script} | awk '{{print $1}}')\" = "
-        f"{shlex.quote(local_script_sha256)} "
-        "|| { echo staged-slurm-script-checksum-mismatch >&2; exit 3; }; "
-        f"sbatch --parsable -- {remote_script}"
+    from zevo.engine.run.gpu_controller import submit_workload
+    job_id, controller_meta = await submit_workload(
+        session, run=run, ticket=ticket, contract=contract, info=info,
+        heartbeat_id=heartbeat_id, sha256=local_script_sha256,
     )
-    submitted = await _ssh(info, command, timeout_seconds=30)
-    if not submitted.get("ok"):
-        raise ValueError(
-            "engine could not submit the validated Slurm script: "
-            + str(submitted.get("error") or submitted.get("stdout") or "unknown error")
-        )
-    raw_job_id = str(submitted.get("stdout") or "").strip().splitlines()[-1:]
-    job_id = (raw_job_id[0].split(";", 1)[0].strip() if raw_job_id else "")
-    if not job_id.isdecimal():
-        raise ValueError(f"sbatch returned an invalid JOBID: {job_id!r}")
 
     gpu = info.gpu
     row = InfraInstance(
@@ -3954,6 +3980,7 @@ async def _submit_validated_slurm_stage(
             "retry_of_job_id": contract.retry_of_job_id,
             "script_sha256": local_script_sha256,
             "implementation_sha256": implementation_sha256,
+            **controller_meta,
         },
     )
     session.add(row)
@@ -3963,7 +3990,13 @@ async def _submit_validated_slurm_stage(
         # The scheduler side effect happened but bookkeeping did not.  Reap the
         # exact Ticket-owned job before surfacing the database failure.
         from zevo.engine.run.remote_jobs import _slurm_job_kill_command
-        await _ssh(info, _slurm_job_kill_command(job_id, ticket.id))
+        if controller_meta.get("allocation_owner_row_id"):
+            from zevo.engine.run.gpu_controller import upload_text_command
+            await _ssh(info, upload_text_command(
+                str(controller_meta["controller_directory"]) + "/cancel/" + heartbeat_id, "cancel",
+            ))
+        else:
+            await _ssh(info, _slurm_job_kill_command(job_id, ticket.id))
         raise
     return row
 
@@ -5591,7 +5624,7 @@ async def run_ticket(
                         # check below passes.
                         prepared_slurm_submission = True
                     elif (
-                        inp.slurm_job.attempt == 2
+                        inp.slurm_job.attempt > 1
                         and stage_row is not None
                         and stage_row.id
                         == inp.slurm_job.retry_of_bookkeeping_row_id
@@ -6156,6 +6189,19 @@ async def run_ticket(
         # A finetuned model left on the REMOTE GPU box is intentionally NOT on
         # this host (inference reads it over ssh; registry pulls only the best one
         # back). Skip the local-existence guard for it — the path is remote.
+        if (run.gpu_provider == "cloud" and (getattr(run, "gpu_allocation_mode", None) or "per_stage") == "per_stage"
+                and status in ("succeeded", "degraded") and tk.agent_id == "train"
+                and bool(getattr(output, "checkpoint_is_remote", False))):
+            status = "failed"
+            error_message = (
+                "Per-stage cloud allocation requires a durable local checkpoint before release. "
+                "Download the checkpoint and intermediate checkpoints to work_dir with remote_transfer, "
+                "verify the files, and return local checkpoint paths with checkpoint_is_remote=false. "
+                "The GPU is retained during this repair."
+            )
+            summary = error_message
+            output.status = "failed"
+            output.error_message = error_message
         remote_model = (
             tk.agent_id == "train"
             and bool(getattr(output, "checkpoint_is_remote", False))
@@ -6572,9 +6618,21 @@ async def run_ticket(
         # trainer consuming the same GPU beside its repair attempt.
         try:
             from zevo.engine.run.remote_jobs import cancel_ticket_remote_job
-            await cancel_ticket_remote_job(session, tk)
-        except Exception as exc:  # cleanup is best-effort; repair remains queued
-            _warn("repair_remote_cleanup", exc)
+            cleanup = await cancel_ticket_remote_job(session, tk, preserve_allocation=True)
+            if cleanup.get("attempted") and not cleanup.get("ok"):
+                tk.status = "failed"
+                tk.error_message = "Repair could not confirm old worker termination; GPU retained for cleanup"
+                tk.repair_route = "orchestrator"
+                await session.commit()
+                await _maybe_wake_supervisor(session, tk)
+                return tk
+        except Exception as exc:
+            tk.status = "failed"
+            tk.error_message = f"Repair process cleanup failed: {exc}"
+            tk.repair_route = "orchestrator"
+            await session.commit()
+            await _maybe_wake_supervisor(session, tk)
+            return tk
         from zevo.engine.run.wakeup import queue_wakeup
         await queue_wakeup(
             session,
@@ -6589,6 +6647,12 @@ async def run_ticket(
             payload={"repair_attempt": int(tk.repair_attempts or 0)},
         )
         return tk
+
+    from zevo.engine.run.gpu_lifecycle import finish_stage
+    try:
+        await finish_stage(session, run, tk)
+    except Exception as exc:
+        _warn("stage_resource_cleanup", exc)
 
     # Mirror only this Run's committed Registry entry. Keep the DB bridge in a
     # separate transaction: a malformed Registry document is reported without
@@ -8156,6 +8220,7 @@ async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
     }
     runtime = {
         "gpu_provider": run.gpu_provider or "instance",
+        "gpu_allocation_mode": getattr(run, "gpu_allocation_mode", None) or "per_stage",
         "num_gpus": _num_gpus(run),
         "generation_backend": run.generation_backend,
         "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),

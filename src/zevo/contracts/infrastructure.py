@@ -228,7 +228,9 @@ class SlurmStageJobContract(BaseModel):
 
     Cluster stages render this contract as a local ``.sbatch`` artifact and
     copy it to the exact verified login path. After validating the typed stage
-    Result and the local/remote script checksum, the engine submits that file.
+    Result and the local/remote script checksum, the engine dispatches that file
+    through a finite allocation controller. A child exit is distinct from
+    allocation release; repair can reuse the same JOBID.
     Other providers keep ``enabled=false`` and use direct SSH execution.
     """
 
@@ -256,10 +258,10 @@ class SlurmStageJobContract(BaseModel):
     attempt: int = Field(
         1,
         ge=1,
-        le=2,
+        le=4,
         description=(
             "Engine-owned external execution attempt. Attempt 1 is the first "
-            "submission; attempt 2 is the single bounded re-execution allowed "
+            "submission; subsequent attempts are bounded re-executions allowed "
             "after a generated implementation failure."
         ),
     )
@@ -499,6 +501,14 @@ class InfrastructureResourcePlan(BaseModel):
         ),
     )
     time_limit_hours: int = Field(ge=0)
+    estimated_run_hours: float | None = Field(default=None, gt=0, allow_inf_nan=False,
+        description="Whole run estimate: preparation, Data, all inference and training iterations; exclude buffer.")
+    runtime_buffer_hours: float | None = Field(default=None, ge=0, allow_inf_nan=False,
+        description="Additional repair/preparation/handoff allowance; default 25% of estimate.")
+    platform_max_runtime_hours: float | None = Field(default=None, gt=0, allow_inf_nan=False,
+        description="Effective verified minimum of partition, QoS, account and provider duration limits; null if unknown/unlimited.")
+    runtime_estimate_evidence: str = ""
+    platform_runtime_limit_evidence: str = ""
     cloud_backend: Literal["", "vastai", "lambda"] = ""
     gpu_type: str = ""
     docker_image: str = ""
@@ -934,6 +944,7 @@ class InfraTaskInput(AgentTaskInput):
             "'instance' = use a fixed GPU host directly over SSH, without Slurm."
         ),
     )
+    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_stage"
     cloud_backend: Literal["", "vastai", "lambda"] = Field(
         "",
         description=(

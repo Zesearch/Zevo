@@ -165,6 +165,7 @@ type RunEnvelope = {
   /** Maximum GPUs the Run may use at once; 0/omitted means unlimited. */
   num_gpus?: number;
   gpu_provider?: GpuProvider;
+  gpu_allocation_mode?: "per_stage" | "per_run";
   // Which cloud to rent on when gpu_provider === "cloud" (empty = deployment
   // default). Sent by the run modals; declared here so the body is fully typed.
   cloud_backend?: "" | "vastai" | "lambda";

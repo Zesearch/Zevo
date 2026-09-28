@@ -256,6 +256,7 @@ class RuntimeSpec(BaseModel):
         ),
     )
     generation_backend: Literal["hf", "vllm"]
+    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_stage"
     max_queue_wait_hours: float = Field(48, gt=0, le=168)
 
 

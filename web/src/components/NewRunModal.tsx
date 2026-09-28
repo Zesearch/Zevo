@@ -154,6 +154,7 @@ function backendFromInputs(inputs: RunInputValues) {
     ...(inputs.gpuProvider === "cloud" && inputs.cloudBackend ? { cloud_backend: inputs.cloudBackend } : {}),
     ...(["cluster", "instance"].includes(inputs.gpuProvider) && inputs.sshHostId ? { ssh_host_id: inputs.sshHostId } : {}),
     num_gpus: Number(inputs.numGpus) || 0,
+        gpu_allocation_mode: inputs.gpuAllocationMode,
     ...(inputs.generation_backend ? { generation_backend: inputs.generation_backend } : {}),
   };
 }
@@ -1154,6 +1155,12 @@ export function NewRunModal({
                       hint="Maximum GPUs Zevo may use at once; the actual plan may use fewer. Blank means unlimited."
                     />
                     <ChoiceField
+            label="GPU allocation" value={inputs.gpuAllocationMode}
+            onChange={(v) => setInputs((s) => ({ ...s, gpuAllocationMode: v as "per_stage" | "per_run" }))}
+            options={[["per_stage", "Per stage"], ["per_run", "Entire run"]]}
+            hint="Both modes retain GPUs during bounded bug repair. Entire run also retains them between stages."
+          />
+          <ChoiceField
                       label="Generation backend" value={inputs.generation_backend}
                       onChange={(v) => setInputs((s) => ({ ...s, generation_backend: v as GenerationBackend | "" }))}
                       options={[["vllm", "vllm"], ["hf", "hf"]]}

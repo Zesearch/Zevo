@@ -437,13 +437,13 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert observed == ["probe"]
 
     job_row.meta.update({
-        "execution_attempt": 2,
+        "execution_attempt": 4,
         "retry_of_bookkeeping_row_id": "request-1",
         "retry_of_job_id": "12345",
     })
     exhausted = asyncio.run(contract())
     assert exhausted.phase == "collect"
-    assert exhausted.attempt == 2
+    assert exhausted.attempt == 4
 
 
 def test_generated_python_static_gate_catches_undefined_names(tmp_path) -> None:

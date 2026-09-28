@@ -162,7 +162,7 @@ async def _open_cluster_job(
 
 
 async def cancel_ticket_remote_job(
-    db: AsyncSession, ticket: Ticket,
+    db: AsyncSession, ticket: Ticket, *, preserve_allocation: bool = False,
 ) -> dict[str, Any]:
     """Stop remote work for one Ticket, never an unrelated device or job."""
     if ticket.agent_id not in {"data", "train", "inference"}:
@@ -178,7 +178,20 @@ async def cancel_ticket_remote_job(
                 "attempted": False,
                 "reason": "no live stage-owned Slurm job",
             }
-        command = _slurm_job_kill_command(cluster_row.instance_id, ticket.id)
+        meta = dict(cluster_row.meta or {})
+        if preserve_allocation and meta.get("controller_directory"):
+            from zevo.engine.run.gpu_controller import upload_text_command
+            request_id = str(meta["controller_request_id"])
+            directory = str(meta["controller_directory"])
+            command = upload_text_command(f"{directory}/cancel/{request_id}", "cancel")
+            # The controller publishes outcome only after its child group stops.
+            outcome = shlex.quote(str(meta["controller_outcome_path"]))
+            command += f" && for i in $(seq 1 10); do test -f {outcome} && exit 0; sleep 1; done; exit 1"
+            return {"ticket_id": ticket.id, "attempted": True, "provider": "cluster",
+                    **await _ssh(info, command, timeout_seconds=20)}
+        command = _slurm_job_kill_command(
+            cluster_row.instance_id, str(meta.get("allocation_owner_ticket_id") or ticket.id),
+        )
     else:
         command = _direct_process_kill_command(ticket.id)
     result = await _ssh(info, command)
