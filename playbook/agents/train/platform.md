@@ -60,6 +60,47 @@ explicitly and follow the experiment's change policy rather than treating it as
 a performance-only implementation detail. Do not require a particular library
 or GPU acceleration without evidence that it improves the measured bottleneck.
 
+## Distributed execution reliability
+
+Before full distributed execution of a new or changed runtime path, verify a
+bounded, representative end-to-end workload using the intended process topology,
+communication path, and permitted inputs. Exercise initialization, input loading,
+computation, synchronization, and output/checkpoint persistence as applicable.
+Integrate this check with the required smoke tests and execution order below;
+it does not authorize extra generation, evaluation-data access, or direct job
+submission. Keep probe artifacts separate from measured experiment outputs.
+
+Monitor useful progress by phase and participating worker: completed work,
+last-progress time, and the operation currently executing. Process liveness or
+an active allocation alone is not evidence of progress. Set finite budgets for
+initialization, data access, per-item computation, synchronization, persistence,
+and shutdown, based on representative measurements, workload variability, and
+the remaining runtime limit. Investigate sustained stalls rather than extending
+timeouts or retrying unchanged work without evidence. A timeout fallback must
+preserve experiment semantics; do not silently skip inputs or alter outputs.
+
+On failure or a progress-budget breach, preserve the earliest available error,
+worker identity, phase, last completed unit of work, relevant configuration, and
+per-worker logs or stack traces where available. Distinguish an originating
+worker failure from downstream waits or communication timeouts. Report uncertain
+causes as hypotheses instead of treating a timeout message as a root cause.
+Stop and confirm termination of the affected synchronized worker group before
+retrying; do not leave peers waiting or overlap old and replacement workers.
+Preserve unrelated independent work and follow the resource-lifetime rules
+above rather than terminating the parent allocation yourself.
+
+Repair according to the evidence and retry within the engine's repair limit.
+Resume only from verified, consistently committed state, including the progress
+and runtime state required by the method. Reuse completed outputs only when
+inputs and configuration still match; avoid duplicate or missing work. If a
+consistent resume is unavailable, report the limitation and use the permitted
+restart policy. Do not silently change the method, data, or execution semantics.
+
+Report planned versus completed work and why execution stopped. Distinguish a
+fully completed plan from an interrupted run with usable partial artifacts in
+the existing result schema and summary. A saved checkpoint, some predictions,
+or a successful probe does not by itself establish completion of the full plan.
+
 ## Execution order
 
 1. Validate the exact `data_signature`, data, baseline YAML, optional selected
