@@ -102,7 +102,7 @@ def _partitions(
     loaded = [_csv_rows(member["questions"]) for member in members]
     counts = [len(rows) for _, rows in loaded]
     total = sum(counts)
-    target = max(1000, math.ceil(total / max(1, worker_count)))
+    target = max(1, math.ceil(total / max(1, worker_count)))
     parts: list[Part] = []
     complete: set[int] = set()
     for index, member in enumerate(members):
@@ -213,7 +213,7 @@ def _merge(member: dict, parts: list[Part], expected: int) -> int:
 
 
 def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
-        allocated_gpus: int, gpus_per_worker: int, max_workers: int = 4) -> int:
+        allocated_gpus: int, gpus_per_worker: int, max_workers: int | None = None) -> int:
     with open(suite, encoding="utf-8") as handle:
         members = json.load(handle)["members"]
     if not members:
@@ -222,7 +222,8 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
     if any(not identity for identity in identities) or len(set(identities)) != len(identities):
         raise ValueError("inference suite requires a distinct benchmark_id for every member")
     if (allocated_gpus < 1 or gpus_per_worker < 1
-            or gpus_per_worker > allocated_gpus or max_workers < 1):
+            or gpus_per_worker > allocated_gpus
+            or (max_workers is not None and max_workers < 1)):
         raise ValueError("invalid GPU allocation or per-worker model-parallel size")
     for member in members:
         with open(member["config"], encoding="utf-8") as handle:
@@ -242,8 +243,10 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
         raise ValueError("fewer visible GPUs than the registered Slurm allocation")
     possible = allocated_gpus // gpus_per_worker
     row_counts = [len(_csv_rows(member["questions"])[1]) for member in members]
-    work_target = max(math.ceil(len(members) / 3), math.ceil(sum(row_counts) / 2000), 1)
-    workers = min(4, max_workers, possible, work_target)
+    # The caller's resource plan includes model memory, host RAM and CPUs.
+    # Partitioning limits concurrency further when there is less work than slots.
+    workers = min(max_workers if max_workers is not None else possible,
+                  possible, max(1, sum(row_counts)))
     print(
         f"[parallel] {len(members)} benchmarks, {sum(row_counts)} rows, "
         f"{workers} independent replica(s), {gpus_per_worker} GPU(s) each",
@@ -304,6 +307,7 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                     sum(counts[item] for item in committed),
                 ),
                 "suite_rows_verified": sum(counts[item] for item in committed),
+                "benchmark_complete": True,
                 "suite_rows_total": sum(counts),
             })
 
@@ -483,7 +487,8 @@ def main() -> int:
     parser.add_argument("--ticket-id", required=True)
     parser.add_argument("--allocated-gpus", required=True, type=int)
     parser.add_argument("--gpus-per-worker", required=True, type=int)
-    parser.add_argument("--max-workers", default=4, type=int)
+    parser.add_argument("--max-workers", type=int,
+                        help="Replica limit from the CPU/RAM and GPU resource plan")
     args = parser.parse_args()
     try:
         return run(

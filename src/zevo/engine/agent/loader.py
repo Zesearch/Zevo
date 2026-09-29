@@ -257,6 +257,15 @@ def _render_skill_catalog(exclude_id: str) -> str:
     return "# Downstream Skill Catalog\n\n" + intro + "\n\n" + "\n\n".join(blocks)
 
 
+def _shared_runtime_sections(agent_id: str) -> list[tuple[str, str]]:
+    sections = []
+    if agent_id in {"data", "train", "inference", "infrastructure"}:
+        sections.append(("gpu_lifetime.md", "GPU Resource Lifetime (shared)"))
+    if agent_id in {"train", "inference"}:
+        sections.append(("distributed_execution.md", "Distributed Execution (shared)"))
+    return sections
+
+
 def _assemble_instructions(
     agent_dir: Path, input_format: str, identity_body: str, skills: list[SkillCard]
 ) -> str:
@@ -273,6 +282,10 @@ def _assemble_instructions(
         f"# Identity\n\n{identity_text}" if identity_text else "",
         _read_section(agent_dir / _GOAL_FILE, "Goal"),
         _read_section(SHARED_DIR / _COMMONS_FILE, "Platform Runtime (shared)"),
+        *[
+            _read_section(SHARED_DIR / name, title)
+            for name, title in _shared_runtime_sections(agent_dir.name)
+        ],
         _read_section(agent_dir / _PLATFORM_FILE, "Platform"),
         _render_skill_pool(skills, agent_dir.name),
     ]

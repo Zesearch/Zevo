@@ -1,6 +1,8 @@
 """Ticket creation, inspection, conversation, and execution controls."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import re
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -33,10 +35,13 @@ from zevo.contracts.customizations import RunCustomizations
 from zevo.contracts.data import is_sha256
 from zevo.contracts.model_registry import model_tag_for_run
 from zevo.engine.method.score_direction import is_better
+from zevo.db import WorkloadExecution
+from zevo.engine.run.workload_execution import bind_progress, classify_event
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_progress_phase,
     canonical_benchmark_marker,
     is_preflight_progress,
+    is_workload_progress,
 )
 from zevo.contracts._base import StrictBody
 from zevo.contracts.tickets import (
@@ -144,6 +149,7 @@ class TicketDetail(TicketDTO):
     work_products: list[WorkProductDTO]
     execution_events: list[ExecutionEventDTO]
     resolved_configs: dict[str, dict[str, Any]]
+    workload_executions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _to_dto(t: Ticket) -> TicketDTO:
@@ -1379,6 +1385,10 @@ async def get_ticket(
             select(HeartbeatRun).where(HeartbeatRun.ticket_id == ticket_id).order_by(HeartbeatRun.started_at)
         )
     ).scalars().all()
+    registered = (await db.execute(select(WorkloadExecution).where(
+        WorkloadExecution.ticket_id == ticket_id,
+    ).order_by(WorkloadExecution.created_at))).scalars().all()
+    registrations = {item.id: item for item in registered}
     base = _to_dto(t)
     return TicketDetail(
         **base.model_dump(),
@@ -1414,11 +1424,17 @@ async def get_ticket(
                               event_type=e.event_type,
                               phase=e.phase, current_step=e.current_step,
                               total_steps=e.total_steps, loss=e.loss,
-                              extras=e.extras or {},
+                              extras=(classify_event(e, registrations)
+                                      if t.agent_id in {"train", "inference"}
+                                      else e.extras or {}),
                               ts=e.ts.isoformat() if e.ts else "")
             for e in events
         ],
         resolved_configs={h.id: h.resolved_config or {} for h in heartbeats if h.resolved_config},
+        workload_executions=[{
+            "id": item.id, "heartbeat_id": item.heartbeat_id,
+            "log_name": Path(item.log_path).name, "purpose": item.purpose,
+        } for item in registered],
     )
 
 
@@ -1674,7 +1690,9 @@ async def post_progress(
     so the UI's 3s poll picks it up live. The runner normally watches local logs
     itself and still performs a terminal sweep for durability.
 
-    Body mirrors a marker: `{"kind":"attempt","attempt_id":"<uuid>"}`,
+    Compute markers include the backend-registered `execution_id`, available in
+    Ticket detail. The relay helper supplies it for the registered log stream.
+    Body otherwise mirrors a marker: `{"kind":"attempt","attempt_id":"<uuid>"}`,
     `{"kind":"progress","attempt_id":"<uuid>","step":N,"total":M,"loss":..,
     "lr":..,...}`, `{"kind":"phase","phase":"training"}`, or
     `{"kind":"config", ...resolved hyper-params...}`. Best-effort: never 404s on
@@ -1687,10 +1705,18 @@ async def post_progress(
         return {"ok": False, "reason": "ticket not found"}
 
     kind = str(body.get("kind") or "progress")
-    heartbeat = (await db.execute(
-        select(HeartbeatRun).where(HeartbeatRun.ticket_id == ticket_id)
-        .order_by(desc(HeartbeatRun.started_at)).limit(1)
-    )).scalar_one_or_none()
+    execution = await db.get(WorkloadExecution, str(body.get("execution_id") or ""))
+    if execution is not None and execution.ticket_id != ticket_id:
+        return {"ok": False, "reason": "execution belongs to another ticket"}
+    body = bind_progress(body, execution)
+    if kind in {"progress", "attempt"} and not is_workload_progress(
+        body, agent_id=ticket.agent_id,
+    ):
+        return {"ok": True, "ignored": True, "reason": "unregistered or diagnostic execution"}
+    heartbeat = (await db.get(HeartbeatRun, execution.heartbeat_id)) if execution else (
+        await db.execute(select(HeartbeatRun).where(HeartbeatRun.ticket_id == ticket_id)
+                         .order_by(desc(HeartbeatRun.started_at)).limit(1))
+    ).scalar_one_or_none()
     if heartbeat is None:
         return {"ok": False, "reason": "no heartbeat for progress"}
     heartbeat_id = heartbeat.id
@@ -1734,7 +1760,7 @@ async def post_progress(
             current_step=0,
             total_steps=0,
             loss=-1.0,
-            extras={},
+            extras={k: body[k] for k in ("execution_id", "execution_purpose") if k in body},
         )
     elif kind == "phase":
         row = ExecutionEvent(ticket_id=ticket_id, heartbeat_id=heartbeat_id,

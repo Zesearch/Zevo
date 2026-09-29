@@ -215,23 +215,17 @@ def test_train_loads_its_pool():
     assert bp.output_schema.__name__ == "TrainResult"
 
 
-def test_train_requires_smoke_test_for_large_or_complex_runtime_paths():
-    instructions = " ".join(load_agent("train").instructions.split())
+def test_compute_agents_receive_shared_runtime_contracts():
+    from zevo.engine.agent.loader import SHARED_DIR
 
-    assert "strictly more than 10 billion parameters" in instructions
-    assert "the realized backend is FSDP or DeepSpeed ZeRO-2/3" in instructions
-    assert "parameter offload, or optimizer" in instructions
-    assert "custom optimizer class" in instructions
-    assert "GPU count alone is neither a trigger nor an exemption" in instructions
-    assert "forward/backward/optimizer steps" in instructions
-    assert "same finite Slurm allocation" in instructions
-    assert "exact parent checkpoint" in instructions
-    assert "real sampler, dataloader, collator" in instructions
-    assert "full scheduler/warmup horizon" in instructions
-    assert "Immediately save a complete resumable checkpoint" in instructions
-    assert "perform a real restore" in instructions
-    assert "an `on_step_end` callback alone is insufficient" in instructions
-    assert "A smaller model or separate toy training loop does not satisfy" in instructions
+    lifetime = (SHARED_DIR / "gpu_lifetime.md").read_text().strip()
+    distributed = (SHARED_DIR / "distributed_execution.md").read_text().strip()
+    for agent in ("data", "train", "inference", "infrastructure"):
+        instructions = load_agent(agent).instructions
+        assert instructions.count(lifetime) == 1
+        assert instructions.count(distributed) == (1 if agent in {"train", "inference"} else 0)
+    assert lifetime not in load_agent("orchestrator").instructions
+
 
 
 def test_data_loads_its_pool():

@@ -36,9 +36,15 @@ class LiveMarkerReader:
     root: Path
     owner: str
     start_at_end: bool = False
+    log_names: set[str] | None = None
     states: dict[Path, _FileState] = field(default_factory=dict)
     phases: dict[Path, str] = field(default_factory=dict)
     attempt_ids: dict[Path, str] = field(default_factory=dict)
+
+    def _paths(self) -> list[Path]:
+        if self.log_names is None:
+            return sorted(self.root.glob("*.log"))
+        return sorted(self.root / name for name in self.log_names)
 
     def __post_init__(self) -> None:
         if not self.start_at_end:
@@ -46,7 +52,7 @@ class LiveMarkerReader:
         # A re-awakened Ticket can reuse a work directory containing an old
         # train.log. The live runner follows bytes produced by THIS activation;
         # the recovery CLI intentionally keeps the default backfill behaviour.
-        for path in sorted(self.root.glob("*.log")):
+        for path in self._paths():
             try:
                 if path.is_file():
                     self.states[path] = _FileState(offset=path.stat().st_size)
@@ -55,7 +61,7 @@ class LiveMarkerReader:
 
     def poll(self, *, finish: bool = False) -> list[tuple[str, dict[str, Any]]]:
         observed: list[tuple[str, dict[str, Any]]] = []
-        for path in sorted(self.root.glob("*.log")):
+        for path in self._paths():
             if not path.is_file():
                 continue
             state = self.states.setdefault(path, _FileState())
@@ -115,7 +121,13 @@ def _request_json(url: str, *, body: dict[str, Any] | None = None) -> dict[str, 
 
 def relay_log(root: Path, ticket_id: str, api_base: str, interval: float = 2.0) -> None:
     """Relay an already-active Ticket's local markers to the progress API."""
-    reader = LiveMarkerReader(root=root, owner=ticket_id)
+    detail = _request_json(f"{api_base.rstrip('/')}/tickets/{ticket_id}")
+    executions = [item for item in detail.get("workload_executions", [])
+                  if item.get("purpose") == "workload" and item.get("log_name")]
+    if not executions:
+        raise ValueError("Ticket has no registered workload log to relay")
+    execution = executions[-1]
+    reader = LiveMarkerReader(root=root, owner=ticket_id, log_names={execution["log_name"]})
     progress_url = f"{api_base.rstrip('/')}/tickets/{ticket_id}/progress"
     ticket_url = f"{api_base.rstrip('/')}/tickets/{ticket_id}"
     pending: list[tuple[str, dict[str, Any]]] = []
@@ -124,14 +136,14 @@ def relay_log(root: Path, ticket_id: str, api_base: str, interval: float = 2.0) 
             pending.extend(reader.poll())
             while pending:
                 kind, payload = pending[0]
-                _request_json(progress_url, body={"kind": kind, **payload})
+                _request_json(progress_url, body={"kind": kind, **payload, "execution_id": execution["id"]})
                 pending.pop(0)
             status = str(_request_json(ticket_url).get("status") or "")
             if status not in {"todo", "blocked", "running", "awaiting_input"}:
                 pending.extend(reader.poll(finish=True))
                 while pending:
                     kind, payload = pending[0]
-                    _request_json(progress_url, body={"kind": kind, **payload})
+                    _request_json(progress_url, body={"kind": kind, **payload, "execution_id": execution["id"]})
                     pending.pop(0)
                 return
         except (OSError, URLError, json.JSONDecodeError):

@@ -171,10 +171,13 @@ from zevo.contracts.infrastructure import (
     slurm_runtime_prologue,
     validate_device_info,
 )
+from zevo.engine.run.workload_execution import bind_progress, register_execution, classify_event
+from zevo.db import WorkloadExecution
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_id as benchmark_member_id,
     benchmark_progress_phase,
     canonical_benchmark_marker,
+    is_workload_progress,
 )
 from zevo.contracts.configuration import (
     InferenceRunConfig,
@@ -4529,6 +4532,18 @@ async def run_ticket(
     await session.commit()
     heartbeat_id = hb.id
 
+    direct_execution = None
+    if tk.agent_id in {"train", "inference"} and not (
+        isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled
+    ):
+        log_name = "train.log" if tk.agent_id == "train" else "infer.log"
+        direct_execution = await register_execution(
+            session, execution_id=heartbeat_id, ticket_id=tk.id,
+            heartbeat_id=heartbeat_id, runtime_key=f"{run.gpu_provider}:{run.id}",
+            log_path=str(Path(work_dir) / log_name),
+        )
+        await session.commit()
+
     # Marker -> DB sink
     pending_phase_inserts: list[dict] = []
 
@@ -4564,11 +4579,7 @@ async def run_ticket(
             return now
         return ts
 
-    # Markers can arrive more than once. A stage that runs remotely writes them
-    # to a log, and the agent reads that log whenever it wants to check on the
-    # job -- so every read replays the WHOLE log, and one inference stage
-    # recorded its `generating` sequence 0->510 twice because the agent looked
-    # at the log twice. A replayed marker describes no new progress.
+    # Replayed markers are deduplicated within the same execution attempt.
     seen_progress: set[tuple] = set()
     progress_by_step: dict[tuple[str, str, int], dict[str, Any]] = {}
 
@@ -4582,7 +4593,7 @@ async def run_ticket(
     marker_phase = {"current": ""}
     seen_attempts: set[str] = set()
 
-    def on_attempt(attempt_id: str, emitted: float | None = None) -> None:
+    def on_attempt(attempt_id: str, emitted: float | None = None, identity: dict | None = None) -> None:
         attempt_id = str(attempt_id or "").strip()
         if not attempt_id:
             return
@@ -4597,7 +4608,7 @@ async def run_ticket(
             "current_step": 0,
             "total_steps": 0,
             "loss": -1.0,
-            "extras": {},
+            "extras": identity or {},
             "ts": _at(emitted),
         })
 
@@ -4639,6 +4650,10 @@ async def run_ticket(
         })
 
     def on_progress(phase: str, data: dict) -> None:
+        if not is_workload_progress(
+            data, agent_id=tk.agent_id,
+        ):
+            return
         if tk.agent_id in {"inference", "evaluation"} and (
             data.get("benchmark_id") or data.get("benchmark_index")
             or data.get("benchmark_name")
@@ -4665,7 +4680,7 @@ async def run_ticket(
         marker_attempt["current"] = attempt_id
         cur = int(data.get("step", data.get("current_step", 0)))
         tot = int(data.get("total", data.get("total_steps", 0)))
-        name = phase or data.get("phase", "")
+        name = data.get("phase") or phase
         benchmark_name = str(data.get("benchmark_name") or "").strip()
         if tk.agent_id in {"inference", "evaluation"}:
             name = benchmark_progress_phase(
@@ -4762,28 +4777,22 @@ async def run_ticket(
     # current phase/attempt tracking here but route inserts through event_sink only, so
     # a marker that appears in BOTH places isn't double-counted.
 
-    def feed_marker_event(ev_type: str, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        # Markers carry the ticket that emitted them. An agent routinely READS
-        # files that contain other stages' markers -- it cats a train.log to see
-        # how the last step went, or reads a sibling's script -- and those are
-        # byte-for-byte identical to the ones its own program prints. One
-        # inference ticket picked up `connecting`, `downloading_data` and
-        # `saving_model` this way, from the train log it inspected; a train
-        # ticket recorded `saving_model 492/492` before it had connected,
-        # from a stale log it tailed first. Ownership is the only thing that
-        # separates them.
-        #
-        # An UNSTAMPED marker is accepted: older templates and any script we
-        # don't control emit bare markers, and dropping those would report
-        # nothing at all for them.
+    def feed_marker_event(ev_type: str, payload: dict, execution=None) -> None:
+        payload = bind_progress(payload if isinstance(payload, dict) else {}, execution)
+        # Ownership identifies the Ticket; the collector supplies execution identity.
         owner = str(payload.pop("owner", "") or "")
         if owner and owner != tk.id:
             return
         if ev_type == "attempt":
-            on_attempt(str(payload.get("attempt_id") or ""), payload.get("t"))
+            if not is_workload_progress(
+                payload,
+                agent_id=tk.agent_id,
+            ):
+                return
+            on_attempt(str(payload.get("attempt_id") or ""), payload.get("t"),
+                       {k: payload[k] for k in ("execution_id", "execution_purpose") if k in payload})
         elif ev_type == "phase":
-            if payload.get("attempt_id"):
+            if payload.get("attempt_id") and (execution is not None or tk.agent_id not in {"train", "inference"}):
                 marker_attempt["current"] = str(payload["attempt_id"])
             marker_phase["current"] = str(payload.get("phase", ""))
             on_phase(marker_phase["current"], payload.get("t"))
@@ -5074,7 +5083,11 @@ async def run_ticket(
                 except Exception as e:
                     _warn("flusher.final_drain", e)
 
-    marker_reader = LiveMarkerReader(Path(work_dir), tk.id, start_at_end=True)
+    marker_reader = LiveMarkerReader(
+        Path(work_dir), tk.id, start_at_end=True,
+        log_names=({Path(direct_execution.log_path).name} if direct_execution else
+                   set() if tk.agent_id in {"train", "inference"} else None),
+    )
     marker_watch_stop = asyncio.Event()
 
     async def _persist_new_marker_rows() -> None:
@@ -5153,14 +5166,14 @@ async def run_ticket(
         try:
             while not marker_watch_stop.is_set():
                 for kind, payload in marker_reader.poll():
-                    feed_marker_event(kind, payload)
+                    feed_marker_event(kind, payload, direct_execution)
                 await _persist_new_marker_rows()
                 try:
                     await asyncio.wait_for(marker_watch_stop.wait(), timeout=2.0)
                 except asyncio.TimeoutError:
                     pass
             for kind, payload in marker_reader.poll(finish=True):
-                feed_marker_event(kind, payload)
+                feed_marker_event(kind, payload, direct_execution)
             await _persist_new_marker_rows()
         except Exception as e:
             _warn("live_marker_watch", e)
@@ -6132,6 +6145,16 @@ async def run_ticket(
                         ExecutionEvent.event_type == "progress",
                     ).order_by(ExecutionEvent.ts, ExecutionEvent.id)
                 )).scalars().all()
+                registered = (await session.execute(select(WorkloadExecution).where(
+                    WorkloadExecution.ticket_id == tk.id,
+                ))).scalars().all()
+                registrations = {item.id: item for item in registered}
+                diagnostic_events = [
+                    event for event in diagnostic_events
+                    if is_workload_progress(
+                        classify_event(event, registrations), agent_id=tk.agent_id,
+                    )
+                ]
                 diagnostics = _training_diagnostics_from_events(diagnostic_events)
                 diagnostics_file = Path(work_dir) / "training_diagnostics.json"
                 diagnostics_file.write_text(

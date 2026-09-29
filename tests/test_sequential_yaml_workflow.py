@@ -667,7 +667,7 @@ def test_side_effect_free_config_validator_uses_current_schema(
     assert "top_k" in error and "operation" in error
 
 
-def test_cluster_train_validator_requires_zero_dataloader_workers(
+def test_cluster_train_validator_checks_worker_budget(
     tmp_path: Path, capsys,
 ) -> None:
     inference_path = _write_inference_config(tmp_path)
@@ -687,14 +687,24 @@ def test_cluster_train_validator_requires_zero_dataloader_workers(
 
     assert configuration_main([
         "validate", "train", str(config_path), "--cluster",
-    ]) == 1
-    assert "dataloader_num_workers=0" in capsys.readouterr().err
-
-    body["training"]["implementation_config"]["dataloader_num_workers"] = 2
+    ]) == 0
+    capsys.readouterr()
+    implementation = body["training"]["implementation_config"]
+    implementation["dataloader_num_workers"] = 2
     config_path.write_text(yaml.safe_dump(body), encoding="utf-8")
-    with pytest.raises(ValueError, match="dataloader_num_workers=0"):
+    with pytest.raises(ValueError, match="dataloader_worker_plan"):
         validate_cluster_train_config(load_train_config(config_path))
-
+    plan = {"cpus_per_rank": 3, "memory_budget_gib": 4, "memory_per_worker_gib": 1}
+    implementation["dataloader_worker_plan"] = plan
+    config_path.write_text(yaml.safe_dump(body), encoding="utf-8")
+    validate_cluster_train_config(load_train_config(config_path))
+    for key, value, message in [("cpus_per_rank", 2, "cpus_per_rank"),
+                                ("memory_budget_gib", 1, "memory_budget_gib"),
+                                ("environment_max_workers", 1, "environment_max_workers")]:
+        implementation["dataloader_worker_plan"] = {**plan, key: value}
+        config_path.write_text(yaml.safe_dump(body), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            validate_cluster_train_config(load_train_config(config_path))
     body["training"]["implementation_config"]["dataloader_num_workers"] = 0
     config_path.write_text(yaml.safe_dump(body), encoding="utf-8")
     assert configuration_main([

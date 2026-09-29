@@ -2162,9 +2162,19 @@ def test_every_holdout_key_the_runner_reads_is_one_the_run_actually_writes() -> 
     runner = Path("src/zevo/engine/run/runner.py").read_text()
     read = set(re.findall(r'holdout\.get\("(\w+)"', runner))
     read |= set(re.findall(r'\(getattr\(run, "holdout", None\) or \{\}\)\.get\("(\w+)"', runner))
-    # Keys named in a tuple the guard iterates, e.g. `for k in ("a", "b")`.
-    for grp in re.findall(r'for k in \(([^)]*)\)', runner):
-        read |= set(re.findall(r'"(\w+)"', grp))
+    # Only tuple-driven comprehensions that actually read holdout contribute keys.
+    import ast
+    for node in ast.walk(ast.parse(runner)):
+        if not isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)):
+            continue
+        if not any(isinstance(child, ast.Attribute) and child.attr == "get"
+                   and isinstance(child.value, ast.Name) and child.value.id == "holdout"
+                   for child in ast.walk(node)):
+            continue
+        for generator in node.generators:
+            if isinstance(generator.iter, ast.Tuple):
+                read |= {item.value for item in generator.iter.elts
+                         if isinstance(item, ast.Constant) and isinstance(item.value, str)}
 
     stray = sorted(read - written)
     assert not stray, (

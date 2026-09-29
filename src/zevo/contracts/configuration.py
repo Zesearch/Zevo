@@ -1478,9 +1478,7 @@ def validate_adaptive_vllm_memory_config(config: InferenceRunConfig) -> None:
     llm_kwargs = implementation.get("llm_kwargs")
     if not isinstance(llm_kwargs, dict):
         raise ValueError("vLLM inference requires implementation_config.llm_kwargs")
-    # vLLM 0.27 removed this legacy EngineArgs option. Rejecting it in the
-    # deterministic config check is intentionally earlier than a multi-hour
-    # Slurm queue wait followed by engine-construction failure.
+    # The supported Zevo runtime contract excludes this option.
     if "swap_space" in llm_kwargs:
         raise ValueError(
             "implementation_config.llm_kwargs.swap_space is not supported by "
@@ -1504,23 +1502,27 @@ def validate_adaptive_vllm_memory_config(config: InferenceRunConfig) -> None:
 
 
 def validate_cluster_train_config(config: TrainRunConfig) -> None:
-    """Reject DataLoader subprocesses for distributed Cluster training.
-
-    A Slurm Train job already uses one distributed process per GPU. Spawning
-    additional DataLoader workers from every rank creates multiprocessing
-    scratch state (notably ``pymp-*`` directories) whose teardown is unreliable
-    on shared filesystems. Cluster jobs therefore load batches in their rank
-    process and must realize this implementation value explicitly.
-    """
-    workers = config.training.implementation_config.get(
-        "dataloader_num_workers"
-    )
-    if type(workers) is not int or workers != 0:
-        raise ValueError(
-            "cluster Train requires training.implementation_config."
-            "dataloader_num_workers=0; the value must be explicit so each DDP "
-            "rank does not create a nested multiprocessing worker pool"
-        )
+    """Validate a per-rank DataLoader budget; zero workers is the default."""
+    implementation = config.training.implementation_config
+    workers = implementation.get("dataloader_num_workers", 0)
+    if type(workers) is not int or workers < 0:
+        raise ValueError("dataloader_num_workers must be a nonnegative integer")
+    if workers == 0:
+        return
+    plan = implementation.get("dataloader_worker_plan")
+    if not isinstance(plan, dict):
+        raise ValueError("positive dataloader_num_workers requires dataloader_worker_plan")
+    cpus = plan.get("cpus_per_rank")
+    if type(cpus) is not int or cpus < workers + 1:
+        raise ValueError("cpus_per_rank must cover DataLoader workers and the training process")
+    memory = plan.get("memory_budget_gib")
+    per_worker = plan.get("memory_per_worker_gib")
+    if any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+           for v in (memory, per_worker)) or workers * per_worker > memory:
+        raise ValueError("DataLoader worker memory must fit memory_budget_gib per rank")
+    limit = plan.get("environment_max_workers")
+    if limit is not None and (type(limit) is not int or limit < 0 or workers > limit):
+        raise ValueError("DataLoader workers exceed environment_max_workers")
 
 
 def validate_train_stage_shape(

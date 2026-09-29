@@ -27,9 +27,20 @@ def is_preflight_progress(marker: Mapping[str, Any]) -> bool:
     """Separate implementation checks from measurements of the scoring suite."""
     scope = str(marker.get("progress_scope") or "").strip()
     if scope:
-        return scope == "preflight"
+        return scope in {"preflight", "test", "mock", "diagnostic"}
     # Compatibility for already-submitted jobs that used a synthetic probe ID.
     return str(marker.get("benchmark_id") or "").strip() == "probe"
+
+
+def is_workload_progress(
+    marker: Mapping[str, Any], *, agent_id: str,
+) -> bool:
+    """Formal compute telemetry is bound to an execution by the backend collector."""
+    if is_preflight_progress(marker):
+        return False
+    if agent_id in {"train", "inference"}:
+        return bool(marker.get("execution_id")) and marker.get("execution_purpose") == "workload"
+    return True
 
 
 def resolve_benchmark_id(
