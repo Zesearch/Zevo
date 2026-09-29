@@ -36,4 +36,3 @@ Report planned versus completed work and why execution stopped. Distinguish a
 fully completed plan from an interrupted run with usable partial artifacts in
 the existing result schema and summary. A saved checkpoint, some predictions,
 or successful startup does not by itself establish completion of the full plan.
-
