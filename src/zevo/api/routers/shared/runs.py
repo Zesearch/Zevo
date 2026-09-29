@@ -63,10 +63,12 @@ from zevo.engine.observe.run_metrics import (
     validation_best_score,
 )
 from zevo.engine.ssh_auth import ssh_base_args
+from zevo.db import WorkloadExecution
+from zevo.engine.run.workload_execution import classify_event
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_id,
     benchmark_names,
-    is_preflight_progress,
+    is_workload_progress,
     resolve_benchmark_id,
 )
 from zevo.contracts.customizations import RunCustomizations
@@ -386,6 +388,7 @@ _BENCHMARK_STAGE_ORDER = {"data": 0, "inference": 1, "evaluation": 2}
 def _benchmark_progress(
     run: Run, tickets: list[Ticket], *, reveal_holdout: bool,
     completion_events: list[ExecutionEvent] | None = None,
+    executions: dict[str, WorkloadExecution] | None = None,
 ) -> dict[str, Any]:
     """Describe the candidate's current per-Benchmark measurement progress.
 
@@ -545,11 +548,17 @@ def _benchmark_progress(
         }
         unmatched_progress: set[tuple[str, str, str]] = set()
         for event in completion_events or []:
-            marker = dict(event.extras or {})
-            if is_preflight_progress(marker):
+            marker = (classify_event(event, executions) if executions is not None
+                      else dict(event.extras or {}))
+            source_ticket = by_id.get(event.ticket_id)
+            if not is_workload_progress(
+                marker,
+                agent_id=source_ticket.agent_id if source_ticket else "",
+            ):
                 continue
             identity = resolve_benchmark_id(marker, names, suite)
-            if identity is not None and event.ticket_id in focused_inference_ids:
+            if (identity is not None and event.ticket_id in focused_inference_ids
+                    and marker.get("benchmark_complete") is True):
                 inference_done.add(identity)
             # A model judge can finish its last row before the scorer writes
             # and validates metrics. Only the scorer's completion marker
@@ -1163,6 +1172,9 @@ async def get_run(
             ExecutionEvent.current_step == ExecutionEvent.total_steps,
         )
     )).scalars().all() if measurement_ids else []
+    registered = (await db.execute(select(WorkloadExecution).where(
+        WorkloadExecution.ticket_id.in_(measurement_ids),
+    ))).scalars().all() if measurement_ids else []
     _cost, _dur = await _cost_and_duration(db, r)
     from zevo.engine.cost.budget import snapshot_for_run
     snap = await snapshot_for_run(db, run_id)
@@ -1203,6 +1215,7 @@ async def get_run(
         benchmark_progress=_benchmark_progress(
             r, tickets, reveal_holdout=reveal_holdout,
             completion_events=completion_events,
+            executions={item.id: item for item in registered},
         ),
         tickets=[
             {

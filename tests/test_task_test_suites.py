@@ -886,7 +886,7 @@ def test_combined_suite_progress_counts_completed_members_not_tickets() -> None:
         ExecutionEvent(
             ticket_id=inference.id, heartbeat_id="submit", attempt_id="one",
             event_type="progress", phase="complete", current_step=10,
-            total_steps=10, extras={"benchmark_name": name},
+            total_steps=10, extras={"benchmark_name": name, "execution_id": "formal", "execution_purpose": "workload", "benchmark_complete": True},
         ) for name in ("math", "qa")
     ]
     progress = _benchmark_progress(
@@ -978,7 +978,7 @@ def test_benchmark_progress_uses_identity_not_display_name() -> None:
         return ExecutionEvent(
             ticket_id=inference.id, heartbeat_id="submit", attempt_id="one",
             event_type="progress", phase="generate", current_step=10,
-            total_steps=10, extras=extras,
+            total_steps=10, extras={"execution_id": "formal", "execution_purpose": "workload", "benchmark_complete": True, **extras},
         )
 
     by_id = completed({

@@ -1,72 +1,4 @@
 
-## GPU resource lifetime
-
-Read `run_context.runtime.gpu_allocation_mode` (Infrastructure also receives
-`gpu_allocation_mode` directly). In both modes, a code bug is repaired on the
-same healthy resources. Preserve the error logs, environment, data and
-checkpoints. Stop failed workers, correct the implementation and retry within
-the engine's repair limit. Do not release resources or create a replacement
-because a child process returned nonzero.
-
-`per_stage` releases resources after the GPU stage's final validation;
-`per_run` retains them across stages until the Run ends. The backend owns this
-boundary. For Slurm, prepare the validated workload `.sbatch` file and return
-`deferred` as before. The backend runs it under an allocation controller, so a
-workload completion is distinct from allocation termination. A repair may use
-the same JOBID with a new attempt directory. Never scancel the parent allocation
-or submit a separate repair job yourself. Allocation expiry, preemption or
-node loss requires replacement; code errors do not. Every allocation remains
-subject to site walltime and provider policies. Per-run controllers have no
-fixed idle handoff timeout; per-stage controllers retain a 30-minute idle limit.
-
-In `per_run`, prepare the full run's resource envelope at Infrastructure time;
-subsequent stages must fit that allocation. The controller uses the train-sized
-GPU, CPU, RAM and walltime plan even if the first consumer is Data/Inference.
-For `per_stage` cloud Train, download and verify the final and selectable
-intermediate checkpoints under backend `work_dir` before reporting success;
-return local paths and `checkpoint_is_remote=false`. Retain logs on failure.
-
-## Distributed execution reliability
-
-Before full distributed execution of a new or changed runtime path, verify a
-bounded, representative end-to-end workload using the intended process topology,
-communication path, and permitted inputs. Exercise initialization, input loading,
-computation, synchronization, and output/checkpoint persistence as applicable.
-Integrate this check with the required smoke tests and execution order below;
-it does not authorize extra generation, evaluation-data access, or direct job
-submission. Keep probe artifacts separate from measured experiment outputs.
-
-Monitor useful progress by phase and participating worker: completed work,
-last-progress time, and the operation currently executing. Process liveness or
-an active allocation alone is not evidence of progress. Set finite budgets for
-initialization, data access, per-item computation, synchronization, persistence,
-and shutdown, based on representative measurements, workload variability, and
-the remaining runtime limit. Investigate sustained stalls rather than extending
-timeouts or retrying unchanged work without evidence. A timeout fallback must
-preserve experiment semantics; do not silently skip inputs or alter outputs.
-
-On failure or a progress-budget breach, preserve the earliest available error,
-worker identity, phase, last completed unit of work, relevant configuration, and
-per-worker logs or stack traces where available. Distinguish an originating
-worker failure from downstream waits or communication timeouts. Report uncertain
-causes as hypotheses instead of treating a timeout message as a root cause.
-Stop and confirm termination of the affected synchronized worker group before
-retrying; do not leave peers waiting or overlap old and replacement workers.
-Preserve unrelated independent work and follow the resource-lifetime rules
-above rather than terminating the parent allocation yourself.
-
-Repair according to the evidence and retry within the engine's repair limit.
-Resume only from verified, consistently committed state, including the progress
-and runtime state required by the method. Reuse completed outputs only when
-inputs and configuration still match; avoid duplicate or missing work. If a
-consistent resume is unavailable, report the limitation and use the permitted
-restart policy. Do not silently change the method, data, or execution semantics.
-
-Report planned versus completed work and why execution stopped. Distinguish a
-fully completed plan from an interrupted run with usable partial artifacts in
-the existing result schema and summary. A saved checkpoint, some predictions,
-or a successful probe does not by itself establish completion of the full plan.
-
 ## Execution order
 
 1. Resolve the output directory and validate all input files.
@@ -168,7 +100,8 @@ After validating every YAML, run the system helper in the batch foreground:
 ```
 python zevo_parallel_inference.py --predict predict.py --model MODEL_PATH \
   --suite suite.json --summary suite_summary.json --ticket-id TICKET_ID \
-  --allocated-gpus SLURM_JOB_GPU_COUNT --gpus-per-worker YAML_TENSOR_PARALLEL_SIZE
+  --allocated-gpus SLURM_JOB_GPU_COUNT --gpus-per-worker YAML_TENSOR_PARALLEL_SIZE \
+  --max-workers RESOURCE_PLAN_REPLICAS
 ```
 
 Use absolute paths in the real script. The helper isolates each worker's GPUs,
@@ -176,10 +109,14 @@ HOME, temporary directory, and writable compilation caches (including
 FlashInfer, Triton, TorchInductor, CUDA and vLLM), splits large prepared CSV benchmarks when useful,
 merges results in original row order, and marks each Benchmark complete as
 soon as its shard artifacts are validated, even while a replica continues with
-other Benchmarks. A final generated-row progress event alone is not completion.
-If available host RAM or CPU cannot support all possible replicas, pass
-`--max-workers N` with the safe limit derived from the site's allocation;
-never let the requested GPU count alone imply that many model copies fit.
+other Benchmarks. The helper emits `benchmark_complete=true` after validating the merged outputs.
+For direct inference, emit that field after the corresponding output validation.
+Pass `--max-workers N` from the execution resource plan, accounting for model
+loading and working memory per replica, host RAM, CPU allocation, and available
+work. Honor an explicitly requested concurrency within those limits. Use known
+input/output lengths and prior timings when available to estimate work; no
+separate benchmark run is required. Without an explicit limit, the helper uses
+available GPU groups, bounded by the number of input rows.
 It never reads private answers. Do not preselect one `CUDA_VISIBLE_DEVICES`
 before calling it: it needs Slurm's complete device mask. Run the system-owned
 `required_free_memory_gib` preflight for every GPU group that will run a
@@ -345,12 +282,11 @@ represent disabled thinking; tag presence alone does not establish the mode.
 `tokenize`, `add_generation_prompt`, and return-shape controls are execution
 controls, not `template_kwargs`. The prediction script must load this mapping
 from YAML; never hard-code a second copy or repeat its keys under
-`implementation_config`. Verify the selected behavior on a bounded generation
-probe before the full prediction job. If the probe contradicts an explicit
-request, resolve or report it; do not label the configuration compliant.
-For generation probes and smoke checks, emit progress with
-`progress_scope: "preflight"` and `phase: "preflight"`. Reserve benchmark
-identity and suite position fields for the full benchmark measurement.
+`implementation_config`. Check the selected behavior during the first scheduled
+predictions using permitted inputs and the frozen measurement configuration,
+then continue with the loaded model. Resolve any incompatibility under the
+experiment's change policy, preserving valid outputs for recovery and
+invalidating affected outputs when their configuration changes.
 
 The task mapping belongs under `measurement.inference_config`; supported keys
 are `input_fields`, `answer_regex`, `answer_column`, `batch_size`, `stop`,
@@ -459,14 +395,12 @@ free memory, absolute target, and derived fraction. The Slurm preflight must use
 the same helper's `required_free_memory_gib` result when selecting among the
 allocated GPUs, so preflight and engine initialization have one standard.
 
-Do not pass the removed legacy `swap_space` argument to `vllm.LLM`. The
-deterministic adaptive-memory validator rejects it before submission; use only
-arguments supported by the installed vLLM `EngineArgs` contract.
+Use arguments supported by both the configuration schema and the installed
+runtime. Resolve parameter compatibility during configuration validation.
 
 If the target exceeds the allowed fraction, increase tensor parallelism or
 reduce a non-semantic concurrency limit such as `max_num_seqs`; do not hide an
-unfit plan by clamping it. A small model on a B200 should ordinarily reserve a
-small fraction rather than most of the card. A GPU with an active foreign
+unfit plan by clamping it. A GPU with an active foreign
 compute process remains suspect even when enough bytes are free: briefly wait
 for allocation cleanup or fail/requeue instead of deliberately sharing it.
 

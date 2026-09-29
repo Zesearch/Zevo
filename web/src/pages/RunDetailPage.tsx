@@ -1031,6 +1031,7 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
   );
   const latestInferenceProgress = [...executionEvents].reverse().find((event) =>
     event.event_type === "progress"
+    && event.extras?.execution_purpose === "workload"
     && typeof event.extras?.benchmark_name === "string"
   );
   // Remote progress belongs to the submit activation, while a successful
@@ -1038,6 +1039,7 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
   // final benchmark name when the active progress window is empty.
   const lastInferenceBenchmark = [...t.execution_events].reverse().find((event) =>
     event.event_type === "progress"
+    && event.extras?.execution_purpose === "workload"
     && typeof event.extras?.benchmark_name === "string"
   );
   const judgeEvents = executionEvents.length > 0 || effectiveWake !== undefined

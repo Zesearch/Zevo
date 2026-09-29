@@ -1,30 +1,7 @@
-
-## GPU resource lifetime
-
-Read `run_context.runtime.gpu_allocation_mode` (Infrastructure also receives
-`gpu_allocation_mode` directly). In both modes, a code bug is repaired on the
-same healthy resources. Preserve the error logs, environment, data and
-checkpoints. Stop failed workers, correct the implementation and retry within
-the engine's repair limit. Do not release resources or create a replacement
-because a child process returned nonzero.
-
-`per_stage` releases resources after the GPU stage's final validation;
-`per_run` retains them across stages until the Run ends. The backend owns this
-boundary. For Slurm, prepare the validated workload `.sbatch` file and return
-`deferred` as before. The backend runs it under an allocation controller, so a
-workload completion is distinct from allocation termination. A repair may use
-the same JOBID with a new attempt directory. Never scancel the parent allocation
-or submit a separate repair job yourself. Allocation expiry, preemption or
-node loss requires replacement; code errors do not. Every allocation remains
-subject to site walltime and provider policies. Per-run controllers have no
-fixed idle handoff timeout; per-stage controllers retain a 30-minute idle limit.
-
-In `per_run`, prepare the full run's resource envelope at Infrastructure time;
-subsequent stages must fit that allocation. The controller uses the train-sized
-GPU, CPU, RAM and walltime plan even if the first consumer is Data/Inference.
 For `per_stage` cloud Train, download and verify the final and selectable
 intermediate checkpoints under backend `work_dir` before reporting success;
 return local paths and `checkpoint_is_remote=false`. Retain logs on failure.
+
 
 ## Large-scale preprocessing performance
 
@@ -60,47 +37,6 @@ explicitly and follow the experiment's change policy rather than treating it as
 a performance-only implementation detail. Do not require a particular library
 or GPU acceleration without evidence that it improves the measured bottleneck.
 
-## Distributed execution reliability
-
-Before full distributed execution of a new or changed runtime path, verify a
-bounded, representative end-to-end workload using the intended process topology,
-communication path, and permitted inputs. Exercise initialization, input loading,
-computation, synchronization, and output/checkpoint persistence as applicable.
-Integrate this check with the required smoke tests and execution order below;
-it does not authorize extra generation, evaluation-data access, or direct job
-submission. Keep probe artifacts separate from measured experiment outputs.
-
-Monitor useful progress by phase and participating worker: completed work,
-last-progress time, and the operation currently executing. Process liveness or
-an active allocation alone is not evidence of progress. Set finite budgets for
-initialization, data access, per-item computation, synchronization, persistence,
-and shutdown, based on representative measurements, workload variability, and
-the remaining runtime limit. Investigate sustained stalls rather than extending
-timeouts or retrying unchanged work without evidence. A timeout fallback must
-preserve experiment semantics; do not silently skip inputs or alter outputs.
-
-On failure or a progress-budget breach, preserve the earliest available error,
-worker identity, phase, last completed unit of work, relevant configuration, and
-per-worker logs or stack traces where available. Distinguish an originating
-worker failure from downstream waits or communication timeouts. Report uncertain
-causes as hypotheses instead of treating a timeout message as a root cause.
-Stop and confirm termination of the affected synchronized worker group before
-retrying; do not leave peers waiting or overlap old and replacement workers.
-Preserve unrelated independent work and follow the resource-lifetime rules
-above rather than terminating the parent allocation yourself.
-
-Repair according to the evidence and retry within the engine's repair limit.
-Resume only from verified, consistently committed state, including the progress
-and runtime state required by the method. Reuse completed outputs only when
-inputs and configuration still match; avoid duplicate or missing work. If a
-consistent resume is unavailable, report the limitation and use the permitted
-restart policy. Do not silently change the method, data, or execution semantics.
-
-Report planned versus completed work and why execution stopped. Distinguish a
-fully completed plan from an interrupted run with usable partial artifacts in
-the existing result schema and summary. A saved checkpoint, some predictions,
-or a successful probe does not by itself establish completion of the full plan.
-
 ## Execution order
 
 1. Validate the exact `data_signature`, data, baseline YAML, optional selected
@@ -122,16 +58,20 @@ or a successful probe does not by itself establish completion of the full plan.
    `training_data_example`. Build `train_config.yaml` using
    `train_config_schema` as the outer key/type authority, then run the supplied
    `config_validation_command` successfully. For Cluster, that command also
-   enforces the explicit runtime constraint
-   `training.implementation_config.dataloader_num_workers=0`; do not remove or
-   bypass its `--cluster` argument.
+   validates the DataLoader worker plan. The default is zero workers; additional
+   workers require a per-rank CPU and memory budget and a writable node-local
+   temporary directory. Honor any worker limit supplied by the environment.
+   Record `cpus_per_rank`, `memory_budget_gib`, and `memory_per_worker_gib` in
+   `dataloader_worker_plan`, plus `environment_max_workers` when the site supplies
+   a limit. Pass that plan to `ZevoTrainerTelemetryCallback`; its startup check
+   verifies allocated CPUs, available allocation memory, and temporary storage.
 6. Generate `train.py` strictly from that YAML and the Skill. Import the
    supplied `checkpoint_helper_path`; generated code does not implement its own
    checkpoint transaction, DDP rank-zero save barrier, shard policy, atomic
    rename, or commit marker.
 7. Run concrete dependency/data/model/GPU preflight. Determine whether the
-   mandatory large-or-complex-training smoke test below applies, record its
-   trigger and exact test plan in `training.implementation_config`, and fail if
+   mandatory large-or-complex-training startup validation below applies, record its
+   trigger and exact validation plan in `training.implementation_config`, and fail if
    the plan cannot exercise the realized runtime path.
    For Cluster, also confirm the realized model/method/checkpoint-saving peak
    fits `device_info.resource_plan.min_ram_gb`; include full serialization and
@@ -437,7 +377,7 @@ derives it, so the recorded command and the executed command agree:
   precision so the JSON never contradicts `TrainingConfig`).
 
 On any multi-process launch keep the existing single-process discipline: rank-0
-only for ordinary logging, `dataloader_num_workers=0` on Cluster, prepare/
+only for ordinary logging, budget DataLoader workers per rank, prepare/
 tokenize once before the distributed Trainer starts, couple
 `distributed.activation_checkpointing` with `gradient_checkpointing`, and record
 every distributed argument in `training.implementation_config` and every
@@ -445,10 +385,10 @@ acceleration package in `training.software_versions`. Real multi-GPU/multi-node
 execution must be validated on actual hardware; the contracts and launch command
 are unit-tested, but a live run confirms rendezvous, sharding, and saving.
 
-### Mandatory smoke test for large or complex training
+### Startup validation within large or complex training
 
-Run a bounded runtime smoke test before committing the allocation to the full
-training schedule when **any** of these conditions holds:
+Validate the opening steps within the full training execution when **any** of
+these conditions holds:
 
 - the verified parent model contains strictly more than 10 billion parameters;
 - the realized backend is FSDP or DeepSpeed ZeRO-2/3;
@@ -463,11 +403,10 @@ not trigger this rule. Determine parameter count from verified model config or
 weight metadata when the model id does not contain a reliable size hint; do not
 assume an unknown model is small.
 
-The smoke test is the opening steps of the real training run, using the exact
+These checks use the opening steps of the real training run, with the exact
 parent checkpoint, resolved training configuration, actual training data, and
-production execution path. A smaller model or separate toy training loop does
-not satisfy this requirement. An optional small-model environment probe may
-precede it, but cannot replace it.
+production execution path. Check the first operations and continue the same
+training plan when they succeed.
 
 1. Prepare the actual dataset and load the real parent with the declared
    launcher, topology, precision, optimizer, sharding/offload, and gradient
@@ -475,46 +414,37 @@ precede it, but cannot replace it.
    method-specific forward/rollout/reward path to produce the first batch.
    Validate data access against the installed library versions and actual data
    scale; avoid repeated expensive conversion or full-dataset work per lookup
-   or rank when it can be prepared once and reused. Do not substitute a tiny
-   dataset or bypass the sampler to make the smoke test pass.
+   or rank when it can be prepared once and reused.
 2. Complete at least two forward/backward/optimizer steps on the real model.
    Check finite loss and gradients, optimizer-step advancement, and telemetry.
-   The steps count toward the declared training schedule. Keep its full
-   scheduler/warmup horizon and data order; do not implement smoke by replacing
-   the full plan with `max_steps=2`, shortening epochs, or lowering the declared
-   batch size or sequence length. A declared plan with fewer than two optimizer
-   steps must exercise all of its steps without adding extra updates.
-3. Immediately save a complete resumable checkpoint through the framework's
-   distributed checkpoint API and the supplied checkpoint helper. Include the
-   model or adapter, optimizer, scheduler, step counters, RNG, and any method-
-   specific state required to resume the same plan. All required ranks must
-   participate. Verify all expected files/shards and perform a real restore
-   through the framework's supported resume path, checking restored counters
-   and state and successful continuation on the next scheduled step. File
-   existence or a weights-only reload is not sufficient. This recovery
-   checkpoint is separate from the optional weights-only branch-point retention
-   policy; do not publish smoke completion as the final Train result.
-4. After verification, continue the unchanged plan inside the same finite Slurm
-   allocation (or the same instance/cloud job). Reuse the loaded model and
-   Trainer where the framework supports restoration in place; otherwise use its
-   supported restore lifecycle within that allocation. Do not load another copy
-   of the large base model or return to the resource queue. Preserve completed
-   steps and data/RNG position rather than replaying the opening updates. A
-   plan already finished at the smoke boundary needs no extra optimizer step.
+   These steps count toward the declared training schedule, preserving its
+   scheduler/warmup horizon, data order, batch size, and sequence length. For a
+   plan shorter than two optimizer steps, validate the steps it contains.
+3. Save an early complete resumable checkpoint through the framework's
+   distributed checkpoint API and supplied checkpoint helper. Include model or
+   adapter, optimizer, scheduler, counters, RNG, and method-specific state needed
+   to resume the same plan. All required ranks must participate. Verify expected
+   files/shards and the helper's commit/integrity checks, and retain the
+   checkpoint for recovery.
+4. Continue the unchanged plan with the loaded model and Trainer in the same
+   allocation. When a failure requires recovery, use the supported restore
+   path and verify restored counters, data/RNG position, and successful
+   continuation. A weights-only reload is not a full-state resume; report any
+   limitation and follow the permitted restart policy.
 
-Only the number of initial training steps is bounded; the real data path and
-configuration remain intact. Full-dataset evaluation and a full training epoch
-are not prerequisites for passing smoke. Record the trigger, exact plan,
-phase-specific timeouts, and checks in `training.implementation_config` before
-submission. Emit progress and elapsed time for data/sampler preparation, first
-batch, first optimizer step, checkpoint save, restore, and continuation. Use
-finite timeouts appropriate to the model/data/checkpoint size, including a
-watchdog that can detect a blocked first batch or step while the training loop
-is not returning; an `on_step_end` callback alone is insufficient. On timeout
-or failure, capture the last operation and all rank stacks where possible,
-report failure, and exit the job to release its resources rather than remaining
-silently running. Record measured steps, checks, and timings in the job log and
-Train result. Success requires the real-path checks, not process liveness.
+Only the initial validation window is bounded; the real data path and full
+training schedule remain intact. Record the trigger, checks, and phase-specific
+timeouts in `training.implementation_config` before submission. Emit actual
+progress and elapsed time for data preparation, first batch, optimizer steps,
+and checkpoint saves, plus restore/continuation when recovery occurs. Use
+finite budgets appropriate to the model/data/checkpoint size and a watchdog
+that detects a blocked batch or step even when the training loop is not
+returning; an `on_step_end` callback alone is insufficient. On failure, capture
+the last operation and per-rank stacks where possible, stop the affected worker
+group, and repair within the engine's limit while retaining healthy resources
+under the GPU resource lifetime rules above. Record measured steps and checks in
+the job log and
+Train result, distinguishing useful partial work from completion of the plan.
 
 ### Method branch selection
 
@@ -559,7 +489,8 @@ values used to disable thinking. Native empty reasoning delimiters may be part
 of the non-thinking rendering; they are not supervised reasoning content.
 
 Before training, use the same rendering function that the real data pipeline
-will call to perform a synthetic smoke check:
+will call to perform a deterministic tokenizer/label-alignment check with
+placeholder text, without model generation or optimizer steps:
 
 1. Render the Inference example messages with
    `add_generation_prompt=True` and the frozen `template_kwargs`; require exact
@@ -576,9 +507,10 @@ will call to perform a synthetic smoke check:
 This check verifies the frozen contract; it must never select or rewrite it. A
 mismatch means repair the rendering/collator implementation or report a real
 tokenizer/version incompatibility. Do not mutate the Inference YAML to make the
-check pass. The mandatory GPU runtime smoke test, when triggered, covers the
+check pass. The mandatory startup validation, when triggered, covers the
 opening steps of actual training, distributed execution, telemetry, and
-checkpoint save/restore as specified above. It preserves the frozen
+checkpoint persistence, with restoration checked during actual recovery as
+specified above. It preserves the frozen
 prompt/template contract; its recovery checkpoint is not by itself the final
 Train result.
 
@@ -598,8 +530,8 @@ actual optimized placeholders so the UI never has to infer a label from a raw
 dataset key or an array position. Every normalized-record value that can vary
 between rows is represented by a declared placeholder; literals are reserved
 for values the normalizer guarantees are constant. Its `loss_target_summary` must agree with the YAML
-`loss_contract`. `prompt_alignment` separately records the measured synthetic
-smoke check: the Train-rendered Baseline prompt, context/target token counts,
+`loss_contract`. `prompt_alignment` separately records the deterministic
+alignment check: the Train-rendered Baseline prompt, context/target token counts,
 string/token prefix results, and prefix-label/target-boundary results. Its
 rendered prompt must equal Baseline `prompt_example.rendered_prompt` exactly.
 Do not require a real multi-turn or method-shaped training example to contain

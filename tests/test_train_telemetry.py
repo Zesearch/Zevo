@@ -164,3 +164,38 @@ def test_live_reader_keeps_restarted_processes_separate(tmp_path) -> None:
     phases = [payload for kind, payload in events if kind == "phase"]
     assert [payload["attempt_id"] for payload in progress] == [first, second]
     assert [payload["attempt_id"] for payload in phases] == [first, second]
+
+
+def test_registered_reader_does_not_scan_rehearsal_logs(tmp_path):
+    marker = '__PROGRESS__:train-run-001:{"step":1,"total":1}\n'
+    (tmp_path / "test.log").write_text(marker)
+    (tmp_path / "train.log").write_text(marker)
+    reader = LiveMarkerReader(tmp_path, "train-run-001", log_names={"train.log"})
+    assert len(reader.poll()) == 1
+    assert len(LiveMarkerReader(tmp_path, "train-run-001", log_names=set()).poll()) == 0
+
+
+def test_dataloader_workers_check_cpu_memory_and_local_temporary_storage(tmp_path, monkeypatch):
+    import pytest
+    module = _load_helper()
+    monkeypatch.setattr(module.os, "sched_getaffinity", lambda _: set(range(8)), raising=False)
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "2")
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
+    monkeypatch.setenv("SLURM_NTASKS_PER_NODE", "1")
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", "16384")
+    monkeypatch.setattr(module.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(module.Path, "read_text", lambda self: "1 0 0:1 / / rw - tmpfs tmpfs rw\n")
+    plan = {"cpus_per_rank": 3, "memory_budget_gib": 4, "memory_per_worker_gib": 1}
+    module.validate_dataloader_runtime(2, plan)
+    assert list(tmp_path.iterdir()) == []  # Temporary files were cleaned up.
+    monkeypatch.setenv("SLURM_NTASKS_PER_NODE", "2")
+    module.validate_dataloader_runtime(4, {**plan, "cpus_per_rank": 5})
+    monkeypatch.setenv("SLURM_NTASKS_PER_NODE", "1")
+    with pytest.raises(ValueError, match="CPU plan"):
+        module.validate_dataloader_runtime(4, {**plan, "cpus_per_rank": 5})
+    with pytest.raises(ValueError, match="memory plan"):
+        module.validate_dataloader_runtime(2, {**plan, "memory_budget_gib": 9})
+    monkeypatch.setattr(module.Path, "read_text", lambda self: "1 0 0:1 / / rw - nfs server rw\n")
+    with pytest.raises(ValueError, match="node-local"):
+        module.validate_dataloader_runtime(2, plan)
+    module.validate_dataloader_runtime(0)  # Default requires no worker pool.

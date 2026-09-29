@@ -199,27 +199,37 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
   const [page, setPage] = useState(0);
   const num = (v: unknown) => (typeof v === "number" && isFinite(v) ? v : undefined);
 
-  // Runtime repair may launch Trainer again for the same Ticket. `attempt_id`
-  // remains an internal curve identity so equal step numbers from two processes
-  // are never spliced together, but it is not a user-facing concept: as soon as
-  // a newer attempt is announced, its figure replaces the previous one.
+  const [showHistory, setShowHistory] = useState(false);
+  const historicalCount = executionEvents.filter((event) =>
+    event.event_type === "progress" && event.extras?.execution_purpose === "unverified"
+  ).length;
+  const eligibleEvents = useMemo(() => executionEvents.filter((event) => {
+    if (event.event_type !== "progress" && event.event_type !== "attempt") return true;
+    const purpose = event.extras?.execution_purpose;
+    return showHistory ? purpose === "unverified" : purpose === "workload";
+  }), [executionEvents, showHistory]);
   const latestAttemptId = useMemo(() => {
     let latest = "";
-    for (const event of executionEvents) {
-      if (
-        (event.event_type === "attempt" || event.event_type === "progress")
-        && event.attempt_id
-      ) {
+    for (const event of eligibleEvents) {
+      if ((event.event_type === "attempt" || event.event_type === "progress") && event.attempt_id) {
         latest = event.attempt_id;
       }
     }
     return latest;
-  }, [executionEvents]);
+  }, [eligibleEvents]);
   const scopedEvents = latestAttemptId
-    ? executionEvents.filter(
-        (event) => event.attempt_id === latestAttemptId,
-      )
-    : executionEvents;
+    ? eligibleEvents.filter((event) => event.attempt_id === latestAttemptId)
+    : eligibleEvents;
+  const historyControl = historicalCount > 0 ? (
+    <div className="mb-2 text-xs text-dim">
+      <button className="underline" onClick={() => setShowHistory(!showHistory)}>
+        {showHistory ? "Show verified execution" : "View historical readings"}
+      </button>
+      <span className="ml-2">{showHistory
+        ? "Execution source unverified; excluded from completion counts."
+        : `${historicalCount} historical readings have an unverified execution source.`}</span>
+    </div>
+  ) : null;
 
   // One row per progress reading: {step, loss, ...every numeric extra}.
   // The same step can arrive twice — once live (POSTed mid-run) and once in the
@@ -310,6 +320,7 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
     const phase = scopedEvents[scopedEvents.length - 1]?.phase;
     return (
       <div className="text-xs text-dim">
+        {historyControl}
         No loss readings yet{phase ? `, current phase: ` : "."}
         {phase && <span className="font-mono text-brass-300">{phase}</span>}
       </div>
@@ -329,6 +340,7 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
 
   return (
     <div>
+      {historyControl}
       <div className="mb-3 flex flex-wrap gap-2 font-mono text-[15px]">
         <span className="rounded bg-raised px-2 py-0.5 text-dim">step <span className="text-slate-100">{last.step}</span></span>
         {visibleMetrics.map((m) => {

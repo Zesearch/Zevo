@@ -841,6 +841,25 @@ class HeartbeatRun(Base):
     ticket: Mapped[Ticket] = relationship(back_populates="heartbeats")
 
 
+class WorkloadExecution(Base):
+    """Backend-registered workload and its telemetry stream, separate from Agent output."""
+
+    __tablename__ = "workload_executions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    ticket_id: Mapped[str] = mapped_column(
+        ForeignKey("tickets.id", ondelete="CASCADE"), index=True,
+    )
+    heartbeat_id: Mapped[str] = mapped_column(
+        ForeignKey("heartbeat_runs.id", ondelete="CASCADE"), index=True,
+    )
+    runtime_key: Mapped[str] = mapped_column(String(256))
+    log_path: Mapped[str] = mapped_column(Text)
+    purpose: Mapped[str] = mapped_column(String(32), default="workload")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow,
+    )
+
+
 class ExecutionEvent(Base):
     """Streaming phase/progress event from agent markers.
 

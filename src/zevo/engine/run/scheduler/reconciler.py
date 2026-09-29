@@ -44,6 +44,7 @@ from zevo.contracts.infrastructure import (
     SLURM_STATUS_EVENT_PREFIX,
     SLURM_STATUS_FILENAME,
 )
+from zevo.engine.run.workload_execution import bind_progress, register_execution
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_progress_phase,
     canonical_benchmark_marker,
@@ -203,8 +204,18 @@ async def _persist_slurm_execution_marker(
     payload: dict[str, Any],
     phase: str,
     attempt_id: str,
+    execution_id: str | None = None,
+    runtime_key: str = "slurm",
+    log_path: str = "",
 ) -> bool:
-    """Idempotently turn one remote stage marker into UI telemetry."""
+    """Idempotently turn one registered workload's markers into UI telemetry."""
+    execution = await register_execution(
+        session, execution_id=execution_id or heartbeat.id, ticket_id=ticket_id,
+        heartbeat_id=heartbeat.id, runtime_key=runtime_key, log_path=log_path,
+    )
+    payload = bind_progress(payload, execution)
+    if is_preflight_progress(payload):
+        return False
     occurred_at = _marker_datetime(payload.get("t"))
     attempt_id = str(payload.get("attempt_id") or attempt_id or heartbeat.id)
 
@@ -232,7 +243,7 @@ async def _persist_slurm_execution_marker(
             current_step=0,
             total_steps=0,
             loss=-1.0,
-            extras={},
+            extras={"execution_id": execution.id, "execution_purpose": execution.purpose},
             ts=occurred_at,
         ))
         return True
@@ -259,7 +270,7 @@ async def _persist_slurm_execution_marker(
             current_step=0,
             total_steps=0,
             loss=-1.0,
-            extras={},
+            extras={"execution_id": execution.id, "execution_purpose": execution.purpose},
             ts=occurred_at,
         ))
         return True
@@ -538,6 +549,8 @@ async def _record_slurm_execution_marker(
             payload=clean_payload,
             phase=phase,
             attempt_id=attempt_id,
+            execution_id=row.id, runtime_key=f"{row.provider}:{job_id}",
+            log_path=str(meta.get("log_path") or ""),
         )
         await session.commit()
         return changed

@@ -214,3 +214,26 @@ def test_benchmark_commits_before_its_worker_finishes_other_members(tmp_path: Pa
             if row.get("suite_rows_verified") is not None] == [
         "validation:0", "validation:1",
     ]
+
+
+def test_replica_limit_is_resource_driven_and_not_capped_at_four(tmp_path: Path) -> None:
+    for gpu_count, cap, expected in [(8, None, 8), (8, 3, 3)]:
+        work = tmp_path / str(expected)
+        work.mkdir()
+        predict = work / "predict.py"
+        predict.write_text(FAKE_PREDICT)
+        suite = _suite(work, [16])
+        command = [sys.executable, str(HELPER), "--predict", str(predict),
+                   "--model", "unused", "--suite", str(suite),
+                   "--summary", str(work / "summary.json"), "--ticket-id", "test-ticket",
+                   "--allocated-gpus", str(gpu_count), "--gpus-per-worker", "1"]
+        if cap is not None:
+            command += ["--max-workers", str(cap)]
+        result = subprocess.run(command, env=dict(os.environ, TMPDIR="/tmp",
+                                CUDA_VISIBLE_DEVICES=",".join(map(str, range(gpu_count)))),
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert f"{expected} independent replica(s)" in result.stdout
+        member = json.loads(suite.read_text())["members"][0]
+        with open(member["output"]) as handle:
+            assert [row["id"] for row in csv.DictReader(handle)] == list(map(str, range(16)))
