@@ -182,20 +182,17 @@ copy the checkpoint/config/script plus the exact `slurm-<JOBID>.out` and
 `log_path` without POSTing `Done:`; the engine publishes it only after accepting
 the Result and artifacts. Collect never parses or replays the copied log into
 training telemetry: the live watcher owns every chart event while the job is
-running. On another terminal state, inspect both exact job
-streams. Return failure unless the
-continuation rule below applies. Scheduler-owned job state is read-only to the
-Agent; do not PATCH it. The allocation ends with the finite script and no
-release Ticket follows.
+running.
 
-When a terminal non-COMPLETED job failed because of generated implementation,
-command, or runtime setup and no required artifact committed, repair the
-generated files in place and return `deferred`. The Engine may authorize one
-bounded second external execution for the same Ticket. It verifies that the
-implementation changed, creates a distinct attempt/JOBID/log set, and submits it only
-after every deterministic check passes. Never call `sbatch` yourself. If the
-checkpoint helper's commit marker already exists and validates, report that
-artifact instead of repeating expensive training.
+A failed external job wakes this Ticket directly in a repair activation with a
+new submit contract and `slurm_job.previous_execution` containing the prior job
+identity and exact logs. Diagnose and repair the implementation, preserve usable
+training state, and prepare and upload the replacement script in this same
+activation. Return `deferred` for engine validation and submission. Resume from
+a consistently committed checkpoint when possible. If the required final
+checkpoint already exists and its training-completion record validates, report it with the original script
+instead of running training again. Report a specific failure when the work order
+cannot be repaired. The engine owns the repair limit and resource lifetime.
 
 If the finite job approaches site walltime before the unchanged training plan
 completes, a graceful pre-walltime hook must save a full resumable trainer state.
@@ -749,3 +746,34 @@ Keep implementation/runtime pitfalls `agent_local`. Report an evidenced
 `experiment_finding` or broad `recommendation` as `shared_candidate` when it
 should inform the Orchestrator's next method or data-direction suggestion.
 Do not share exact secret paths, credentials, or held-out information.
+
+## Training completion and final publication
+
+Before the first optimizer step, freeze the resolved full-plan step count with
+`zevo_train_checkpoint.record_training_plan(plan_path, ticket_id=...,
+config_path=..., planned_steps=..., planned_epochs=...)`. Call this on rank zero once the full-data Trainer schedule is resolved
+(for example in `on_train_begin`), before optimization starts; `planned_epochs` must equal the
+configured `training.num_epochs`. Preserve this plan across repairs and resumes.
+
+Training succeeds when this target is reached, or when the metric history
+satisfies `training.early_stopping` declared before execution (`metric`, `mode`,
+`patience`, `min_delta`). Save the final Trainer state, including `global_step`,
+`max_steps`, and evaluation history, before final model publication. Retain a
+full resumable checkpoint until the final model is committed and verified.
+
+After the distributed framework has materialized the selected final weights
+and tokenizer into a staging directory, publish with
+`commit_training_checkpoint(staging_dir, final_dir, plan_path=...,
+trainer_state_path=...)`. This validates plan completion and commits its evidence
+with the checkpoint manifest. Return `succeeded` only for this verified final
+artifact; the backend independently checks the files, configuration identity,
+and training completion before registering it or advancing the pipeline.
+
+An interrupted plan stays on this Train Ticket: diagnose the failure and resume
+from complete optimizer/scheduler/RNG state. If that state is unavailable,
+report it and repair within the original work order. A usable intermediate
+model is a recovery artifact, not completion of the training plan. When training
+has completed but saving failed, repair publication from the completed state
+and validate the final files without repeating optimization. Keep the original
+plan unchanged during recovery; a shorter plan requires an explicit new user
+or coordinator decision rather than retroactively lowering the completion target.

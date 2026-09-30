@@ -154,7 +154,9 @@ class TrainTaskInput(AgentTaskInput):
         description=(
             "System-owned checkpoint transaction helper copied beside train.py. "
             "Use it for bounded sharding, rank-zero DDP save, structural "
-            "validation, atomic publication, and the commit marker."
+            "validation, atomic publication, and the commit marker. Freeze the full "
+            "training plan with record_training_plan and publish the final model "
+            "with commit_training_checkpoint after that plan completes."
         ),
     )
     telemetry_interval_steps: Literal[20] = Field(
@@ -306,7 +308,8 @@ class TrainResult(AgentResult):
     checkpoint_path: str = Field(
         "",
         description=(
-            "Verified checkpoint directory. A remote checkpoint must live in "
+            "Final checkpoint with a verified training-completion commit record. "
+            "A remote checkpoint must live in "
             "a Ticket-unique path containing ticket_id so later iterations cannot "
             "overwrite a selectable historical parent."
         ),

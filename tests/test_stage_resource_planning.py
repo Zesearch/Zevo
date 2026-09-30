@@ -426,9 +426,18 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
         "gpus_per_node": 3,
         "scheduler_state": "FAILED",
         "execution_attempt": 1,
+        "status_path": submit.status_path,
+        "remote_workdir": submit.remote_work_dir,
+        "remote_script": submit.remote_script_path,
     }
     retry = asyncio.run(contract())
     assert retry.phase == "submit"
+    from zevo.contracts.infrastructure import SlurmStageJobContract
+    previous = SlurmStageJobContract.model_validate(retry.previous_execution)
+    assert previous.phase == "collect"
+    assert previous.job_id == "12345"
+    assert previous.status_path == submit.status_path
+    assert previous.stdout_path.replace("%j", previous.job_id).endswith("slurm-12345.out")
     assert retry.attempt == 2
     assert retry.retry_of_bookkeeping_row_id == "request-1"
     assert retry.retry_of_job_id == "12345"
@@ -437,13 +446,24 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert observed == ["probe"]
 
     job_row.meta.update({
-        "execution_attempt": 4,
+        "execution_attempt": 11,
         "retry_of_bookkeeping_row_id": "request-1",
         "retry_of_job_id": "12345",
     })
+    ticket.repair_attempts = 11
     exhausted = asyncio.run(contract())
     assert exhausted.phase == "collect"
-    assert exhausted.attempt == 4
+    assert exhausted.attempt == 11
+    # User-directed replacements are independent of the automatic repair budget.
+    ticket.status = "queued"
+    ticket._restart_instruction_id = "instruction-1"
+    job_row.meta["scheduler_state"] = "COMPLETED"
+    replacement = asyncio.run(contract())
+    assert replacement.phase == "submit"
+    assert replacement.attempt == 12
+    assert replacement.restart_instruction_id == "instruction-1"
+    assert ticket.repair_attempts == 11
+
 
 
 def test_generated_python_static_gate_catches_undefined_names(tmp_path) -> None:

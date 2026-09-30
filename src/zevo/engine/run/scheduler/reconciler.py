@@ -1075,7 +1075,8 @@ async def _reconcile_slurm_stage_jobs(
                     trigger_detail=f"job_{state.lower()}",
                     reason=(
                         f"finite Slurm job {row.instance_id} reached {state}; "
-                        "collect and validate its outputs"
+                        + ("collect and validate its outputs" if state == "COMPLETED"
+                           else "diagnose and repair in one activation")
                     ),
                     payload={"job_id": row.instance_id, "scheduler_state": state},
                 )

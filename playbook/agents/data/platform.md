@@ -238,13 +238,12 @@ activation.
 
 On `phase="collect"`, never submit duplicate work. A non-terminal state remains
 deferred. On `COMPLETED`, copy and validate the compact control artifacts and
-return the ordinary successful Data result. On another terminal state, inspect
-the separate exact stdout/stderr files and fail specifically. If the failure is
-owned by the generated implementation, the repair activation may provide
-`phase="submit"` with `attempt=2`; repair and upload the script, then return
-deferred so the engine can submit the one bounded replacement job. The backend
-watcher changes the current request from Waiting to Running and wakes this
-Ticket at terminal.
+return the ordinary successful Data result. A failed job instead wakes a repair
+activation with a new submit contract and `slurm_job.previous_execution` holding
+the failed job identity and logs. Inspect those logs and existing artifacts,
+repair and upload the script in this activation, then return `deferred` for
+engine validation and submission. If the required artifacts already validate,
+report them with the original script. The engine enforces the repair limit.
 
 ### `prepare_holdout_data`
 

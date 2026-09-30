@@ -152,18 +152,19 @@ async def test_orchestrator_routes_instruction_as_a_quiesced_specialist_wake(
                 body="Apply this to Train now",
                 author="orchestrator",
                 run_instruction_id=instruction_id,
+                instruction_action="restart_activation",
             ),
             session,
         )
         ticket = await session.get(Ticket, "train-001")
-        assert ticket.status == "cancelled"
+        assert ticket.status == "queued"
         wakeups = (await session.execute(
             select(AgentWakeupRequest).where(
                 AgentWakeupRequest.ticket_id == "train-001"
             )
         )).scalars().all()
         assert len(wakeups) == 1
-        assert wakeups[0].payload == {"run_instruction_id": instruction_id}
+        assert wakeups[0].payload == {"run_instruction_id": instruction_id, "instruction_action": "restart_activation"}
 
 
 @pytest.mark.asyncio
@@ -189,3 +190,77 @@ async def test_private_test_ticket_cannot_be_instruction_context(client_and_sess
         json={"body": "Please review this step", "source_ticket_id": "test-001"},
     )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_cancel", [False, True])
+async def test_replacement_sigterm_does_not_cancel_ticket_or_consume_repair(
+    client_and_session, monkeypatch, explicit_cancel,
+):
+    from datetime import datetime, timezone
+    from zevo.db import HeartbeatRun
+    from zevo.engine.run.activation_control import finish_superseded_activation
+    from zevo.engine.run.scheduler.reconciler import _close_finished_runs
+    from zevo.engine.run import remote_jobs
+
+    client, Session = client_and_session
+    posted = await client.post('/api/runs/run-1/instructions', json={'body': 'Replace the current execution'})
+    instruction_id = posted.json()['id']
+    calls = []
+
+    async def stop(db, ticket, *, preserve_allocation=False):
+        calls.append(preserve_allocation)
+        return {'attempted': True, 'ok': True}
+
+    monkeypatch.setattr(remote_jobs, 'cancel_ticket_remote_job', stop)
+    async with Session() as runner:
+        ticket = await runner.get(Ticket, 'train-001')
+        ticket.status = 'running'
+        ticket.repair_attempts = 2
+        hb = HeartbeatRun(id='old-activation', ticket_id=ticket.id, agent_id='train', driver='test', model='test')
+        runner.add(hb)
+        await runner.commit()
+        async with Session() as api:
+            await post_message(ticket.id, MessageBody(
+                body='Replace the current execution', author='orchestrator',
+                run_instruction_id=instruction_id, instruction_action='restart_activation',
+            ), api)
+            current = await api.get(Ticket, ticket.id)
+            assert current.status == 'running'
+            assert (await api.get(Run, 'run-1')).status == 'running'
+            if explicit_cancel:
+                current.status = 'cancelled'
+                await api.commit()
+        hb.finished_at = datetime.now(timezone.utc)
+        hb.exit_code = 1
+        hb.error_message = 'RuntimeError: claude exec cancelled (signal SIGTERM)'
+        hb.estimated_cost_usd = 1.25
+        assert await finish_superseded_activation(runner, ticket, hb) is (not explicit_cancel)
+        await runner.commit()
+        assert ticket.status == ('cancelled' if explicit_cancel else 'queued')
+        assert ticket.repair_attempts == 2
+        assert hb.superseded_by_instruction_id == instruction_id
+        assert hb.estimated_cost_usd == 1.25
+        assert hb.finished_at is not None
+        if not explicit_cancel:
+            await _close_finished_runs(runner)
+            assert (await runner.get(Run, 'run-1')).status == 'running'
+    assert calls == []  # Commit the handoff before process cleanup.
+
+
+@pytest.mark.asyncio
+async def test_instruction_continue_does_not_stop_execution(client_and_session, monkeypatch):
+    from zevo.engine.run import remote_jobs
+    client, Session = client_and_session
+    posted = await client.post('/api/runs/run-1/instructions', json={'body': 'Use this context later'})
+
+    async def unexpected_stop(*args, **kwargs):
+        pytest.fail('continuing an instruction must not stop the workload')
+
+    monkeypatch.setattr(remote_jobs, 'cancel_ticket_remote_job', unexpected_stop)
+    async with Session() as db:
+        await post_message('train-001', MessageBody(
+            body='Use this context later', author='orchestrator',
+            run_instruction_id=posted.json()['id'],
+        ), db)
+        assert (await db.get(Ticket, 'train-001')).status == 'waiting_external'

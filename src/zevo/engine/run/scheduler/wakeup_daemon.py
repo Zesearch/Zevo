@@ -393,7 +393,15 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                                 target.id, wakeup_id[:8],
                             )
                             return
-                        if target is not None and instruction_id:
+                        if (target is not None and instruction_id
+                                and wake_payload.get("instruction_action") == "restart_activation"
+                                and target.status not in TERMINAL_TICKET_STATUSES):
+                            from zevo.engine.run.remote_jobs import cancel_ticket_remote_job
+                            cleanup = await cancel_ticket_remote_job(s, target, preserve_allocation=True)
+                            if cleanup.get("attempted") and not cleanup.get("ok"):
+                                w.scheduled_for = datetime.now(timezone.utc) + _dt.timedelta(seconds=5)
+                                await s.commit()
+                                return
                             active_stage = (await s.execute(
                                 select(InfraInstance).where(
                                     InfraInstance.ticket_id == target.id,
@@ -402,7 +410,7 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                                     InfraInstance.released_at.is_(None),
                                 ).order_by(InfraInstance.created_at.desc()).limit(1)
                             )).scalar_one_or_none()
-                            if active_stage is not None:
+                            if active_stage is not None and not (active_stage.meta or {}).get("monitor_terminal"):
                                 # scancel acceptance is not release. Keep the
                                 # instruction activation queued until Slurm no
                                 # longer owns the old allocation.
@@ -415,17 +423,6 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                                     instruction_id[:8], active_stage.instance_id,
                                 )
                                 return
-                            superseded = (
-                                target.status == "cancelled"
-                                and target.error_message.startswith(
-                                    "current activation superseded by Run instruction "
-                                )
-                            )
-                            if superseded:
-                                target.status = "queued"
-                                target.error_message = ""
-                                target.summary = ""
-                                await s.commit()
                         obsolete = bool(
                             target is not None
                             and target.status in TERMINAL_TICKET_STATUSES

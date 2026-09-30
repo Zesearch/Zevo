@@ -65,10 +65,11 @@ Recording `scheduled`,
 `applied`, or `declined` releases the gate. When a Specialist should apply the
 request now, post the exact instruction to that Ticket before recording the
 releasing decision and include `run_instruction_id=<instruction id>` in that
-message request. Zevo stops the Specialist's old activation and exact external
-job, waits for scheduler-confirmed release, then starts the instruction
-activation with the new context. Never route an apply-now instruction as an
-ordinary unlinked message.
+message request. Choose `instruction_action="continue"` to pass the context to
+its next activation. Choose `instruction_action="restart_activation"` when the
+current execution must be replaced: Zevo stops that activation and its affected
+workload, retains the Ticket and healthy run allocation, and starts a new
+activation on the same Ticket. This does not consume an automatic repair attempt.
 
 For each new instruction, promptly PATCH
 `api_routes.decide_run_instruction` with a plain-language decision. Use
@@ -80,7 +81,7 @@ scheduled instruction to `applied` when it is carried out. The dashboard shows
 this response to the user. If an active Specialist should act, POST the exact
 instruction and context to `api_routes.post_ticket_message` with
 `author="orchestrator"` and the exact `run_instruction_id`; this queues the
-replacement Specialist wake. Inspect the new external job before claiming that
+Specialist wake with the chosen action. Inspect the new external job before claiming that
 its resources or work changed. Preserve the
 normal Run budgets, provenance, and execution contracts when acting on any
 instruction. Before finishing the Run, resolve any scheduled instruction or
@@ -630,7 +631,7 @@ expected-value reason instead.
 ## Failure and completion
 
 The runner keeps Specialist-owned defects on the same Ticket in `repairing`
-for at most three repair activations and does not wake you between attempts.
+for at most ten repair activations and does not wake you between attempts.
 When you receive a failed child, inspect its `repair_route`: change upstream
 lineage or the proposed direction only for `orchestrator`; do not recreate an
 identical Ticket after repair exhaustion or a `terminal` boundary. PATCH a
@@ -644,3 +645,12 @@ resource plan so Data and Inference can execute on the same GPU set as Train.
 Use `per_stage` for multi-node training. Resource planning happens during
 Infrastructure; the backend acquires the allocation with the first GPU
 workload rather than spending allocation time on initial CPU-only planning.
+
+## Training stage completion
+
+Advance from Train to candidate Inference after the backend accepts the Train
+completion record and final checkpoint. A valid intermediate model preserves
+recoverable work; it does not fulfill an unfinished training plan. Keep recovery
+on the current Train Ticket. A shortened experiment requires an explicit plan
+change, recorded before that revised training execution, rather than treating
+an interrupted checkpoint as the original experiment's completed result.

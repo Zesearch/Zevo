@@ -814,13 +814,19 @@ async def _slurm_stage_job_contract(
     prior_state = str(meta.get("scheduler_state") or "").strip().upper()
     prior_state = prior_state.split()[0].rstrip("+") if prior_state else ""
     prior_attempt = max(1, int(meta.get("execution_attempt") or 1))
+    restart_instruction_id = str(getattr(ticket, "_restart_instruction_id", "") or "")
     repair_submission = bool(
         cluster
         and job_row is not None
-        and str(getattr(ticket, "status", "")) == "repairing"
         and prior_state in _SLURM_TERMINAL_STATES
-        and prior_state != "COMPLETED"
-        and prior_attempt <= MAX_REPAIR_ATTEMPTS
+        and (
+            restart_instruction_id
+            or (
+                str(getattr(ticket, "status", "")) == "repairing"
+                and (prior_state != "COMPLETED" or (stage == "train" and meta.get("training_completion_repair")))
+                and int(getattr(ticket, "repair_attempts", 0) or 0) <= MAX_REPAIR_ATTEMPTS
+            )
+        )
     )
     if cluster and info.cluster is None:
         raise ValueError("cluster stage has no cluster execution route")
@@ -904,8 +910,9 @@ async def _slurm_stage_job_contract(
         if cluster and info.cluster is not None else ""
     )
     remote_ticket_dir = str(PurePosixPath(status_path).parent) if status_path else ""
-    return SlurmStageJobContract(
+    contract = SlurmStageJobContract(
         enabled=cluster,
+        restart_instruction_id=restart_instruction_id,
         phase=("submit" if job_row is None or repair_submission else "collect"),
         stage=stage if cluster else "",
         estimated_gpus=selection.estimated_gpus if selection is not None else 0,
@@ -959,6 +966,27 @@ async def _slurm_stage_job_contract(
         nodes=(selection.nodes if selection is not None else int(info.resource_plan.nodes)),
         max_queue_wait_hours=float(run.max_queue_wait_hours or 48.0),
     )
+    if repair_submission:
+        previous_status_path = str(meta.get("status_path") or "")
+        previous = contract.model_copy(update={
+            "phase": "collect", "attempt": prior_attempt,
+            "previous_execution": {}, "restart_instruction_id": "",
+            "bookkeeping_row_id": job_row.id, "job_id": job_row.instance_id,
+            "scheduler_state": prior_state,
+            "scheduler_exit_code": str(meta.get("scheduler_exit_code") or ""),
+            "scheduler_reason": str(meta.get("scheduler_reason") or ""),
+            "status_path": previous_status_path,
+            "stdout_path": str(PurePosixPath(previous_status_path).parent / "slurm-%j.out"),
+            "stderr_path": str(PurePosixPath(previous_status_path).parent / "slurm-%j.err"),
+            "retry_of_bookkeeping_row_id": str(meta.get("retry_of_bookkeeping_row_id") or ""),
+            "retry_of_job_id": str(meta.get("retry_of_job_id") or ""),
+            "remote_work_dir": str(meta.get("remote_workdir") or ""),
+            "remote_script_path": str(meta.get("remote_script") or ""),
+            "lifecycle_prologue": slurm_lifecycle_prologue(previous_status_path),
+        })
+        contract.previous_execution = previous.model_dump(mode="json")
+    return contract
+
 
 
 async def _build_train_input(
@@ -2433,6 +2461,7 @@ def _python_checkpoint_helper_problem(path: str) -> str:
     accepted = {
         "save_transformers_model_rank_zero",
         "commit_checkpoint_directory",
+        "commit_training_checkpoint",
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "zevo_train_checkpoint":
@@ -2667,6 +2696,13 @@ def _extract_summary_artifact_meta(
     file so Registry can consume the `metrics` ArtifactBinding cleanly.
     """
     status = getattr(result, "status", "succeeded")
+
+    contract = getattr(inp, "slurm_job", None)
+    if (status == "succeeded" and isinstance(contract, SlurmStageJobContract)
+        and contract.previous_execution):
+        inp = inp.model_copy(update={
+            "slurm_job": SlurmStageJobContract.model_validate(contract.previous_execution),
+        })
 
     if isinstance(result, EvaluationResult):
         artifact, metrics = materialize_metrics_artifact(result.metrics_path, work_dir)
@@ -3840,7 +3876,7 @@ async def _latest_slurm_resource_request(
 async def _slurm_watcher_job_is_current(
     session: AsyncSession, ticket: Ticket, payload: dict[str, Any],
 ) -> bool:
-    """Accept a collect wake only for the newest committed terminal JOBID."""
+    """Accept a terminal-workload wake only for the newest committed JOBID."""
     expected_job_id = str(payload.get("job_id") or "")
     current_job = await _latest_slurm_resource_request(session, ticket)
     current_meta = dict(current_job.meta or {}) if current_job is not None else {}
@@ -3913,8 +3949,14 @@ async def _submit_validated_slurm_stage(
             or previous.instance_id != contract.retry_of_job_id
         ):
             raise ValueError("the Slurm retry no longer supersedes the newest Ticket job")
-        if previous_state not in _SLURM_TERMINAL_STATES or previous_state == "COMPLETED":
-            raise ValueError("only a terminal failed Slurm job may be re-executed")
+        if contract.restart_instruction_id:
+            instruction = await session.get(RunInstruction, contract.restart_instruction_id)
+            if instruction is None or instruction.run_id != run.id:
+                raise ValueError("replacement instruction does not belong to this Run")
+        if (previous_state not in _SLURM_TERMINAL_STATES
+            or (previous_state == "COMPLETED" and not contract.restart_instruction_id
+                and not (ticket.agent_id == "train" and previous_meta.get("training_completion_repair")))):
+            raise ValueError("Slurm replacement requires the prior workload to be terminal")
         if int(previous_meta.get("execution_attempt") or 1) + 1 != contract.attempt:
             raise ValueError("the Slurm retry attempt is not consecutive")
     try:
@@ -4215,6 +4257,35 @@ async def _escalate_stored_payload_validation_failure(
     raise StoredPayloadValidationError(note) from exc
 
 
+async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket) -> bool:
+    """Hand a failed external job directly to one bounded repair activation."""
+    if ticket.status in TERMINAL_TICKET_STATUSES:
+        return False
+    row = await _latest_slurm_resource_request(session, ticket)
+    if row is None:
+        return True
+    meta = dict(row.meta or {})
+    state = str(meta.get("scheduler_state") or "").upper().split("+")[0].split(" ")[0]
+    if state not in _SLURM_TERMINAL_STATES or state == "COMPLETED":
+        return True
+    if "repair_activation_authorized" in meta:
+        return bool(meta["repair_activation_authorized"])
+    error = (
+        f"External workload {row.instance_id} ended {state}: "
+        f"{meta.get('scheduler_reason') or row.release_reason or ''}. "
+        f"Inspect stdout {meta.get('log_path', '')} and stderr {meta.get('stderr_path', '')}."
+    )
+    allowed = await _apply_ticket_failure_policy(session, ticket, error_message=error)
+    ticket.error_message = error[:2000]
+    ticket.summary = (
+        f"Repairing failed workload {row.instance_id}"
+        if allowed else f"Workload {row.instance_id} failed; {ticket.repair_route} action required"
+    )
+    row.meta = {**meta, "repair_activation_authorized": allowed}
+    await session.commit()
+    return allowed
+
+
 async def run_ticket(
     session: AsyncSession,
     *,
@@ -4249,6 +4320,11 @@ async def run_ticket(
         await session.commit()
         return tk
     activation_payload = dict(activation_payload or {})
+    # Activation-local control, never an Agent-authored Ticket payload field.
+    tk._restart_instruction_id = (
+        str(activation_payload.get("run_instruction_id") or "")
+        if activation_payload.get("instruction_action") == "restart_activation" else ""
+    )
     if activation_source == "slurm_watcher":
         if not await _slurm_watcher_job_is_current(
             session, tk, activation_payload,
@@ -4258,6 +4334,11 @@ async def run_ticket(
             # event obtains the Ticket lock; never reinterpret the old wake as
             # Collect for the new job.
             return tk
+    if activation_source == "slurm_watcher":
+        if not await _activate_failed_workload_repair(session, tk):
+            await _maybe_wake_supervisor(session, tk)
+            return tk
+
     # Background transcript and progress writers need independent sessions, but
     # they must use the SAME database binding as the caller. This keeps manual
     # runs and isolated test databases from leaking writes into the process-wide
@@ -4915,7 +4996,16 @@ async def run_ticket(
                             tk_row = (await cs.execute(
                                 select(Ticket).where(Ticket.id == tk.id)
                             )).scalar_one_or_none()
-                            if tk_row is not None and tk_row.status == "cancelled":
+                            activation = await cs.get(HeartbeatRun, heartbeat_id)
+                            if (tk_row is not None and tk_row.status != "cancelled"
+                                and activation is not None
+                                and activation.superseded_by_instruction_id):
+                                process_registry.cancel(heartbeat_id)
+                                process_registry.cancel(tk.id)
+                                from zevo.engine.run.remote_jobs import cancel_ticket_remote_job
+                                await cancel_ticket_remote_job(cs, tk_row, preserve_allocation=True)
+                                stopped = True
+                            elif tk_row is not None and tk_row.status == "cancelled":
                                 # Both keys: a CLI driver registers its own
                                 # subprocess under the heartbeat, an in-process
                                 # driver registers each shell it runs under the
@@ -5444,6 +5534,11 @@ async def run_ticket(
     # Absolute values agree with the live checkpoints (no double charging).
     for field, value in live_usage.values(hb.model).items():
         setattr(hb, field, value)
+
+    from zevo.engine.run.activation_control import finish_superseded_activation
+    if await finish_superseded_activation(session, tk, hb):
+        await session.commit()
+        return tk
 
     # Set before the branch below: only one of the two paths assigns it, and the
     # handoff at the end of this function reads it either way.
@@ -6246,6 +6341,23 @@ async def run_ticket(
                 )
                 error_message = summary
                 artifact = ""  # never register a phantom work_product
+        if isinstance(output, TrainResult) and status == "succeeded":
+            from zevo.engine.run.training_completion import verify_completed_training
+            try:
+                artifact_meta["training_completion"] = await verify_completed_training(
+                    session, tk, output,
+                    REPO_ROOT / "playbook" / "runners" / "train_checkpoint.py",
+                )
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                status = "failed"
+                error_message = summary = f"training completion verification failed: {exc}"
+                output.status = "failed"
+                output.error_message = error_message
+                artifact = ""
+                stage_row = await _latest_slurm_resource_request(session, tk)
+                if stage_row is not None:
+                    stage_row.meta = {**dict(stage_row.meta or {}), "training_completion_repair": True}
+
         if status == "deferred" and prepared_slurm_submission:
             try:
                 deferred_stage_row = await _submit_validated_slurm_stage(
