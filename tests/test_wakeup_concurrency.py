@@ -183,9 +183,8 @@ async def test_instruction_identity_promotes_the_queued_wakeup(db) -> None:
     async with db() as s:
         s.add(Ticket(
             id="train-directed", run_id="run-directed", agent_id="train",
-            status="cancelled", lane="optimization", payload={},
+            status="queued", lane="optimization", payload={},
             customization={}, inputs={},
-            error_message="current activation superseded by Run instruction instruction-1",
         ))
         s.add(AgentWakeupRequest(
             id="old-assignment", agent_id="train", ticket_id="train-directed",
@@ -199,11 +198,11 @@ async def test_instruction_identity_promotes_the_queued_wakeup(db) -> None:
             ticket_id="train-directed",
             source="on_demand",
             reason="message by orchestrator",
-            payload={"run_instruction_id": "instruction-1"},
+            payload={"run_instruction_id": "instruction-1", "instruction_action": "restart_activation"},
         )
         assert promoted.id == "old-assignment"
         assert promoted.source == "on_demand"
-        assert promoted.payload == {"run_instruction_id": "instruction-1"}
+        assert promoted.payload == {"run_instruction_id": "instruction-1", "instruction_action": "restart_activation"}
 
 
 @pytest.mark.asyncio
@@ -242,9 +241,8 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
     async with db() as s:
         s.add(Ticket(
             id="train-replace", run_id="run-replace", agent_id="train",
-            status="cancelled", lane="optimization", payload={},
+            status="queued", lane="optimization", payload={},
             customization={}, inputs={},
-            error_message="current activation superseded by Run instruction instruction-1",
         ))
         s.add(RunInstruction(
             id="instruction-1", run_id="run-replace", body="Use a better plan",
@@ -258,7 +256,7 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
         s.add(AgentWakeupRequest(
             id="instruction-wake", agent_id="train", ticket_id="train-replace",
             status="queued", source="on_demand", reason="message by orchestrator",
-            payload={"run_instruction_id": "instruction-1"},
+            payload={"run_instruction_id": "instruction-1", "instruction_action": "restart_activation"},
             scheduled_for=datetime.now(timezone.utc),
         ))
         await s.commit()
@@ -267,6 +265,14 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
     async def _lock(*_args, **_kwargs):
         yield True
 
+    from zevo.engine.run import remote_jobs
+    cleanup_calls = []
+
+    async def stop_workload(db, ticket, *, preserve_allocation=False):
+        cleanup_calls.append(preserve_allocation)
+        return {"attempted": True, "ok": True}
+
+    monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", stop_workload)
     calls: list[dict] = []
 
     async def _run(*_args, **kwargs):
@@ -286,7 +292,8 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
         await s.commit()
 
     await wd._run_one("train", "instruction-wake", datetime.now(timezone.utc))
-    assert calls[0]["activation_payload"] == {"run_instruction_id": "instruction-1"}
+    assert cleanup_calls == [True, True]
+    assert calls[0]["activation_payload"] == {"run_instruction_id": "instruction-1", "instruction_action": "restart_activation"}
     async with db() as s:
         ticket = await s.get(Ticket, "train-replace")
         assert ticket.status == "queued"

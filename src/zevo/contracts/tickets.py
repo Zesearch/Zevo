@@ -209,7 +209,7 @@ class CreateTicketResponse(BaseModel):
     inputs: dict[str, Any]
     summary: str
     error_message: str
-    repair_attempts: int = Field(0, ge=0, le=3)
+    repair_attempts: int = Field(0, ge=0, le=10)
     repair_route: Literal["", "self", "orchestrator", "terminal"] = ""
     created_at: str
     updated_at: str

@@ -822,6 +822,9 @@ class HeartbeatRun(Base):
     stdout_path: Mapped[str] = mapped_column(Text, default="")
     stderr_path: Mapped[str] = mapped_column(Text, default="")
     error_message: Mapped[str] = mapped_column(Text, default="")
+    superseded_by_instruction_id: Mapped[str] = mapped_column(
+        String(36), default="", server_default="",
+    )
     # The exact configuration resolved for this activation. It is execution
     # metadata, not a synthetic phase called ``__config__``.
     resolved_config: Mapped[dict[str, Any]] = mapped_column(JsonCol, default=dict)

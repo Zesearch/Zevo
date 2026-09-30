@@ -1074,6 +1074,14 @@ class TrainingDataSelection(BaseModel):
         return self
 
 
+class TrainingEarlyStopping(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    metric: str = Field(min_length=1)
+    mode: Literal["min", "max"]
+    patience: int = Field(ge=1)
+    min_delta: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+
+
 class TrainingConfig(BaseModel):
     """Complete common trainer configuration selected for one iteration.
 
@@ -1087,6 +1095,7 @@ class TrainingConfig(BaseModel):
 
     data_selection: TrainingDataSelection
     num_epochs: int = Field(ge=1)
+    early_stopping: TrainingEarlyStopping | None = None
     max_seq_len: int = Field(ge=1)
     batch_size: int = Field(ge=1, description="Per-device training batch size")
     gradient_accumulation_steps: int = Field(ge=1)

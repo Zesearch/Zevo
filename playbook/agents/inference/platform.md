@@ -169,16 +169,17 @@ copy predictions/config/script plus the exact `slurm-<JOBID>.out` and
 local `.out` path as `log_path` without POSTing `Done:`; the engine publishes it
 only after accepting the Result and artifacts. Collect never parses or replays
 the copied log into telemetry: the live watcher owns progress while the job is
-running. For any other terminal state,
-inspect both exact job streams and return a specific failure. The backend retains the allocation through repair and releases it according to the selected mode; do not create an Infrastructure release ticket or PATCH
-scheduler-owned state.
+running.
 
-If that terminal failure came from generated implementation, command, or
-runtime setup and produced no valid predictions, repair the generated files in
-place. The next repair activation may carry `slurm_job.phase="submit"` with
-`attempt=2`; return `deferred` and let the Engine validate the changed script
-and dispatch a new attempt on the retained allocation when it is healthy. Never resubmit the terminal collect job
-yourself. Only one automatic external re-execution is allowed for a Ticket.
+A failed external job wakes this Ticket directly in a repair activation with a
+new submit contract and `slurm_job.previous_execution` identifying the failed
+job and its exact logs. In this activation, diagnose the error, reuse compatible
+completed member outputs, repair the affected implementation, and prepare and
+upload the replacement script. Return `deferred` for engine validation and
+submission. If all required outputs already exist and validate, return success
+with the original job's script and artifacts instead. Report a specific failure
+when the repair cannot be completed within this work order. The engine owns the
+repair limit and retains a healthy allocation according to its lifetime mode.
 
 ## Selecting a model-lineage baseline YAML
 

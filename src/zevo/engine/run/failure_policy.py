@@ -5,7 +5,7 @@ spends again.  This module assigns one of three routes:
 
 ``self``
     The Specialist owns the generated output, script, command, or artifact and
-    gets up to three repair activations on the same Ticket.
+    gets up to ten repair activations on the same Ticket.
 ``orchestrator``
     The work order/upstream lineage must change.  Re-running the Specialist
     unchanged would be wasteful, so its terminal failure is handed upstream.
@@ -21,7 +21,7 @@ from typing import Literal
 
 
 RepairRoute = Literal["self", "orchestrator", "terminal"]
-MAX_REPAIR_ATTEMPTS = 3
+MAX_REPAIR_ATTEMPTS = 10
 
 # A ticket's STORED typed payload is validated BEFORE the agent runs. A `queued`
 # ticket whose payload fails that check cannot be repaired by re-running it
@@ -132,7 +132,7 @@ def repair_instruction(
         "Reuse any already verified expensive work; fix only the invalid output, "
         "generated implementation, command, or artifact. Do not restart training or "
         "inference when the completed artifact can be verified and reported correctly. "
-        "Run the supplied deterministic validators again, then emit exactly the typed "
+        "Run the required artifact validators and checks relevant to the repair, then emit the typed "
         "Result schema. If a new expensive execution is genuinely required, explain "
         "why in notes and keep it within the original work order.\n\n"
         f"Exact failure: {error_message[:6000]}"

@@ -39,7 +39,7 @@ def test_failure_ownership_is_deterministic() -> None:
 
 
 @pytest.mark.asyncio
-async def test_three_repairs_stay_on_one_ticket_then_escalate(session: AsyncSession) -> None:
+async def test_ten_repairs_stay_on_one_ticket_then_escalate(session: AsyncSession) -> None:
     session.add(Run(
         id="r", task_name="t", agent_objective="t", metric="score", status="running",
     ))
@@ -69,9 +69,9 @@ async def test_three_repairs_stay_on_one_ticket_then_escalate(session: AsyncSess
     messages = (await session.execute(select(TicketMessage).where(
         TicketMessage.ticket_id == ticket.id,
     ).order_by(TicketMessage.created_at))).scalars().all()
-    assert len(messages) == 3
-    assert "Repair attempt 1/3" in messages[0].body
-    assert "Repair attempt 3/3" in messages[-1].body
+    assert len(messages) == 10
+    assert "Repair attempt 1/10" in messages[0].body
+    assert "Repair attempt 10/10" in messages[-1].body
 
 
 @pytest.mark.asyncio
@@ -105,3 +105,47 @@ async def test_engine_scoring_failure_does_not_retry_data_agent(
     assert ticket.status == "failed"
     assert ticket.repair_attempts == 0
     assert ticket.repair_route == "terminal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('agent', ['data', 'train', 'inference'])
+async def test_failed_workload_enters_one_repair_without_collect(session, agent):
+    from zevo.db import InfraInstance
+    from zevo.engine.run.runner import _activate_failed_workload_repair
+    ticket = Ticket(id='stage', run_id='r', agent_id=agent, status='queued')
+    session.add_all([Run(id='r', metric='accuracy', status='running'), ticket])
+    row = InfraInstance(id='job-row', run_id='r', ticket_id='stage', provider='cluster',
+                        instance_id='123', status='failed', meta={
+        'resource_request': True, 'scheduler_state': 'FAILED',
+        'log_path': '/work/slurm-123.out', 'stderr_path': '/work/slurm-123.err',
+    })
+    session.add(row)
+    await session.commit()
+    assert await _activate_failed_workload_repair(session, ticket)
+    assert ticket.status == 'repairing'
+    assert ticket.repair_attempts == 1
+    assert await _activate_failed_workload_repair(session, ticket)
+    assert ticket.repair_attempts == 1  # A repeated watcher observation is not another repair.
+    messages = (await session.execute(select(TicketMessage))).scalars().all()
+    assert len(messages) == 1
+    assert '/work/slurm-123.err' in messages[0].body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('state,used,allowed,expected', [
+    ('COMPLETED', 0, True, 'queued'),
+    ('FAILED', 10, False, 'failed'),
+])
+async def test_external_repair_preserves_collection_and_enforces_budget(session, state, used, allowed, expected):
+    from zevo.db import InfraInstance
+    from zevo.engine.run.runner import _activate_failed_workload_repair
+    ticket = Ticket(id='stage', run_id='r', agent_id='inference', status='queued', repair_attempts=used)
+    session.add_all([Run(id='r', metric='accuracy', status='running'), ticket,
+        InfraInstance(id='job-row', run_id='r', ticket_id='stage', provider='cluster',
+                      instance_id='123', status='released', meta={
+                          'resource_request': True, 'scheduler_state': state,
+                      })])
+    await session.commit()
+    assert await _activate_failed_workload_repair(session, ticket) is allowed
+    assert ticket.status == expected
+    assert ticket.repair_attempts == used

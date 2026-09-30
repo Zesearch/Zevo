@@ -21,3 +21,13 @@ fixed idle handoff timeout; per-stage controllers retain a 30-minute idle limit.
 In `per_run`, prepare the full run's resource envelope at Infrastructure time;
 subsequent stages must fit that allocation. The controller uses the train-sized
 GPU, CPU, RAM and walltime plan even if the first consumer is Data/Inference.
+
+## Verification after implementation changes
+
+Choose checks that exercise the behavior changed and the failure being repaired.
+Check configuration, input formats, and script syntax directly where sufficient.
+For device, distributed-runtime, or kernel failures, verify the repair during
+startup of the actual workload on its assigned resources. Once startup succeeds,
+continue that same execution through the full task. Reuse evidence and unchanged
+validated artifacts from the preceding activation; repeat checks when a change
+invalidates them. Record what each check establishes and what remains unverified.

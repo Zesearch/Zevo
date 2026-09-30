@@ -294,7 +294,7 @@ export function TicketDetailPage() {
         <div className="mt-3 flex items-center gap-2 rounded-lg border border-lilac-500/30 bg-lilac-500/10 px-3 py-2 text-xs text-lilac-200">
           <RotateCw size={13} className={tk.status === "repairing" ? "animate-spin" : ""} />
           <span>
-            Automatic repair {tk.repair_attempts}/3
+            Automatic repair {tk.repair_attempts}/10
             {tk.repair_route ? ` · ${tk.repair_route}` : ""}
           </span>
         </div>

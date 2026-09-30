@@ -258,13 +258,15 @@ class SlurmStageJobContract(BaseModel):
     attempt: int = Field(
         1,
         ge=1,
-        le=4,
         description=(
             "Engine-owned external execution attempt. Attempt 1 is the first "
-            "submission; subsequent attempts are bounded re-executions allowed "
-            "after a generated implementation failure."
+            "submission; later executions include repairs and instruction replacements. "
+            "The Ticket repair counter separately bounds automatic repairs."
         ),
     )
+    # Backend snapshot of the failed execution, including its exact log paths.
+    previous_execution: dict[str, Any] = Field(default_factory=dict)
+    restart_instruction_id: str = ""
     retry_of_bookkeeping_row_id: str = ""
     retry_of_job_id: str = ""
     bookkeeping_row_id: str = ""

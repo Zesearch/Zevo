@@ -120,6 +120,7 @@ def commit_checkpoint_directory(
         "committed_at_unix": int(time.time()),
         "checkpoint_path": str(final),
         "files": names,
+        "file_sizes": {name: (staging / name).stat().st_size for name in names},
         "weight_files": weights,
         "weight_bytes": sum((staging / name).stat().st_size for name in weights),
         "metadata": dict(metadata or {}),
@@ -162,3 +163,112 @@ def save_transformers_model_rank_zero(
     )
     tokenizer.save_pretrained(staging)
     return commit_checkpoint_directory(staging, final, metadata=metadata)
+
+
+def record_training_plan(path, *, ticket_id, config_path, planned_steps, planned_epochs):
+    """Freeze the resolved full-run target before the first optimizer step."""
+    import hashlib
+    import yaml
+    config_bytes = Path(config_path).read_bytes()
+    training = yaml.safe_load(config_bytes)["training"]
+    if type(planned_steps) is not int or planned_steps <= 0:
+        raise ValueError("planned_steps must be a positive resolved optimizer-step count")
+    if planned_epochs != training["num_epochs"]:
+        raise ValueError("resolved epochs differ from the configured training plan")
+    policy = training.get("early_stopping")
+    if policy is not None:
+        policy = {**policy, "min_delta": policy.get("min_delta", 0.0)}
+    plan = {
+        "ticket_id": ticket_id,
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "planned_steps": planned_steps,
+        "planned_epochs": planned_epochs,
+        "early_stopping": policy,
+    }
+    path = Path(path)
+    if path.exists():
+        if json.loads(path.read_text()) != plan:
+            raise ValueError("training plan already exists with different targets")
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_json(path, plan)
+    return plan
+
+
+def _validate_training_progress(plan, state):
+    import math
+    target = plan.get("planned_steps")
+    step = state.get("global_step")
+    if type(target) is not int or target <= 0 or type(step) is not int or step <= 0:
+        raise ValueError("training completion requires positive planned and completed steps")
+    if state.get("max_steps") != target:
+        raise ValueError("runtime step target differs from the frozen training plan")
+    if step >= target:
+        return "plan_completed"
+    policy = plan.get("early_stopping")
+    if not policy:
+        raise ValueError(f"training incomplete: {step}/{target} optimizer steps")
+    best = None
+    stale = 0
+    last_step = -1
+    for event in state.get("log_history", []):
+        if policy["metric"] not in event:
+            continue
+        event_step = event.get("step", -1)
+        if type(event_step) is not int or event_step <= last_step or event_step > step:
+            raise ValueError("early-stopping evaluations must have increasing runtime steps")
+        value = float(event[policy["metric"]])
+        if not math.isfinite(value):
+            raise ValueError("early-stopping metric must be finite")
+        improvement = (best - value if policy["mode"] == "min" else value - best) if best is not None else None
+        if best is None or improvement > policy["min_delta"]:
+            best, stale = value, 0
+        else:
+            stale += 1
+        last_step = event_step
+    if stale >= policy["patience"] and last_step == step:
+        return "early_stopping"
+    raise ValueError(f"training incomplete: {step}/{target}; declared early stopping not reached")
+
+
+def commit_training_checkpoint(staging_dir, final_dir, *, plan_path, trainer_state_path):
+    """Publish a final model only after its original training target is satisfied."""
+    plan = json.loads(Path(plan_path).read_text())
+    state = json.loads(Path(trainer_state_path).read_text())
+    reason = _validate_training_progress(plan, state)
+    metric = (plan.get("early_stopping") or {}).get("metric")
+    completion = {"plan": plan, "state": {
+        "global_step": state["global_step"], "max_steps": state["max_steps"],
+        "log_history": [{"step": row.get("step"), metric: row[metric]}
+                        for row in state.get("log_history", []) if metric and metric in row],
+    }, "reason": reason}
+    result = commit_checkpoint_directory(staging_dir, final_dir, metadata={"training_completion": completion})
+    if result.get("metadata", {}).get("training_completion") != completion:
+        raise ValueError("published checkpoint belongs to a different training completion")
+    return result
+
+
+def verify_training_completion(checkpoint_dir, *, ticket_id, config_sha256, training):
+    """Verify the actual published files and completion record, independently of Result prose."""
+    root = Path(checkpoint_dir)
+    receipt = json.loads((root / MARKER_NAME).read_text())
+    _checkpoint_files(root)
+    for name, size in receipt.get("file_sizes", {}).items():
+        file = root / name
+        if not file.is_file() or file.stat().st_size != size:
+            raise ValueError(f"committed checkpoint file missing or changed: {name}")
+    if not receipt.get("file_sizes"):
+        raise ValueError("checkpoint lacks a verifiable file manifest")
+    completion = receipt.get("metadata", {}).get("training_completion")
+    if not completion:
+        raise ValueError("checkpoint exists but has no training completion evidence")
+    plan = completion["plan"]
+    if plan.get("ticket_id") != ticket_id or plan.get("config_sha256") != config_sha256:
+        raise ValueError("training completion belongs to another Ticket or configuration")
+    if plan.get("planned_epochs") != training["num_epochs"] or plan.get("early_stopping") != training.get("early_stopping"):
+        raise ValueError("training completion changed the configured termination policy")
+    reason = _validate_training_progress(plan, completion["state"])
+    if reason != completion.get("reason"):
+        raise ValueError("training completion reason is inconsistent")
+    return {"reason": reason, "completed_steps": completion["state"]["global_step"],
+            "planned_steps": plan["planned_steps"]}
