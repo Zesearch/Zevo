@@ -14,6 +14,7 @@
 | `data_query` | Natural-language discovery/preparation guidance used with the task objective when dataset is empty. |
 | `dataset_source` | Provenance label. Resolve its exact realized identity into `data_recipe.json`; do not repeat it in `DataResult`. |
 | `training_method` | Required semantic-shape selector for Run data; never a hyperparameter bundle. Empty for private held-out stripping. |
+| `max_training_rows` | Engine-stamped Run cap on prepared Training rows; 0 = no cap. The only authority for a row cap (prose limits are not applied). At iteration 0 it alone permits a deterministic `subset`. |
 | `recipe_intent` | Exact selection/filter/sampling/weighting/transformation/mapping/seed request for this data version. Empty fields preserve baseline behavior. |
 | `branch_transition` | Engine-validated exhausted-branch record. It may contain scalar score/plateau evidence, never Validation records, examples, fields, or statistics. |
 | `data_intent_signature` | Engine-computed identity of source, method, recipe intent, and Data pins/suggestions. Use it to verify the work order; do not echo it in `DataResult`. |

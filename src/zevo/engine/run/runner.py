@@ -261,6 +261,44 @@ def _canonical_data_source_identity(payload: dict) -> str:
     return ""
 
 
+def _max_training_rows(run: Run) -> int:
+    """The Run-level Training row cap the user typed, or 0 for none."""
+    try:
+        return max(0, int((run.decision_pins or {}).get("max_training_rows") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def check_training_row_selection(
+    recipe: DataRecipe, *, iteration: int, max_training_rows: int, n_rows_out: int,
+) -> None:
+    """Enforce who may select Training rows.
+
+    Iteration 0 prepares the entire eligible source so the first Validation
+    measurement is not shaped by a selection nobody asked for. The one
+    exception is the user's typed `max_training_rows`: under it the recipe may
+    carry a deterministic `subset` and nothing else. The cap binds every
+    iteration. A limit written in prose never reaches here, by design.
+    """
+    if iteration == 0:
+        allowed = {"subset"} if max_training_rows > 0 else set()
+        selected = [
+            field for field in ("subset", "filters", "sampling", "weighting")
+            if getattr(recipe, field) and field not in allowed
+        ]
+        if selected:
+            raise ValueError(
+                "initial Data selected Training source rows: " + ", ".join(selected)
+                + ("" if max_training_rows <= 0 else
+                   f" (only a deterministic subset of at most {max_training_rows} rows is permitted)")
+            )
+    if max_training_rows > 0 and n_rows_out > max_training_rows:
+        raise ValueError(
+            f"DataResult.n_rows_out={n_rows_out} exceeds the Run's "
+            f"max_training_rows={max_training_rows}"
+        )
+
+
 def _same_local_file(left: str, right: str) -> bool:
     """Whether two reported local paths identify byte-identical files."""
     if not left or not right:
@@ -424,6 +462,7 @@ def _build_data_input(
         recipe_intent=(
             {} if held_out else dict(payload.get("recipe_intent") or {})
         ),
+        max_training_rows=0 if held_out else _max_training_rows(run),
         data_intent_signature=(
             "" if held_out else str(payload.get("data_intent_signature") or "")
         ),
@@ -5844,16 +5883,12 @@ async def run_ticket(
                 if not isinstance(inp, DataTaskInput):
                     raise ValueError("DataResult received a non-Data input")
                 stored_recipe = load_data_recipe(output.data_recipe_path)
-                if int(tk.iteration or 0) == 0:
-                    selected = [
-                        field for field in ("subset", "filters", "sampling", "weighting")
-                        if getattr(stored_recipe, field)
-                    ]
-                    if selected:
-                        raise ValueError(
-                            "initial Data selected Training source rows: "
-                            + ", ".join(selected)
-                        )
+                check_training_row_selection(
+                    stored_recipe,
+                    iteration=int(tk.iteration or 0),
+                    max_training_rows=inp.max_training_rows,
+                    n_rows_out=int(output.n_rows_out or 0),
+                )
                 if stored_recipe.source_identity != inp.expected_source_identity:
                     raise ValueError(
                         "data_recipe.source_identity must exactly copy "
