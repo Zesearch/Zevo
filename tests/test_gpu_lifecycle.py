@@ -217,15 +217,14 @@ async def test_owner_monitor_after_source_ticket_completed(monkeypatch, state, r
 
 
 @pytest.mark.parametrize('provider,lane,state,expected', [
-    # A successful optimization Inference on a direct host feeds the engine's
-    # held-out chain on the same device: keep the rental.
-    ('cloud', 'optimization', 'succeeded', False),
-    ('cloud', 'optimization', 'degraded', False),
+    # A successful optimization Inference on a fixed instance feeds the
+    # engine's held-out chain on the same device: keep the lease.
     ('instance', 'optimization', 'succeeded', False),
-    # The held-out Inference is the end of that chain: release.
-    ('cloud', 'held_out_test', 'succeeded', True),
-    # A failed Inference spawns nothing: release.
-    ('cloud', 'optimization', 'failed', True),
+    ('instance', 'optimization', 'degraded', False),
+    # The held-out Inference is the end of that chain: release the lease.
+    ('instance', 'held_out_test', 'succeeded', True),
+    # A failed Inference spawns nothing: release the lease.
+    ('instance', 'optimization', 'failed', True),
     # Cluster allocations are controller-owned; the rule does not apply.
     ('cluster', 'optimization', 'succeeded', True),
 ])
@@ -235,7 +234,21 @@ def test_per_stage_release_waits_for_the_engine_held_out_chain(provider, lane, s
     assert needs_stage_release(run, ticket) is expected
 
 
-def test_train_release_boundary_is_unchanged_on_cloud():
+@pytest.mark.parametrize('agent_id,lane,state', [
+    ('inference', 'optimization', 'succeeded'), ('inference', 'held_out_test', 'succeeded'),
+    ('inference', 'optimization', 'failed'), ('train', 'optimization', 'succeeded'),
+    ('train', 'optimization', 'failed'),
+])
+def test_a_cloud_rental_is_never_released_between_stages(agent_id, lane, state):
+    """Smoke run a676d8ac: releasing after the held-out pass cost a 14-minute
+    re-provision, a forced Data re-preparation, and a 26-minute Orchestrator
+    pass before Train. The rental belongs to this Run alone; it is released
+    when the Run ends or by an explicit Infrastructure release ticket."""
     run = SimpleNamespace(gpu_allocation_mode='per_stage', gpu_provider='cloud')
+    assert needs_stage_release(run, SimpleNamespace(status=state, agent_id=agent_id, lane=lane)) is False
+
+
+def test_train_release_boundary_is_unchanged_on_a_fixed_instance():
+    run = SimpleNamespace(gpu_allocation_mode='per_stage', gpu_provider='instance')
     assert needs_stage_release(run, SimpleNamespace(status='succeeded', agent_id='train', lane='optimization')) is True
     assert needs_stage_release(run, SimpleNamespace(status='repairing', agent_id='train', lane='optimization')) is False

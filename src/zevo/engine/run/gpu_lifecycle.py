@@ -21,6 +21,17 @@ def allocation_mode(run: Run) -> str:
 def needs_stage_release(run: Run, ticket: Ticket) -> bool:
     if allocation_mode(run) != "per_stage" or ticket.status not in TERMINAL:
         return False
+    if getattr(run, "gpu_provider", "") == "cloud":
+        # A cloud rental is this Run's alone: nothing else is waiting for the
+        # card, so releasing it between stages buys nothing and costs a full
+        # re-acquisition before the next GPU stage. Smoke run a676d8ac
+        # (2026-10-01) paid for it twice over: a 14-minute re-provision, a
+        # forced Data re-preparation because the prepared artifact is bound
+        # to the released data plane, and a 26-minute Orchestrator pass
+        # working out why Train was refused. The rental is released when the
+        # Run ends (reconciler cleanup) or by an explicit Infrastructure
+        # release ticket; the Run's cost and runtime caps bound a stall.
+        return False
     if ticket.agent_id not in GPU_STAGES and not (
         getattr(run, "gpu_provider", "") == "cluster" and ticket.agent_id == "data"
     ):
