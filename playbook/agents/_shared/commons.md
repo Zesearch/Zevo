@@ -46,6 +46,43 @@ Do not poll for another activation. The scheduler creates a new wake when the
 same Ticket is ready to advance, when another Ticket has work, or when a user
 message requires one. Do not repeat completed work unless explicitly reactivated.
 
+## Effort budget
+
+The typed input carries every engine fact the work needs: schemas, validator
+commands, metric lists, split policy, device routes, helper paths. Read the
+input, not the engine. Do not open files under the Zevo source tree
+(`/app/src`, `src/zevo`) to discover a contract, a threshold, or a metric. If a
+fact you need is genuinely absent from the input, say so in `notes` and
+proceed on the documented default rather than hunting for it.
+
+Do the work once and let the validator be the check. Run each expensive step
+(download, generation, training) one time; the supplied validation command and
+the engine's own checks are the acceptance test. Do not re-run a step whose
+output a validator already accepted, and do not add a second verification pass
+of your own on top of a passed validator.
+
+Report once. `Starting:`, phase telemetry, and `Done:` are the narration; the
+final JSON is the record. Do not list hashes, byte counts, or per-file
+re-verification in messages when the Result fields already carry them.
+
+Budget your turns. A ticket that stays inside its budget is the normal case:
+
+| Work | Typical turns |
+|---|---|
+| `scope_problem` | 30 |
+| `prepare_run_data` | 35 |
+| Infrastructure provision or release | 20 |
+| Inference, reuse path (`configuration_mode="reuse"`) | 20 |
+| Inference, fresh configuration | 35 |
+| Train | 40 |
+| Registry | 12 |
+| Orchestrator wake | 10 |
+
+Exceeding a budget is not an error, but it is a signal: stop, state in `notes`
+what consumed the extra turns, and finish rather than widening the
+investigation. A repair activation inherits the remaining budget of the
+original; it reuses verified work and fixes only the reported defect.
+
 ## Runtime environment
 
 | Variable | Meaning |

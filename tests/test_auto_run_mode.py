@@ -488,6 +488,19 @@ def test_runner_builds_a_scoping_work_order_without_stamping_a_metric() -> None:
     assert inp.metric == "" and inp.scoring_set == "" and inp.training_method == ""
     assert inp.scoping_result_schema["title"] == "ScopingResult"
     assert "zevo.contracts.scoping validate" in inp.scoping_result_validation_command
+    # Engine facts ride on the work order so the agent never reads source for them.
+    assert "accuracy" in inp.builtin_metrics and inp.builtin_metrics == sorted(inp.builtin_metrics)
+    assert inp.validation_split_policy == {
+        "fraction": 0.2, "min_validation_rows": 200, "min_final_test_rows": 40,
+    }
+    # They are scoping-only: a preparation work order may not carry them.
+    with pytest.raises(ValidationError, match="scoping fields"):
+        DataTaskInput(
+            ticket_id="t", operation="prepare_run_data", run_id="r",
+            training_method="sft", data_recipe_schema={},
+            data_recipe_validation_command="x", artifacts_validation_command="x",
+            work_dir="/w", builtin_metrics=["accuracy"],
+        )
     # The same work order on the held-out lane is refused.
     ticket.lane = "held_out_test"
     with pytest.raises(ValueError, match="optimization lane only"):

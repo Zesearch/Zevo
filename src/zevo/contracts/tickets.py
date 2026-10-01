@@ -339,6 +339,10 @@ class DataPayload(StoredPayload):
     test_query: str = ""
     test_set_name: str = ""
     constraints: list[str] = Field(default_factory=list)
+    # Engine-stamped facts for scope_problem (installed metrics, split policy).
+    # Stored payloads never carry them; the runner adds them at build time.
+    builtin_metrics: list[str] = Field(default_factory=list)
+    validation_split_policy: dict[str, Any] = Field(default_factory=dict)
     dataset_source: str = ""
     dataset: str = ""
     dataset_split: str = ""

@@ -290,10 +290,12 @@ policy in order:
 1. **Derive the metric from the objective and Test query.** Treat
    `test_query` as advisory requirements for the evaluation population,
    provenance, coverage, or format; never reinterpret it as training-data
-   guidance. Choose the built-in the task
-   community reports for each relevant task shape (`accuracy`/`mc_loglikelihood`
-   for multiple choice, `exact_match` for short-answer, `f1`/`token_f1` for
-   extractive/overlap, `bleu`/`rouge_l` for generation), and its direction.
+   guidance. Choose from `builtin_metrics` on this input: it is the exact
+   installed list, so do not read engine source to discover or confirm it.
+   Pick the built-in the task community reports for each relevant task shape
+   (`accuracy`/`mc_loglikelihood` for multiple choice, `exact_match` for
+   short-answer, `f1`/`token_f1` for extractive/overlap, `bleu`/`rouge_l` for
+   generation), and its direction.
    Prefer a built-in; a `custom` evaluator (a `.py` scorer you write into
    `work_dir`) is allowed only when no built-in measures the objective, and
    its path goes in `evaluation_script`. Select multiple complementary Test
@@ -313,11 +315,13 @@ policy in order:
    fill `benchmark` with `hub_id`/`config`/`split`/`rows` (+ `revision`,
    `license`, `url` when known). Set `eval_source="public_benchmark"`.
    **Never fabricate, edit, relabel, or "fill in" answers of a real
-   benchmark**: `benchmark.rows` must equal the rows you wrote. Prefer a
-   population of at least 200 rows when possible. Settlement deterministically
-   carves 20% from every member that can provide at least 200 Validation and keep 40
-   final-Test rows. Smaller benchmarks (for example AIME-sized sets) remain
-   intact as final-test-only measurements; do not pad or fabricate them.
+   benchmark**: `benchmark.rows` must equal the rows you wrote. Size the
+   population from `validation_split_policy` on this input: settlement carves
+   `fraction` of every member that can provide at least `min_validation_rows`
+   Validation rows while keeping `min_final_test_rows` for final Test, so a
+   member needs `min_validation_rows / fraction` rows to donate Validation.
+   Smaller benchmarks (for example AIME-sized sets) remain intact as
+   final-test-only measurements; do not pad or fabricate them.
 3. **ONLY IF no suitable public benchmark exists, synthesize a private
    held-out** with the teacher-distillation capability (`distill-augment`
    Skill, applied here to held-out items rather than training rows): a named

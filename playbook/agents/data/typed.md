@@ -7,6 +7,8 @@
 | `task_objective` | `scope_problem` only: the user's objective. Empty otherwise. |
 | `test_query` | `scope_problem` only: optional guidance for selecting or creating the Test population and format. Empty otherwise. |
 | `constraints` | `scope_problem` only: optional user constraints. Empty otherwise. |
+| `builtin_metrics` | `scope_problem` only: the exact installed built-in metric names. Choose from this list; never read engine source to find it. |
+| `validation_split_policy` | `scope_problem` only: `fraction`, `min_validation_rows`, `min_final_test_rows` used by settlement to carve Validation from each Test member. |
 | `scoping_result_schema` | `scope_problem` only: exact JSON Schema of `scoping_result.json` (`ScopingResult`). |
 | `scoping_result_validation_command` | `scope_problem` only: exact validator to run on the written file before success. |
 | `dataset` | Exact user path/Hugging Face id; empty only when acquiring. |

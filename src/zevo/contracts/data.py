@@ -439,7 +439,10 @@ DATA_OPERATIONS = ("prepare_run_data", "prepare_holdout_data", "scope_problem")
 DataOperation = Literal["prepare_run_data", "prepare_holdout_data", "scope_problem"]
 # Fields that exist only for the Auto-mode scoping work order. Every other
 # operation must leave them empty so the historical payload shapes are unchanged.
-SCOPING_ONLY_FIELDS = ("task_objective", "test_query", "constraints")
+SCOPING_ONLY_FIELDS = (
+    "task_objective", "test_query", "constraints",
+    "builtin_metrics", "validation_split_policy",
+)
 
 
 class HoldoutDataSuiteMemberInput(BaseModel):
@@ -485,6 +488,21 @@ class DataTaskInput(AgentTaskInput):
     constraints: list[str] = Field(
         default_factory=list,
         description="Auto mode: optional user constraints, e.g. 'no external APIs'.",
+    )
+    builtin_metrics: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Auto mode: the installed built-in metric names, supplied by the "
+            "engine so the agent never reads engine source to discover them."
+        ),
+    )
+    validation_split_policy: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Auto mode: how settlement carves Validation from each Test member "
+            "(fraction, min_validation_rows, min_final_test_rows), supplied by "
+            "the engine. Members below the minimum stay final-test-only."
+        ),
     )
     scoping_result_schema: dict[str, Any] = Field(
         default_factory=dict,
