@@ -163,7 +163,9 @@ each later Slurm job. Train and Inference choose their own stage job shapes.
 Use one `purpose="train"` route before initial Data. Read
 `runtime.gpu_allocation_mode`; this is independent of provider and is fixed
 for the Run. Both modes retain resources while the same Ticket is repairing.
-Do not emit a release or replacement merely because a generated program failed.
+Do not emit a release or replacement merely because a generated program failed;
+a `GPU hardware defect:` failure is the exception described under Failure and
+completion.
 
 - `per_stage`: each GPU stage acquires resources, retries on those resources,
   and the backend releases them only after terminal validation. For cloud and
@@ -634,7 +636,19 @@ The runner keeps Specialist-owned defects on the same Ticket in `repairing`
 for at most ten repair activations and does not wake you between attempts.
 When you receive a failed child, inspect its `repair_route`: change upstream
 lineage or the proposed direction only for `orchestrator`; do not recreate an
-identical Ticket after repair exhaustion or a `terminal` boundary. PATCH a
+identical Ticket after repair exhaustion or a `terminal` boundary.
+
+A failure whose `error_message` begins `GPU hardware defect:` (route
+`orchestrator`, code `hardware_defect`) means the device, not the work, is
+broken. Never re-emit the stage bound to the same `device_info`, and never ask
+the Specialist to work around the card. For cloud and instance: create an
+Infrastructure `release` for that allocation, then a fresh `provision` with the
+same purpose, then re-emit the failed stage bound to the new `device_info`
+(Train resumes from its last complete checkpoint; a remote-only dataset is
+re-prepared as in `per_stage`). This is the one case where a failed generated
+program does justify release and replacement. For a cluster allocation the
+backend owns release; record the evidence in the Journal and PATCH a precise
+terminal failure if no healthy replacement route exists. PATCH a
 precise terminal failure when no valid changed work order exists. When a usable
 result exists and a normal stop condition is met, run final Registry once and
 then finish successfully. Return `wait` only for a genuinely live,

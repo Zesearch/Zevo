@@ -259,9 +259,26 @@ runtime. Record it as reported. `recommended_torch_index` is advisory only:
 choose a wheel tag no newer than driver support when the mapping is known;
 otherwise leave it empty. Downstream must still validate its actual environment.
 
+For cloud/instance, the probe is also a health gate. On each assigned index
+run, under a finite deadline, `nvidia-smi -i <idx> -q -d ECC,ROW_REMAPPER,RETIRED_PAGES`
+(and `nvidia-smi -i <idx> --query-gpu=ecc.errors.uncorrected.volatile.total,retired_pages.pending --format=csv,noheader`
+where supported). A device is defective when any of these hold: `Remapping
+Failure Occurred : Yes`; `Pending : Yes` under row remapper with a non-zero
+failure count; a non-zero uncorrected volatile ECC total; `Pending Page
+Blacklist : Yes` / pending retired pages; or `Xid 48/63/64/79/94/95` in
+`dmesg`. Do not proceed on a defective device and do not hide it behind a
+healthy sibling. For cloud, `destroy_instance` once, close bookkeeping, and
+fail with `error_message` beginning `GPU hardware defect:` followed by the
+exact evidence lines, backend, instance id and price; renting a replacement in
+the same Ticket remains forbidden. For instance, fail the same way and name the
+index so the operator can take the card out of the pool. Skip the gate for
+cluster, whose allocation does not exist yet. Record the gate's outcome in
+`notes` (`gpu_health: ok` or the evidence).
+
 Success requires all of the following:
 
 - SSH and, for cluster, scheduler-route validation succeeded;
+- for cloud/instance, the health gate above passed on every assigned device;
 - measured or cluster-requested device count equals `resource_plan.num_gpus`
   and does not exceed a positive Run `num_gpus` maximum;
 - every assigned device meets `resource_plan.min_vram_gb`;

@@ -61,7 +61,21 @@ _TERMINAL: tuple[tuple[str, re.Pattern[str], str], ...] = (
      "the Run budget boundary was reached"),
 )
 
+HARDWARE_DEFECT_PREFIX = "GPU hardware defect:"
+
 _ORCHESTRATOR: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    # A defective card is not an implementation defect. Smoke run 5b4a67e0
+    # retried inference and training on an A10 with an exhausted row remapper
+    # (Xid 48, ~249k uncorrectable ECC errors) for ~40 minutes and ~$10 before
+    # a workaround held. The owner of that failure is whoever can swap the
+    # device, so it goes to the orchestrator as a release-and-reprovision.
+    ("hardware_defect", re.compile(
+        r"GPU hardware defect|uncorrectable ECC|uncorrected ECC|"
+        r"remapping failure occurred:?\s*yes|row remapp(?:er|ing) failure|"
+        r"\bXid\s+(?:48|63|64|79|94|95)\b|retired pages pending\s*:?\s*yes|"
+        r"GPU has fallen off the bus", re.I),
+     "the assigned GPU is defective: release it and provision a replacement "
+     "before re-running the stage"),
     ("resource_lifetime", re.compile(
         r"GPU lease has been released|cloud instance has been released|"
         r"already owns a cloud instance|retained allocation is busy|"

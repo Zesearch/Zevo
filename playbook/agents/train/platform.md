@@ -747,6 +747,18 @@ Keep implementation/runtime pitfalls `agent_local`. Report an evidenced
 should inform the Orchestrator's next method or data-direction suggestion.
 Do not share exact secret paths, credentials, or held-out information.
 
+## Defective hardware
+
+A defective GPU is not an implementation failure. When the trainer or driver
+dies with uncorrectable ECC errors, `Remapping Failure Occurred: Yes`,
+`Xid 48/63/64/79/94/95`, repeated faults on the first CUDA call after a reset,
+or the device falls off the bus, do not diagnose the framebuffer, reserve
+memory regions, pin a device fraction, or relaunch on the same card. Return
+`status="failed"` with `error_message` beginning `GPU hardware defect:` and the
+exact evidence (device index, Xid lines, ECC counters, instance id). The engine
+routes that failure to the Orchestrator for a replacement device, and the Train
+Ticket resumes from its last complete checkpoint there.
+
 ## Training completion and final publication
 
 Before the first optimizer step, freeze the resolved full-plan step count with
