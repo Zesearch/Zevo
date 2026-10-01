@@ -516,7 +516,11 @@ def _build_scoping_input(
     optional Test query, constraints, exact ScopingResult schema, and its
     output validator.
     """
+    from zevo.contracts.orchestrator import BUILTIN_METRICS
     from zevo.contracts.scoping import ScopingResult
+    from zevo.engine.method.validation_split import (
+        FRACTION, MIN_FINAL_TEST_ROWS, MIN_VALIDATION_ROWS,
+    )
 
     return DataTaskInput(
         ticket_id=ticket.id,
@@ -530,6 +534,14 @@ def _build_scoping_input(
         task_objective=str(payload.get("task_objective") or ""),
         test_query=str(payload.get("test_query") or ""),
         constraints=[str(c) for c in (payload.get("constraints") or [])],
+        # Facts the agent otherwise greps out of /app/src at runtime (run
+        # b37b423c: 24 read calls into eval_metrics.py and split_settlement.py).
+        builtin_metrics=sorted(BUILTIN_METRICS),
+        validation_split_policy={
+            "fraction": FRACTION,
+            "min_validation_rows": MIN_VALIDATION_ROWS,
+            "min_final_test_rows": MIN_FINAL_TEST_ROWS,
+        },
         scoping_result_schema=ScopingResult.model_json_schema(),
         scoping_result_validation_command=(
             "python -m zevo.contracts.scoping validate <absolute-scoping-result-json-path>"

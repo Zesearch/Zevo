@@ -464,6 +464,13 @@ the YAML's ordered input mapping. Generate one real model reply per row. Write
 exactly the sample-submission columns in exactly their order. Never prefill,
 duplicate, filter, reorder, or synthesize replies to make the file complete.
 
+Generate once. The predictions validator is the acceptance check for the
+file; after it passes, do not re-run generation to confirm the result, and do
+not probe the tokenizer or template separately when the rendered prompts in
+the generation diagnostics already show them. On the reuse path the
+configuration, template, and extraction were fixed by Baseline: validate the
+supplied file, load, generate, validate the predictions, report.
+
 Sample submissions illustrate the output schema. Populate identifiers from the
 assigned inputs and output values from each actual model response, following
 the Task's field definitions.
