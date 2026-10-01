@@ -303,7 +303,16 @@ policy in order:
    its own `inference_query`, metric, answer fields, and submission template.
    Leave the `validation_*` fields blank: the engine constructs Validation from
    eligible benchmark members and mirrors each member's Test contract.
-2. **PREFER a real public benchmark suite.** Search the Hub using the objective and
+2. **A pinned benchmark is not a choice.** When `test_benchmark` is non-empty,
+   the primary Test population is exactly that `hub_id`/`config`/`split` (and
+   `revision` when given; otherwise record the revision you read). Do not
+   search for alternatives or add members the user did not ask for; derive
+   the metric, answer fields, and submission template for it as below.
+   When `max_test_rows` is greater than zero, materialize a deterministic
+   seeded sample of at most that many rows per member (state the seed in
+   `rationale`); `benchmark.rows` and `test_rows` report the rows you wrote.
+   Never edit, relabel, or fabricate a row to fit the cap.
+3. **Otherwise PREFER a real public benchmark suite.** Search the Hub using the objective and
    `test_query`, the way you do for a `data_query` (the `acquire-hf` Skill: the datasets-server `search`/`splits`
    APIs, `hub_repo_search`, dataset cards) for an established evaluation set
    suited to the objective — e.g. an MMLU subject config, `reglab/barexam_qa`,
@@ -322,7 +331,7 @@ policy in order:
    member needs `min_validation_rows / fraction` rows to donate Validation.
    Smaller benchmarks (for example AIME-sized sets) remain intact as
    final-test-only measurements; do not pad or fabricate them.
-3. **ONLY IF no suitable public benchmark exists, synthesize a private
+4. **ONLY IF no suitable public benchmark exists, synthesize a private
    held-out** with the teacher-distillation capability (`distill-augment`
    Skill, applied here to held-out items rather than training rows): a named
    stronger `teacher_model`, recorded `generation_params`, verified answers
@@ -336,13 +345,13 @@ policy in order:
    optionally `report_path`). A synthesized result without both blocks is
    rejected by the contract. Never seed synthesis from another Run's
    Validation/Test population.
-4. **Build each submission template**: a CSV `test_sample_submission_path` with
+5. **Build each submission template**: a CSV `test_sample_submission_path` with
    the id/prediction columns Inference must emit for the metric to read; its
    example rows need not cover the population. Name `test_answer_fields`
    exactly (a CSV column or JSON key present in the file).
-5. **State the rationale** for every member and for the suite's coverage. Do not recommend or select training data, a base model, or a
+6. **State the rationale** for every member and for the suite's coverage. Do not recommend or select training data, a base model, or a
    training method; those belong to the later optimization pipeline.
-6. **Validate before success**: run the exact `scoping_result_validation_command`
+7. **Validate before success**: run the exact `scoping_result_validation_command`
    on the written file and fix every reported problem. Report `n_rows_in` /
    `n_rows_out` as the held-out row count; no `data_recipe.json`, questions-only
    copy, or profile is produced here — the settled Run's ordinary

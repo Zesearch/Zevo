@@ -651,6 +651,33 @@ class UserRequest(BaseModel):
         return self
 
 
+class HeldOutBenchmarkPin(BaseModel):
+    """An exact public benchmark the Auto scoping stage must use as held-out.
+
+    Scoping still derives the metric, answer fields, and submission shape; the
+    pin fixes only which rows become the Test population, so two Runs of the
+    same request measure the same thing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    hub_id: str = Field(min_length=1, description="Hugging Face dataset id, owner/name.")
+    config: str = Field("", description="Named subset, when the repo ships several.")
+    split: str = Field(min_length=1, description="Exact split to materialize.")
+    revision: str = Field("", description="Repo revision/commit; blank uses the current head and records it.")
+
+    @model_validator(mode="after")
+    def normalize(self) -> "HeldOutBenchmarkPin":
+        self.hub_id = self.hub_id.strip()
+        self.config = self.config.strip()
+        self.split = self.split.strip()
+        self.revision = self.revision.strip()
+        if self.hub_id.count("/") != 1:
+            raise ValueError("test_benchmark.hub_id must be an owner/name Hugging Face id")
+        if not self.split:
+            raise ValueError("test_benchmark.split must not be blank")
+        return self
+
+
 class AutoUserRequest(BaseModel):
     """An Auto Run's objective plus its optional optimization choices.
 
@@ -671,6 +698,21 @@ class AutoUserRequest(BaseModel):
         description=(
             "Optional guidance for selecting or creating the held-out Test "
             "contract in Auto mode."
+        ),
+    )
+    test_benchmark: HeldOutBenchmarkPin | None = Field(
+        None,
+        description=(
+            "Exact public benchmark to use as the held-out Test population. "
+            "None lets scoping choose one; the choice then differs between Runs."
+        ),
+    )
+    max_test_rows: int = Field(
+        0, ge=0,
+        description=(
+            "Cap on held-out rows materialized per Test member; 0 keeps the "
+            "whole split. Rows are a deterministic seeded sample, never "
+            "edited or fabricated."
         ),
     )
     dataset: str = Field(

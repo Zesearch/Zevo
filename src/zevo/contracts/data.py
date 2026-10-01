@@ -441,7 +441,7 @@ DataOperation = Literal["prepare_run_data", "prepare_holdout_data", "scope_probl
 # operation must leave them empty so the historical payload shapes are unchanged.
 SCOPING_ONLY_FIELDS = (
     "task_objective", "test_query", "constraints",
-    "builtin_metrics", "validation_split_policy",
+    "builtin_metrics", "validation_split_policy", "test_benchmark", "max_test_rows",
 )
 
 
@@ -502,6 +502,20 @@ class DataTaskInput(AgentTaskInput):
             "Auto mode: how settlement carves Validation from each Test member "
             "(fraction, min_validation_rows, min_final_test_rows), supplied by "
             "the engine. Members below the minimum stay final-test-only."
+        ),
+    )
+    test_benchmark: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Auto mode: exact public benchmark pinned by the user "
+            "(hub_id, config, split, revision). Empty lets scoping choose."
+        ),
+    )
+    max_test_rows: int = Field(
+        0, ge=0,
+        description=(
+            "Auto mode: cap on held-out rows per Test member; 0 keeps the "
+            "whole split. Sample deterministically; never edit or fabricate rows."
         ),
     )
     scoping_result_schema: dict[str, Any] = Field(

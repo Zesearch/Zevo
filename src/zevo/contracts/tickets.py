@@ -337,6 +337,8 @@ class DataPayload(StoredPayload):
     # objective and optional hints; every other operation leaves these empty.
     task_objective: str = ""
     test_query: str = ""
+    test_benchmark: dict[str, Any] = Field(default_factory=dict)
+    max_test_rows: int = Field(0, ge=0)
     test_set_name: str = ""
     constraints: list[str] = Field(default_factory=list)
     # Engine-stamped facts for scope_problem (installed metrics, split policy).

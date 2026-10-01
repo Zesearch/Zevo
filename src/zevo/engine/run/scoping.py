@@ -28,6 +28,8 @@ scoring contract, so it is never woken.
 """
 from __future__ import annotations
 
+import json
+
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +81,10 @@ def scoping_payload(request: AutoUserRequest) -> dict[str, Any]:
             "operation": SCOPING_OPERATION,
             "task_objective": request.task_objective,
             "test_query": request.test_query,
+            "test_benchmark": (
+                request.test_benchmark.model_dump() if request.test_benchmark else {}
+            ),
+            "max_test_rows": int(request.max_test_rows or 0),
             "constraints": list(request.constraints),
         },
     )
@@ -200,6 +206,44 @@ async def _fail_run(
     await session.commit()
 
 
+def check_held_out_pins(result: ScopingResult, payload: dict[str, Any]) -> None:
+    """A pinned benchmark or row cap on the work order binds the result.
+
+    The agent keeps every other scoping decision (metric, answer fields,
+    submission shape, suite members); the pin fixes which public rows become
+    the primary Test population so repeated Runs measure the same thing.
+    """
+    pin = dict(payload.get("test_benchmark") or {})
+    if pin:
+        bench = result.benchmark
+        if result.eval_source != "public_benchmark" or bench is None:
+            raise ScopingSettlementError(
+                "the work order pins a public benchmark "
+                f"({pin.get('hub_id')}), but the scoping result is not a public_benchmark"
+            )
+        mismatched = {
+            key: {"pinned": pin.get(key) or "", "actual": getattr(bench, key) or ""}
+            for key in ("hub_id", "config", "split", "revision")
+            if (pin.get(key) or "") and (pin.get(key) or "") != (getattr(bench, key) or "")
+        }
+        if mismatched:
+            raise ScopingSettlementError(
+                "scoping used a different benchmark than the pinned one: "
+                + json.dumps(mismatched, sort_keys=True)
+            )
+    cap = int(payload.get("max_test_rows") or 0)
+    if cap > 0:
+        members = [(result.test_name, result.test_rows)] + [
+            (member.name, member.test_rows) for member in result.test_sets
+        ]
+        over = [(name, rows) for name, rows in members if int(rows or 0) > cap]
+        if over:
+            raise ScopingSettlementError(
+                "held-out rows exceed max_test_rows="
+                f"{cap}: " + ", ".join(f"{name}={rows}" for name, rows in over)
+            )
+
+
 async def settle_scoping(
     session: AsyncSession, run: Run, ticket: Ticket, result: ScopingResult,
 ) -> Ticket:
@@ -216,6 +260,7 @@ async def settle_scoping(
     from zevo.engine.run.wakeup import queue_wakeup
 
     payload = dict(ticket.payload or {})
+    check_held_out_pins(result, payload)
     private_dir = _private_scoping_dir(run)
     scoped = result.effective_test_sets(task_objective=run.task_objective)
     test_sets: list[TaskTestSet] = []
