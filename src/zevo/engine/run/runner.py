@@ -2832,13 +2832,21 @@ def _extract_summary_artifact_meta(
                         ):
                             problems.append("cluster resource plan requires positive wall-time")
                         if info.gpu is not None:
-                            minimum_vram_mb = info.resource_plan.min_vram_gb * 1024
-                            if any(
-                                device.vram_mb < minimum_vram_mb
-                                for device in info.gpu.devices
-                            ):
+                            from zevo.contracts.infrastructure import meets_vram_minimum
+                            short = [
+                                device for device in info.gpu.devices
+                                if not meets_vram_minimum(
+                                    vram_mb=device.vram_mb,
+                                    min_vram_gb=info.resource_plan.min_vram_gb,
+                                )
+                            ]
+                            if short:
                                 problems.append(
-                                    "assigned GPU does not meet resource_plan.min_vram_gb"
+                                    "assigned GPU does not meet resource_plan.min_vram_gb="
+                                    f"{info.resource_plan.min_vram_gb} GB (nameplate): "
+                                    + ", ".join(
+                                        f"index {d.index} reports {d.vram_mb} MiB" for d in short
+                                    )
                                 )
                         meta = {
                             "operation": result.operation,

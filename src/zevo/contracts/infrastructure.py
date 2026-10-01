@@ -86,6 +86,41 @@ mkdir -p -m 700 -- "$TMPDIR/xdg" || exit 1
 export XDG_RUNTIME_DIR="$TMPDIR/xdg"'''
 
 
+# A plan's `min_vram_gb` is the figure providers print on the offer: nameplate,
+# decimal gigabytes ("A10 (24 GB PCIe)", "A100 80GB"). The driver reports MiB
+# and a 24 GB card shows 23028 MiB, which is 22 GiB after an integer floor.
+# Comparing the two as if both were GiB rejected a healthy A10 in smoke run
+# 83f87bfa: the agent destroyed the instance it had just rented and a repair
+# activation rented another. Convert the nameplate figure to MiB first.
+NAMEPLATE_GB_IN_MIB = 1_000_000_000 / (1024 * 1024)  # 953.674...
+
+
+def nameplate_gb_to_mib(min_vram_gb: int | float) -> int:
+    """Smallest MiB figure a device of this nameplate size must report."""
+    return int(math.ceil(float(min_vram_gb) * NAMEPLATE_GB_IN_MIB))
+
+
+def meets_vram_minimum(*, vram_mb: int, min_vram_gb: int | float) -> bool:
+    """Whether a measured device (MiB) satisfies a nameplate minimum (GB)."""
+    if min_vram_gb <= 0:
+        return True
+    return int(vram_mb) >= nameplate_gb_to_mib(min_vram_gb)
+
+
+def meets_vram_minimum_from_gib_floor(*, vram_gb: int, min_vram_gb: int | float) -> bool:
+    """The same test when only an integer-GiB floor of the measurement is known.
+
+    A floor of G means the device reported somewhere in [G, G+1) GiB, so the
+    minimum is met when even the top of that range would not fall short.
+    Unknown VRAM (0) never satisfies a positive floor.
+    """
+    if min_vram_gb <= 0:
+        return True
+    if vram_gb <= 0:
+        return False
+    return (int(vram_gb) + 1) * 1024 > nameplate_gb_to_mib(min_vram_gb)
+
+
 class GpuAllocationCandidate(BaseModel):
     """One fixed GPU host plus a fresh physical-device idle probe.
 

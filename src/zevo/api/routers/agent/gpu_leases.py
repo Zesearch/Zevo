@@ -193,10 +193,13 @@ async def acquire(body: GpuLeaseRequest, db: AsyncSession = Depends(get_db)) -> 
 
     # A hard floor requires a measurement. Unknown VRAM (0) cannot prove that
     # the allocation satisfies the request and is therefore ineligible.
+    from zevo.contracts.infrastructure import meets_vram_minimum_from_gib_floor
     usable = [
         a for a in body.allocations
         if a.gpu_count > 0
-        and (not body.min_vram_gb or a.vram_gb >= body.min_vram_gb)
+        and meets_vram_minimum_from_gib_floor(
+            vram_gb=a.vram_gb, min_vram_gb=body.min_vram_gb,
+        )
     ]
 
     for _ in range(_MAX_GRANT_ATTEMPTS):
