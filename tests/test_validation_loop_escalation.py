@@ -290,3 +290,42 @@ async def test_reconcile_entrypoint_reports_validation_failures(monkeypatch) -> 
     async with Session() as db:
         tk = await db.get(Ticket, "infer-1")
         assert tk.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_ticket_routes_a_released_device_value_error_through_escalation(
+    monkeypatch, tmp_path,
+) -> None:
+    """A deliberate ValueError from the builders (released cloud instance,
+    provider mismatch, unresolvable GPU plan) is deterministic too. Smoke run
+    83f87bfa's held-out Inference failed its wake seven times with the ticket
+    still queued; it now takes the same bounded escalation as a bad payload."""
+    Session = await _session()
+    async with Session() as db:
+        await _seed_run_with_child(db)
+
+        async def _released(*a, **k):
+            raise ValueError(
+                "cloud instance has been released; provision a fresh "
+                "device_info before the next stage"
+            )
+
+        monkeypatch.setattr(runner_mod, "_build_input", _released)
+
+        with pytest.raises(StoredPayloadValidationError):
+            await run_ticket(db, ticket_id="infer-1", work_dir_root=str(tmp_path))
+
+        tk = await db.get(Ticket, "infer-1")
+        assert tk.status == "queued"
+        assert tk.repair_route == "orchestrator"
+        assert "cloud instance has been released" in tk.error_message
+        assert PAYLOAD_VALIDATION_FAILURE_SIGNATURE in tk.error_message
+        assert len(await _orch_wakeups(db)) == 1
+
+        # Two more identical wakes and the ticket fails terminally instead of
+        # being re-driven by the alarm clock forever.
+        await _add_failed_validation_wakeups(db, "infer-1", 2)
+        with pytest.raises(StoredPayloadValidationError):
+            await run_ticket(db, ticket_id="infer-1", work_dir_root=str(tmp_path))
+        await db.refresh(tk)
+        assert tk.status == "failed"
