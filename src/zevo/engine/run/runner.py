@@ -4531,6 +4531,15 @@ async def run_ticket(
     # payload (or a resolved typed input) is malformed: deterministic, not
     # transient. Left to propagate it would leave the ticket `queued` and the
     # cron would re-drive the identical payload forever. Escalate + bound it.
+    #
+    # The same holds for every ValueError the builders raise on purpose: a
+    # device_info whose cloud instance or GPU lease has been released, a stage
+    # whose provider differs from Infrastructure's, an unresolvable GPU plan.
+    # Nothing about re-driving the identical ticket changes those answers.
+    # Smoke run 83f87bfa's held-out Inference failed its wake with "cloud
+    # instance has been released" every five minutes, seven times, with the
+    # ticket still `queued`, until it was cancelled by hand. pydantic's
+    # ValidationError is itself a ValueError, so one clause covers both.
     try:
         inp = await _build_input(
             agent_id=tk.agent_id,
@@ -4543,7 +4552,7 @@ async def run_ticket(
             session=session,
             specialist_context=specialist_context,
         )
-    except ValidationError as payload_err:
+    except ValueError as payload_err:
         # The session may be mid-statement from the failed build; clear it so the
         # escalation writes commit cleanly.
         await session.rollback()
