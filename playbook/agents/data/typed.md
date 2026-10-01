@@ -9,6 +9,8 @@
 | `constraints` | `scope_problem` only: optional user constraints. Empty otherwise. |
 | `builtin_metrics` | `scope_problem` only: the exact installed built-in metric names. Choose from this list; never read engine source to find it. |
 | `validation_split_policy` | `scope_problem` only: `fraction`, `min_validation_rows`, `min_final_test_rows` used by settlement to carve Validation from each Test member. |
+| `test_benchmark` | `scope_problem` only: exact public benchmark pinned by the user (`hub_id`, `config`, `split`, `revision`). Non-empty means use exactly it; settlement rejects a different benchmark. |
+| `max_test_rows` | `scope_problem` only: cap on held-out rows per Test member; 0 keeps the whole split. Deterministic seeded sample; settlement rejects more rows. |
 | `scoping_result_schema` | `scope_problem` only: exact JSON Schema of `scoping_result.json` (`ScopingResult`). |
 | `scoping_result_validation_command` | `scope_problem` only: exact validator to run on the written file before success. |
 | `dataset` | Exact user path/Hugging Face id; empty only when acquiring. |

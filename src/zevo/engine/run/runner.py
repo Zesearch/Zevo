@@ -572,6 +572,8 @@ def _build_scoping_input(
         run_id=str(ticket.run_id or ""),
         task_objective=str(payload.get("task_objective") or ""),
         test_query=str(payload.get("test_query") or ""),
+        test_benchmark=dict(payload.get("test_benchmark") or {}),
+        max_test_rows=int(payload.get("max_test_rows") or 0),
         constraints=[str(c) for c in (payload.get("constraints") or [])],
         # Facts the agent otherwise greps out of /app/src at runtime (run
         # b37b423c: 24 read calls into eval_metrics.py and split_settlement.py).

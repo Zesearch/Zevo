@@ -129,6 +129,10 @@ export type UserRequest = {
 export type AutoUserRequest = {
   task_objective: string;
   test_query?: string;
+  /** Exact public benchmark for the held-out Test population; omit to let scoping choose. */
+  test_benchmark?: { hub_id: string; config?: string; split: string; revision?: string };
+  /** Cap on held-out rows per Test member; 0 or omitted keeps the whole split. */
+  max_test_rows?: number;
   dataset?: string;
   dataset_split?: string;
   dataset_config?: string;
