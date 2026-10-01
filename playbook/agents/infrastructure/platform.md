@@ -259,21 +259,26 @@ runtime. Record it as reported. `recommended_torch_index` is advisory only:
 choose a wheel tag no newer than driver support when the mapping is known;
 otherwise leave it empty. Downstream must still validate its actual environment.
 
-For cloud/instance, the probe is also a health gate. On each assigned index
-run, under a finite deadline, `nvidia-smi -i <idx> -q -d ECC,ROW_REMAPPER,RETIRED_PAGES`
-(and `nvidia-smi -i <idx> --query-gpu=ecc.errors.uncorrected.volatile.total,retired_pages.pending --format=csv,noheader`
-where supported). A device is defective when any of these hold: `Remapping
-Failure Occurred : Yes`; `Pending : Yes` under row remapper with a non-zero
-failure count; a non-zero uncorrected volatile ECC total; `Pending Page
-Blacklist : Yes` / pending retired pages; or `Xid 48/63/64/79/94/95` in
-`dmesg`. Do not proceed on a defective device and do not hide it behind a
-healthy sibling. For cloud, `destroy_instance` once, close bookkeeping, and
-fail with `error_message` beginning `GPU hardware defect:` followed by the
-exact evidence lines, backend, instance id and price; renting a replacement in
-the same Ticket remains forbidden. For instance, fail the same way and name the
-index so the operator can take the card out of the pool. Skip the gate for
-cluster, whose allocation does not exist yet. Record the gate's outcome in
-`notes` (`gpu_health: ok` or the evidence).
+For cloud/instance, the probe is also a health gate, and the gate is the
+supplied helper, not a command you compose: after `wait_for_ssh` succeeds, run
+`python3 <gpu_health_helper_path> --host <h> --port <p> --user <u> --key-path <k> --index <i>`
+(one `--index` per assigned device) from `work_dir`. It queries every
+`nvidia-smi` section separately, treats a section the driver does not support
+as missing evidence rather than a defect (driver 570 names page retirement
+`PAGE_RETIREMENT`, not `RETIRED_PAGES`, and a combined query exits 2), and
+condemns a device only on an explicit pattern: `Remapping Failure Occurred :
+Yes`, row-remapper `Pending : Yes` with uncorrectable remaps, a non-zero
+uncorrected volatile ECC total, pending retired pages, or `Xid
+48/63/64/79/94/95` in `dmesg`. Exit 0 is healthy, 1 is defective (its JSON
+`defects` list is your evidence), 3 means the host was unreachable (retry
+`wait_for_ssh`, do not condemn). Never infer a defect from a failed or empty
+command, and do not hide a defective device behind a healthy sibling. On exit
+1 for cloud: `destroy_instance` once, close bookkeeping, and fail with
+`error_message` beginning `GPU hardware defect:` followed by the helper's
+`defects`, backend, instance id and price; renting a replacement in the same
+Ticket remains forbidden. For instance, fail the same way and name the index
+so the operator can take the card out of the pool. Skip the gate for cluster,
+whose allocation does not exist yet. Put the helper's JSON verdict in `notes`.
 
 Success requires all of the following:
 

@@ -1097,6 +1097,15 @@ class InfraTaskInput(AgentTaskInput):
             "This is the sole cross-Agent artifact key/type authority."
         ),
     )
+    gpu_health_helper_path: str = Field(
+        "",
+        description=(
+            "System-owned GPU health gate (zevo_gpu_health.py) copied into "
+            "work_dir for cloud/instance provisioning. Run it over the SSH "
+            "route on every assigned index; do not write a gate of your own. "
+            "Empty for cluster and for release."
+        ),
+    )
     device_info_validation_command: str = Field(
         ...,
         min_length=1,
