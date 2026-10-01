@@ -322,15 +322,22 @@ class LambdaCloudProvider:
         timeout: int = 600,
         poll_interval: int = 15,
     ) -> dict:
-        """Poll until status == 'active'. Lambda boots take longer than Vast, so
-        the default timeout is higher. 'active' is API-ready, NOT SSH-ready — the
-        caller must additionally `wait_for_ssh` afterwards."""
+        """Poll until status == 'active' AND the instance has a public IP.
+
+        Lambda boots take longer than Vast, so the default timeout is higher.
+        'active' is API-ready, NOT SSH-ready: the caller must additionally
+        `wait_for_ssh` afterwards. Lambda can also report 'active' a poll or two
+        before `ip` is populated; returning then hands the caller an empty host,
+        and `wait_for_ssh` probes nothing until its own deadline (smoke run
+        4bd98bf5 destroyed a healthy A10 after 420 s that way). Keep polling
+        until the address exists as well.
+        """
         elapsed = 0
         info: dict = {}
         while elapsed < timeout:
             info = await self.get_instance(instance_id)
             status = str(info.get("status", "")).lower()
-            if status == "active":
+            if status == "active" and str(info.get("ssh_host") or "").strip():
                 return info
             if status in ("terminated", "terminating", "unhealthy"):
                 raise RuntimeError(
@@ -338,8 +345,8 @@ class LambdaCloudProvider:
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
         raise TimeoutError(
-            f"Lambda instance {instance_id} not active after {timeout}s "
-            f"(last status: {info.get('status')})"
+            f"Lambda instance {instance_id} not active with an IP after {timeout}s "
+            f"(last status: {info.get('status')}, ip: {info.get('ssh_host') or 'none'})"
         )
 
     async def wait_for_ssh(
@@ -359,6 +366,13 @@ class LambdaCloudProvider:
         — never a shell `sleep` loop, which some agent sandboxes BLOCK, turning a
         slow boot into a spurious failure. Returns True once reachable, else False.
         """
+        if not str(host or "").strip():
+            # Probing an empty host can only time out; say so at once so the
+            # caller re-reads the instance instead of burning its deadline.
+            raise ValueError(
+                "wait_for_ssh requires a host; the instance has no IP yet "
+                "(call wait_for_ready / get_ssh_details again)"
+            )
         key_path = key_path or _default_ssh_key_path()
         elapsed = 0
         while elapsed < timeout:
