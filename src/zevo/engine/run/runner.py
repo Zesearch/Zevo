@@ -790,6 +790,10 @@ async def _build_infra_input(
         infra_instance_patch_schema=PatchInfraInstanceBody.model_json_schema(),
         infra_instance_response_schema=InfraInstanceDTO.model_json_schema(),
         device_info_schema=InfrastructureDeviceInfo.model_json_schema(),
+        gpu_health_helper_path=(
+            str(Path(work_dir) / "zevo_gpu_health.py")
+            if provider != "cluster" and not release else ""
+        ),
         device_info_validation_command=(
             "python -m zevo.contracts.infrastructure validate-device "
             "<absolute-device-info-json-path> --run-id "
@@ -4440,6 +4444,11 @@ async def run_ticket(
     run_dir = Path(work_dir_root) / (tk.run_id or "standalone")
     work_dir = str(run_dir / tk.id)
     Path(work_dir).mkdir(parents=True, exist_ok=True)
+    if tk.agent_id == "infrastructure":
+        health_source = REPO_ROOT / "playbook" / "runners" / "gpu_health.py"
+        if not health_source.is_file():
+            raise ValueError(f"system GPU health helper is missing: {health_source}")
+        shutil.copyfile(health_source, Path(work_dir) / "zevo_gpu_health.py")
     if tk.agent_id == "train":
         telemetry_source = REPO_ROOT / "playbook" / "runners" / "train_telemetry.py"
         if not telemetry_source.is_file():

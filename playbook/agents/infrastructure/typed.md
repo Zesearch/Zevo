@@ -19,6 +19,7 @@ you these fields directly:
 | `infra_instances_endpoint` | Exact bookkeeping collection path. Append only the returned row `id` for PATCH. |
 | `infra_instance_create_schema`, `infra_instance_patch_schema`, `infra_instance_response_schema` | Exact POST/PATCH/response authorities. Use `dph` and `meta`; `price` and `metadata` do not exist. |
 | `device_info_schema` | Exact machine-readable key/type authority for successful `device_info.json`; never infer its shape from an example or prior Run. |
+| `gpu_health_helper_path` | System-owned GPU health gate to run over SSH on every assigned index after `wait_for_ssh` (cloud/instance provision only). Exit 0 healthy, 1 defective with JSON `defects`, 3 unreachable. Do not write your own gate. |
 | `device_info_validation_command` | Side-effect-free validator for the final artifact. Replace only its path placeholder; Run/Ticket/provider/GPU-maximum/purpose values are already inserted. |
 | `ssh_host`, `ssh_port`, `ssh_user`, `ssh_key_path`, `ssh_password_path` | Login-node route for cluster/instance. Exactly one credential path is non-empty; never read or print its contents. |
 | `slurm_partition`, `slurm_account`, `slurm_qos` | Deployment/site hints rather than Ticket resource requests. Site skills validate live availability and account/QOS pairing. |
