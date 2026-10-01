@@ -63,6 +63,15 @@ no `subset`, `filters`, `sampling`, or `weighting`. Reject only structurally
 unusable rows, then let the engine remove Validation/Test overlaps. Later Data
 revisions may select rows only through their explicit `recipe_intent`.
 
+The single exception is the typed `max_training_rows` field. When it is greater
+than zero, prepare at most that many rows at every iteration, selecting them as
+one deterministic `subset` (a seeded sample or a fixed slice, recorded in the
+recipe) and no other selection. The engine stamps this field from the Run; it
+is the only authority for a row cap. A row limit written in prose in
+`data_query`, the objective, or `run_context` is not a cap: do not apply it,
+prepare the entire eligible split, and note the discrepancy in `notes`. Never
+report `n_rows_out` above the cap.
+
 Map only evidence genuinely present in the source into the method family:
 
 - `sft`: `messages`, `prompt`/`completion`, or `text`, choosing

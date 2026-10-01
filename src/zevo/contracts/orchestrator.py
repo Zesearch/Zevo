@@ -527,6 +527,15 @@ class UserRequest(BaseModel):
             "dataset pin; use '' to derive guidance from the task objective."
         ),
     )
+    max_training_rows: int = Field(
+        0, ge=0,
+        description=(
+            "Upper bound on prepared Training rows at every iteration; 0 means "
+            "the entire eligible source. This typed field is the only "
+            "authority for a row cap: a limit written in prose in data_query "
+            "or the objective is not applied."
+        ),
+    )
     base_model: str = Field(
         ...,
         description=(
@@ -671,6 +680,14 @@ class AutoUserRequest(BaseModel):
     dataset_config: str = ""
     data_query: str = Field(
         "", description="Optional guidance for training-data discovery (advisory).",
+    )
+    max_training_rows: int = Field(
+        0, ge=0,
+        description=(
+            "Upper bound on prepared Training rows at every iteration; 0 means "
+            "the entire eligible source. The only authority for a row cap; a "
+            "limit written in prose is not applied."
+        ),
     )
     base_model: str = Field(
         "", description="Exact base-model pin; empty lets Zevo select a model.",

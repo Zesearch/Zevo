@@ -513,6 +513,14 @@ class DataTaskInput(AgentTaskInput):
     )
     training_method: str = ""
     recipe_intent: DataRecipeIntent = Field(default_factory=DataRecipeIntent)
+    max_training_rows: int = Field(
+        0, ge=0,
+        description=(
+            "Engine-stamped Run-level cap on prepared Training rows; 0 means "
+            "no cap. At iteration 0 it is the only reason a `subset` is "
+            "permitted. Prose row limits in data_query are not applied."
+        ),
+    )
     branch_transition: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -636,6 +644,7 @@ class DataTaskInput(AgentTaskInput):
                 or self.configuration_pins or self.expected_source_identity
                 or self.data_intent_signature or self.expected_source_fingerprint
                 or self.recipe_intent != DataRecipeIntent()
+                or self.max_training_rows
                 or self.device_info_path or self.remote_data_helper_path
                 or self.remote_dataset_spec_schema
                 or self.remote_dataset_spec_validation_command
