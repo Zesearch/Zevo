@@ -214,3 +214,28 @@ async def test_owner_monitor_after_source_ticket_completed(monkeypatch, state, r
         assert ticket.status == 'succeeded'
         assert owner.meta['scheduler_state'] == 'COMPLETED'
     await engine.dispose()
+
+
+@pytest.mark.parametrize('provider,lane,state,expected', [
+    # A successful optimization Inference on a direct host feeds the engine's
+    # held-out chain on the same device: keep the rental.
+    ('cloud', 'optimization', 'succeeded', False),
+    ('cloud', 'optimization', 'degraded', False),
+    ('instance', 'optimization', 'succeeded', False),
+    # The held-out Inference is the end of that chain: release.
+    ('cloud', 'held_out_test', 'succeeded', True),
+    # A failed Inference spawns nothing: release.
+    ('cloud', 'optimization', 'failed', True),
+    # Cluster allocations are controller-owned; the rule does not apply.
+    ('cluster', 'optimization', 'succeeded', True),
+])
+def test_per_stage_release_waits_for_the_engine_held_out_chain(provider, lane, state, expected):
+    run = SimpleNamespace(gpu_allocation_mode='per_stage', gpu_provider=provider)
+    ticket = SimpleNamespace(status=state, agent_id='inference', lane=lane)
+    assert needs_stage_release(run, ticket) is expected
+
+
+def test_train_release_boundary_is_unchanged_on_cloud():
+    run = SimpleNamespace(gpu_allocation_mode='per_stage', gpu_provider='cloud')
+    assert needs_stage_release(run, SimpleNamespace(status='succeeded', agent_id='train', lane='optimization')) is True
+    assert needs_stage_release(run, SimpleNamespace(status='repairing', agent_id='train', lane='optimization')) is False

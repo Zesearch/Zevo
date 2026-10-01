@@ -19,8 +19,36 @@ def allocation_mode(run: Run) -> str:
 
 
 def needs_stage_release(run: Run, ticket: Ticket) -> bool:
-    return (allocation_mode(run) == "per_stage" and ticket.status in TERMINAL
-            and (ticket.agent_id in GPU_STAGES or (getattr(run, "gpu_provider", "") == "cluster" and ticket.agent_id == "data")))
+    if allocation_mode(run) != "per_stage" or ticket.status not in TERMINAL:
+        return False
+    if ticket.agent_id not in GPU_STAGES and not (
+        getattr(run, "gpu_provider", "") == "cluster" and ticket.agent_id == "data"
+    ):
+        return False
+    return not engine_chain_follows(run, ticket)
+
+
+def engine_chain_follows(run: Run, ticket: Ticket) -> bool:
+    """Whether the engine itself will spawn the next GPU consumer on this device.
+
+    A successful optimization-lane Inference is always followed by Evaluation
+    and then the engine-owned held-out measurement (prepare_holdout_data ->
+    held-out Inference -> held-out Evaluation), bound to the same device_info.
+    That chain has no Orchestrator wake and no Infrastructure ticket in it, so
+    on a direct host (cloud/instance) releasing here strands the held-out
+    Inference: every alarm-clock wake fails with "cloud instance has been
+    released; provision a fresh device_info before the next stage" and the
+    Run never ends (smoke run 83f87bfa, 2026-10-01). The held-out Inference's
+    own terminal state is the release point; the Orchestrator provisions
+    before any later stage it decides on, as the per_stage contract says.
+    Cluster allocations are controller-owned and unaffected.
+    """
+    return (
+        getattr(run, "gpu_provider", "") != "cluster"
+        and ticket.agent_id == "inference"
+        and getattr(ticket, "lane", "optimization") == "optimization"
+        and ticket.status in {"succeeded", "degraded"}
+    )
 
 
 async def finish_stage(session, run: Run, ticket: Ticket) -> None:
