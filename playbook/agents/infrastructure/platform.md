@@ -281,7 +281,13 @@ Success requires all of the following:
 - for cloud/instance, the health gate above passed on every assigned device;
 - measured or cluster-requested device count equals `resource_plan.num_gpus`
   and does not exceed a positive Run `num_gpus` maximum;
-- every assigned device meets `resource_plan.min_vram_gb`;
+- every assigned device meets `resource_plan.min_vram_gb`. That figure is the
+  nameplate size providers print on the offer (decimal GB: "A10 (24 GB)",
+  "A100 80GB"); the driver reports MiB, and a 24 GB card shows about 23028 MiB.
+  A device meets the minimum when `vram_mb >= min_vram_gb × 953.67`
+  (10^9 bytes per GB over 2^20 bytes per MiB), which is the engine's rule.
+  Do not compare `vram_gb` (an integer-GiB floor) against the plan and do not
+  destroy a rental because 23028 MiB looks smaller than 24;
 - `instance` count and indices exactly equal the lease grant;
 - SSH, job, workdir, ownership, backend, and cost fields are internally
   consistent; and
