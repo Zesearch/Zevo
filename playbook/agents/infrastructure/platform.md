@@ -330,31 +330,30 @@ instance types and ignores those fields. Require a non-empty offer list. Post a
 cost-transparency message naming backend, offer/type, region when applicable,
 GPU count/type/VRAM, and `dph_total` before creation.
 
-Create only the selected cheapest valid offer:
+Create and bring up the selected cheapest valid offer with the supplied
+helper, not with code you write: from `work_dir`, run
 
-- Vast.ai: `create_instance(offer_id, resource_plan.docker_image,
-  resource_plan.disk_gb)`; SSH is normally
-  `root` on the returned port.
-- Lambda: `create_instance(offer_id, region, ssh_key_path, name)`; SSH is
-  `ubuntu` on port 22. The client resolves/registers the public key.
+```
+python3 <cloud_acquire_helper_path> --backend <lambda|vastai> --offer-id <id> \
+  [--region <r>] [--docker-image <img> --disk-gb <n>] --ssh-key-path <key> \
+  --name zevo-<run8> --run-id $RUN_ID --ticket-id $TICKET_ID --dph <dph_total> \
+  --state acquire_state.json
+```
 
-Immediately POST `infra_instances_endpoint` with the exact
-`infra_instance_create_schema`: `provider="cloud"`, the provider's
-`instance_id`, `status="provisioning"`, run/ticket ids, `dph`, and `meta`
-including `backend` and `auto_release`. `price` and `metadata` are invalid.
-Capture the returned row `id`
-(the bookkeeping row's own id — later PATCHes address that, not `instance_id`).
-If this bookkeeping write fails, destroy the new instance and fail.
-
-Use the client's asynchronous readiness and SSH waits; a provider API-ready
-state is not SSH-ready. After a successful hardware probe, PATCH the row to
-`ready` with measured hardware, SSH route, and price, then write the device
-contract.
-
-On every post-create exception, call `destroy_instance` once and check its
-boolean result. Never rent a replacement in the same ticket. If destruction
-fails, leave the bookkeeping row active and return failure with the real
-instance id/backend/price so leak detection remains actionable.
+It creates exactly one instance, POSTs the `provisioning` bookkeeping row
+before any waiting (capturing the row `id`), waits for readiness *and* an IP,
+reads the SSH route from the client's `ssh_host`/`ssh_port`/`ssh_user`, waits
+for real SSH, probes `index,name,memory.total` and the driver/CUDA versions,
+runs the GPU health gate on every index, and PATCHes the row to `ready` with
+the measured hardware. On any failure after creation it destroys the
+instance, verifies it at the provider, releases the row, and exits non-zero:
+`1` provisioning failed (`error` says why), `2` defective GPU (`gpu_health`
+carries the evidence; fail with `error_message` beginning `GPU hardware
+defect:`), `4` the instance could not be created (nothing to clean up). Exit
+`0` leaves `acquire_state.json` with `instance_id`, `row_id`, `ssh`, `probe`
+and `gpu_health`; build `device_info.json` from those fields plus your
+resolved plan and run `device_info_validation_command`. Never rent a
+replacement in the same Ticket, whatever the exit code.
 
 ## Slurm site skills
 

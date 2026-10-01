@@ -1097,6 +1097,16 @@ class InfraTaskInput(AgentTaskInput):
             "This is the sole cross-Agent artifact key/type authority."
         ),
     )
+    cloud_acquire_helper_path: str = Field(
+        "",
+        description=(
+            "System-owned end-to-end cloud acquisition (zevo_cloud_acquire.py) "
+            "copied into work_dir for cloud provisioning: create, bookkeeping "
+            "row, readiness, SSH route, probe, health gate, cleanup on failure. "
+            "Run it with the resolved plan; do not re-implement that sequence. "
+            "Empty for cluster/instance and for release."
+        ),
+    )
     gpu_health_helper_path: str = Field(
         "",
         description=(

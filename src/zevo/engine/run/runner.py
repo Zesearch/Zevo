@@ -794,6 +794,10 @@ async def _build_infra_input(
             str(Path(work_dir) / "zevo_gpu_health.py")
             if provider != "cluster" and not release else ""
         ),
+        cloud_acquire_helper_path=(
+            str(Path(work_dir) / "zevo_cloud_acquire.py")
+            if provider == "cloud" and not release else ""
+        ),
         device_info_validation_command=(
             "python -m zevo.contracts.infrastructure validate-device "
             "<absolute-device-info-json-path> --run-id "
@@ -4449,6 +4453,10 @@ async def run_ticket(
         if not health_source.is_file():
             raise ValueError(f"system GPU health helper is missing: {health_source}")
         shutil.copyfile(health_source, Path(work_dir) / "zevo_gpu_health.py")
+        acquire_source = REPO_ROOT / "playbook" / "runners" / "cloud_acquire.py"
+        if not acquire_source.is_file():
+            raise ValueError(f"system cloud acquisition helper is missing: {acquire_source}")
+        shutil.copyfile(acquire_source, Path(work_dir) / "zevo_cloud_acquire.py")
     if tk.agent_id == "train":
         telemetry_source = REPO_ROOT / "playbook" / "runners" / "train_telemetry.py"
         if not telemetry_source.is_file():
