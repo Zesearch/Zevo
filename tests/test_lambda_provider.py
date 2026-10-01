@@ -192,12 +192,48 @@ async def test_get_instance_normalises_ip_and_ubuntu_user(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_for_ready_returns_on_active(monkeypatch) -> None:
-    inst = {"data": {"id": "i-abc", "status": "active",
+async def test_wait_for_ready_returns_on_active_with_an_ip(monkeypatch) -> None:
+    inst = {"data": {"id": "i-abc", "status": "active", "ip": "203.0.113.7",
                      "instance_type": {"specs": {"gpus": 1}}, "region": {}}}
     p, _ = _provider_with(monkeypatch, {"GET /instances/i-abc": inst})
     info = await p.wait_for_ready("i-abc", timeout=5, poll_interval=1)
     assert str(info["status"]).lower() == "active"
+    assert info["ssh_host"] == "203.0.113.7"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_ready_keeps_polling_until_the_ip_exists(monkeypatch) -> None:
+    """Lambda reports 'active' a poll or two before `ip` is populated. Smoke
+    run 4bd98bf5 took that first answer, handed an empty host to wait_for_ssh,
+    and destroyed a healthy A10 after the 420 s SSH deadline."""
+    polls = {"n": 0}
+
+    def staged(method, path, kwargs):
+        polls["n"] += 1
+        ip = "" if polls["n"] < 3 else "203.0.113.9"
+        return {"data": {"id": "i-abc", "status": "active", "ip": ip,
+                         "instance_type": {"specs": {"gpus": 1}}, "region": {}}}
+
+    p, _ = _provider_with(monkeypatch, {"GET /instances/i-abc": staged})
+    info = await p.wait_for_ready("i-abc", timeout=30, poll_interval=0)
+    assert info["ssh_host"] == "203.0.113.9"
+    assert polls["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_wait_for_ready_times_out_naming_the_missing_ip(monkeypatch) -> None:
+    inst = {"data": {"id": "i-abc", "status": "active", "ip": None,
+                     "instance_type": {"specs": {"gpus": 1}}, "region": {}}}
+    p, _ = _provider_with(monkeypatch, {"GET /instances/i-abc": inst})
+    with pytest.raises(TimeoutError, match="ip: none"):
+        await p.wait_for_ready("i-abc", timeout=1, poll_interval=1)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_ssh_refuses_an_empty_host(monkeypatch) -> None:
+    p, _ = _provider_with(monkeypatch, {})
+    with pytest.raises(ValueError, match="requires a host"):
+        await p.wait_for_ssh(host="", key_path="/tmp/k", timeout=1)
 
 
 @pytest.mark.asyncio
