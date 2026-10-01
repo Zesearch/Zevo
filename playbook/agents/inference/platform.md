@@ -500,3 +500,14 @@ argument correction. Do not store answers, scores from the held-out lane, or a
 replacement configuration. A missing GPU, incompatible model/template,
 unusable checkpoint, ambiguous task mapping, failed remote command, or invalid
 artifact is `status="failed"` with a specific error.
+
+A defective GPU is not yours to work around. When the engine or driver dies
+with uncorrectable ECC errors, `Remapping Failure Occurred: Yes`, `Xid
+48/63/64/79/94/95`, repeated faults on the first CUDA call after a reset, or
+the device falls off the bus, stop: do not reserve memory regions, lower the
+device fraction, retry the same rows, or move to a sibling index. Return
+`status="failed"` with `error_message` beginning `GPU hardware defect:` and
+the exact evidence (device index, Xid lines, ECC counters, instance id). The
+engine routes that failure to the Orchestrator for a replacement device; a
+workaround on the same card is not a repair and spends the Run's budget on
+hardware nobody will keep.
