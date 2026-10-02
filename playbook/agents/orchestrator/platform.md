@@ -474,6 +474,11 @@ decision is made, select the trained iteration with the best final Validation
 score in the Task direction and create exactly one Registry using that
 iteration's checkpoint, metrics, `train_config`, and device bindings. The API
 independently recomputes the champion and rejects a different iteration.
+The Run keeps its best fine-tuned model however small the gain: there is no
+minimum improvement, so never skip Registry, extend the loop, or call a result
+"not worth registering" because the margin over the baseline is tiny. Say in
+the final Journal row and the terminal summary how the registered model
+compares with the baseline on Validation, including when it did not beat it.
 Build every Journal or terminal Run PATCH from `run_patch_schema`; a Journal
 update uses one complete `history_entry` with all four non-empty narrative
 fields and never sends score fields owned by Evaluation.
