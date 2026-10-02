@@ -18,6 +18,7 @@
 | `inference_mapping_contract` | Exact allowed/required keys and types inside `measurement.inference_config`. |
 | `config_validation_command` | Side-effect-free validator to run after the optional tokenizer-only rendering check and before model generation or prediction work. |
 | `memory_planning_contract` | Engine-owned formula and bounds for sizing vLLM from model weights plus the planned KV-cache workload. |
+| `remote_env_helper_path` | System-owned builder of the pinned `infer` environment on a direct host. Run `bash ~/zevo/env/remote_env.sh ensure infer` over SSH (upload this copy there if absent) and use the interpreter it prints. Never build the environment yourself. Empty for cluster. |
 | `memory_helper_path` | System-owned helper used to derive the concrete GPU fraction and the matching free-memory preflight threshold. |
 | `predictions_validation_command` | Exact side-effect-free output validator with assigned questions/sample paths already inserted. Replace only `<absolute-predictions-csv-path>` after copy-back. |
 | `reusable_predict_script_path` | Prior verified `predict.py`; reuse when compatible, otherwise document why regeneration was required. |

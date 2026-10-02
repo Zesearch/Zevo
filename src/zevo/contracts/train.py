@@ -139,6 +139,17 @@ class TrainTaskInput(AgentTaskInput):
             "<absolute-yaml-path> with train_config.yaml."
         ),
     )
+    remote_env_helper_path: str = Field(
+        "",
+        description=(
+            "System-owned remote environment builder (remote_env.sh) for a "
+            "direct GPU host. It lives at ~/zevo/env/remote_env.sh on a host "
+            "the acquisition helper provisioned; upload this copy there if it "
+            "is absent. Run `ensure <infer|train>` and use the interpreter it "
+            "prints. Never build a venv or pip install the GPU stack yourself. "
+            "Empty for cluster (cluster.env_setup applies)."
+        ),
+    )
     telemetry_helper_path: str = Field(
         ...,
         min_length=1,
