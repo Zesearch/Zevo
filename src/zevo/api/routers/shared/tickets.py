@@ -34,7 +34,7 @@ from zevo.db import (
 from zevo.contracts.customizations import RunCustomizations
 from zevo.contracts.data import is_sha256
 from zevo.contracts.model_registry import model_tag_for_run
-from zevo.engine.method.score_direction import is_better
+from zevo.engine.method.score_direction import champion_index
 from zevo.db import WorkloadExecution
 from zevo.engine.run.workload_execution import bind_progress, classify_event
 from zevo.engine.run.benchmark_telemetry import (
@@ -1130,14 +1130,13 @@ async def create_ticket(
                     ScoreEvent.split == "validation",
                     ScoreEvent.source == "trained",
                 ).order_by(ScoreEvent.ts.asc()))).scalars().all()
-                champion = None
-                for score_row in score_rows:
-                    if champion is None or is_better(
-                        float(score_row.score),
-                        float(champion.score),
-                        owning_run.validation_metric_direction,
-                    ):
-                        champion = score_row
+                # Best fine-tuned candidate, however small its margin: see
+                # champion_index for the policy.
+                champion_at = champion_index(
+                    (float(row.score) for row in score_rows),
+                    owning_run.validation_metric_direction,
+                )
+                champion = None if champion_at is None else score_rows[champion_at]
                 if champion is None:
                     raise ValueError(
                         "final Registry requires at least one measured trained candidate"
