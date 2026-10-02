@@ -68,9 +68,48 @@ DEFAULT_CLAUDE_BIN = "claude"
 CLAUDE_IDLE_TIMEOUT_ENV = "ZEVO_CLAUDE_IDLE_TIMEOUT_SECONDS"
 DEFAULT_CLAUDE_IDLE_TIMEOUT_SECONDS = 300.0
 
+# How long one Bash tool call may run inside the agent. Claude Code's own
+# default is 120 s, after which it moves the command to the background and the
+# agent has to poll it: every poll is an LLM turn over the full context. Remote
+# inference runs for minutes and training for hours, so run 7 (a676d8ac)
+# spent 10 of its 16 inference minutes in TaskOutput polls and run 2 lost
+# 13 minutes of inference and 4 of training to sleep-and-tail loops. Lift the
+# default to an hour and the ceiling to the Train contract's 4 h plus margin so
+# a foreground `ssh ... | tee log` is one tool call with zero polling turns.
+BASH_DEFAULT_TIMEOUT_ENV = "ZEVO_AGENT_BASH_DEFAULT_TIMEOUT_SECONDS"
+BASH_MAX_TIMEOUT_ENV = "ZEVO_AGENT_BASH_MAX_TIMEOUT_SECONDS"
+DEFAULT_AGENT_BASH_TIMEOUT_SECONDS = 3600
+DEFAULT_AGENT_BASH_MAX_TIMEOUT_SECONDS = 4 * 3600 + 900
+
 
 class ClaudeStreamStalled(RuntimeError):
     """Claude stayed alive without producing any stdout/stderr bytes."""
+
+
+def _bash_timeout_env(env: dict[str, str]) -> dict[str, str]:
+    """Claude Code's BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS for an agent.
+
+    A deployment may lower or raise both through the ZEVO_* variables; an
+    explicit BASH_* value already in the environment is left alone.
+    """
+    def seconds(name: str, default: int) -> int:
+        raw = env.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            return max(1, int(float(raw)))
+        except ValueError:
+            print(f"[claude_cli.bash_timeout] WARN: {name}={raw!r} is not a number; using {default}",
+                  file=sys.stderr, flush=True)
+            return default
+    default_s = seconds(BASH_DEFAULT_TIMEOUT_ENV, DEFAULT_AGENT_BASH_TIMEOUT_SECONDS)
+    max_s = max(default_s, seconds(BASH_MAX_TIMEOUT_ENV, DEFAULT_AGENT_BASH_MAX_TIMEOUT_SECONDS))
+    out: dict[str, str] = {}
+    if not env.get("BASH_DEFAULT_TIMEOUT_MS"):
+        out["BASH_DEFAULT_TIMEOUT_MS"] = str(default_s * 1000)
+    if not env.get("BASH_MAX_TIMEOUT_MS"):
+        out["BASH_MAX_TIMEOUT_MS"] = str(max_s * 1000)
+    return out
 
 
 def _claude_idle_timeout_seconds() -> float:
@@ -600,6 +639,7 @@ class ClaudeCliDriver:
             # https://github.com/anthropics/claude-code/issues, search for
             # IS_SANDBOX.)
             env.setdefault("IS_SANDBOX", "1")
+            env.update(_bash_timeout_env(env))
             auth_mode, auth_detail = _resolve_auth(env)
             if auth_mode == "none":
                 raise RuntimeError(
