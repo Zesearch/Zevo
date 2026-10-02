@@ -27,7 +27,7 @@
 | `data_recipe_schema` | Exact artifact-level realized-recipe schema for `data_recipe.json`. |
 | `data_recipe_validation_command` | Exact side-effect-free recipe/artifact/source validator. Replace only the placeholders present; the engine already inserts a shell-quoted local source path. Use its printed signature. |
 | `artifacts_validation_command` | Exact side-effect-free validator for the training artifact only. |
-| `device_info_path` | The purpose=train remote route shared with Train. HF download, detect, analysis, transformation, and prepared rows stay there. |
+| `device_info_path` | Set only for remote preparation (`dataset` is a Hub id): the purpose=train route shared with Train, where download, analysis, transformation, and prepared rows stay. Empty means local preparation under `work_dir`; no GPU host exists yet. |
 | `remote_data_helper_path` | Small system helper to upload; it receipts/finalizes remote data without returning rows. |
 | `remote_dataset_spec_schema` / `remote_dataset_spec_validation_command` | Exact remote HF source contract and validator. Pin an immutable revision. |
 | `remote_hf_cache_path` | Remote cache for reusable raw Hugging Face downloads only. |

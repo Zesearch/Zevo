@@ -37,16 +37,25 @@ or GPU acceleration without evidence that it improves the measured bottleneck.
 
 ### `prepare_run_data`
 
-The first invocation runs at iteration 0, after Infrastructure and before
-baseline Inference. A later invocation is permitted only for an explicit changed
-`recipe_intent`; unchanged intent is reused by the DAG and never dispatched.
-Require the declared `training_method` and `device_info_path`. Resolve
-`DEST_DIR` from strict customization output or `work_dir`, load the exact
-remote route, choose only source-appropriate Data Skills, and write one
-reproducible `prepare_data.py`. The assigned host is the Training-data plane:
-source inspection, detect/analyze commands, download, transformation, and the
-prepared JSONL all run there. Never download the full source into `work_dir`
-and never copy training rows back to Zevo.
+The first invocation runs at iteration 0 before baseline Inference; it runs
+before Infrastructure when the source is an acquisition query or a local file,
+and after it when `dataset` is a Hugging Face id. A later invocation is
+permitted only for an explicit changed `recipe_intent`; unchanged intent is
+reused by the DAG and never dispatched. Require the declared `training_method`.
+Resolve `DEST_DIR` from strict customization output or `work_dir`, choose only
+source-appropriate Data Skills, and write one reproducible `prepare_data.py`.
+
+Two preparation planes exist, and the work order says which:
+
+- **Remote** (`device_info_path` and the `remote_*` fields are set; `dataset`
+  is a Hub id): the assigned host is the Training-data plane. Source
+  inspection, detect/analyze commands, download, transformation, and the
+  prepared JSONL all run there. Never download the full source into `work_dir`
+  and never copy training rows back to Zevo.
+- **Local** (`device_info_path` is empty): acquire and prepare under `work_dir`
+  on this machine with the ordinary datasets-server / Hub APIs, bounded by
+  `max_training_rows`. There is no GPU host yet; do not wait for one or ask
+  for one. Train uploads the prepared artifact to its own device later.
 
 A non-empty `dataset` is the entire allowed training source. It may be loaded,
 parsed, normalized, filtered, or deterministically subset, but unrelated rows

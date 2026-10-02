@@ -16,9 +16,11 @@ hierarchy as a `full_pipeline` Run.
 
 ```text
 Orchestrator
+  -> Data 0 when its source is not a Hub id (local preparation; no GPU needed yet)
+  -> Orchestrator
   -> Infrastructure purpose=train (one reusable remote data/model plane)
   -> Orchestrator
-  -> Data 0 on that remote plane (engine binds hidden Validation afterward)
+  -> Data 0 on that remote plane when `dataset` IS a Hub id (engine binds hidden Validation afterward)
   -> Orchestrator
   -> Baseline Inference (select + write the current model lineage's inference_config.yaml)
   -> Orchestrator
@@ -160,9 +162,17 @@ user-supplied GPU maximum remain fixed; zero means unlimited. Infrastructure
 selects a concrete positive count and must not exceed a positive limit.
 For cluster this is an access-route planning estimate, not the GPU minimum for
 each later Slurm job. Train and Inference choose their own stage job shapes.
-Use one `purpose="train"` route before initial Data. Read
-`runtime.gpu_allocation_mode`; this is independent of provider and is fixed
-for the Run. Both modes retain resources while the same Ticket is repairing.
+Order the first two stages by what Data 0 needs. When `user_request.dataset`
+is a Hugging Face id, Data downloads and prepares on the remote data plane, so
+provision the `purpose="train"` route first and bind its `device_info` to Data
+0 (the API refuses a Hub-source Data ticket without it). When `dataset` is
+empty (acquisition from `data_query`) or a local file, Data 0 prepares in its
+own `work_dir` with no `device_info` binding: create Data 0 FIRST and provision
+only after it succeeds, so the rental is not billed while rows are being
+fetched and mapped (smoke runs idled an A10 for 5–12 minutes there; the
+environment build the acquisition helper starts needs that window anyway).
+Read `runtime.gpu_allocation_mode`; this is independent of provider and is
+fixed for the Run. Both modes retain resources while the same Ticket is repairing.
 Do not emit a release or replacement merely because a generated program failed;
 a `GPU hardware defect:` failure is the exception described under Failure and
 completion.
@@ -245,6 +255,10 @@ once. A child caller cannot add or replace customization after Run creation.
   "run_id": "<run-id>"
 }
 ```
+
+Bind `device_info` only when `dataset` is a Hub id (remote preparation). For an
+acquisition query or a local file, send `"inputs": {}`: Data prepares in its
+`work_dir`, and Train later binds the device route itself.
 
 Iteration 0 Data prepares training data without access to Validation. After it
 succeeds, the engine freezes and binds the Validation package.
