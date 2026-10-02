@@ -255,6 +255,24 @@ only for directories. Direct `scp` remains permitted when the task needs it,
 but it must follow the same route and option rules. Always use the exact route
 in `device_info.json`, not prose.
 
+## Long remote commands
+
+A Bash tool call may run for up to an hour by default and up to the Train
+contract's wall limit when you pass a longer `timeout`. Run remote work as
+one foreground command that ends when the remote process ends, with its
+output flowing to a local log:
+
+```
+ssh <route> 'cd <remote_dir> && bash run.sh' 2>&1 | tee "$WORK_DIR/<stage>.log"
+```
+
+Do not wrap that in a `sleep`-and-`tail` loop, do not move it to the
+background and poll it, and do not split it into "start" and "check" calls:
+every poll is a full model turn and buys nothing. One command, one result.
+Give long commands a `timeout` that covers the expected run plus margin, and
+let the engine's cancellation (which targets the remote process by
+`ZEVO_TICKET_ID`) handle the abnormal case.
+
 ## Customization
 
 `customization` has exactly these fields:
