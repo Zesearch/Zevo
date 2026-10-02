@@ -1069,7 +1069,7 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   sshHostId: "",
   generation_backend: "",
   // Blank leaves the GPU count to Zevo's stage planner.
-  gpuAllocationMode: "per_stage",
+  gpuAllocationMode: "per_run",
   numGpus: "",
   // Optimization rounds, spend and active runtime are uncapped unless the
   // operator enters a value. Queueing remains bounded by default so a Slurm
@@ -1917,8 +1917,8 @@ export function RunInputs({
           <ChoiceField
             label="GPU allocation" value={gpuAllocationMode}
             onChange={(v) => onChange({ gpuAllocationMode: v as "per_stage" | "per_run" })}
-            options={[["per_stage", "Per stage"], ["per_run", "Entire run"]]}
-            hint="Both modes retain GPUs during bounded bug repair. Entire run also retains them between stages."
+            options={[["per_run", "Entire run"], ["per_stage", "Per stage"]]}
+            hint="Entire run acquires GPUs once and reuses them across stages and iterations. Per stage re-acquires before each GPU stage; choose it for multi-node Slurm training. Both retain GPUs during bounded bug repair."
           />
           <ChoiceField
             label="Generation backend" value={generation_backend}

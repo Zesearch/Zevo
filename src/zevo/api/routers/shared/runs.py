@@ -1320,7 +1320,11 @@ class CreateRunRequest(BaseModel):
         ),
     )
     gpu_provider: Literal["cluster", "cloud", "instance"] | None = None
-    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_stage"
+    # One allocation for the whole Run by default: a cloud rental or lease is
+    # acquired once and reused by Data, Inference and Train across iterations.
+    # per_stage re-acquires before each GPU stage (and is required for
+    # multi-node Slurm training, which per_run does not support yet).
+    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_run"
     # Optional verified SSH profile for a cluster/instance run.
     ssh_host_id: str = ""
     # Which cloud to rent on when gpu_provider == "cloud" (pins Vast.ai vs Lambda
