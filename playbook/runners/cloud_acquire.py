@@ -172,6 +172,46 @@ def health(route: dict[str, Any], key_path: str, indices: list[int]) -> dict[str
     return verdict
 
 
+# ------------------------------------------------------------ environment
+REMOTE_ENV_DIR = "~/zevo/env"
+
+
+def start_remote_env_build(route: dict[str, Any], key_path: str) -> dict[str, Any]:
+    """Upload the shipped environment builder and start `build all` detached.
+
+    The build (vLLM, torch, TRL and friends into two pinned venvs) takes a few
+    minutes; the Data stage that follows provisioning takes about as long, so
+    starting it now and letting Inference/Train `ensure` their profile hides
+    the install behind work that happens anyway. The process is detached on
+    the HOST (setsid + nohup), not in this helper, which returns at once.
+    """
+    helper = Path(__file__).with_name("zevo_remote_env.sh")
+    if not helper.is_file():
+        helper = Path(__file__).with_name("remote_env.sh")
+    if not helper.is_file():
+        return {"started": False, "reason": "remote_env.sh not shipped beside the acquisition helper"}
+    scp = ["scp", "-P", str(route["port"]), "-o", "StrictHostKeyChecking=no",
+           "-o", "UserKnownHostsFile=/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
+    if key_path:
+        scp += ["-i", key_path]
+    rc, _, err = _ssh(route, key_path, f"mkdir -p {REMOTE_ENV_DIR}")
+    if rc != 0:
+        return {"started": False, "reason": f"mkdir failed rc={rc}: {err.strip()[:160]}"}
+    proc = subprocess.run(scp + [str(helper), f"{route['user']}@{route['host']}:{REMOTE_ENV_DIR}/remote_env.sh"],
+                          capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        return {"started": False, "reason": f"upload failed rc={proc.returncode}: {proc.stderr.strip()[:160]}"}
+    rc, out, err = _ssh(route, key_path,
+                        f"chmod +x {REMOTE_ENV_DIR}/remote_env.sh && "
+                        f"setsid nohup bash {REMOTE_ENV_DIR}/remote_env.sh build all "
+                        f"> {REMOTE_ENV_DIR}/bootstrap.log 2>&1 < /dev/null & echo STARTED")
+    if rc != 0 or "STARTED" not in out:
+        return {"started": False, "reason": f"start failed rc={rc}: {err.strip()[:160]}"}
+    return {"started": True, "helper": f"{REMOTE_ENV_DIR}/remote_env.sh",
+            "profiles": {"infer": f"{REMOTE_ENV_DIR}/infer/bin/python", "train": f"{REMOTE_ENV_DIR}/train/bin/python"},
+            "log": f"{REMOTE_ENV_DIR}/bootstrap.log"}
+
+
 # ----------------------------------------------------------------- lifecycle
 async def destroy_and_release(provider, instance_id: str, row_id: str, reason: str, state: dict[str, Any]) -> None:
     try:
@@ -246,6 +286,15 @@ async def run(args) -> int:
             state.update(phase="defective", error=reason)
             await destroy_and_release(provider, instance_id, row_id, reason + "; instance destroyed", state)
             save(); _log(json.dumps(state)); return 2
+
+        # Environment build runs on the host while the Run moves on to Data.
+        # A failure here is not a provisioning failure: the stage helpers
+        # build on demand with `ensure`; record the outcome and continue.
+        try:
+            state["remote_env"] = start_remote_env_build(route, args.ssh_key_path)
+        except Exception as exc:  # noqa: BLE001 - best effort by design
+            state["remote_env"] = {"started": False, "reason": repr(exc)[:200]}
+        save(); _log(f"REMOTE_ENV {json.dumps(state['remote_env'])}")
 
         patch_row(row_id, {
             "status": "ready", "gpu_name": probed["devices"][0]["name"],

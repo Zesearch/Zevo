@@ -705,7 +705,14 @@ may restart at zero. Earlier attempt telemetry remains available for diagnosis,
 while the live figure displays the newest attempt rather than joining both
 processes into one curve.
 
-For cloud/instance, the remote training command remains attached in the
+For cloud/instance, the Python environment is the engine-built `train`
+profile: run `bash ~/zevo/env/remote_env.sh ensure train` over SSH (upload
+`remote_env_helper_path` to `~/zevo/env/remote_env.sh` first if absent) and
+launch `train.py` with the interpreter it prints
+(`~/zevo/env/train/bin/python`). Do not create a venv, `pip install`
+torch/transformers/TRL/PEFT, or re-pin versions; record the versions `ensure`
+prints in `training.software_versions` and report a genuinely missing package
+as a failure. The remote training command remains attached in the
 foreground and the local SSH invocation pipes stdout/stderr through
 `tee <work_dir>/train.log`. For cluster, the trainer remains foreground inside
 the finite sbatch script while the Agent activation ends as `deferred`; the

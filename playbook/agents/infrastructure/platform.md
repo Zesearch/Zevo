@@ -350,9 +350,14 @@ instance, verifies it at the provider, releases the row, and exits non-zero:
 `1` provisioning failed (`error` says why), `2` defective GPU (`gpu_health`
 carries the evidence; fail with `error_message` beginning `GPU hardware
 defect:`), `4` the instance could not be created (nothing to clean up). Exit
-`0` leaves `acquire_state.json` with `instance_id`, `row_id`, `ssh`, `probe`
-and `gpu_health`; build `device_info.json` from those fields plus your
-resolved plan and run `device_info_validation_command`. Never rent a
+`0` leaves `acquire_state.json` with `instance_id`, `row_id`, `ssh`, `probe`,
+`gpu_health` and `remote_env`; build `device_info.json` from those fields plus
+your resolved plan and run `device_info_validation_command`. `remote_env`
+records that the helper uploaded `remote_env.sh` to `~/zevo/env/` and started
+`build all` on the host in the background (pinned vLLM/torch and TRL
+profiles); Inference and Train `ensure` their profile later. A
+`remote_env.started=false` is not a provisioning failure: mention the reason
+in `notes` and continue. Never rent a
 replacement in the same Ticket, whatever the exit code.
 
 ## Slurm site skills

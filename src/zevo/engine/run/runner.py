@@ -798,6 +798,10 @@ async def _build_infra_input(
             str(Path(work_dir) / "zevo_cloud_acquire.py")
             if provider == "cloud" and not release else ""
         ),
+        remote_env_helper_path=(
+            str(Path(work_dir) / "zevo_remote_env.sh")
+            if provider != "cluster" and not release else ""
+        ),
         device_info_validation_command=(
             "python -m zevo.contracts.infrastructure validate-device "
             "<absolute-device-info-json-path> --run-id "
@@ -1143,6 +1147,10 @@ async def _build_train_input(
             )
         ),
         telemetry_helper_path=str(Path(work_dir) / "zevo_train_telemetry.py"),
+        remote_env_helper_path=(
+            str(Path(work_dir) / "zevo_remote_env.sh")
+            if str(run.gpu_provider or "instance") != "cluster" else ""
+        ),
         checkpoint_helper_path=str(Path(work_dir) / "zevo_train_checkpoint.py"),
         execution_contract=TrainExecutionContract(
             required_environment=required_environment,
@@ -1443,6 +1451,10 @@ async def _build_inference_input(
             if generation_backend == "vllm" else ""
         ),
         parallel_runner_path=str(Path(work_dir) / "zevo_parallel_inference.py"),
+        remote_env_helper_path=(
+            str(Path(work_dir) / "zevo_remote_env.sh")
+            if str(run.gpu_provider or "instance") != "cluster" else ""
+        ),
         recommended_gpus_per_replica=max(1, slurm_job.estimated_gpus),
         parallel_workload_rows=sum(
             max(0, int(item.get("n_rows") or 0))
@@ -4448,6 +4460,11 @@ async def run_ticket(
     run_dir = Path(work_dir_root) / (tk.run_id or "standalone")
     work_dir = str(run_dir / tk.id)
     Path(work_dir).mkdir(parents=True, exist_ok=True)
+    if tk.agent_id in {"infrastructure", "inference", "train"}:
+        env_source = REPO_ROOT / "playbook" / "runners" / "remote_env.sh"
+        if not env_source.is_file():
+            raise ValueError(f"system remote environment helper is missing: {env_source}")
+        shutil.copyfile(env_source, Path(work_dir) / "zevo_remote_env.sh")
     if tk.agent_id == "infrastructure":
         health_source = REPO_ROOT / "playbook" / "runners" / "gpu_health.py"
         if not health_source.is_file():

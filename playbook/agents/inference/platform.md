@@ -27,6 +27,16 @@
    a ticket-specific remote directory, using the `remote_transfer` helper by
    default or correctly constructed direct SCP when needed. Run directly for
    cloud/instance or use the finite cluster job below.
+   On cloud/instance the Python environment is the engine-built profile, not
+   one you create: run `bash ~/zevo/env/remote_env.sh ensure infer` over SSH
+   (if that file is absent, upload `remote_env_helper_path` to
+   `~/zevo/env/remote_env.sh` first) and run `predict.py` with the interpreter
+   it prints (`~/zevo/env/infer/bin/python`). The acquisition helper starts
+   the build in the background at provisioning, so `ensure` normally returns
+   at once; it waits on a build in progress and builds only if nothing has.
+   Never create a venv, `pip install` vLLM/torch/transformers, or change the
+   pinned versions yourself; a genuinely missing package is a failure to
+   report in `notes`, not something to install around.
    For one model replica, initialize the engine once and loop over the primary
    plus every member in that process. A cluster allocation can instead run
    independent replicas via `parallel_runner_path` below. Never submit
