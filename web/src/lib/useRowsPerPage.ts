@@ -86,8 +86,17 @@ export function useRowsPerPage(
       // (51.4px, not 52). Erring by a few pixels in this direction costs a row
       // only when the fit was that close; erring the other way puts the pager
       // under the fold, which is the whole thing this exists to avoid.
+      // Use the list's position before scrolling. Clicking a pager can scroll
+      // main (or a nested container) down; viewport-relative top then decreases
+      // even though the available layout space has not grown. Feeding that
+      // position into the next ResizeObserver measurement increases page size
+      // on every turn, especially when group headers make the page taller.
+      let layoutTop = el.getBoundingClientRect().top + window.scrollY;
+      for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+        if (parent !== document.scrollingElement) layoutTop += parent.scrollTop;
+      }
       const available =
-        window.innerHeight - el.getBoundingClientRect().top - heightBelow(el, document.body) - 8;
+        window.innerHeight - layoutTop - heightBelow(el, document.body) - 8;
       setRows(Math.max(min, Math.min(max, Math.floor(available / rowHeight))));
     }
 
