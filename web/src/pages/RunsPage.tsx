@@ -5,6 +5,7 @@ import { ArrowDown, ArrowUp, ChevronsUpDown, Rocket, Search, Trash2, X } from "l
 import { api } from "../lib/api";
 import type { GenerationBackend, GpuProvider, RunSummary } from "../lib/api";
 import { StatusBadge } from "../components/StatusBadge";
+import { RunGroupFilter } from "../components/RunGroupFilter";
 import { fmtScore, fmtMetric, fmtCost, fmtDate, fmtDuration, shortModel } from "../lib/format";
 import { fireCommand } from "../lib/commands";
 import { toast } from "../lib/toast";
@@ -173,6 +174,12 @@ export function RunsPage() {
   const [group, setGroup] = useState<string>("");
   const grouped = group === "task";
   const groupedByStatus = group === "status";
+  const [selectedTasks, setSelectedTasks] = useState<string[]>([]);
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
+  const filters = new URLSearchParams();
+  if (grouped) selectedTasks.forEach(task => filters.append("task", task));
+  if (groupedByStatus) selectedStatuses.forEach(status => filters.append("status", status));
+  const hasFilters = Boolean(query.trim() || filters.size);
 
   // The run the user clicked, shown in place rather than by leaving the list.
   // Its inputs come from the RUN, not from the task of the same name: a run
@@ -188,7 +195,7 @@ export function RunsPage() {
 
   const { data, mutate, error: loadError, isLoading } = useSWR(
     `/api/runs?limit=${pageSize}&offset=${page * pageSize}`
-      + `&q=${encodeURIComponent(query.trim())}&sort=${sort}&order=${order}&group=${group}`,
+      + `&q=${encodeURIComponent(query.trim())}&sort=${sort}&order=${order}&group=${group}&${filters}`,
     fetchPage,
     // keepPreviousData holds the old rows while the next page loads, so paging
     // doesn't flash an empty table every three seconds of polling.
@@ -199,6 +206,15 @@ export function RunsPage() {
   // it is drawn on cannot know it.
   const { data: taskCounts } = useSWR<Record<string, number>>(
     grouped ? `/api/runs/task-counts?q=${encodeURIComponent(query.trim())}` : null,
+  );
+  // The picker covers the entire catalogue, independent of search and paging.
+  const { data: allTasks, error: taskOptionsError, isLoading: tasksLoading, mutate: retryTasks } = useSWR<Record<string, number>>(
+    grouped ? "/api/runs/task-counts" : null,
+    { refreshInterval: 3000 },
+  );
+  const { data: statusCounts, error: statusOptionsError, isLoading: statusesLoading, mutate: retryStatuses } = useSWR<Record<string, number>>(
+    groupedByStatus ? "/api/runs/status-counts" : null,
+    { refreshInterval: 3000 },
   );
 
   const runs = data?.items ?? [];
@@ -275,7 +291,7 @@ export function RunsPage() {
         </div>
 
 
-        {query && (
+        {hasFilters && (
           <span className="ml-auto font-mono text-2xs text-slate-500">
             {total} match{total === 1 ? "" : "es"}
           </span>
@@ -302,6 +318,16 @@ export function RunsPage() {
         >
           Group By Status
         </button>
+        {grouped && <RunGroupFilter kind="tasks" selected={selectedTasks}
+          options={Object.keys(allTasks ?? {}).sort((a, b) => a.localeCompare(b)).map(task => ({ value: task, label: task }))}
+          loading={tasksLoading} error={Boolean(taskOptionsError)} onRetry={() => void retryTasks()}
+          onChange={values => { setSelectedTasks(values); setPage(0); }} />}
+        {groupedByStatus && <RunGroupFilter kind="statuses" selected={selectedStatuses}
+          loading={statusesLoading} error={Boolean(statusOptionsError)} onRetry={() => void retryStatuses()}
+          options={Object.keys(statusCounts ?? {}).map(status => ({
+            value: status, label: status.charAt(0).toUpperCase() + status.slice(1),
+          }))}
+          onChange={values => { setSelectedStatuses(values); setPage(0); }} />}
 
       </div>
 
@@ -341,9 +367,12 @@ export function RunsPage() {
       {loadError && <div role="alert" className="mb-4 rounded border border-coral-500/40 p-3 text-coral-300">Could not refresh runs. {data ? "Showing the last loaded results." : "Your run history is unavailable."} <button className="btn ml-2" onClick={() => void mutate()}>Retry</button></div>}
       {correctingPage || (isLoading && (!data || runs.length === 0)) ? <Bezel className="p-12">Loading runs…</Bezel> : loadError && !data ? null : runs.length === 0 && total === 0 ? (
         <Bezel className="p-12 text-center">
-          <p className="text-sm text-slate-500">{query ? "No runs match your search." : "No runs on record yet."}</p>
-          <button onClick={() => query ? setQuery("") : fireCommand("open-new-run")} className="btn btn-brass mx-auto mt-4">
-            <Rocket size={14} /> {query ? "Clear search" : "Launch your first run"}
+          <p className="text-sm text-slate-500">{filters.size ? "No runs match your filters." : query ? "No runs match your search." : "No runs on record yet."}</p>
+          <button onClick={() => {
+            if (hasFilters) { setQuery(""); setSelectedTasks([]); setSelectedStatuses([]); setPage(0); }
+            else fireCommand("open-new-run");
+          }} className="btn btn-brass mx-auto mt-4">
+            <Rocket size={14} /> {filters.size ? "Clear filters" : query ? "Clear search" : "Launch your first run"}
           </button>
         </Bezel>
       ) : (
