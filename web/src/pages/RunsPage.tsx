@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import useSWR from "swr";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowDown, ArrowUp, ChevronsUpDown, Rocket, Search, Trash2, X } from "lucide-react";
@@ -204,8 +204,15 @@ export function RunsPage() {
   const runs = data?.items ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  const first = total === 0 ? 0 : page * pageSize + 1;
-  const last = page * pageSize + runs.length;
+  const visiblePage = Math.min(page, pageCount - 1);
+  const correctingPage = page !== visiblePage;
+  useEffect(() => {
+    // Polling can remove the final page; auto sizing can reduce the page count
+    // when the window grows. Refetch a valid page in both cases.
+    if (correctingPage) setPage(visiblePage);
+  }, [correctingPage, visiblePage]);
+  const first = total === 0 || runs.length === 0 ? 0 : visiblePage * pageSize + 1;
+  const last = Math.min(total, visiblePage * pageSize + runs.length);
 
   const [deleting, setDeleting] = useState<string>("");
   const nav = useNavigate();
@@ -332,7 +339,7 @@ export function RunsPage() {
       </div>
 
       {loadError && <div role="alert" className="mb-4 rounded border border-coral-500/40 p-3 text-coral-300">Could not refresh runs. {data ? "Showing the last loaded results." : "Your run history is unavailable."} <button className="btn ml-2" onClick={() => void mutate()}>Retry</button></div>}
-      {isLoading && !data ? <Bezel className="p-12">Loading runs…</Bezel> : loadError && !data ? null : runs.length === 0 ? (
+      {correctingPage || (isLoading && (!data || runs.length === 0)) ? <Bezel className="p-12">Loading runs…</Bezel> : loadError && !data ? null : runs.length === 0 && total === 0 ? (
         <Bezel className="p-12 text-center">
           <p className="text-sm text-slate-500">{query ? "No runs match your search." : "No runs on record yet."}</p>
           <button onClick={() => query ? setQuery("") : fireCommand("open-new-run")} className="btn btn-brass mx-auto mt-4">
@@ -646,9 +653,9 @@ export function RunsPage() {
 
       <div className="mt-auto">
         <Pager
-          total={total} first={first} last={last} page={page} pageCount={pageCount}
+          total={total} first={first} last={last} page={visiblePage} pageCount={pageCount}
           pageSizePref={pageSizePref} sizes={PAGE_SIZES}
-          onSize={resize} onPage={setPage}
+          onSize={resize} onPage={(n) => setPage(Math.max(0, Math.min(n, pageCount - 1)))}
         />
       </div>
     </div>
