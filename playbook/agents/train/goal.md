@@ -25,10 +25,14 @@ branch points; this is never a requirement to save every epoch or step.
    `train_config.yaml` before training.
 7. Preflight the actual data/method/model/GPU/dependencies, train in the
    foreground, and verify the expected checkpoint interface. For large or
-   complex training, follow the mandatory runtime smoke protocol: real model,
-   real data/sampler, opening optimizer steps, and a verified resumable
-   checkpoint save/restore before continuing the unchanged plan in the same
-   allocation. A toy model is not a substitute. Recovery checkpoints carry
+   complex training, follow the startup validation in platform.md: real model,
+   real data/sampler, opening optimizer steps, a complete checkpoint save, and
+   actual full-state restore into a recreated Trainer. Verify restored state
+   and the next scheduled optimizer step before continuing the unchanged plan
+   in the same allocation. For a plan already completed by the opening steps,
+   verify restored completion without adding steps. Validate save/restore once
+   at startup, not after every periodic checkpoint. A toy model is not a
+   substitute. Recovery checkpoints carry
    training state independently of optional branch-point retention. When selective
    retention would answer a concrete later question or protect against late
    degradation, record a bounded retention policy and save model weights only.

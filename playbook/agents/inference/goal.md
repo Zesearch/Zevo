@@ -21,13 +21,18 @@ comparable Inference configuration.
 4. Verify the tokenizer ids for EOS and every single-token response/turn
    terminator used by the selected template. Record them in `stop_token_ids`;
    never rely on a special-token string surviving detokenization.
-5. Record every realized field, the exact supported `template_kwargs`, each
+5. Before measured Baseline generation, calibrate unpinned generation-length
+   budgets on a bounded, representative questions-only sample using the real
+   model and serving path. Follow platform.md: assess truncation and resource
+   use without labels or scoring, then freeze the selected budget. Keep
+   calibration separate from benchmark predictions and progress.
+6. Record every realized field, the exact supported `template_kwargs`, each
    suggestion decision, and a synthetic
    `prompt_example` in `inference_config.yaml` before generation. The example
    must show input placeholders, pre-template messages, the actual system
    prompt, and the exact rendered text produced with those kwargs and handed to
    the model.
-6. Generate predictions with that exact file and write one termination record
+7. Generate predictions with that exact file and write one termination record
    per generation request containing its backend finish reason, stop reason,
    and generated-token count.
 

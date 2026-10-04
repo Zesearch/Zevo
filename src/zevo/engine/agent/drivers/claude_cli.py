@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import re
 import os
 import signal
 import shutil
@@ -83,7 +85,67 @@ DEFAULT_AGENT_BASH_MAX_TIMEOUT_SECONDS = 4 * 3600 + 900
 
 
 class ClaudeStreamStalled(RuntimeError):
-    """Claude stayed alive without producing any stdout/stderr bytes."""
+    """Claude stayed alive without producing substantive output."""
+
+
+class _CliActivity:
+    """Ignore transport heartbeats; honor explicit, bounded Bash timeouts."""
+
+    def __init__(self, clock: Callable[[], float], max_tool_seconds: float):
+        self.clock = clock
+        self.last = clock()
+        self.max_tool_seconds = max_tool_seconds
+        self.deadlines: dict[str, float] = {}
+        self.buffer = b""
+
+    def stderr(self, _chunk: bytes) -> None:
+        self.last = self.clock()
+
+    def stdout(self, chunk: bytes) -> None:
+        self.buffer += chunk
+        while b"\n" in self.buffer:
+            line, self.buffer = self.buffer.split(b"\n", 1)
+            self._line(line)
+        # Keep genuinely streaming long text/JSON alive before its newline.
+        # Incomplete heartbeat JSON is small and must not refresh the timer.
+        prefix = self.buffer.lstrip()
+        event_type = re.match(rb'\{\s*"type"\s*:\s*"([^"\s]+)"', prefix)
+        if prefix and (not prefix.startswith(b"{") or (
+            event_type and event_type[1] not in {b"tool_progress", b"heartbeat_alive"}
+        )):
+            self.last = self.clock()
+
+    def _line(self, line: bytes) -> None:
+        try:
+            obj = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            self.last = self.clock()
+            return
+        if not isinstance(obj, dict):
+            self.last = self.clock()
+            return
+        if obj.get("type") in {"tool_progress", "heartbeat_alive"}:
+            return
+        self.last = self.clock()
+        message = obj.get("message") or {}
+        for block in message.get("content", []) if isinstance(message, dict) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                self.deadlines.pop(str(block.get("tool_use_id", "")), None)
+            elif block.get("type") == "tool_use" and is_bash_tool(str(block.get("name", ""))):
+                tool_id = str(block.get("id", ""))
+                try:
+                    seconds = float((block.get("input") or {}).get("timeout", 0)) / 1000
+                except (TypeError, ValueError):
+                    continue
+                if tool_id and math.isfinite(seconds) and seconds > 0:
+                    self.deadlines.setdefault(tool_id, self.clock() + min(seconds, self.max_tool_seconds))
+
+    def latest(self) -> float:
+        # A declared quiet operation has a finite allowance, never extended by
+        # tool_progress. Afterwards the normal idle grace applies.
+        return max(self.last, min(self.clock(), max(self.deadlines.values(), default=self.last)))
 
 
 def _bash_timeout_env(env: dict[str, str]) -> dict[str, str]:
@@ -139,7 +201,7 @@ async def _await_cli_activity(
     agent_id: str,
     paused: Callable[[], bool] | None = None,
 ) -> None:
-    """Wait for CLI I/O + exit, failing when raw output becomes inactive."""
+    """Wait for CLI I/O + exit, failing when substantive output becomes inactive."""
     pending = set(tasks)
     if idle_timeout_seconds <= 0:
         await asyncio.gather(*pending)
@@ -169,7 +231,7 @@ async def _await_cli_activity(
         last_tick = now
         if pending and idle_seconds >= idle_timeout_seconds:
             raise ClaudeStreamStalled(
-                f"claude exec produced no stdout/stderr bytes for "
+                f"claude exec produced no substantive stdout/stderr output for "
                 f"{idle_seconds:.1f}s (limit {idle_timeout_seconds:g}s) "
                 f"for agent {agent_id}"
             )
@@ -715,11 +777,7 @@ class ClaudeCliDriver:
             stdout_chunks: list[str] = []
             stderr_chunks: list[str] = []
             loop = asyncio.get_running_loop()
-            last_activity_at = loop.time()
-
-            def _record_activity(_chunk: bytes) -> None:
-                nonlocal last_activity_at
-                last_activity_at = loop.time()
+            activity = _CliActivity(loop.time, float(env["BASH_MAX_TIMEOUT_MS"]) / 1000)
 
             # Emit a synthetic event so the operator sees which auth mode
             # was used (helps when debugging "is this even using my Max plan?").
@@ -733,7 +791,7 @@ class ClaudeCliDriver:
 
             async def _drain_stdout(stream: asyncio.StreamReader) -> None:
                 async for line in iter_subprocess_lines(
-                    stream, on_chunk=_record_activity,
+                    stream, on_chunk=activity.stdout,
                 ):
                     try:
                         text = line.decode("utf-8")
@@ -755,7 +813,7 @@ class ClaudeCliDriver:
 
             async def _drain_stderr(stream: asyncio.StreamReader) -> None:
                 async for line in iter_subprocess_lines(
-                    stream, on_chunk=_record_activity,
+                    stream, on_chunk=activity.stderr,
                 ):
                     try:
                         text = line.decode("utf-8")
@@ -780,7 +838,7 @@ class ClaudeCliDriver:
             try:
                 await _await_cli_activity(
                     cli_tasks,
-                    last_activity=lambda: last_activity_at,
+                    last_activity=activity.latest,
                     idle_timeout_seconds=_claude_idle_timeout_seconds(),
                     agent_id=blueprint.id,
                     paused=lambda: process_registry.is_paused(tk_id),

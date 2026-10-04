@@ -895,3 +895,105 @@ async def test_workload_failure_and_allocation_loss_are_distinct(session, monkey
     assert ticket.status == 'queued'
     assert (job.released_at is None) is retained
     assert job.meta['scheduler_state'] == 'FAILED'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['exit', 'ssh', 'none'])
+async def test_queue_timeout_keeps_allocation_until_scheduler_confirms(session, monkeypatch, failure):
+    import zevo.engine.run.scheduler.reconciler as reconciler
+
+    run = await session.get(Run, 'r1')
+    run.max_queue_wait_hours = 1
+    ticket = Ticket(id='data-timeout-001', run_id='r1', agent_id='data',
+                    status='waiting_external', payload={})
+    job = InfraInstance(instance_id='208374', provider='cluster', status='provisioning',
+                        run_id='r1', ticket_id=ticket.id, created_at=_ago(7200),
+                        meta={'stage_job': True, 'scheduler_state': 'PENDING',
+                              'submission_committed': True,
+                              'controller_outcome_path': '/allocation/outcome.json'})
+    session.add_all([ticket, job])
+    await session.commit()
+    observed = 'PENDING'
+    commands = []
+    queries = []
+
+    async def connection(*args, **kwargs):
+        return {'host': 'cluster', 'user': 'u', 'port': 22, 'key': '/tmp/test-key'}
+
+    async def query(**kwargs):
+        queries.append(kwargs)
+        return observed, '', '', None
+
+    class Process:
+        returncode = 127 if failure == 'exit' else 0
+
+        async def communicate(self):
+            return b'', b'scancel: command not found' if self.returncode else b''
+
+    async def execute(*args, **kwargs):
+        commands.append(args[-1])
+        if failure == 'ssh':
+            raise OSError('SSH disconnected')
+        return Process()
+
+    monkeypatch.setattr(reconciler, '_slurm_connection', connection)
+    monkeypatch.setattr(reconciler, '_query_slurm_job', query)
+    monkeypatch.setattr(reconciler.asyncio, 'create_subprocess_exec', execute)
+
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 0)
+    assert job.released_at is None
+    assert ticket.status == 'waiting_external'
+    assert job.meta['scheduler_state'] == 'PENDING'
+    assert 'queue_timeout_requested_at' in job.meta
+    assert ('cancellation_requested_at' in job.meta) == (failure == 'none')
+    if failure != 'none':
+        assert 'queue timeout scancel failed' in job.meta['monitor_error']
+    assert 'module load default-environment' in commands[0]
+    assert 'stage-job-identity-mismatch' in commands[0]
+
+    # Starting after the timeout does not strand a job whose cancellation failed.
+    observed = 'RUNNING'
+    job.meta = {**job.meta, 'monitor_next_at': _ago(1).isoformat()}
+    await session.commit()
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 0)
+    assert len(commands) == 2
+    assert job.released_at is None
+    assert ticket.status == 'running'
+    assert 'outcome_path' not in queries[-1]  # query allocation, not child outcome
+
+    # A stale child completion plus a failed provider query cannot release GPUs.
+    async def unavailable(**kwargs):
+        raise OSError('scheduler unavailable')
+
+    monkeypatch.setattr(reconciler, '_query_slurm_job', unavailable)
+    job.meta = {**job.meta, 'scheduler_state': 'COMPLETED',
+                'monitor_next_at': _ago(1).isoformat()}
+    await session.commit()
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 0)
+    assert job.released_at is None
+    assert ticket.status == 'running'
+    assert len(commands) == 3
+
+    monkeypatch.setattr(reconciler, '_query_slurm_job', query)
+    observed = 'CANCELLED'
+    job.meta = {**job.meta, 'monitor_next_at': _ago(1).isoformat()}
+    await session.commit()
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 1)
+    assert job.released_at is not None
+    assert ticket.status == 'queued'
+    assert 'maximum queue wait' in job.release_reason
+    assert len(commands) == 3
+
+
+@pytest.mark.asyncio
+async def test_synthetic_ui_pulse_does_not_refresh_cli_liveness(session):
+    from zevo.engine.run.scheduler.reconciler import _last_sign_of_life, _aware
+    await _mk(session, 'train-ui-pulse', started_ago=3600, chatter_ago=600)
+    hb = (await session.execute(select(HeartbeatRun).where(
+        HeartbeatRun.ticket_id == 'train-ui-pulse'))).scalar_one()
+    real = (await session.execute(select(TranscriptEvent).where(
+        TranscriptEvent.heartbeat_id == hb.id))).scalar_one()
+    session.add(TranscriptEvent(heartbeat_id=hb.id, seq=2, type='heartbeat_alive',
+                                payload={'silent_seconds': 600}, ts=_ago(0)))
+    await session.commit()
+    assert await _last_sign_of_life(session, hb) == _aware(real.ts)

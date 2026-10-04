@@ -172,6 +172,7 @@ export function RunsPage() {
   // correct once the list is paginated.
   const [group, setGroup] = useState<string>("");
   const grouped = group === "task";
+  const groupedByStatus = group === "status";
 
   // The run the user clicked, shown in place rather than by leaving the list.
   // Its inputs come from the RUN, not from the task of the same name: a run
@@ -274,6 +275,7 @@ export function RunsPage() {
         )}
         <button
           onClick={() => { setGroup(grouped ? "" : "task"); setPage(0); }}
+          aria-pressed={grouped}
           className={`${query ? "" : "ml-auto"} rounded-md border px-2.5 py-1.5 font-mono text-2xs transition ${
             grouped
               ? "border-brass-500/40 bg-brass-500/10 text-brass-300"
@@ -281,6 +283,17 @@ export function RunsPage() {
           }`}
         >
           Group By Task
+        </button>
+        <button
+          onClick={() => { setGroup(groupedByStatus ? "" : "status"); setPage(0); }}
+          aria-pressed={groupedByStatus}
+          className={`rounded-md border px-2.5 py-1.5 font-mono text-2xs transition ${
+            groupedByStatus
+              ? "border-brass-500/40 bg-brass-500/10 text-brass-300"
+              : "border-hair bg-canvas text-slate-500 hover:text-slate-300"
+          }`}
+        >
+          Group By Status
         </button>
 
       </div>
@@ -330,6 +343,11 @@ export function RunsPage() {
         <div ref={setListEl} className="stagger flex flex-col gap-2.5">
           {runs.map((r, i) => (
             <Fragment key={r.id}>
+            {groupedByStatus && (i === 0 || runs[i - 1].status !== r.status) && (
+              <div className="mt-2 flex items-baseline gap-2 px-1 first:mt-0">
+                <StatusBadge status={r.status} />
+              </div>
+            )}
             {/* Sorting by task turns the list into groups; the header appears
                 wherever the name changes, which stays correct across pages. */}
             {grouped && (i === 0 || runs[i - 1].task_name !== r.task_name) && (
