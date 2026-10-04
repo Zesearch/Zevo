@@ -29,7 +29,7 @@ from fastapi import (
     Response,
 )
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import asc, delete as sa_delete, desc, func, or_, select, update as sa_update
+from sqlalchemy import asc, case, delete as sa_delete, desc, func, or_, select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.config import settings
@@ -895,6 +895,10 @@ _RUN_SORTS = {
 _COST_SORT = "cost"
 _IMPROVEMENT_SORT = "improvement"
 
+_RUN_STATUS_PRIORITY = {status: rank for rank, status in enumerate(
+    ("success", "running", "planning", "degraded", "failed", "halted", "cancelled")
+)}
+
 
 @router.get("/runs/statistics")
 async def run_statistics(db: AsyncSession = Depends(get_db)) -> dict:
@@ -943,13 +947,21 @@ async def list_runs(
     direction = asc if (order or "").lower() == "asc" else desc
     # started_at is the tiebreaker so equal keys keep a stable, meaningful order
     # rather than whatever the planner returns.
-    order_by = [direction(col)] + ([] if col is Run.started_at else [desc(Run.started_at)])
+    order_by = [direction(col)] + ([] if col is Run.started_at else [desc(Run.started_at)]) + [asc(Run.id)]
     # Grouping is a FIRST key, not a replacement for the sort: `group=task` with
     # `sort=score&order=desc` answers "for each task, best score first", which
     # neither one alone can.
     group_field = {"task": "task_name", "status": "status"}.get((group or "").lower())
-    if group_field:
+    if group_field == "status":
+        order_by = [asc(case(_RUN_STATUS_PRIORITY, value=Run.status,
+                             else_=len(_RUN_STATUS_PRIORITY))), asc(Run.status)] + order_by
+    elif group_field:
         order_by = [asc(getattr(Run, group_field))] + order_by
+
+    def group_key(run: Run) -> tuple:
+        if group_field == "status":
+            return (_RUN_STATUS_PRIORITY.get(run.status, len(_RUN_STATUS_PRIORITY)), run.status)
+        return (getattr(run, group_field),) if group_field else ()
 
     count_q = select(func.count()).select_from(Run)
     rows_q = select(Run)
@@ -962,14 +974,14 @@ async def list_runs(
     if sort == _COST_SORT:
         # Price every match, order, then take the page. Sorting the page alone
         # would order 25 rows out of the whole result and call it sorted.
-        matches = (await db.execute(rows_q.order_by(desc(Run.started_at)))).scalars().all()
+        matches = (await db.execute(rows_q.order_by(desc(Run.started_at), asc(Run.id)))).scalars().all()
         costs = await _costs_for_runs(db, list(matches))
         asc_ = (order or "").lower() == "asc"
         # Sort descending by negating, so the task key can stay ascending in the
         # same pass — Python sorts are stable but not per-key directional.
         matches = sorted(
             matches,
-            key=lambda r: ((getattr(r, group_field) if group_field else ""),
+            key=lambda r: (group_key(r),
                            (costs.get(r.id, 0.0) if asc_ else -costs.get(r.id, 0.0))),
         )
         rows = matches[offset:offset + limit]
@@ -977,7 +989,7 @@ async def list_runs(
         # Improvement is derived from the Run's held-out history rather than a
         # database column. As with Cost, sort the full matching set before
         # pagination; sorting only the visible page would make the arrow lie.
-        matches = (await db.execute(rows_q.order_by(desc(Run.started_at)))).scalars().all()
+        matches = (await db.execute(rows_q.order_by(desc(Run.started_at), asc(Run.id)))).scalars().all()
         gains = {
             run.id: improvement_test(
                 run.history,
@@ -990,7 +1002,7 @@ async def list_runs(
         matches = sorted(
             matches,
             key=lambda run: (
-                getattr(run, group_field) if group_field else "",
+                group_key(run),
                 gains[run.id] is None,
                 (
                     gains[run.id]
