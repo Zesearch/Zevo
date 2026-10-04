@@ -423,17 +423,32 @@ training plan when they succeed.
    to resume the same plan. All required ranks must participate. Verify expected
    files/shards and the helper's commit/integrity checks, and retain the
    checkpoint for recovery.
-4. Continue the unchanged plan with the loaded model and Trainer in the same
-   allocation. When a failure requires recovery, use the supported restore
-   path and verify restored counters, data/RNG position, and successful
-   continuation. A weights-only reload is not a full-state resume; report any
-   limitation and follow the permitted restart policy.
+4. Restore that checkpoint through the framework's supported full-state resume
+   path before continuing the plan. Recreate the Trainer and distributed
+   training state, releasing the previous state first; keep the same GPU
+   allocation. Verify restored model/adapter, optimizer, scheduler, global
+   step, RNG, sampler/data position, and method-specific state against the saved
+   checkpoint. Complete the next scheduled optimizer step with finite loss and
+   gradients and confirm that the step counter advances from the saved value.
+   This resumed step counts toward the original schedule; preserve its total
+   steps, warmup, data order, batch size, and sequence length. If the opening
+   steps already completed the entire plan, verify restored completion state
+   without adding an extra optimizer step. Record successful save and restore
+   before marking startup validation complete, then continue with the restored
+   Trainer. File existence checks or continuing the original in-memory Trainer
+   do not validate restore. Report unsupported state explicitly and repair the
+   resume path rather than substituting a weights-only restart.
+
+Perform this save/restore validation once at startup for the realized training
+configuration. Later recovery checkpoints follow the configured rolling
+retention policy and do not each require a validation restart. When recovering
+from a real failure, verify the restored state and continuation again.
 
 Only the initial validation window is bounded; the real data path and full
 training schedule remain intact. Record the trigger, checks, and phase-specific
 timeouts in `training.implementation_config` before submission. Emit actual
 progress and elapsed time for data preparation, first batch, optimizer steps,
-and checkpoint saves, plus restore/continuation when recovery occurs. Use
+and checkpoint save, restore, and resumed optimizer steps. Use
 finite budgets appropriate to the model/data/checkpoint size and a watchdog
 that detects a blocked batch or step even when the training loop is not
 returning; an `on_step_end` callback alone is insufficient. On failure, capture
@@ -506,8 +521,8 @@ mismatch means repair the rendering/collator implementation or report a real
 tokenizer/version incompatibility. Do not mutate the Inference YAML to make the
 check pass. The mandatory startup validation, when triggered, covers the
 opening steps of actual training, distributed execution, telemetry, and
-checkpoint persistence, with restoration checked during actual recovery as
-specified above. It preserves the frozen
+checkpoint save, full-state restore, and resumed training as specified above.
+It preserves the frozen
 prompt/template contract; its recovery checkpoint is not by itself the final
 Train result.
 

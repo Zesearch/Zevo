@@ -8,8 +8,9 @@
 3. Resolve baseline, adapter, or full-checkpoint model mode. Never substitute.
 4. Select or load the YAML configuration as directed. In baseline select mode,
    a bounded tokenizer-only compatibility/rendering check on the assigned
-   runtime is allowed to realize the exact `prompt_example`; it must not load
-   the model for generation or produce predictions. Treat
+   runtime is allowed to realize the exact `prompt_example`. Generation-length
+   calibration is separate GPU work under the assigned execution lifecycle;
+   follow the calibration section below before measured Baseline generation. Treat
    `inference_config_schema` as the sole key/type authority and run the supplied
    `config_validation_command` successfully before measured generation. For
    vLLM baseline selection, follow `memory_planning_contract`, record the
@@ -376,6 +377,48 @@ equivalent finish-reason field, so derive it from the untrimmed generated token
 ids: `stop` plus the terminal id when the final token is in `stop_token_ids`,
 otherwise `length` plus a null stop reason when the generation reaches its
 configured token limit. Do not infer either outcome from decoded text.
+
+### Generation-length calibration before Baseline
+
+For generation-based scoring in `configuration_mode=select`, establish the
+output budget before freezing the Baseline measurement contract. Use the task's
+intended response shape, verified reasoning mode, rendered input lengths,
+model context limit, and user resource constraints to choose an initial budget.
+An input-plus-output configuration fitting the context or GPU memory is a
+feasibility check, not evidence that responses can finish within that budget.
+
+Use a bounded, reproducible sample of the supplied questions-only inputs that
+covers their length distribution and relevant task types, including long or
+complex inputs. Exercise the real model, template, stopping controls, and
+serving backend on the assigned GPU allocation. Validate each provisional
+configuration before its calibration generation. Do not read reference answers,
+call the scorer, or choose a budget by measured answer correctness.
+
+Record generated lengths, backend termination reasons, truncation frequency,
+latency, and memory use. Set a task-appropriate truncation tolerance and a
+bounded calibration budget before observing outputs. If the output cap cuts
+off too many responses, increase the unpinned output budget and repeat on the
+same sample while resource and model limits permit. Check stopping behavior
+when generations fail to terminate; increasing the cap alone may not solve it.
+When a binding limit prevents further increases, record the residual truncation
+and the limiting constraint. Do not silently override pinned values.
+
+Derive the runtime total-context limit from the supported rendered input length
+plus the selected output allowance, within the model's verified context limit.
+Recompute the memory plan at the intended concurrency and verify it on the
+assigned hardware. Consider reducing concurrency when memory limits the desired
+output allowance; record any remaining input-length or output-length constraint.
+Document the sample selection, tried budgets, observations, stopping decision,
+and final rationale using schema-supported configuration evidence fields and
+job logs. Do not introduce unsupported YAML keys.
+
+Freeze and validate the final YAML before generating the complete Baseline.
+Calibration outputs are not benchmark predictions and must not advance benchmark
+row counts or progress; record them as separate preparation activity. Generate
+all measured rows under the final configuration. Reuse that exact contract for
+later candidates without recalibrating their budgets. A later budget change
+requires an explicit new measurement contract and reevaluation of the Baseline
+and compared candidates; scores across different budgets are not interchangeable.
 
 ### vLLM GPU-memory sizing
 

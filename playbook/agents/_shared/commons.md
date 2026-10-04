@@ -48,6 +48,14 @@ message requires one. Do not repeat completed work unless explicitly reactivated
 
 ## Effort budget
 
+Give remote operations a finite timeout appropriate to their work. Connection,
+metadata, and file-verification calls need bounded connection and execution
+waits; keep their error output available for diagnosis. Real training or
+generation commands use the supplied execution-contract timeout explicitly.
+Tool keepalives only report that a process exists; they do not establish work
+progress or extend an operation's timeout. After a timeout, inspect the exact
+remote operation before retrying so an uncertain response cannot duplicate work.
+
 The typed input carries every engine fact the work needs: schemas, validator
 commands, metric lists, split policy, device routes, helper paths. Read the
 input, not the engine. Do not open files under the Zevo source tree

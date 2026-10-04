@@ -874,6 +874,7 @@ async def _reconcile_slurm_stage_jobs(
         ) not in _SLURM_TERMINAL_STATES
         and bool((row.meta or {}).get("submission_heartbeat_id"))
         and not bool((row.meta or {}).get("scheduler_event_exit_pending"))
+        and not bool((row.meta or {}).get("queue_timeout_requested_at"))
         and bool(_slurm_status_path(dict(row.meta or {})))
     }
     _cancel_inactive_slurm_status_streams(stream_row_ids)
@@ -943,6 +944,11 @@ async def _reconcile_slurm_stage_jobs(
             continue
         state = _normalise_slurm_state(str(meta.get("scheduler_state") or ""))
         previous_state = state
+        if meta.get("queue_timeout_requested_at"):
+            # Child exit events cannot confirm release of a persistent allocation.
+            # Require a fresh provider query, including after a failed SSH probe.
+            state = "UNKNOWN"
+            meta["scheduler_state"] = state
         terminal = state in _SLURM_TERMINAL_STATES
         exit_event_pending = bool(meta.get("scheduler_event_exit_pending"))
         due_at = _meta_datetime(meta.get("monitor_next_at"))
@@ -950,6 +956,7 @@ async def _reconcile_slurm_stage_jobs(
             continue
 
         if not terminal:
+            scheduler_observed = False
             connection = await _slurm_connection(run, session)
             if connection is None or not connection.get("host") or not connection.get("user"):
                 meta["monitor_error"] = "cluster SSH connection is unavailable"
@@ -957,9 +964,11 @@ async def _reconcile_slurm_stage_jobs(
                 try:
                     state, exit_code, reason, started_at = await _query_slurm_job(
                         connection=connection, job_id=row.instance_id,
-                        **({"outcome_path": str(meta["controller_outcome_path"])} if meta.get("controller_outcome_path") else {}),
+                        **({"outcome_path": str(meta["controller_outcome_path"])}
+                           if meta.get("controller_outcome_path") and not meta.get("queue_timeout_requested_at") else {}),
                     )
                     checked += 1
+                    scheduler_observed = bool(state)
                     meta.pop("monitor_error", None)
                     if state:
                         meta["scheduler_state"] = state
@@ -973,32 +982,46 @@ async def _reconcile_slurm_stage_jobs(
                     meta["monitor_error"] = str(exc)[:1000]
 
             state = _normalise_slurm_state(str(meta.get("scheduler_state") or ""))
-            if state == "PENDING":
-                queued_for = max(0.0, (now - _aware(row.created_at)).total_seconds())
-                queue_limit = max(0.0, float(run.max_queue_wait_hours or 0.0)) * 3600
-                if queue_limit and queued_for >= queue_limit:
-                    connection = connection or await _slurm_connection(run, session)
-                    if connection is not None:
+            queued_for = max(0.0, (now - _aware(row.created_at)).total_seconds())
+            queue_limit = max(0.0, float(run.max_queue_wait_hours or 0.0)) * 3600
+            queue_expired = scheduler_observed and state == "PENDING" and queue_limit and queued_for >= queue_limit
+            if (queue_expired or meta.get("queue_timeout_requested_at")) and state not in _SLURM_TERMINAL_STATES:
+                # Persist intent even when SSH fails: the job can start between
+                # the queue observation and cancellation and still needs cleanup.
+                meta.setdefault("queue_timeout_requested_at", now.isoformat())
+                meta.setdefault("queue_timeout_reason", f"maximum queue wait of {queue_limit / 3600:g} hours exceeded")
+                if connection is not None and connection.get("host") and connection.get("user"):
+                    try:
+                        from zevo.engine.run.remote_jobs import _slurm_job_kill_command
+                        cancel = await asyncio.create_subprocess_exec(
+                            *ssh_base_args(
+                                key_path=str(connection.get("key") or ""),
+                                password_path=str(connection.get("password") or ""),
+                                port=int(connection.get("port") or 22),
+                            ),
+                            f"{connection.get('user')}@{connection.get('host')}",
+                            _slurm_job_kill_command(
+                                row.instance_id, str(meta.get("allocation_owner_ticket_id") or ticket.id),
+                            ),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
                         try:
-                            cancel = await asyncio.create_subprocess_exec(
-                                *ssh_base_args(
-                                    key_path=str(connection.get("key") or ""),
-                                    password_path=str(connection.get("password") or ""),
-                                    port=int(connection.get("port") or 22),
-                                ),
-                                f"{connection.get('user')}@{connection.get('host')}",
-                                f"scancel {row.instance_id}",
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                            )
-                            await asyncio.wait_for(cancel.communicate(), timeout=30)
-                        except Exception as exc:
-                            meta["monitor_error"] = f"queue timeout scancel failed: {exc}"[:1000]
-                    state = "TIMEOUT"
-                    meta["scheduler_state"] = state
-                    meta["scheduler_reason"] = (
-                        f"maximum queue wait of {queue_limit / 3600:g} hours exceeded"
-                    )
+                            _, stderr = await asyncio.wait_for(cancel.communicate(), timeout=30)
+                        except asyncio.TimeoutError:
+                            cancel.kill()
+                            await cancel.communicate()
+                            raise
+                        if cancel.returncode != 0:
+                            raise RuntimeError(stderr.decode("utf-8", errors="replace").strip()[:1000]
+                                               or f"scancel exited {cancel.returncode}")
+                        meta["cancellation_requested_at"] = now.isoformat()
+                    except Exception as exc:
+                        meta["monitor_error"] = f"queue timeout scancel failed: {exc}"[:1000]
+                # A successful scancel is only an acknowledgement. Keep ownership
+                # and the waiting Ticket until a later scheduler query is terminal.
+            if meta.get("queue_timeout_requested_at") and state in _SLURM_TERMINAL_STATES:
+                meta["scheduler_reason"] = meta["queue_timeout_reason"]
 
             terminal = state in _SLURM_TERMINAL_STATES
             exit_event_at = _meta_datetime(meta.get("scheduler_event_exit_at"))
@@ -1120,7 +1143,12 @@ async def _last_sign_of_life(session: AsyncSession, hb: HeartbeatRun) -> datetim
     # caught, but only because something compared them.
     started = _aware(hb.started_at)
     last = (await session.execute(
-        select(func.max(TranscriptEvent.ts)).where(TranscriptEvent.heartbeat_id == hb.id)
+        select(func.max(TranscriptEvent.ts)).where(
+            TranscriptEvent.heartbeat_id == hb.id,
+            # The UI pulse is generated by this process even for a dead CLI.
+            # Claude tool keepalives have a bounded allowance in its driver.
+            TranscriptEvent.type != "heartbeat_alive",
+        )
     )).scalar_one_or_none()
     return started if last is None else max(_aware(last), started)
 

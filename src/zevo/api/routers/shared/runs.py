@@ -947,9 +947,9 @@ async def list_runs(
     # Grouping is a FIRST key, not a replacement for the sort: `group=task` with
     # `sort=score&order=desc` answers "for each task, best score first", which
     # neither one alone can.
-    grouped = (group or "").lower() == "task"
-    if grouped:
-        order_by = [asc(Run.task_name)] + order_by
+    group_field = {"task": "task_name", "status": "status"}.get((group or "").lower())
+    if group_field:
+        order_by = [asc(getattr(Run, group_field))] + order_by
 
     count_q = select(func.count()).select_from(Run)
     rows_q = select(Run)
@@ -969,7 +969,7 @@ async def list_runs(
         # same pass — Python sorts are stable but not per-key directional.
         matches = sorted(
             matches,
-            key=lambda r: ((r.task_name if grouped else ""),
+            key=lambda r: ((getattr(r, group_field) if group_field else ""),
                            (costs.get(r.id, 0.0) if asc_ else -costs.get(r.id, 0.0))),
         )
         rows = matches[offset:offset + limit]
@@ -990,7 +990,7 @@ async def list_runs(
         matches = sorted(
             matches,
             key=lambda run: (
-                run.task_name if grouped else "",
+                getattr(run, group_field) if group_field else "",
                 gains[run.id] is None,
                 (
                     gains[run.id]
