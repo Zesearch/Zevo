@@ -16,7 +16,7 @@ from pathlib import Path
 import asyncio
 import os
 from datetime import datetime, timezone
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import (
@@ -918,6 +918,8 @@ async def list_runs(
     sort: str = "started",
     order: str = "desc",
     group: str = "",
+    task: Annotated[list[str] | None, Query()] = None,
+    status: Annotated[list[str] | None, Query()] = None,
 ) -> list[RunSummary]:
     """Paginated, and searchable/sortable server-side.
 
@@ -934,6 +936,10 @@ async def list_runs(
     # One box searches the id, the run's own name and the task name: users type
     # whichever of the three they remember.
     where = []
+    if task:
+        where.append(Run.task_name.in_(task))
+    if status:
+        where.append(Run.status.in_(status))
     term = (q or "").strip()
     if term:
         like = f"%{term.lower()}%"
@@ -1064,6 +1070,16 @@ async def run_task_counts(
             func.lower(Run.id).like(like),
         ))
     return {r.task_name: int(r.n or 0) for r in (await db.execute(stmt)).all()}
+
+
+@router.get("/runs/status-counts")
+async def run_status_counts(db: AsyncSession = Depends(get_db)) -> dict[str, int]:
+    """Existing statuses across all runs, in the same order as status groups."""
+    stmt = select(Run.status, func.count().label("n")).group_by(Run.status).order_by(
+        case(_RUN_STATUS_PRIORITY, value=Run.status, else_=len(_RUN_STATUS_PRIORITY)),
+        Run.status,
+    )
+    return {row.status: int(row.n) for row in (await db.execute(stmt)).all()}
 
 
 @router.get("/runs/{run_id}/instructions", response_model=list[RunInstructionDTO])

@@ -20,6 +20,7 @@ def main():
             url = urlparse(route.request.url)
             query = parse_qs(url.query)
             data = []
+            total = state["total"]
             if url.path == "/api/runs":
                 offset = int(query.get("offset", [0])[0])
                 limit = int(query.get("limit", [100])[0])
@@ -29,7 +30,13 @@ def main():
                              status=statuses[min(i // 25, 5)], is_terminal=True, history=[],
                              iterations_completed=0, max_iterations=1,
                              started_at="2026-01-01T00:00:00Z")
-                        for i in range(offset, min(offset + limit, state["total"]))]
+                        for i in range(state["total"])]
+                if query.get("task"):
+                    data = [row for row in data if row['task_name'] in query['task']]
+                if query.get("status"):
+                    data = [row for row in data if row['status'] in query['status']]
+                total = len(data)
+                data = data[offset:offset + limit]
             elif url.path == "/api/cost/total":
                 data = {"total_usd": 0, "agent_usd": 0, "gpu_usd": 0}
             elif url.path == "/api/runs/statistics":
@@ -37,8 +44,10 @@ def main():
                         "failed": 0, "runtime_seconds": {"all": 0}, "improvements": []}
             elif url.path == "/api/runs/task-counts":
                 data = {f"Task {i // 3}": 3 for i in range(state["total"])}
+            elif url.path == "/api/runs/status-counts":
+                data = {status: 25 for status in ["success", "running", "planning", "degraded", "failed", "cancelled"]}
             route.fulfill(content_type="application/json", body=json.dumps(data),
-                          headers={"X-Total-Count": str(state["total"])})
+                          headers={"X-Total-Count": str(total)})
 
         page.route("**/api/**", api)
         base = os.environ.get("ZEVO_TEST_URL", "http://127.0.0.1:5188")
@@ -97,9 +106,33 @@ def main():
         current, count = map(int, re.findall(r"\d+", pager.inner_text()))
         assert current <= count, pager.inner_text()
         expect(page.get_by_text("No runs on record yet.")).to_have_count(0)
+        # Pick tasks that are absent from the first page; combine selections,
+        # clear them, and ensure switching groups does not leave hidden filters.
+        page.goto(base + "/runs")
+        page.get_by_role("button", name="Group By Task", exact=True).click()
+        page.locator("summary").filter(has_text="All tasks").click()
+        page.get_by_role("textbox", name="Find a task").fill("Task 4")
+        page.get_by_role("checkbox", name="Task 40", exact=True).check()
+        expect(page.get_by_role("link", name="Run 120", exact=True)).to_be_visible()
+        page.get_by_role("checkbox", name="Task 41", exact=True).check()
+        expect(page.get_by_text("6 matches", exact=True)).to_be_visible()
+        page.get_by_role("button", name="All tasks", exact=True).click()
+        expect(page.locator("summary")).to_have_text("All tasks")
+        page.get_by_role("checkbox", name="Task 40", exact=True).check()
+        page.get_by_role("button", name="Group By Status", exact=True).click()
+        page.locator("summary").filter(has_text="All statuses").click()
+        expect(page.get_by_role("checkbox", name="Halted", exact=True)).to_have_count(0)
+        page.get_by_role("checkbox", name="Running", exact=True).check()
+        expect(page.get_by_text("25 matches", exact=True)).to_be_visible()
+        page.get_by_role("checkbox", name="Success", exact=True).check()
+        expect(page.get_by_text("50 matches", exact=True)).to_be_visible()
+        page.get_by_role("checkbox", name="Running", exact=True).uncheck()
+        page.get_by_role("checkbox", name="Success", exact=True).uncheck()
+        page.get_by_role("button", name="All statuses", exact=True).click()
+        expect(page.get_by_role("link", name="Run 0", exact=True)).to_be_visible()
         assert not errors, errors
         browser.close()
-        print("Runs pagination: stable grouped paging, polling shrink and auto resize passed")
+        print("Runs: grouped paging, polling shrink, auto resize and multi-select filters passed")
 
 
 if __name__ == "__main__":
