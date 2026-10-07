@@ -1,3 +1,4 @@
+import { useLaunchSetting } from "../lib/useLaunchSetting";
 import { LaunchLimitsSummary, useLaunchPreflight } from "./LaunchPreflight";
 import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
@@ -127,7 +128,7 @@ export function CustomizedRunForm({
     ...(initialInputs || {}),
   });
   const compute = useComputeTargets();
-  const [pickedSetting, setPickedSetting] = useState("");
+  const { sourceSetting, pickedSetting, setPickedSetting, editSetting } = useLaunchSetting();
   // Matches Full Pipeline: the save-reuse prompt appears only after the user
   // has chosen or changed a Setting-owned value, not on an untouched form.
   const [touched, setTouched] = useState(false);
@@ -252,20 +253,7 @@ export function CustomizedRunForm({
   }
 
   function setDetailedInput(patch: Partial<RunInputValues>) {
-    const runOnlyKeys = new Set<keyof RunInputValues>([
-      "gpuProvider", "cloudBackend", "sshHostId", "numGpus", "gpuAllocationMode", "generation_backend",
-      "timeLimitHours", "queueWaitHours",
-      "promptFraming", "systemPrompt", "lossObjectiveConfig", "inferenceConfig",
-      "decodingStrategy", "maxNewTokens", "temperature", "topP", "topK",
-      "repetitionPenalty", "seed",
-    ]);
-    const runOnly = (Object.keys(patch) as Array<keyof RunInputValues>).every(
-      (key) => runOnlyKeys.has(key),
-    );
-    if (!runOnly) {
-      setPickedSetting("");
-      setTouched(true);
-    }
+    if (editSetting(patch, inputs)) setTouched(true);
     setInputs((current) => ({ ...current, ...patch }));
   }
 
@@ -510,19 +498,14 @@ export function CustomizedRunForm({
               <TaskSettingHistory
                 task={predefined.name}
                 onPick={applySetting}
-                selectedId={pickedSetting}
+                selectedId={sourceSetting}
+                modified={Boolean(sourceSetting && !pickedSetting)}
                 readOnly
               />
             </section>
           ) : null}
           onChange={(patch) => {
-            const runOnly = Object.keys(patch).every(
-              (key) => key === "timeLimitHours" || key === "queueWaitHours",
-            );
-            if (!runOnly) {
-              setPickedSetting("");
-              setTouched(true);
-            }
+            if (editSetting(patch, inputs)) setTouched(true);
             setInputs((v) => ({ ...v, ...patch }));
           }}
           beforeChecklist={(

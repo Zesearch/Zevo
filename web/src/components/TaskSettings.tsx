@@ -334,7 +334,7 @@ function SettingValidationCard({
  */
 export function TaskSettingHistory({
   task, onPick, onRun, onOpenDataset, onAddingChange,
-  readOnly = false, busy = false, selectedId = "",
+  readOnly = false, busy = false, selectedId = "", modified = false,
 }: {
   task: string;
   onPick?: (s: TaskSettingDTO) => void;
@@ -354,6 +354,7 @@ export function TaskSettingHistory({
   /** The row whose values are in the form. Marked, because a form that filled
    *  itself in should say what filled it. */
   selectedId?: string;
+  modified?: boolean;
 }) {
   const { data, isLoading, mutate } = useSWR<TaskSettingDTO[]>(
     task ? `/api/tasks/${encodeURIComponent(task)}/settings` : null,
@@ -403,7 +404,12 @@ export function TaskSettingHistory({
                 : "border-hair bg-canvas/50 hover:border-brass-500/40 hover:bg-raised"
             }`}
           >
-            <span className="shrink-0 font-mono text-2xs text-slate-100">{s.name}</span>
+            <span className="shrink-0 font-mono text-2xs text-slate-100">
+              {s.name}
+              {s.id === selectedId && modified && (
+                <span className="ml-2 text-brass-300">· Modified</span>
+              )}
+            </span>
             <LevelBadge level={s.level} />
             {/* The row scrolls rather than truncating: every fact on it is one
                 of the decisions the setting IS, and a row that cuts the last

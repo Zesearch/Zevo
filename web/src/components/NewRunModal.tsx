@@ -1,3 +1,4 @@
+import { useLaunchSetting } from "../lib/useLaunchSetting";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, Eraser } from "lucide-react";
 import useSWR from "swr";
@@ -201,7 +202,7 @@ export function NewRunModal({
   const [runName, setRunName] = useState("");
   // Which past setting the Optional fields came from, so the form can say where
   // its own contents came from. Cleared when the task changes.
-  const [pickedSetting, setPickedSetting] = useState("");
+  const { sourceSetting, pickedSetting, setPickedSetting, editSetting } = useLaunchSetting();
   // Whether this run's configuration is written down as a reusable setting,
   // and under what name. Every run used to record one automatically, which is
   // how a task collects settings nobody chose to keep — and why they end up
@@ -1270,19 +1271,16 @@ export function NewRunModal({
             )}
             optionalPrefix={predefined ? (
               <Field label="Saved settings">
-                <TaskSettingHistory task={trimmedTask} onPick={applySetting} selectedId={pickedSetting} />
+                <TaskSettingHistory
+                  task={trimmedTask}
+                  onPick={applySetting}
+                  selectedId={sourceSetting}
+                  modified={Boolean(sourceSetting && reusableSetting?.id !== sourceSetting)}
+                />
               </Field>
             ) : null}
             onChange={(patch) => {
-              // This deadline belongs only to the current Run, so changing it
-              // neither detaches nor dirties an otherwise exact Saved Setting.
-              const runOnly = Object.keys(patch).every(
-                (key) => key === "timeLimitHours" || key === "queueWaitHours",
-              );
-              if (!runOnly) {
-                setPickedSetting("");
-                setTouched(true);
-              }
+              if (editSetting(patch, inputs)) setTouched(true);
               setInputs((v) => ({ ...v, ...patch }));
             }}
 
