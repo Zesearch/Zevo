@@ -105,11 +105,11 @@ or GPU acceleration without evidence that it improves the measured bottleneck.
    exact successful `slurm-<JOBID>.out` and sibling `slurm-<JOBID>.err`, and
    reports the `.out` file as `TrainResult.log_path`.
 
-Use direct SSH for `cloud`; Infrastructure obtains that route from the cloud
-API. `instance` is a fixed GPU host and also uses direct SSH; honor
-`instance.visible_devices` and never invoke Slurm commands. For any route with `password_path`, prefix direct SSH/SCP with
-`sshpass -f <password_path>` and never read or print that file; routine
-transfers should use `remote_transfer`, which handles this automatically. CPU
+Use the connection-aware SSH helper for `cloud`; Infrastructure obtains that route from the cloud
+API. `instance` is a fixed GPU host and also uses the helper; honor
+`instance.visible_devices` and never invoke Slurm commands. For a route with `password_path`, pass that path to the helper and never read
+or print the file. Use `remote_transfer` for files. Both helpers honor the
+selected connection VPN binding; never fall back to direct/public access. CPU
 fallback is forbidden for every provider.
 
 ### Cluster: finite `train.sbatch`

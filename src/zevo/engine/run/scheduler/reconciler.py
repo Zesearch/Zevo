@@ -715,13 +715,12 @@ async def _query_slurm_job(
     """Return state, exit code, reason, and actual start for one exact job."""
     if not re.fullmatch(r"[0-9]+(?:_[0-9]+)?", job_id):
         raise ValueError(f"invalid Slurm job id {job_id!r}")
-    bootstrap = (
-        "if ! command -v squeue >/dev/null 2>&1 && "
-        "[ -f /etc/profile.d/modules.sh ]; then "
-        "source /etc/profile.d/modules.sh; module load default-environment; fi"
+    from zevo.engine.run.remote_jobs import _slurm_cli_bootstrap_command
+    bootstrap = _slurm_cli_bootstrap_command(
+        connection.get("env_setup", ""), required=("squeue", "sacct", "scontrol"),
     )
     command = (
-        "set +u; " + bootstrap + "; "
+        "set +u; " + bootstrap
         + f"q=$(squeue -h -j {job_id} -o %T 2>/dev/null | head -n 1 || true); "
         + f"a=$(TZ=UTC sacct -n -X -j {job_id} --format=State,ExitCode,Start -P "
           "2>/dev/null | awk 'NF {print; exit}' || true); "
