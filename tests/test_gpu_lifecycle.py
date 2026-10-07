@@ -100,6 +100,8 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
     commands = []
     async def ssh(info, command, **kwargs):
         commands.append(command)
+        if 'squeue -h' in command or 'sbatch --parsable' in command:
+            assert 'export SITE_SLURM=1' in command
         if "squeue -h" in command:
             return dict(ok=True, stdout='RUNNING\n' if live else '')
         return dict(ok=True, stdout='123\n')
@@ -118,7 +120,7 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
         session.add_all([run, ticket, owner])
         await session.commit()
         job, meta = await submit_workload(session, run=run, ticket=ticket, contract=contract,
-            info=SimpleNamespace(cluster=SimpleNamespace(workdir='/remote'), resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=4)),
+            info=SimpleNamespace(cluster=SimpleNamespace(workdir='/remote', env_setup='export SITE_SLURM=1'), resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=4)),
             heartbeat_id='h2', sha256='digest')
         assert job == '123'
         assert bool(meta['allocation_owner_row_id']) is reuses

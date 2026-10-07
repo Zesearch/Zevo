@@ -236,15 +236,27 @@ documented status endpoint/provider and let the scheduler perform later
 wakeups. Build API calls only from endpoint and schema fields supplied on the
 current typed input.
 
-Build direct SSH and SCP invocations as separate argument arrays. SSH uses
-lowercase `-p <port>`; SCP uses uppercase `-P <port>`. Never reuse one
-command's option array for the other, and never let a port value become a
-positional local path. When the route has `password_path`, use
-`sshpass -f <password_path>` and never read, print, copy, or place the password
-in argv/environment; otherwise use its `key_path`. The installed helper owns
-this authentication choice and is the recommended reference
-implementation for routine upload/download because it reads the exact route
-from the assigned `device_info.json` and owns both argument lists:
+Use the installed connection-aware helpers for every remote operation, including
+SSH commands, uploads/downloads, and Slurm submission, queries, and cancellation.
+The selected SSH Connection is authoritative: when it binds a VPN, all traffic
+must use that owner's selected VPN. If it is unavailable, report the failure and
+request reconnection; never retry over public/direct access or another user's
+connection. Without a VPN binding, the same helpers use the configured direct
+route. Do not construct raw ssh/scp commands or copy credential/route sidecars.
+
+For SSH commands use:
+
+```bash
+python -m zevo.engine.ssh_auth --host <typed-host> --user <typed-user> \
+  --port <typed-port> --key-path <typed-key-path> --command '<command>'
+```
+
+Use `--password-path` instead of `--key-path` for password authentication. Never
+read or print either credential file. Read the exact route from assigned typed
+input or `device_info.json`; never infer it from prose. For cluster commands,
+initialize the configured `env_setup` in the same remote shell before invoking
+Slurm. Do not modify the user's shell startup files to bypass missing setup.
+For transfers use:
 
 ```bash
 python -m zevo.engine.remote_transfer upload \
@@ -259,9 +271,7 @@ python -m zevo.engine.remote_transfer download \
 ```
 
 Repeat `--source`/`--remote-path` for multiple entries and add `--recursive`
-only for directories. Direct `scp` remains permitted when the task needs it,
-but it must follow the same route and option rules. Always use the exact route
-in `device_info.json`, not prose.
+only for directories. The helper owns SSH/SCP port flags and VPN routing.
 
 ## Long remote commands
 

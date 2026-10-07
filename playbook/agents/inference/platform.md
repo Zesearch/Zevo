@@ -66,13 +66,13 @@
    verify one termination record per real request, then return one complete
    `InferenceResult`.
 
-Use direct SSH for `cloud`; Infrastructure obtains that route from the cloud
-API. `instance` is also direct SSH, but to a fixed host: export
+Use the connection-aware SSH helper for `cloud`; Infrastructure obtains that route from the cloud
+API. `instance` also uses the helper, but targets a fixed host: export
 `CUDA_VISIBLE_DEVICES=device_info.instance.visible_devices` and the exact
 `ZEVO_TICKET_ID=<ticket_id>` into the prediction process so cancellation can
 terminate only this Ticket. Never invoke Slurm commands for instance. For a route with
-`password_path`, prefix direct SSH/SCP with `sshpass -f <password_path>` and
-never read or print that file; `remote_transfer` handles it automatically.
+`password_path`, pass that path to the helper and never read or print the file.
+The helper applies the selected connection VPN binding when present.
 Never fall back to CPU or run GPU inference inside the scheduler container.
 
 ### Cluster: finite `predict.sbatch`

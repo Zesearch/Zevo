@@ -127,3 +127,21 @@ def scp_base_args(
     if recursive:
         args.append("-r")
     return args
+
+
+if __name__ == '__main__':
+    import argparse
+    import subprocess
+    parser = argparse.ArgumentParser(description='Execute SSH using the selected credential and its VPN route.')
+    parser.add_argument('--host', required=True)
+    parser.add_argument('--user', required=True)
+    parser.add_argument('--port', type=int, default=22)
+    parser.add_argument('--key-path', default='')
+    parser.add_argument('--password-path', default='')
+    parser.add_argument('--command', required=True)
+    opts = parser.parse_args()
+    validate_ssh_target(host=opts.host, user=opts.user, port=opts.port)
+    raise SystemExit(subprocess.call([
+        *ssh_base_args(key_path=opts.key_path, password_path=opts.password_path, port=opts.port),
+        '--', f'{opts.user}@{opts.host}', opts.command,
+    ]))

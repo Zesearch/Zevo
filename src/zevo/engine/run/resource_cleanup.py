@@ -105,13 +105,17 @@ async def release_cluster(session, row: InfraInstance, run: Run) -> bool:
     if ticket is None or ticket.run_id != run.id:
         raise ValueError("Slurm cleanup Ticket does not belong to the Run")
     job_id = _safe_ticket_id(row.instance_id)
-    command = _slurm_job_kill_command(job_id, str((row.meta or {}).get("allocation_owner_ticket_id") or row.ticket_id))
+    connection = await session.get(SshHost, run.ssh_host_id) if run.ssh_host_id else None
+    env_setup = connection.env_setup if connection else os.environ.get("ZEVO_CLUSTER_ENV_SETUP", "")
+    command = _slurm_job_kill_command(
+        job_id, str((row.meta or {}).get("allocation_owner_ticket_id") or row.ticket_id),
+        env_setup=env_setup or "",
+    )
     # scancel accepting a request is not confirmation that the job released.
     command += (
         f" && remaining=$(squeue -h -j {job_id} -o '%i')"
         " && [ -z \"$remaining\" ]"
     )
-    connection = await session.get(SshHost, run.ssh_host_id) if run.ssh_host_id else None
     host = connection.host if connection else os.environ.get("ZEVO_CLUSTER_SSH_HOST", "")
     if not host:
         raise ValueError("cluster SSH connection is unavailable")

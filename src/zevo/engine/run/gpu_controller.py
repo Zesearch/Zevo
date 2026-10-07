@@ -228,7 +228,7 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             continue
         if run.gpu_allocation_mode != "per_run" and row.ticket_id != ticket.id:
             continue
-        checked = await _ssh(info, _slurm_cli_bootstrap_command() +
+        checked = await _ssh(info, _slurm_cli_bootstrap_command(info.cluster.env_setup, required=("sbatch", "squeue", "sacct", "scancel")) +
                              f"squeue -h -j {shlex.quote(row.instance_id)} -o '%T'")
         if not checked.get("ok"):
             raise ValueError("cannot verify the retained allocation: " + checked.get("error", ""))
@@ -292,7 +292,7 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
                                     idle_seconds=0 if run.gpu_allocation_mode == "per_run" else 1800)
         Path(contract.script_path).with_name("allocation-controller.sbatch").write_text(wrapper)
         command = publish + " && " + upload_text_command(wrapper_path, wrapper)
-        command += " && " + _slurm_cli_bootstrap_command() + "sbatch --parsable -- " + shlex.quote(wrapper_path)
+        command += " && " + _slurm_cli_bootstrap_command(info.cluster.env_setup, required=("sbatch", "squeue", "sacct", "scancel")) + "sbatch --parsable -- " + shlex.quote(wrapper_path)
     else:
         command = publish + " && printf '%s\\n' " + shlex.quote(owner.instance_id)
     result = await _ssh(info, command, timeout_seconds=30)

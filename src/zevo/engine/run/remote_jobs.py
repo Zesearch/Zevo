@@ -117,29 +117,38 @@ print('terminated', len(pids), 'ticket processes')
     return "python3 -c " + shlex.quote(script)
 
 
-def _slurm_cli_bootstrap_command() -> str:
+def _slurm_cli_bootstrap_command(env_setup: str = "", *, required: tuple[str, ...] = ("squeue", "scancel")) -> str:
     """Expose Slurm in non-interactive shells and fail closed if unavailable."""
-    return (
-        "if ! command -v squeue >/dev/null 2>&1 "
-        "|| ! command -v scancel >/dev/null 2>&1; then "
-        "if [ -r /etc/profile.d/modules.sh ]; then "
-        ". /etc/profile.d/modules.sh >/dev/null 2>&1; "
-        "if command -v module >/dev/null 2>&1; then "
-        "module load default-environment >/dev/null 2>&1 || true; fi; "
-        "fi; fi; "
-        "command -v squeue >/dev/null 2>&1 "
-        "|| { echo slurm-squeue-unavailable >&2; exit 127; }; "
-        "command -v scancel >/dev/null 2>&1 "
-        "|| { echo slurm-scancel-unavailable >&2; exit 127; }; "
-    )
+    if env_setup.strip():
+        # Run trusted connection setup in the same shell as Slurm. Silence its
+        # stdout so job ids and scheduler records remain machine-readable.
+        bootstrap = "{\n" + env_setup.strip() + "\n} >/dev/null || { echo slurm-env-setup-failed >&2; exit 126; }; "
+    else:
+        bootstrap = (
+            "if ! command -v squeue >/dev/null 2>&1 "
+            "|| ! command -v scancel >/dev/null 2>&1; then "
+            "if [ -r /etc/profile.d/modules.sh ]; then "
+            ". /etc/profile.d/modules.sh >/dev/null 2>&1; "
+            "if command -v module >/dev/null 2>&1; then "
+            "module load default-environment >/dev/null 2>&1 || true; fi; "
+            "fi; fi; "
+        )
+    for command in required:
+        if command not in {"sbatch", "squeue", "sacct", "scancel", "scontrol"}:
+            raise ValueError("unsupported Slurm command")
+        bootstrap += (
+            f"command -v {command} >/dev/null 2>&1 "
+            f"|| {{ echo slurm-{command}-unavailable >&2; exit 127; }}; "
+        )
+    return bootstrap
 
 
-def _slurm_job_kill_command(jobid_value: str, ticket_id: str) -> str:
+def _slurm_job_kill_command(jobid_value: str, ticket_id: str, env_setup: str = "") -> str:
     """Cancel one exact stage-owned job after verifying its Ticket name."""
     jobid = _safe_ticket_id(jobid_value)
     name = f"zevo-{_safe_ticket_id(ticket_id)}"
     return (
-        _slurm_cli_bootstrap_command()
+        _slurm_cli_bootstrap_command(env_setup)
         + f"if ! record=$(squeue -h -j {shlex.quote(jobid)} -o '%i|%j'); then "
         "echo stage-job-query-failed >&2; exit 1; fi; "
         "if [ -z \"$record\" ]; then echo stage-job-already-terminal; exit 0; fi; "
@@ -191,6 +200,7 @@ async def cancel_ticket_remote_job(
                     **await _ssh(info, command, timeout_seconds=20)}
         command = _slurm_job_kill_command(
             cluster_row.instance_id, str(meta.get("allocation_owner_ticket_id") or ticket.id),
+            env_setup=info.cluster.env_setup if info.cluster else "",
         )
     else:
         command = _direct_process_kill_command(ticket.id)
