@@ -444,6 +444,8 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert retry.bookkeeping_row_id == ""
     assert retry.job_id == ""
     assert observed == ["probe"]
+    assert (previous.num_gpus, previous.nodes) == (6, 2)
+    assert (retry.num_gpus, retry.nodes) == (6, 2)
 
     job_row.meta.update({
         "execution_attempt": 11,
@@ -463,6 +465,67 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert replacement.attempt == 12
     assert replacement.restart_instruction_id == "instruction-1"
     assert ticket.repair_attempts == 11
+
+
+@pytest.mark.parametrize("capacity", [None, SlurmCapacitySnapshot((1,), 1)])
+def test_explicit_gpu_request_is_not_shrunk_by_capacity(capacity):
+    selection = plan_stage_resources(
+        stage="inference", base_model="org/7B",
+        info=_cluster_info(constraints=_partial_node_constraints()),
+        maximum_gpus=4, requested_gpus=4, live_capacity=capacity,
+    )
+    assert selection.num_gpus == 4
+    assert selection.estimated_gpus == 1
+
+
+def test_explicit_gpu_request_rejects_limits():
+    with pytest.raises(ValueError, match="Run maximum"):
+        plan_stage_resources(
+            stage="inference", base_model="org/7B",
+            info=_cluster_info(constraints=_partial_node_constraints()),
+            maximum_gpus=2, requested_gpus=4,
+        )
+    with pytest.raises(ValueError, match="cluster constraints"):
+        plan_stage_resources(
+            stage="inference", base_model="org/7B",
+            info=_cluster_info(plan_gpus=4, constraints=_beta_constraints()),
+            maximum_gpus=4, requested_gpus=2,
+        )
+
+
+def test_instruction_replacement_replans_one_gpu_to_four_and_survives_repair(tmp_path, monkeypatch):
+    from zevo.db import Run
+    from zevo.engine.run import steering
+    info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
+    path = tmp_path / "device_info.json"
+    path.write_text(info.model_dump_json())
+    row = SimpleNamespace(
+        id="old", instance_id="123", gpu_count=1, status="failed",
+        meta={"nodes": 1, "scheduler_state": "FAILED", "execution_attempt": 1,
+              "superseded_by_instruction_id": "instruction-1"},
+    )
+    async def latest(*args):
+        return row
+    async def probe(*args):
+        raise OSError("capacity unavailable")
+    async def request(*args):
+        return 4
+    monkeypatch.setattr(steering, "requested_slurm_gpus", request)
+    monkeypatch.setattr(runner, "_latest_slurm_resource_request", latest)
+    monkeypatch.setattr(runner, "probe_slurm_capacity", probe)
+    ticket = SimpleNamespace(
+        id="infer-1", run_id="run-1", lane="optimization", status="running",
+        repair_attempts=4, payload={"base_model": "org/7B"},
+    )
+    contract = asyncio.run(runner._slurm_stage_job_contract(
+        run=Run(gpu_provider="cluster", num_gpus=4, max_queue_wait_hours=24, holdout={}),
+        ticket=ticket, work_dir=str(tmp_path), filename="predict.sbatch",
+        device_info_path=str(path), session=object(), stage="inference",
+    ))
+    assert contract.phase == "submit"
+    assert contract.num_gpus == 4
+    assert contract.previous_execution["num_gpus"] == 1
+    assert contract.restart_instruction_id == "instruction-1"
 
 
 

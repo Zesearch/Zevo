@@ -997,3 +997,24 @@ async def test_synthetic_ui_pulse_does_not_refresh_cli_liveness(session):
                                 payload={'silent_seconds': 600}, ts=_ago(0)))
     await session.commit()
     assert await _last_sign_of_life(session, hb) == _aware(real.ts)
+
+
+@pytest.mark.asyncio
+async def test_superseded_workload_is_released_without_repair_wakeup(session):
+    ticket = Ticket(id='infer-replaced', run_id='r1', agent_id='inference', status='running', payload={}, inputs={})
+    job = InfraInstance(
+        instance_id='12350', provider='cluster', status='ready', run_id='r1', ticket_id=ticket.id,
+        meta={'resource_request': True, 'scheduler_state': 'FAILED',
+              'submission_committed': True, 'superseded_by_instruction_id': 'instruction-1'},
+    )
+    session.add_all([ticket, job])
+    await session.commit()
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 0)
+    await session.refresh(job)
+    await session.refresh(ticket)
+    assert job.released_at is not None
+    assert ticket.status == 'running'
+    assert ticket.repair_attempts == 0
+    assert not (await session.execute(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == ticket.id,
+    ))).scalars().all()

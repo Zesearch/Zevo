@@ -1451,6 +1451,8 @@ class MessageBody(StrictBody):
     # lets it quiesce the old attempt before applying the new direction.
     run_instruction_id: str = ""
     instruction_action: Literal["continue", "restart_activation"] = "continue"
+    requested_gpus: int | None = Field(default=None, ge=1, strict=True)
+    gpu_stages: list[Literal["data", "inference", "train"]] = Field(default_factory=list)
 
 
 def _external_stage_message_body(
@@ -1486,6 +1488,12 @@ async def post_message(
     body = payload.body
     author = (payload.author or "").strip()
     instruction: RunInstruction | None = None
+    if payload.gpu_stages and payload.requested_gpus is None:
+        raise HTTPException(422, "gpu_stages requires requested_gpus")
+    if payload.requested_gpus is not None and (
+        not payload.run_instruction_id or payload.instruction_action != "restart_activation"
+    ):
+        raise HTTPException(422, "requested_gpus requires a routed restart instruction")
     if payload.run_instruction_id:
         instruction = await db.get(RunInstruction, payload.run_instruction_id)
         if author != "orchestrator":
@@ -1500,9 +1508,46 @@ async def post_message(
             raise HTTPException(422, "Run instructions may target only optimization Specialists")
         if t.status in TERMINAL_TICKET_STATUSES:
             raise HTTPException(409, "Run instructions require an active Specialist ticket")
+        owner_run = await db.get(Run, t.run_id)
+        if owner_run is None or owner_run.status in TERMINAL_RUN_STATUSES:
+            raise HTTPException(409, "Run instructions require an active Run")
         if payload.instruction_action == "restart_activation":
             if not payload.wake_agent:
                 raise HTTPException(422, "restart_activation requires wake_agent")
+            if payload.requested_gpus is not None:
+                if t.agent_id not in {"data", "inference", "train"}:
+                    raise HTTPException(422, "requested_gpus requires a compute stage")
+                if payload.gpu_stages and t.agent_id not in payload.gpu_stages:
+                    raise HTTPException(422, "gpu_stages must include the target stage")
+                if owner_run is None or owner_run.gpu_provider != "cluster":
+                    raise HTTPException(422, "requested_gpus is supported only for Slurm")
+                if owner_run.num_gpus and payload.requested_gpus > owner_run.num_gpus:
+                    raise HTTPException(422, "requested_gpus exceeds the Run GPU maximum")
+                from zevo.engine.run.remote_jobs import _device_info_for_ticket
+                from zevo.engine.run.resource_planning import plan_stage_resources
+                device = await _device_info_for_ticket(db, t)
+                if device is not None:
+                    try:
+                        plan_stage_resources(
+                            stage=t.agent_id, base_model=str((t.payload or {}).get("base_model") or ""),
+                            info=device, maximum_gpus=int(owner_run.num_gpus or 0),
+                            requested_gpus=payload.requested_gpus,
+                            training_method=str((t.payload or {}).get("training_method_pin") or ""),
+                            train_use_peft=bool(((t.payload or {}).get("method_config_pins") or {}).get("use_peft", False)),
+                            train_world_size_pin=int(((t.payload or {}).get("configuration_pins") or {}).get("world_size") or 0),
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(422, str(exc)) from exc
+            # Mark the old execution before releasing the instruction gate.
+            # Both future watcher polls and already queued events must ignore it.
+            stages = (await db.execute(select(InfraInstance).where(
+                InfraInstance.ticket_id == t.id, InfraInstance.provider == "cluster",
+                InfraInstance.instance_id != "",
+            ).order_by(InfraInstance.created_at.desc()))).scalars().all()
+            for stage in stages:
+                if (stage.meta or {}).get("resource_request") or (stage.meta or {}).get("stage_job"):
+                    stage.meta = {**(stage.meta or {}), "superseded_by_instruction_id": instruction.id}
+                    break
             active = (await db.execute(select(HeartbeatRun).where(
                 HeartbeatRun.ticket_id == t.id,
                 HeartbeatRun.finished_at.is_(None),
@@ -1579,7 +1624,9 @@ async def post_message(
             source="on_demand",
             reason=f"message by {payload.author}",
             payload=(
-                {"run_instruction_id": instruction.id, "instruction_action": payload.instruction_action}
+                {"run_instruction_id": instruction.id, "instruction_action": payload.instruction_action,
+                 **({"requested_gpus": payload.requested_gpus} if payload.requested_gpus is not None else {}),
+                 **({"gpu_stages": payload.gpu_stages} if payload.gpu_stages else {})}
                 if instruction is not None else None
             ),
         )

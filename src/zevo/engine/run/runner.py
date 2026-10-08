@@ -879,7 +879,9 @@ async def _slurm_stage_job_contract(
     prior_state = str(meta.get("scheduler_state") or "").strip().upper()
     prior_state = prior_state.split()[0].rstrip("+") if prior_state else ""
     prior_attempt = max(1, int(meta.get("execution_attempt") or 1))
-    restart_instruction_id = str(getattr(ticket, "_restart_instruction_id", "") or "")
+    restart_instruction_id = str(getattr(ticket, "_restart_instruction_id", "") or meta.get("superseded_by_instruction_id") or "")
+    from zevo.engine.run.steering import requested_slurm_gpus
+    requested_gpus = await requested_slurm_gpus(session, ticket.id) if cluster and session is not None else 0
     repair_submission = bool(
         cluster
         and job_row is not None
@@ -896,11 +898,12 @@ async def _slurm_stage_job_contract(
     if cluster and info.cluster is None:
         raise ValueError("cluster stage has no cluster execution route")
     if cluster:
-        registered_gpus = int(job_row.gpu_count or 0) if job_row is not None else 0
-        registered_nodes = int(meta.get("nodes") or 0) if job_row is not None else 0
+        replan = job_row is None or (repair_submission and bool(restart_instruction_id))
+        registered_gpus = int(job_row.gpu_count or 0) if not replan else 0
+        registered_nodes = int(meta.get("nodes") or 0) if not replan else 0
         capacity = None
         capacity_error = ""
-        if job_row is None:
+        if replan:
             try:
                 capacity = await probe_slurm_capacity(info)
             except (OSError, ValueError) as exc:
@@ -947,6 +950,7 @@ async def _slurm_stage_job_contract(
             ),
             registered_gpus=registered_gpus,
             registered_nodes=registered_nodes,
+            requested_gpus=requested_gpus,
         )
     else:
         selected_gpus = int(info.resource_plan.num_gpus)
@@ -956,7 +960,10 @@ async def _slurm_stage_job_contract(
                 f"Infrastructure selected {selected_gpus} GPUs outside Run maximum {limit}"
             )
         selection = None
-    if cluster and (getattr(run, "gpu_allocation_mode", None) or "per_stage") == "per_run":
+    per_run_allocation = cluster and (getattr(run, "gpu_allocation_mode", None) or "per_stage") == "per_run"
+    if per_run_allocation and requested_gpus and selection.nodes != 1:
+        raise ValueError("per_run requires a single-node allocation; use per_stage for multi-node training")
+    if per_run_allocation and not requested_gpus:
         from dataclasses import replace
         if info.resource_plan.nodes != 1:
             raise ValueError("per_run currently requires a single-node allocation so Data and Inference can reuse it; use per_stage for multi-node training")
@@ -1034,6 +1041,9 @@ async def _slurm_stage_job_contract(
     if repair_submission:
         previous_status_path = str(meta.get("status_path") or "")
         previous = contract.model_copy(update={
+            "num_gpus": int(job_row.gpu_count),
+            "nodes": int(meta.get("nodes") or 1),
+            "gpus_per_node": int(job_row.gpu_count) // int(meta.get("nodes") or 1),
             "phase": "collect", "attempt": prior_attempt,
             "previous_execution": {}, "restart_instruction_id": "",
             "bookkeeping_row_id": job_row.id, "job_id": job_row.instance_id,
@@ -3968,6 +3978,7 @@ async def _slurm_watcher_job_is_current(
         and current_job is not None
         and current_job.instance_id == expected_job_id
         and bool(current_meta.get("submission_committed"))
+        and not current_meta.get("superseded_by_instruction_id")
         and current_job.released_at is not None
         and current_state in _SLURM_TERMINAL_STATES
     )
@@ -4346,6 +4357,8 @@ async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket
     if row is None:
         return True
     meta = dict(row.meta or {})
+    if meta.get("superseded_by_instruction_id"):
+        return False
     state = str(meta.get("scheduler_state") or "").upper().split("+")[0].split(" ")[0]
     if state not in _SLURM_TERMINAL_STATES or state == "COMPLETED":
         return True

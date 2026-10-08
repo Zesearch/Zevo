@@ -213,6 +213,7 @@ def plan_stage_resources(
     train_world_size_pin: int = 0,
     registered_gpus: int = 0,
     registered_nodes: int = 0,
+    requested_gpus: int = 0,
 ) -> StageResourceSelection:
     """Choose a coarse tier, then conform it to the discovered cluster rules.
 
@@ -262,6 +263,19 @@ def plan_stage_resources(
         estimated = max(estimated, inference_gpus_per_replica)
 
     single_node = stage in {"data", "inference"}
+    if requested_gpus:
+        if requested_gpus < estimated or (maximum_gpus and requested_gpus > maximum_gpus):
+            raise ValueError(f"requested {requested_gpus} GPUs outside stage requirement {estimated} and Run maximum {maximum_gpus or 'unlimited'}")
+        if stage == "train" and train_world_size_pin and requested_gpus != train_world_size_pin:
+            raise ValueError("requested GPUs conflict with pinned Train world_size")
+        shape = _shape_for(requested_gpus, constraints, single_node=single_node)
+        if shape is None or (stage == "inference" and requested_gpus % max(1, estimated)):
+            raise ValueError("requested GPU count violates cluster constraints or model replica size")
+        return StageResourceSelection(
+            stage=stage, estimated_gpus=estimated, num_gpus=requested_gpus,
+            nodes=shape[0], gpus_per_node=shape[1],
+            source="user instruction", rationale="honor the explicit GPU request; queue if capacity is busy",
+        )
     if stage == "train" and train_world_size_pin:
         if train_world_size_pin < estimated:
             raise ValueError(

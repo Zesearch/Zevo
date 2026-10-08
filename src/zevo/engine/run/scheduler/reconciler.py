@@ -1078,6 +1078,7 @@ async def _reconcile_slurm_stage_jobs(
             meta["monitor_terminal"] = True
             can_queue_collect = (
                 bool(meta.get("submission_committed"))
+                and not meta.get("superseded_by_instruction_id")
                 and ticket.status in {"waiting_external", "running"}
                 and ticket.id not in active_collect_ticket_ids
             )

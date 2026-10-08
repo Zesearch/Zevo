@@ -12,6 +12,7 @@ from zevo.api.database import get_db
 from zevo.api.routers.shared import runs as runs_router
 from zevo.api.routers.shared.tickets import MessageBody, post_message
 from zevo.db import AgentWakeupRequest, Base, Run, RunInstruction, Ticket
+from zevo.db import InfraInstance
 from zevo.engine.agent.drivers._prompt import _conversation_block
 from zevo.engine.run.runner import _run_instruction_context
 from zevo.engine.run.steering import instruction_gate_active
@@ -264,3 +265,115 @@ async def test_instruction_continue_does_not_stop_execution(client_and_session, 
             run_instruction_id=posted.json()['id'],
         ), db)
         assert (await db.get(Ticket, 'train-001')).status == 'waiting_external'
+
+
+@pytest.mark.asyncio
+async def test_resize_persists_request_and_suppresses_old_watcher(client_and_session):
+    from datetime import datetime, timezone
+    from zevo.engine.run.runner import _slurm_watcher_job_is_current, _activate_failed_workload_repair
+    client, Session = client_and_session
+    posted = await client.post('/api/runs/run-1/instructions', json={'body': 'Use 4 GPUs'})
+    async with Session() as db:
+        run = await db.get(Run, 'run-1')
+        run.gpu_provider = 'cluster'
+        run.num_gpus = 4
+        old = InfraInstance(
+            id='old-job', run_id='run-1', ticket_id='train-001',
+            provider='cluster', instance_id='123', status='failed', gpu_count=1,
+            released_at=datetime.now(timezone.utc),
+            meta={'resource_request': True, 'submission_committed': True,
+                  'scheduler_state': 'FAILED'},
+        )
+        db.add(old)
+        await db.commit()
+        await post_message('train-001', MessageBody(
+            body='Use 4 GPUs', author='orchestrator',
+            run_instruction_id=posted.json()['id'], instruction_action='restart_activation',
+            requested_gpus=4,
+        ), db)
+        ticket = await db.get(Ticket, 'train-001')
+        from zevo.engine.run.steering import requested_slurm_gpus
+        assert await requested_slurm_gpus(db, ticket.id) == 4
+        assert old.meta['superseded_by_instruction_id'] == posted.json()['id']
+        assert not await _slurm_watcher_job_is_current(db, ticket, {'job_id': '123'})
+        assert not await _activate_failed_workload_repair(db, ticket)
+        assert ticket.repair_attempts == 0
+        assert ticket.status == 'queued'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('provider,maximum', [('cloud', 4), ('cluster', 2)])
+async def test_invalid_resize_does_not_change_ticket(client_and_session, provider, maximum):
+    from fastapi import HTTPException
+    client, Session = client_and_session
+    posted = await client.post('/api/runs/run-1/instructions', json={'body': 'Use 4 GPUs'})
+    async with Session() as db:
+        run = await db.get(Run, 'run-1')
+        run.gpu_provider, run.num_gpus = provider, maximum
+        await db.commit()
+        with pytest.raises(HTTPException) as error:
+            await post_message('train-001', MessageBody(
+                body='Use 4 GPUs', author='orchestrator', requested_gpus=4,
+                run_instruction_id=posted.json()['id'], instruction_action='restart_activation',
+            ), db)
+        assert error.value.status_code == 422
+        ticket = await db.get(Ticket, 'train-001')
+        assert ticket.status == 'waiting_external'
+        assert not (ticket.customization or {}).get('slurm_requested_gpus')
+
+
+@pytest.mark.asyncio
+async def test_resize_finds_retained_owner_after_workload_alias_finished(client_and_session):
+    from datetime import datetime, timezone
+    from zevo.engine.run.remote_jobs import allocation_for_resize
+    _, Session = client_and_session
+    async with Session() as db:
+        owner = InfraInstance(
+            id='owner', run_id='run-1', ticket_id='infra-001', provider='cluster',
+            instance_id='123', status='ready', gpu_count=1,
+            meta={'resource_request': True, 'monitor_terminal': True},
+        )
+        alias = InfraInstance(
+            id='alias', run_id='run-1', ticket_id='train-001', provider='cluster',
+            instance_id='123', status='released', gpu_count=1,
+            released_at=datetime.now(timezone.utc),
+            meta={'resource_request': True, 'allocation_owner_row_id': 'owner'},
+        )
+        db.add_all([owner, alias])
+        await db.commit()
+        ticket = await db.get(Ticket, 'train-001')
+        assert (await allocation_for_resize(db, ticket)).id == owner.id
+        other = InfraInstance(
+            id='other', run_id='run-1', ticket_id='test-001', provider='cluster',
+            instance_id='123', status='ready', meta={'resource_request': True},
+        )
+        db.add(other)
+        await db.commit()
+        with pytest.raises(ValueError, match='another stage'):
+            await allocation_for_resize(db, ticket)
+        other.released_at = datetime.now(timezone.utc)
+        owner.released_at = datetime.now(timezone.utc)
+        await db.commit()
+        assert await allocation_for_resize(db, ticket) is None
+
+
+@pytest.mark.asyncio
+async def test_gpu_stage_scope_reaches_future_optimization_tickets_only(client_and_session):
+    from zevo.engine.run.steering import requested_slurm_gpus
+    client, Session = client_and_session
+    posted = await client.post('/api/runs/run-1/instructions', json={'body': 'Use 4 GPUs for inference and training'})
+    async with Session() as db:
+        run = await db.get(Run, 'run-1')
+        run.gpu_provider, run.num_gpus = 'cluster', 4
+        await db.commit()
+        await post_message('train-001', MessageBody(
+            body='Use 4 GPUs', author='orchestrator', requested_gpus=4,
+            gpu_stages=['train', 'inference'], run_instruction_id=posted.json()['id'],
+            instruction_action='restart_activation',
+        ), db)
+        db.add(Ticket(id='future-infer', run_id='run-1', agent_id='inference', status='queued'))
+        db.add(Ticket(id='other-data', run_id='run-1', agent_id='data', status='queued'))
+        await db.commit()
+        assert await requested_slurm_gpus(db, 'future-infer') == 4
+        assert await requested_slurm_gpus(db, 'test-001') == 0
+        assert await requested_slurm_gpus(db, 'other-data') == 0
