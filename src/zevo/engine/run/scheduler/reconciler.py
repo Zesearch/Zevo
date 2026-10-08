@@ -1190,14 +1190,13 @@ async def _sweep_stuck_tickets(
                 InfraInstance.ticket_id == tk.id,
                 InfraInstance.provider == "cluster",
                 InfraInstance.instance_id != "",
-                InfraInstance.released_at.is_(None),
             )
             .order_by(InfraInstance.created_at.desc())
-            .limit(5)
+            .limit(1)
         )).scalars().all()
         live_stage = next((
             row for row in stage_rows
-            if bool(
+            if row.released_at is None and bool(
                 (row.meta or {}).get("resource_request")
                 or (row.meta or {}).get("stage_job")
             )
@@ -1214,6 +1213,24 @@ async def _sweep_stuck_tickets(
             .order_by(HeartbeatRun.started_at.desc())
             .limit(1)
         )).scalar_one_or_none()
+
+        # Allocation release and workload collection are independent. The
+        # allocation watcher can release this row before the stage watcher
+        # confirms EXITED and queues collect. Until that handoff, the finished
+        # submission heartbeat is expected: the stage watcher still owns the
+        # Ticket, even with no live allocation. Match the latest submission so
+        # an old job cannot hide a crashed collect/repair activation.
+        stage = stage_rows[0] if stage_rows else None
+        meta = dict(stage.meta or {}) if stage is not None else {}
+        if (
+            (meta.get("resource_request") or meta.get("stage_job"))
+            and meta.get("submission_committed")
+            and not meta.get("collect_wakeup_queued")
+            and not meta.get("superseded_by_instruction_id")
+            and latest_hb is not None
+            and meta.get("submission_heartbeat_id") == latest_hb.id
+        ):
+            continue
 
         runner_gone = False
         reason = ""
