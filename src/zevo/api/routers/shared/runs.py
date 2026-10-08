@@ -98,16 +98,20 @@ async def _resolve_run_compute(
     """Resolve an explicit picker value or the configured concrete default."""
     provider = _normalize_gpu_provider(body.gpu_provider or "")
     if provider:
-        return ComputeTarget(
+        compute = ComputeTarget(
             value="explicit",
             provider=cast(ComputeProvider, provider),
             cloud_backend=(body.cloud_backend or "").strip().lower(),
             ssh_host_id=(body.ssh_host_id or "").strip(),
         )
-    try:
-        return await resolve_default_compute(db)
-    except DefaultComputeError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    else:
+        try:
+            compute = await resolve_default_compute(db)
+        except DefaultComputeError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    if body.gpu_allocation_mode == "per_submission" and compute.provider != "cluster":
+        raise HTTPException(400, "Per submission GPU allocation requires a Slurm connection.")
+    return compute
 
 
 def _dataset_profile_for(dataset_path: str) -> dict | None:
@@ -1350,9 +1354,9 @@ class CreateRunRequest(BaseModel):
     gpu_provider: Literal["cluster", "cloud", "instance"] | None = None
     # One allocation for the whole Run by default: a cloud rental or lease is
     # acquired once and reused by Data, Inference and Train across iterations.
-    # per_stage re-acquires before each GPU stage (and is required for
-    # multi-node Slurm training, which per_run does not support yet).
-    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_run"
+    # per_stage re-acquires per GPU stage; per_submission per Slurm workload.
+    # Both support multi-node Slurm training; per_run currently does not.
+    gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_run"
     # Optional verified SSH profile for a cluster/instance run.
     ssh_host_id: str = ""
     # Which cloud to rent on when gpu_provider == "cloud" (pins Vast.ai vs Lambda
@@ -2983,7 +2987,7 @@ class RunRequestDTO(BaseModel):
     max_runtime_hours: float
     max_queue_wait_hours: float
     gpu_provider: Literal["cluster", "cloud", "instance"]
-    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_stage"
+    gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_stage"
     num_gpus: int
     generation_backend: Literal["hf", "vllm"]
     # Each file, classified the same way the Tasks list classifies a task's

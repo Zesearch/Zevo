@@ -981,7 +981,7 @@ class InfraTaskInput(AgentTaskInput):
             "'instance' = use a fixed GPU host directly over SSH, without Slurm."
         ),
     )
-    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_stage"
+    gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_stage"
     cloud_backend: Literal["", "vastai", "lambda"] = Field(
         "",
         description=(
@@ -1215,6 +1215,8 @@ class InfraTaskInput(AgentTaskInput):
 
     @model_validator(mode="after")
     def validate_remote_root(self) -> "InfraTaskInput":
+        if self.gpu_allocation_mode == "per_submission" and self.provider != "cluster":
+            raise ValueError("per_submission requires a Slurm connection")
         if self.release and self.purpose:
             raise ValueError("release must not carry a stage purpose")
         if not self.release and not self.purpose:

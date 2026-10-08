@@ -1157,9 +1157,9 @@ export function NewRunModal({
                     />
                     <ChoiceField
             label="GPU allocation" value={inputs.gpuAllocationMode}
-            onChange={(v) => setInputs((s) => ({ ...s, gpuAllocationMode: v as "per_stage" | "per_run" }))}
-            options={[["per_run", "Entire run"], ["per_stage", "Per stage"]]}
-            hint="Entire run acquires GPUs once and reuses them across stages and iterations. Per stage re-acquires before each GPU stage; choose it for multi-node Slurm training. Both retain GPUs during bounded bug repair."
+            onChange={(v) => setInputs((s) => ({ ...s, gpuAllocationMode: v as "per_stage" | "per_run" | "per_submission" }))}
+            options={[["per_run", "Entire run"], ["per_stage", "Per stage"], ["per_submission", "Per submission (Slurm)"]]}
+            hint="Entire run retains GPUs across stages. Per stage retains GPUs within a stage, including repair. Per submission (Slurm only) releases GPUs after each workload and requests a new allocation for retries."
           />
           <ChoiceField
                       label="Generation backend" value={inputs.generation_backend}

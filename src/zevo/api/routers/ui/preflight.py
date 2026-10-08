@@ -72,7 +72,7 @@ class PreflightBody(BaseModel):
     # Mirror CreateRunRequest: execution runtime is top-level and never part of
     # UserRequest. A missing provider resolves to the concrete Settings default.
     gpu_provider: Literal["cluster", "cloud", "instance"] | None = None
-    gpu_allocation_mode: Literal["per_stage", "per_run"] = "per_run"
+    gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_run"
     cloud_backend: Literal["", "vastai", "lambda"] = ""
     ssh_host_id: str = ""
     num_gpus: int | None = Field(None, ge=0)
@@ -782,6 +782,8 @@ async def preflight(body: PreflightBody, db: AsyncSession = Depends(get_db)) -> 
             _block(items, "ssh_host_unverified", "Verify the selected SSH connection before launch.")
         elif host.category != provider:
             _block(items, "ssh_host_category", "The selected SSH connection does not match the GPU provider.")
+    if body.gpu_allocation_mode == "per_submission" and provider != "cluster":
+        _block(items, "gpu_allocation_mode", "Per submission GPU allocation requires a Slurm connection.")
     _check_infra(
         provider,
         items,

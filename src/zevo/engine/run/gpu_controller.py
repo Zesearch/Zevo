@@ -1,4 +1,4 @@
-"""Finite Slurm allocation controller; workload exit does not release hardware.
+"""Finite Slurm allocation controller; supports retained or single-workload allocations.
 
 The backend alone publishes validated commands. Each command has an immutable
 identity and its own outcome, so late events cannot complete a newer attempt.
@@ -18,6 +18,7 @@ CONTROLLER_SOURCE = r'''
 import json, os, pathlib, signal, subprocess, sys, time
 root = pathlib.Path(sys.argv[1])
 idle_seconds = int(sys.argv[2])
+single_workload = len(sys.argv) > 3 and sys.argv[3] == "1"
 child = None
 stopping = False
 
@@ -133,6 +134,8 @@ while not stopping:
     temporary = output_path.with_suffix(".tmp")
     temporary.write_text(json.dumps({"exit_code": rc, "error": error}))
     os.replace(temporary, output_path)
+    if single_workload:
+        sys.exit(rc if 0 <= rc <= 255 else 1)
     last_work = time.monotonic()
 '''
 
@@ -149,7 +152,7 @@ def upload_text_command(path: str, content: str) -> str:
     return "python3 -c " + shlex.quote(script)
 
 
-def controller_script(stage_script: str, directory: str, *, idle_seconds: int = 1800) -> str:
+def controller_script(stage_script: str, directory: str, *, idle_seconds: int = 1800, single_workload: bool = False) -> str:
     """Preserve the site's validated SBATCH resource/container directives."""
     directives = [line for line in stage_script.splitlines() if line.startswith("#SBATCH")]
     encoded = base64.b64encode(CONTROLLER_SOURCE.encode()).decode()
@@ -157,7 +160,7 @@ def controller_script(stage_script: str, directory: str, *, idle_seconds: int = 
     return "\n".join([
         "#!/bin/bash", *directives,
         "exec python3 -c " + shlex.quote(program) + " " + shlex.quote(directory)
-        + " " + str(idle_seconds), "",
+        + " " + str(idle_seconds) + " " + str(int(single_workload)), "",
     ])
 
 
@@ -232,6 +235,8 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
                              f"squeue -h -j {shlex.quote(row.instance_id)} -o '%T'")
         if not checked.get("ok"):
             raise ValueError("cannot verify the retained allocation: " + checked.get("error", ""))
+        if run.gpu_allocation_mode == "per_submission" and checked.get("stdout", "").strip():
+            raise ValueError("previous submission allocation is still active or terminating; retry after Slurm releases it")
         if checked.get("stdout", "").strip() not in {"RUNNING", "PENDING", "CONFIGURING"}:
             # The provider no longer owns the allocation. It is safe to replace it.
             from datetime import datetime, timezone
@@ -289,7 +294,8 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
                         f"#SBATCH --time={walltime['requested_minutes']}\n")
             body = "#!/bin/bash\n" + envelope + body
         wrapper = controller_script(body, directory,
-                                    idle_seconds=0 if run.gpu_allocation_mode == "per_run" else 1800)
+                                    idle_seconds=0 if run.gpu_allocation_mode == "per_run" else 1800,
+                                    single_workload=run.gpu_allocation_mode == "per_submission")
         Path(contract.script_path).with_name("allocation-controller.sbatch").write_text(wrapper)
         command = publish + " && " + upload_text_command(wrapper_path, wrapper)
         command += " && " + _slurm_cli_bootstrap_command(info.cluster.env_setup, required=("sbatch", "squeue", "sacct", "scancel")) + "sbatch --parsable -- " + shlex.quote(wrapper_path)

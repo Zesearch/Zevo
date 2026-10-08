@@ -798,7 +798,7 @@ def run_create(
         help="Natural-language guidance for Zevo when --base-model is blank.",
     ),
     gpu_allocation_mode: str = typer.Option(
-        "per_run", "--gpu-allocation-mode", help="GPU lifetime: per_run (default, one allocation for the whole run) or per_stage (re-acquire per GPU stage; required for multi-node Slurm training). Both retain GPUs during bug repair.",
+        "per_run", "--gpu-allocation-mode", help="GPU lifetime: per_run (default, whole run), per_stage (one GPU stage, including repair), or per_submission (Slurm only; release after every workload, re-acquire for retries).",
     ),
     gpu_provider: str = typer.Option(
         "", "--gpu-provider", help="where to get the GPU: cluster (SSH login node + finite Slurm jobs) | cloud (rent through Vast.ai or Lambda Cloud) | instance (fixed directly reachable GPU host, no Slurm). Empty defaults to instance.",
