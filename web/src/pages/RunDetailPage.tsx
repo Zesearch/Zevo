@@ -1,5 +1,6 @@
 import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
 import { instructionBlocks, stageStatus } from "../lib/stageStatus";
+import { timelineTicketStatus } from "../lib/timelineStatus";
 import { useState, useMemo, useEffect, Fragment } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
@@ -656,18 +657,18 @@ function PipelineTimeline({
         {groups.map((g) => {
           const open = expanded.has(g.key);
           const groupTickets = [...g.tickets, ...g.mirror];
+          const ticketStatus = timelineTicketStatus(groupTickets);
           const groupOrchestrator = orchestratorByGroup.get(g.key) || [];
           const groupHasUnrecordedFailure = unrecordedOrchestratorFailure
             && failureGroupKey === g.key;
           const groupPaused = groupTickets.some((ticket) => pausedTicketIds.has(ticket.id));
           const groupRunning = !groupPaused && (groupTickets.some((t) => t.status === "running" || t.status === "repairing")
             || groupOrchestrator.some((heartbeat) => heartbeat.is_live));
-          const groupFailed = groupTickets.some((t) => t.status === "failed")
+          const groupFailed = ticketStatus === "failed"
             || groupOrchestrator.some((heartbeat) => heartbeat.action === "mark_failed")
             || groupHasUnrecordedFailure;
-          const groupDegraded = groupTickets.some((t) => t.status === "degraded");
-          const groupDone = groupTickets.length > 0
-            && groupTickets.every((t) => ["succeeded", "skipped"].includes(t.status));
+          const groupDegraded = ticketStatus === "degraded";
+          const groupDone = ticketStatus === "succeeded";
           const headDot = groupPaused
             ? statusToneFor("paused").dot
             : groupRunning

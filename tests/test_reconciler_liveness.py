@@ -1018,3 +1018,109 @@ async def test_superseded_workload_is_released_without_repair_wakeup(session):
     assert not (await session.execute(select(AgentWakeupRequest).where(
         AgentWakeupRequest.ticket_id == ticket.id,
     ))).scalars().all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lane", ["optimization", "held_out_test"])
+@pytest.mark.parametrize("outcome", ["COMPLETED", "FAILED"])
+async def test_allocation_release_before_collect_keeps_watcher_ownership(
+    session, monkeypatch, lane, outcome,
+):
+    """Allocation can finish between workload polling and the stuck sweep."""
+    import zevo.engine.run.scheduler.reconciler as reconciler
+    ticket = Ticket(id="infer-race", run_id="r1", agent_id="inference",
+                    lane=lane, status="running", payload={}, inputs={})
+    heartbeat = HeartbeatRun(
+        id="hb-race", ticket_id=ticket.id, agent_id="inference",
+        driver="claude_cli", model="m", activation_phase="repair",
+        started_at=_ago(600), finished_at=_ago(300), exit_code=0,
+    )
+    job = InfraInstance(
+        id="job-race", instance_id="953610", provider="cluster",
+        status="ready", run_id="r1", ticket_id=ticket.id,
+        meta={
+            "resource_request": True, "scheduler_state": "RUNNING",
+            "controller_directory": "/remote/controller",
+            "controller_outcome_path": "/remote/controller/outcome.json",
+            "submission_heartbeat_id": heartbeat.id,
+            "submission_committed": True, "external_ticket_running": True,
+            "scheduler_event_exit_pending": True,
+            "scheduler_event_exit_code": 0 if outcome == "COMPLETED" else 1,
+            "scheduler_event_exit_at": _ago(1).isoformat(),
+            "monitor_next_at": _ago(-30).isoformat(),
+        },
+    )
+    session.add_all([ticket, heartbeat, job])
+    await session.commit()
+
+    async def connection(*args, **kwargs):
+        return {"host": "cluster", "user": "u", "port": 22}
+
+    async def query(*args, **kwargs):
+        if kwargs.get("outcome_path"):
+            return outcome, "0:0" if outcome == "COMPLETED" else "1:0", "workload exited", _ago(300)
+        return "COMPLETED", "0:0", "None", _ago(300)
+
+    monkeypatch.setattr(reconciler, "_slurm_connection", connection)
+    monkeypatch.setattr(reconciler, "_query_slurm_job", query)
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 0)
+    assert await reconciler._reconcile_slurm_allocation_owners(session) == 1
+    await session.refresh(job)
+    assert job.released_at is not None
+    assert job.meta["scheduler_state"] == "RUNNING"
+    assert await _sweep_stuck_tickets(session, CUTOFF) == 0
+    await session.refresh(ticket)
+    assert ticket.status == "running"
+
+    job.meta = {**job.meta, "monitor_next_at": _ago(1).isoformat()}
+    await session.commit()
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 1)
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 0)
+    await session.refresh(ticket)
+    await session.refresh(job)
+    assert ticket.status == "queued"
+    assert job.meta["collect_wakeup_queued"] is True
+    assert not job.meta.get("scheduler_event_exit_pending")
+    wakes = (await session.execute(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == ticket.id,
+    ))).scalars().all()
+    assert len(wakes) == 1
+    assert wakes[0].source == "slurm_watcher"
+    assert wakes[0].payload["scheduler_state"] == outcome
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["collect", "uncommitted", "superseded", "newer_job"])
+async def test_released_job_does_not_hide_abandoned_activation(session, monkeypatch, scenario):
+    import zevo.engine.run.remote_jobs as remote_jobs
+
+    async def no_remote_work(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(remote_jobs, "cancel_run_remote_jobs", no_remote_work)
+    await _mk(session, "infer-abandoned", started_ago=600, finished=True)
+    job = InfraInstance(
+        id="old-job", instance_id="953610", provider="cluster", status="released",
+        run_id="r1", ticket_id="infer-abandoned", released_at=_ago(10), created_at=_ago(300),
+        meta={"resource_request": True, "scheduler_state": "COMPLETED",
+              "submission_committed": True, "submission_heartbeat_id": "hb-infer-abandoned"},
+    )
+    if scenario == "collect":
+        session.add(HeartbeatRun(
+            id="hb-collect", ticket_id="infer-abandoned", agent_id="inference",
+            driver="claude_cli", model="m", activation_phase="collect",
+            started_at=_ago(100), finished_at=_ago(50), exit_code=1,
+        ))
+    elif scenario == "uncommitted":
+        job.meta = {**job.meta, "submission_committed": False}
+    elif scenario == "superseded":
+        job.meta = {**job.meta, "superseded_by_instruction_id": "instruction"}
+    else:
+        session.add(InfraInstance(
+            id="new-job", instance_id="953611", provider="cluster", status="released",
+            run_id="r1", ticket_id="infer-abandoned", released_at=_ago(1),
+            meta={"resource_request": True, "scheduler_state": "FAILED"},
+        ))
+    session.add(job)
+    await session.commit()
+    assert await _sweep_stuck_tickets(session, CUTOFF) == 1
