@@ -35,6 +35,7 @@ export function statusToneFor(status: string): StatusTone {
     case "degraded":
       return { dot: "bg-lilac-400", text: "text-lilac-300", ring: "border-lilac-500/30 bg-lilac-500/10" };
     case "awaiting_input":
+    case "needs_input":
     case "waiting_external":
       return { dot: "bg-skyx-400 shadow-glow-brass", text: "text-skyx-200", ring: "border-skyx-400/50 bg-skyx-500/15", live: true };
     case "paused":

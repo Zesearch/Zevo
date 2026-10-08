@@ -234,8 +234,9 @@ async def test_new_slurm_job_replaces_stale_queued_collect_payload(db) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requested_gpus", [None, 4])
 async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
-    db, monkeypatch,
+    db, monkeypatch, requested_gpus,
 ) -> None:
     await _seed(db, "train", cap=1, n_queued=0)
     async with db() as s:
@@ -256,7 +257,8 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
         s.add(AgentWakeupRequest(
             id="instruction-wake", agent_id="train", ticket_id="train-replace",
             status="queued", source="on_demand", reason="message by orchestrator",
-            payload={"run_instruction_id": "instruction-1", "instruction_action": "restart_activation"},
+            payload={"run_instruction_id": "instruction-1", "instruction_action": "restart_activation",
+                     **({"requested_gpus": requested_gpus} if requested_gpus else {})},
             scheduled_for=datetime.now(timezone.utc),
         ))
         await s.commit()
@@ -268,8 +270,9 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
     from zevo.engine.run import remote_jobs
     cleanup_calls = []
 
-    async def stop_workload(db, ticket, *, preserve_allocation=False):
+    async def stop_workload(db, ticket, *, preserve_allocation=False, resize_allocation=False):
         cleanup_calls.append(preserve_allocation)
+        assert resize_allocation == bool(requested_gpus)
         return {"attempted": True, "ok": True}
 
     monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", stop_workload)
@@ -292,8 +295,11 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
         await s.commit()
 
     await wd._run_one("train", "instruction-wake", datetime.now(timezone.utc))
-    assert cleanup_calls == [True, True]
-    assert calls[0]["activation_payload"] == {"run_instruction_id": "instruction-1", "instruction_action": "restart_activation"}
+    assert cleanup_calls == [not bool(requested_gpus)] * 2
+    assert calls[0]["activation_payload"] == {
+        "run_instruction_id": "instruction-1", "instruction_action": "restart_activation",
+        **({"requested_gpus": requested_gpus} if requested_gpus else {}),
+    }
     async with db() as s:
         ticket = await s.get(Ticket, "train-replace")
         assert ticket.status == "queued"

@@ -1,4 +1,5 @@
 import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
+import { instructionBlocks, stageStatus } from "../lib/stageStatus";
 import { useState, useMemo, useEffect, Fragment } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
@@ -468,6 +469,16 @@ function PipelineTimeline({
   activeInstructions: RunInstructionDTO[];
 }) {
   const groups = useMemo(() => groupByIteration(run.tickets), [run.tickets]);
+  const { data: resources = [] } = useSWR<InfraInstanceDTO[]>(
+    `/api/infra/instances?active_only=false&run_id=${encodeURIComponent(run.id)}`,
+    { refreshInterval: 3000 },
+  );
+  const needsInstructionInput = activeInstructions.some((i) => i.status === "needs_input");
+  const resourceState = (id: string) => {
+    const resource = resources.find((r) => r.ticket_id === id
+      && !!r.meta?.resource_request && !r.meta?.superseded_by_instruction_id);
+    return resource ? slurmState(resource) : "";
+  };
   // A run has ONE supervisor ticket with one heartbeat per activation, spanning
   // every iteration. groupByIteration can only file it under one block, so the
   // other blocks' markers had no ticket to point at and simply did nothing when
@@ -558,9 +569,10 @@ function PipelineTimeline({
     [groups],
   );
   const pausedTicketIds = useMemo(() => {
-    if (activeInstructions.length === 0) return new Set<string>();
+    const blocking = activeInstructions.filter((i) => instructionBlocks(i.status));
+    if (blocking.length === 0) return new Set<string>();
     const ids = new Set(
-      activeInstructions
+      blocking
         .map((instruction) => instruction.target_ticket_id)
         .filter((id): id is string => !!id),
     );
@@ -588,8 +600,14 @@ function PipelineTimeline({
         .at(-1);
       if (current) ids.add(current.id);
     }
+    for (const ticket of allTickets) {
+      if (["succeeded", "degraded", "failed", "skipped", "cancelled"].includes(ticket.status)
+        || (ticket.status === "waiting_external" && ["RUNNING", "COMPLETING", "PENDING", "CONFIGURING"].includes(resourceState(ticket.id)))) {
+        ids.delete(ticket.id);
+      }
+    }
     return ids;
-  }, [activeInstructions, allTickets]);
+  }, [activeInstructions, allTickets, resources]);
   const paused = allTickets.find((ticket) => pausedTicketIds.has(ticket.id));
   const running = paused
     || allTickets.find((t) => t.status === "running" || t.status === "repairing");
@@ -766,8 +784,10 @@ function PipelineTimeline({
                       : activationCaptions[0] || operationCaption(t);
                     const active = selectedId === t.id;
                     const isPaused = pausedTicketIds.has(t.id);
-                    const displayStatus = isPaused ? "paused" : t.status;
-                    const isRunning = !isPaused && (t.status === "running" || t.status === "repairing");
+                    const livePhase = (heartbeatsByTicket.get(t.id) || []).find((h) => h.is_live)?.activation_phase;
+                    const displayStatus = stageStatus(t.status, isPaused, resourceState(t.id), isPaused && needsInstructionInput, livePhase);
+                    const applying = activeInstructions.some((i) => i.target_ticket_id === t.id && i.activity_status === "applying");
+                    const isRunning = displayStatus === "running" || displayStatus === "repairing";
                     const dot = statusToneFor(displayStatus).dot;
                     rows.push(
                       <li key={t.id} className="relative">
@@ -794,7 +814,7 @@ function PipelineTimeline({
                               <StatusBadge status={displayStatus} />
                             </span>
                             <span className="flex min-w-0 items-center gap-1.5">
-                              <span className="truncate font-mono text-[12px] text-dim">{activity}</span>
+                              <span className="truncate font-mono text-[12px] text-dim">{applying ? "Applying instruction · " : ""}{activity}</span>
                             </span>
                             <span className="block truncate font-mono text-[11px] text-slate-600">{t.id}</span>
                           </span>
@@ -902,17 +922,21 @@ function PipelineTimeline({
         showUnrecordedFailure={selectedId.endsWith("#failed")}
         benchmarkProgress={run.benchmark_progress}
         paused={pausedTicketIds.has(selectedId.split("#")[0])}
+        needsInput={needsInstructionInput && pausedTicketIds.has(selectedId.split("#")[0])}
+        applying={activeInstructions.some((i) => i.target_ticket_id === selectedId.split("#")[0] && i.activity_status === "applying")}
       />
     </div>
   );
 }
 
-function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkProgress, paused = false }: {
+function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkProgress, paused = false, needsInput = false, applying = false }: {
   ticketId: string;
   wake?: number;
   showUnrecordedFailure?: boolean;
   benchmarkProgress?: BenchmarkProgress;
   paused?: boolean;
+  needsInput?: boolean;
+  applying?: boolean;
 }) {
   const { data: t } = useSWR<TicketDetail>(
     ticketId ? `/api/tickets/${ticketId}` : null, {
@@ -1019,6 +1043,7 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
   );
   const submittedResourceRequest = infraInstances.find((instance) =>
     instance.ticket_id === ticketId
+    && !instance.meta?.superseded_by_instruction_id
     && !!instance.instance_id
     && !!instance.meta?.resource_request,
   );
@@ -1066,7 +1091,8 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
           <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{t.id}</Link>
-          <StatusBadge status={paused ? "paused" : t.status} />
+          <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />
+          {applying && <span className="text-xs text-dim">Applying instruction</span>}
         </div>
         <div className="flex items-center gap-3">
           <Link to={`/tickets/${t.id}`} className="font-mono text-[13px] uppercase tracking-wider text-dim hover:text-brass-300">
@@ -1351,7 +1377,7 @@ export function RunDetailPage() {
   );
   const activeInstructions = useMemo(
     () => instructions.filter((instruction) =>
-      ["reviewing", "waiting", "applying"].includes(instruction.activity_status)),
+      instructionBlocks(instruction.status) || ["waiting", "applying"].includes(instruction.activity_status)),
     [instructions],
   );
   // A user-instruction wake is control-plane review shown in the dedicated

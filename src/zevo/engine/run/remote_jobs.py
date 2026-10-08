@@ -172,6 +172,7 @@ async def _open_cluster_job(
 
 async def cancel_ticket_remote_job(
     db: AsyncSession, ticket: Ticket, *, preserve_allocation: bool = False,
+    resize_allocation: bool = False,
 ) -> dict[str, Any]:
     """Stop remote work for one Ticket, never an unrelated device or job."""
     if ticket.agent_id not in {"data", "train", "inference"}:
@@ -180,6 +181,8 @@ async def cancel_ticket_remote_job(
     if info is None:
         return {"ticket_id": ticket.id, "attempted": False, "reason": "no resolved device route"}
     cluster_row = await _open_cluster_job(db, ticket) if info.provider == "cluster" else None
+    if info.provider == "cluster" and resize_allocation:
+        cluster_row = await allocation_for_resize(db, ticket) or cluster_row
     if info.provider == "cluster":
         if cluster_row is None:
             return {
@@ -219,6 +222,30 @@ async def cancel_ticket_remote_job(
         "provider": info.provider,
         **result,
     }
+
+
+async def allocation_for_resize(db: AsyncSession, ticket: Ticket) -> InfraInstance | None:
+    """Resolve ownership even when the latest workload alias is already finished."""
+    rows = (await db.execute(select(InfraInstance).where(
+        InfraInstance.ticket_id == ticket.id, InfraInstance.provider == "cluster",
+        InfraInstance.instance_id != "",
+    ).order_by(InfraInstance.created_at.desc()))).scalars().all()
+    latest = next((row for row in rows if (row.meta or {}).get("resource_request")
+                   or (row.meta or {}).get("stage_job")), None)
+    if latest is None:
+        return None
+    owner_id = (latest.meta or {}).get("allocation_owner_row_id")
+    owner = await db.get(InfraInstance, owner_id) if owner_id else latest
+    if owner is None or owner.run_id != ticket.run_id or owner.released_at is not None:
+        return None
+    siblings = (await db.execute(select(InfraInstance).where(
+        InfraInstance.run_id == ticket.run_id, InfraInstance.instance_id == owner.instance_id,
+        InfraInstance.provider == "cluster", InfraInstance.released_at.is_(None),
+        InfraInstance.ticket_id != ticket.id,
+    ))).scalars().all()
+    if any(row.id != owner.id and not (row.meta or {}).get("monitor_terminal") for row in siblings):
+        raise ValueError("cannot resize an allocation used by another stage")
+    return owner
 
 
 async def cancel_run_remote_jobs(

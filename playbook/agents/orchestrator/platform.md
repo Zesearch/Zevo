@@ -73,6 +73,20 @@ current execution must be replaced: Zevo stops that activation and its affected
 workload, retains the Ticket and healthy run allocation, and starts a new
 activation on the same Ticket. This does not consume an automatic repair attempt.
 
+For a Slurm GPU-count change, include `requested_gpus` (a positive integer) in
+that same `restart_activation` message request. This updates the backend resource
+request before the replacement script is generated; prose alone cannot resize a
+job. Stay within the Run GPU maximum and discovered site constraints. The engine
+validates the exact count and queues it even when capacity is busy, rather than
+silently shrinking it. A resize releases the old allocation before replacement.
+If the user requests the same count for multiple stages, include `gpu_stages`,
+for example `["inference", "train"]`; this persists the request for those
+optimization stages, including future tickets, without affecting held-out tests.
+Without `gpu_stages`, the request applies only to the target Ticket. Restart any
+already-running affected stage separately. Keep the instruction scheduled until
+all requested stages are handled. Do not mark the
+instruction Applied until the requested changes have actually been accepted.
+
 For each new instruction, promptly PATCH
 `api_routes.decide_run_instruction` with a plain-language decision. Use
 `scheduled` when work must finish first or the instruction belongs to a later
