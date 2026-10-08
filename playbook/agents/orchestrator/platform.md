@@ -171,12 +171,16 @@ own `work_dir` with no `device_info` binding: create Data 0 FIRST and provision
 only after it succeeds, so the rental is not billed while rows are being
 fetched and mapped (smoke runs idled an A10 for 5–12 minutes there; the
 environment build the acquisition helper starts needs that window anyway).
-Read `runtime.gpu_allocation_mode`; this is independent of provider and is
-fixed for the Run. Both modes retain resources while the same Ticket is repairing.
+Read `runtime.gpu_allocation_mode`; this is fixed for the Run.
+The retained modes, per_run and per_stage, retain resources during repair.
 Do not emit a release or replacement merely because a generated program failed;
 a `GPU hardware defect:` failure is the exception described under Failure and
 completion.
 
+- `per_submission` (Slurm only): each workload gets a fresh allocation.
+  After worker cleanup the controller exits on success or failure. Repair and
+  collection retain no GPUs; retries requeue. Preserve artifacts on shared
+  storage. The backend owns submission and release.
 - `per_stage`: each GPU stage acquires resources, retries on those resources,
   and the backend releases them only after terminal validation. For cloud and
   fixed instance, provision a fresh device artifact before the next GPU stage
@@ -192,7 +196,7 @@ completion.
   resources when the Run completes, is cancelled, or finally fails. Serialize
   GPU consumers on this allocation; do not run competing stages concurrently.
 
-For Slurm, the backend submits a finite allocation controller from the first
+For Slurm retained modes, the backend submits a finite allocation controller from the first
 validated stage script. Stage programs are child workloads; their exit does
 not itself return the GPUs. Repair dispatches a corrected workload on the same
 healthy allocation. Full-run mode uses the train resource envelope from the

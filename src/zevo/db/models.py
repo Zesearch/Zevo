@@ -326,7 +326,7 @@ class Run(Base):
             name="ck_runs_gpu_provider",
         ),
         CheckConstraint(
-            "gpu_allocation_mode IN ('per_stage', 'per_run')",
+            "gpu_allocation_mode IN ('per_stage', 'per_run', 'per_submission')",
             name="ck_runs_gpu_allocation_mode",
         ),
     )

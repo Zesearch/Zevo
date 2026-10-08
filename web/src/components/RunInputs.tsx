@@ -1038,7 +1038,7 @@ export type RunInputValues = {
   sshHostId: string;
   /** Maximum GPUs the Run may use at once. Empty means no upper bound;
    *  Infrastructure selects a concrete positive count. */
-  gpuAllocationMode: "per_stage" | "per_run";
+  gpuAllocationMode: "per_stage" | "per_run" | "per_submission";
   numGpus: string;
   generation_backend: GenerationBackend | "";
   iterations: string;
@@ -1916,9 +1916,9 @@ export function RunInputs({
           />
           <ChoiceField
             label="GPU allocation" value={gpuAllocationMode}
-            onChange={(v) => onChange({ gpuAllocationMode: v as "per_stage" | "per_run" })}
-            options={[["per_run", "Entire run"], ["per_stage", "Per stage"]]}
-            hint="Entire run acquires GPUs once and reuses them across stages and iterations. Per stage re-acquires before each GPU stage; choose it for multi-node Slurm training. Both retain GPUs during bounded bug repair."
+            onChange={(v) => onChange({ gpuAllocationMode: v as "per_stage" | "per_run" | "per_submission" })}
+            options={[["per_run", "Entire run"], ["per_stage", "Per stage"], ["per_submission", "Per submission (Slurm)"]]}
+            hint="Entire run retains GPUs across stages. Per stage retains GPUs within a stage, including repair. Per submission (Slurm only) releases GPUs after each workload and requests a new allocation for retries."
           />
           <ChoiceField
             label="Generation backend" value={generation_backend}

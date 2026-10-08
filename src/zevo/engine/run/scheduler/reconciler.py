@@ -767,7 +767,7 @@ async def _query_slurm_job(
         import json
         outcome = json.loads(values["WORKLOAD"])
         code = int(outcome["exit_code"])
-        retained = state in {"RUNNING", "PENDING", "CONFIGURING"}
+        retained = state not in _SLURM_TERMINAL_STATES
         reason = ("[workload-retained] " if retained else "[workload-released] ") + str(outcome.get("error") or "workload exited")
         return ("COMPLETED" if code == 0 else "FAILED"), str(code) + ":0", reason, started_at
     return state, exit_code.strip(), values.get("REASON", "").strip(), started_at

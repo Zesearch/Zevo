@@ -13,13 +13,13 @@ TERMINAL = {"succeeded", "degraded", "failed", "cancelled", "skipped"}
 
 def allocation_mode(run: Run) -> str:
     mode = getattr(run, "gpu_allocation_mode", None) or "per_stage"
-    if mode not in {"per_stage", "per_run"}:
+    if mode not in {"per_stage", "per_run", "per_submission"}:
         raise ValueError(f"unsupported GPU allocation mode: {mode}")
     return mode
 
 
 def needs_stage_release(run: Run, ticket: Ticket) -> bool:
-    if allocation_mode(run) != "per_stage" or ticket.status not in TERMINAL:
+    if allocation_mode(run) not in {"per_stage", "per_submission"} or ticket.status not in TERMINAL:
         return False
     if ticket.agent_id not in GPU_STAGES and not (
         getattr(run, "gpu_provider", "") == "cluster" and ticket.agent_id == "data"

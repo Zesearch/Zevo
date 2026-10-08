@@ -89,7 +89,10 @@ def test_release_boundary(mode, state, expected):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('mode,next_ticket,reuses,live', [
     ('per_stage', 'train-1', True, True), ('per_run', 'infer-1', True, True),
-    ('per_stage', 'infer-1', False, True), ('per_run', 'infer-1', False, False),
+    ('per_stage', 'infer-1', False, True),
+    ('per_submission', 'train-1', False, False),
+    ('per_submission', 'train-1', False, 'RUNNING'),
+    ('per_submission', 'train-1', False, 'COMPLETING'), ('per_run', 'infer-1', False, False),
 ])
 async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mode, next_ticket, reuses, live):
     from zevo.engine.run import remote_jobs
@@ -103,8 +106,8 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
         if 'squeue -h' in command or 'sbatch --parsable' in command:
             assert 'export SITE_SLURM=1' in command
         if "squeue -h" in command:
-            return dict(ok=True, stdout='RUNNING\n' if live else '')
-        return dict(ok=True, stdout='123\n')
+            return dict(ok=True, stdout=(live if isinstance(live, str) else 'RUNNING') + '\n' if live else '')
+        return dict(ok=True, stdout='456\n' if 'sbatch --parsable' in command else '123\n')
     monkeypatch.setattr(remote_jobs, '_ssh', ssh)
     script = tmp_path / 'train.sbatch'
     script.write_text('#!/bin/bash\n#SBATCH --gpus=8\nexit 0\n')
@@ -119,22 +122,35 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
             meta=dict(controller_directory='/controller', scheduler_state='FAILED', nodes=1))
         session.add_all([run, ticket, owner])
         await session.commit()
-        job, meta = await submit_workload(session, run=run, ticket=ticket, contract=contract,
+        kwargs = dict(run=run, ticket=ticket, contract=contract,
             info=SimpleNamespace(cluster=SimpleNamespace(workdir='/remote', env_setup='export SITE_SLURM=1'), resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=4)),
             heartbeat_id='h2', sha256='digest')
-        assert job == '123'
-        assert bool(meta['allocation_owner_row_id']) is reuses
-        assert any('sbatch --parsable' in c for c in commands) is not reuses
+        if mode == 'per_submission' and live:
+            with pytest.raises(ValueError, match='still active or terminating'):
+                await submit_workload(session, **kwargs)
+            assert not any('sbatch --parsable' in c for c in commands)
+        else:
+            await assert_submission(session, kwargs, reuses, commands, tmp_path, mode)
     await engine.dispose()
 
 
-def test_cancel_stops_child_but_retains_controller(tmp_path):
+async def assert_submission(session, kwargs, reuses, commands, tmp_path, mode):
+    job, meta = await submit_workload(session, **kwargs)
+    if mode == 'per_submission':
+        assert meta['controller_directory'] == '/remote/.zevo-allocations/h2'
+        assert (tmp_path / 'allocation-controller.sbatch').read_text().rstrip().endswith('1800 1')
+    assert job == ('123' if reuses else '456')
+    assert bool(meta['allocation_owner_row_id']) is reuses
+    assert any('sbatch --parsable' in c for c in commands) is not reuses
+
+@pytest.mark.parametrize("single_workload", [False, True])
+def test_cancel_stops_child_but_retains_controller(tmp_path, single_workload):
     for name in ('requests', 'outcomes', 'cancel'):
         (tmp_path / name).mkdir()
     script = tmp_path / 'train.sh'
     script.write_text('echo $$ > child.pid\nexec sleep 60\n')
     publish(tmp_path, '01', script)
-    process = subprocess.Popen([sys.executable, '-c', CONTROLLER_SOURCE, str(tmp_path), '20'])
+    process = subprocess.Popen([sys.executable, '-c', CONTROLLER_SOURCE, str(tmp_path), '20', str(int(single_workload))])
     try:
         deadline = time.monotonic() + 5
         while not (tmp_path / 'child.pid').exists() and time.monotonic() < deadline:
@@ -144,9 +160,12 @@ def test_cancel_stops_child_but_retains_controller(tmp_path):
         assert wait_outcome(tmp_path / 'outcomes/01.json', process)['exit_code'] != 0
         with pytest.raises(ProcessLookupError):
             os.kill(child_pid, 0)
-        assert process.poll() is None
-        (tmp_path / 'release').touch()
-        assert process.wait(timeout=5) == 0
+        if single_workload:
+            assert process.wait(timeout=5) != 0
+        else:
+            assert process.poll() is None
+            (tmp_path / "release").touch()
+            assert process.wait(timeout=5) == 0
     finally:
         if process.poll() is None:
             process.kill()
@@ -241,3 +260,39 @@ def test_train_release_boundary_is_unchanged_on_cloud():
     run = SimpleNamespace(gpu_allocation_mode='per_stage', gpu_provider='cloud')
     assert needs_stage_release(run, SimpleNamespace(status='succeeded', agent_id='train', lane='optimization')) is True
     assert needs_stage_release(run, SimpleNamespace(status='repairing', agent_id='train', lane='optimization')) is False
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_single_submission_exits_and_preserves_artifacts(tmp_path, exit_code):
+    for name in ("requests", "outcomes", "cancel"):
+        (tmp_path / name).mkdir()
+    script = tmp_path / "work.sh"
+    script.write_text(f"echo checkpoint > checkpoint.txt\nexit {exit_code}\n")
+    publish(tmp_path, "01", script)
+    second = tmp_path / "second.sh"
+    second.write_text("touch must-not-run\n")
+    publish(tmp_path, "02", second)
+    process = subprocess.Popen([sys.executable, "-c", CONTROLLER_SOURCE, str(tmp_path), "1800", "1"])
+    try:
+        assert process.wait(timeout=10) == exit_code
+        assert json.loads((tmp_path / "outcomes/01.json").read_text())["exit_code"] == exit_code
+        assert (tmp_path / "checkpoint.txt").read_text().strip() == "checkpoint"
+        assert not (tmp_path / "must-not-run").exists()
+        assert not (tmp_path / "outcomes/02.json").exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state,released", [("COMPLETING", False), ("RUNNING", False), ("", False), ("FAILED", True), ("COMPLETED", True)])
+async def test_outcome_does_not_release_allocation_before_slurm(monkeypatch, state, released):
+    from unittest.mock import AsyncMock
+    from zevo.engine.run.scheduler import reconciler
+    output = f'QUEUE={state}\nWORKLOAD={{"exit_code": 0}}\n'.encode()
+    process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(output, b"")))
+    monkeypatch.setattr(reconciler.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    result = await reconciler._query_slurm_job(connection={"host": "host", "user": "user", "key": "/test/key"}, job_id="123", outcome_path="/shared/outcome.json")
+    assert result[0] == "COMPLETED"
+    assert result[2].startswith("[workload-released]" if released else "[workload-retained]")
