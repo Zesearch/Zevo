@@ -1124,3 +1124,48 @@ async def test_released_job_does_not_hide_abandoned_activation(session, monkeypa
     session.add(job)
     await session.commit()
     assert await _sweep_stuck_tickets(session, CUTOFF) == 1
+
+
+@pytest.mark.asyncio
+async def test_exit_75_after_monitor_recovery_queues_collection_once(session, monkeypatch):
+    from unittest.mock import AsyncMock
+    from types import SimpleNamespace
+    import shlex
+    import zevo.engine.run.scheduler.reconciler as reconciler
+
+    ticket = Ticket(id="train-continuation", run_id="r1", agent_id="train",
+                    status="running", payload={}, inputs={}, repair_attempts=7)
+    job = InfraInstance(instance_id="210772", provider="cluster", status="ready",
+                        run_id="r1", ticket_id=ticket.id, meta={
+                            "stage_job": True, "submission_committed": True,
+                            "scheduler_state": "RUNNING",
+                            "monitor_error": "slurm-squeue-unavailable",
+                            "scheduler_event_exit_pending": True,
+                            "scheduler_event_exit_code": 75,
+                            "controller_outcome_path": "/shared/outcome.json",
+                        })
+    session.add_all([ticket, job])
+    await session.commit()
+    monkeypatch.setattr(reconciler, "_slurm_connection", AsyncMock(return_value={
+        "host": "cluster", "user": "u", "key": "/test/key", "env_setup": "true",
+    }))
+    output = b'QUEUE=\nACCOUNTING=COMPLETED|0:0|2026-10-07T22:09:52\nWORKLOAD={"exit_code":75}\n'
+    process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(output, b"")))
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(reconciler.asyncio, "create_subprocess_exec", spawn)
+    assert await _reconcile_slurm_stage_jobs(session) == (1, 1)
+    command = shlex.split(spawn.call_args.args[-1])
+    assert command[:2] == ["bash", "-lc"]
+    assert "sacct" in command[2]
+    await session.refresh(ticket)
+    await session.refresh(job)
+    assert ticket.status == "queued"
+    assert ticket.repair_attempts == 7
+    assert (await session.get(Run, "r1")).status == "running"
+    assert job.meta["scheduler_exit_code"] == "75:0"
+    assert "monitor_error" not in job.meta
+    assert job.meta["collect_wakeup_queued"] is True
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 0)
+    wakes = (await session.execute(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == ticket.id))).scalars().all()
+    assert len(wakes) == 1

@@ -48,3 +48,30 @@ def test_cleanup_initializes_same_environment(tmp_path):
     result = subprocess.run(["bash", "-c", _slurm_job_kill_command("123", "train-test", setup)], capture_output=True, text=True)
     assert result.returncode == 0
     assert "setup-noise" not in result.stdout
+
+
+def test_login_shell_exposes_site_commands_and_preserves_literal_arguments(tmp_path):
+    import os
+    import shlex
+    from zevo.engine.run.remote_jobs import _slurm_login_command
+
+    setup = site(tmp_path)
+    # A noninteractive login shell reads BASH_ENV after its login profile.
+    # Emulate a site exposing Slurm only in a login shell, independent of the
+    # developer machine's /etc/profile and ~/.bash_profile contents.
+    profile = tmp_path / "profile.sh"
+    profile.write_text('if shopt -q login_shell; then\n' + setup + '\nfi\n')
+    env = {**os.environ, "BASH_ENV": str(profile)}
+    body = _slurm_cli_bootstrap_command("true", required=("sbatch",)) + "sbatch"
+    ordinary = subprocess.run(["bash", "--noprofile", "--norc", "-c", body], env=env, capture_output=True, text=True)
+    assert ordinary.returncode == 127
+    login = subprocess.run(["sh", "-c", _slurm_login_command(body)], env=env, capture_output=True, text=True)
+    assert login.returncode == 0
+    assert login.stdout.endswith("site-sbatch\n")
+    marker = tmp_path / "must-not-execute"
+    literal = f"$(touch '{marker}') `touch '{marker}'` ' quoted"
+    command = _slurm_login_command("printf '%s' " + shlex.quote(literal))
+    result = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert result.stdout == literal
+    assert not marker.exists()

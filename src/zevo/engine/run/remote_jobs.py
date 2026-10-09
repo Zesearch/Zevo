@@ -117,6 +117,15 @@ print('terminated', len(pids), 'ticket processes')
     return "python3 -c " + shlex.quote(script)
 
 
+def _slurm_login_command(command: str) -> str:
+    """Load the site's login environment before explicit setup and Slurm commands.
+
+    Quote the entire body so the SSH account's outer shell cannot expand paths,
+    variables or command substitutions before the login environment is loaded.
+    """
+    return "bash -lc " + shlex.quote(command)
+
+
 def _slurm_cli_bootstrap_command(env_setup: str = "", *, required: tuple[str, ...] = ("squeue", "scancel")) -> str:
     """Expose Slurm in non-interactive shells and fail closed if unavailable."""
     if env_setup.strip():
@@ -147,7 +156,7 @@ def _slurm_job_kill_command(jobid_value: str, ticket_id: str, env_setup: str = "
     """Cancel one exact stage-owned job after verifying its Ticket name."""
     jobid = _safe_ticket_id(jobid_value)
     name = f"zevo-{_safe_ticket_id(ticket_id)}"
-    return (
+    return _slurm_login_command(
         _slurm_cli_bootstrap_command(env_setup)
         + f"if ! record=$(squeue -h -j {shlex.quote(jobid)} -o '%i|%j'); then "
         "echo stage-job-query-failed >&2; exit 1; fi; "
