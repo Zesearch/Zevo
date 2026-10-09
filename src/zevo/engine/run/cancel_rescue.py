@@ -192,13 +192,15 @@ async def _copy_off_box(session: AsyncSession, candidate: RescueCandidate, dest:
 
 
 async def _mirror_registry(
-    session: AsyncSession, run: Run, candidate: RescueCandidate, model_dir: Path,
+    session: AsyncSession, run: Run, candidate: RescueCandidate, model_dir: Path | str,
 ) -> str:
     tag = model_tag_for_run(run.id)
     row = await session.get(RegistryModel, tag)
     if row is None:
         row = RegistryModel(version_tag=tag, run_id=run.id)
         session.add(row)
+    if row.run_id != run.id:
+        raise ValueError("Model tag belongs to another Run")
     iteration = int(candidate.ticket.iteration or 0)
     row.iteration = iteration
     row.base_model = str(candidate.meta.get("base_model") or "")
@@ -223,28 +225,6 @@ def hf_token() -> str:
     return _read_env(ENV_PATH).get("HF_TOKEN", "") or os.environ.get("HF_TOKEN", "")
 
 
-async def push_to_hf(model_dir: Path, *, repo_id: str, private: bool, token: str) -> str:
-    # Credentials go through stdin, never process arguments or logs.
-    script = (
-        "import json,sys; from huggingface_hub import HfApi; p=json.load(sys.stdin); "
-        "api=HfApi(token=p['token']); api.create_repo(p['repo'],private=p['private'],exist_ok=True); "
-        "api.upload_folder(folder_path=p['path'],repo_id=p['repo'],ignore_patterns=['.zevo-*'])"
-    )
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", script, stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        await proc.communicate(json.dumps({"token": token, "repo": repo_id, "private": private, "path": str(model_dir)}).encode())
-        if proc.returncode:
-            raise RuntimeError(f"Hugging Face upload exited {proc.returncode}; local checkpoint retained")
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-    return f"https://huggingface.co/{repo_id}"
-
-
 async def _registered_model_dir(session: AsyncSession, run: Run) -> Path | None:
     """The registry stage already pulled this run's champion off the box."""
     if not (run.registry_version_tag or "").strip():
@@ -263,6 +243,23 @@ async def perform_rescue(session: AsyncSession, run: Run) -> dict[str, Any]:
     if policy.weights == "discard":
         return outcome
 
+    if policy.weights in {"hf", "remote"}:
+        from zevo.contracts.model_save import ModelSavePolicy
+        from zevo.engine.run.model_save import save_model
+        candidate = await select_rescue_checkpoint(session, run)
+        if candidate is None:
+            raise RuntimeError("No completed checkpoint is available to save")
+        receipt = await save_model(session, run, candidate.ticket,
+            source=candidate.path, remote=candidate.remote,
+            policy=ModelSavePolicy(weights=policy.weights, hf_repo_id=policy.hf_repo_id,
+                hf_private=policy.hf_private, remote_dir=policy.remote_dir))
+        outcome["registry_version_tag"] = await _mirror_registry(session, run, candidate, receipt["path"])
+        outcome.update(model_path=receipt["path"], storage=receipt["storage"], revision=receipt["revision"])
+        if policy.weights == "hf":
+            outcome["hf_url"] = receipt["path"]
+        await session.commit()
+        return outcome
+
     model_dir = await _registered_model_dir(session, run)
     if model_dir is not None:
         outcome["note"] = "champion was already registered; nothing to copy"
@@ -278,14 +275,6 @@ async def perform_rescue(session: AsyncSession, run: Run) -> dict[str, Any]:
         await session.commit()
     outcome["model_path"] = str(model_dir)
 
-    if policy.weights == "hf":
-        token = hf_token()
-        if not token:
-            raise RuntimeError("HF_TOKEN is not set in Settings")
-        outcome["hf_url"] = await push_to_hf(
-            model_dir,
-            repo_id=policy.hf_repo_id, private=policy.hf_private, token=token,
-        )
     return outcome
 
 
@@ -408,7 +397,7 @@ async def _finish_cancel(run_id: str) -> None:
                     outcome["model_path"] = str(local)
                 outcome.update(status="preservation_failed" if error else "completed",
                                attempts=attempts, finished_at=now.isoformat(),
-                               source_retained=local is not None,
+                               source_retained=local is not None or bool(outcome.get("storage") in {"hf", "remote"}),
                                compute_may_accrue=True, retryable=bool(error))
                 if error and policy.discard_on_failure and local is None:
                     outcome["discarded_after_failure"] = True

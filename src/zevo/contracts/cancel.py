@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-CancelWeights = Literal["download", "hf", "discard"]
+CancelWeights = Literal["download", "hf", "remote", "discard"]
 
 _HF_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 
@@ -28,10 +28,11 @@ class CancelWeightsPolicy(BaseModel):
     # Settings must be able to write it.
     hf_repo_id: str = ""
     hf_private: bool = True
+    remote_dir: str = ""
     # Rescue work is bounded. By default a failed copy retains the source and
     # requires an explicit retry/discard; rented compute may continue billing.
     rescue_timeout_seconds: int = Field(default=900, ge=30, le=3600)
-    attempt_timeout_seconds: int = Field(default=300, ge=10, le=900)
+    attempt_timeout_seconds: int = Field(default=300, ge=10, le=3600)
     max_attempts: int = Field(default=3, ge=1, le=5)
     discard_on_failure: bool = False
     # `hf` only: keep the local copy the upload was made from.
@@ -39,6 +40,9 @@ class CancelWeightsPolicy(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "CancelWeightsPolicy":
+        if self.weights == "remote":
+            from zevo.contracts.model_save import ModelSavePolicy
+            ModelSavePolicy(weights="remote", remote_dir=self.remote_dir)
         if self.local_dir and not Path(self.local_dir).is_absolute():
             raise ValueError("local_dir must be an absolute path")
         if self.weights == "hf" and not _HF_REPO.match(self.hf_repo_id):

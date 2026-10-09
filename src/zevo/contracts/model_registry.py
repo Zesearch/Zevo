@@ -83,6 +83,8 @@ class RegistryEntry(BaseModel):
     metric_direction: Literal["max", "min"]
     eval: RegistryEvalRecord
     retention: Literal["retained"] = "retained"
+    storage: Literal["local", "hf", "remote"] = "local"
+    revision: str = ""
     registered_at: datetime = Field(description="UTC ISO-8601 commit timestamp.")
 
 
@@ -141,6 +143,10 @@ def _main(argv: list[str] | None = None) -> int:
 
 class RegisterTaskInput(AgentTaskInput):
     """Mirror of orchestrator.RegisterPayload (after ref resolution)."""
+
+    model_save_policy: dict[str, Any] = Field(default_factory=dict)
+    saved_model_path: str = ""
+    saved_model_revision: str = ""
 
     run_id: str = Field(
         ...,
@@ -218,8 +224,8 @@ class RegisterTaskInput(AgentTaskInput):
         description=(
             "Resolved path to device_info.json from the upstream infra ticket. "
             "Needed when `checkpoint_path` is a REMOTE path: registry uses "
-            "the ssh creds here to pull the BEST iteration's model back to the "
-            "host. '' when the checkpoint is already local (nothing to pull)."
+            "the SSH route here to save the selected model at the Run destination. "
+            "Empty when the checkpoint is already local."
         ),
     )
 

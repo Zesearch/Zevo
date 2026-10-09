@@ -40,6 +40,7 @@ from zevo.api.compute_defaults import (
     resolve_default_compute,
 )
 from zevo.contracts.cancel import CancelWeightsPolicy
+from zevo.contracts.model_save import ModelSavePolicy
 from zevo.providers import resolve_ssh_key
 from zevo.api.database import get_db
 from zevo.api.ui_access import is_trusted_ui_request
@@ -1306,6 +1307,9 @@ class CreateRunRequest(BaseModel):
     # so the union parses exactly one of them; the validator below then pins
     # which one `mode` permits.
     user_request: UserRequest | AutoUserRequest | None = None
+    # Launch UI defaults to HF and supplies its repository. Absent only for
+    # legacy API clients, which retain the existing local-copy behavior.
+    model_save_policy: ModelSavePolicy | None = None
     task_name: str = Field(min_length=1, max_length=64)
     # task_name names the work; many runs share one, so this tells executions
     # apart in every list and detail view.
@@ -1741,6 +1745,8 @@ async def cancel_run(
     r = (await db.execute(select(Run).where(Run.id == run_id).with_for_update())).scalar_one_or_none()
     if r is None:
         raise HTTPException(404, f"run {run_id} not found")
+    if body is None and (r.lifecycle or {}).get("model_save_policy"):
+        policy = CancelWeightsPolicy.model_validate(r.lifecycle["model_save_policy"])
     retry_preservation = bool(
         body is not None and policy.weights != "discard"
         and (r.cancel_outcome or {}).get("status") == "preservation_failed"
@@ -1749,6 +1755,9 @@ async def cancel_run(
         r.status = "running"
         r.finished_at = None
     if r.status in TERMINAL_RUN_STATUSES:
+        if body is not None and policy.weights == "discard":
+            r.cancel_policy = policy.model_dump(mode="json")
+            await db.commit()
         # Already terminal can still mean a remote trainer survived the local
         # SSH/Agent process.  Re-run exact Ticket cleanup before provider
         # lifecycle cleanup; this makes Cancel a useful leak-recovery action.
@@ -1780,7 +1789,7 @@ async def cancel_run(
     if policy.weights != "discard":
         from zevo.engine.run.cancel_rescue import hf_token, prepare_rescue_dir
         try:
-            rescue_dir = prepare_rescue_dir(r, policy)
+            rescue_dir = prepare_rescue_dir(r, policy) if policy.weights == "download" else None
         except OSError as e:
             raise HTTPException(400, f"cannot write the rescue folder: {e}")
         if policy.weights == "hf" and not hf_token():
@@ -1832,7 +1841,7 @@ async def cancel_run(
             "tickets_cancelled": cancelled_ticket_ids,
             "remote_jobs_cancelled": remote_jobs_cancelled,
             "heartbeats_finished": heartbeats_finished,
-            "rescue_dir": str(rescue_dir),
+            "rescue_dir": str(rescue_dir) if rescue_dir is not None else "",
             "cancel_policy": r.cancel_policy,
             "cancel_outcome": r.cancel_outcome,
             "note": "Bounded checkpoint rescue started. On failure the source is retained and compute may accrue until retry or explicit discard.",
@@ -2078,6 +2087,8 @@ async def _create_auto_run(
     run.num_gpus = max(0, int(body.num_gpus or 0))
     run.gpu_provider = resolved_gpu_provider
     run.gpu_allocation_mode = body.gpu_allocation_mode
+    if body.model_save_policy is not None:
+        run.lifecycle = {**(run.lifecycle or {}), "model_save_policy": body.model_save_policy.model_dump(mode="json")}
     run.ssh_host_id = (
         (compute.ssh_host_id or None)
         if resolved_gpu_provider in ("cluster", "instance") else None
@@ -2175,6 +2186,10 @@ async def create_run(
     from fastapi.concurrency import run_in_threadpool
     from zevo.engine.run.setup_progress import update as setup_progress
 
+    if body.model_save_policy is not None and body.model_save_policy.weights == "hf":
+        from zevo.engine.run.cancel_rescue import hf_token
+        if not hf_token():
+            raise HTTPException(400, "Set a Hugging Face write token in Settings before launching with HF storage")
     setup_id = str(body.setup_id or "")
     setup_progress(
         setup_id,
@@ -2655,6 +2670,8 @@ async def create_run(
     run.num_gpus = max(0, int(body.num_gpus or 0))
     run.gpu_provider = resolved_gpu_provider
     run.gpu_allocation_mode = body.gpu_allocation_mode
+    if body.model_save_policy is not None:
+        run.lifecycle = {**(run.lifecycle or {}), "model_save_policy": body.model_save_policy.model_dump(mode="json")}
     # NULL (not '') when no profile is selected: ssh_host_id is a real FK to
     # ssh_hosts now, and '' could never satisfy it. All readers already treat
     # falsy/None as "use the deployment-level fallback".

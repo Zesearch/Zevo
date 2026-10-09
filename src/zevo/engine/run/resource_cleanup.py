@@ -146,6 +146,13 @@ async def cleanup_run_resources(session, run: Run, *, force: bool = False, retry
         if row.released_at is not None or (row.meta or {}).get("allocation_owner_row_id"):
             continue
         meta = dict(row.meta or {})
+        storage = (run.lifecycle or {}).get("model_storage") or {}
+        if (row.provider == "cloud" and storage.get("storage") == "remote"
+                and (not storage.get("instance_id") or storage["instance_id"] == row.instance_id)
+                and (run.cancel_policy or {}).get("weights") != "discard"):
+            results.append({"provider": "cloud", "instance_id": row.instance_id,
+                            "destroyed": False, "error": "GPU host retained: it contains the saved model; rental billing continues"})
+            continue
         if not force and meta.get("auto_release") is False:
             continue
         next_at = meta.get("cleanup_next_at")

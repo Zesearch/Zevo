@@ -1804,7 +1804,9 @@ async def _build_input(
             ),
         )
     if agent_id == "registry":
-        return _build_registry_input(ticket, payload, inputs, work_dir)
+        registry_input = _build_registry_input(ticket, payload, inputs, work_dir)
+        registry_input.model_save_policy = dict((run.lifecycle or {}).get("model_save_policy") or {})
+        return registry_input
     raise ValueError(f"no input builder for agent_id={agent_id!r}")
 
 
@@ -3030,22 +3032,27 @@ def _extract_summary_artifact_meta(
                             raise ValueError(
                                 "selected champion eval differs from metrics.json"
                             )
-                        stored_model = Path(selected.model_path)
-                        local_model = (
-                            stored_model
-                            if stored_model.is_absolute()
-                            else (REPO_ROOT / stored_model).resolve()
-                        )
-                        model_problem = _artifact_problem(str(local_model))
-                        if model_problem:
-                            raise ValueError(
-                                f"selected champion model is {model_problem}: {local_model}"
-                            )
+                        if inp.model_save_policy:
+                            if not inp.saved_model_path or selected.model_path != inp.saved_model_path:
+                                raise ValueError("selected champion differs from the engine-verified storage receipt")
+                            if selected.storage != inp.model_save_policy["weights"] or selected.revision != inp.saved_model_revision:
+                                raise ValueError("selected champion storage/revision differs from the verified receipt")
+                            local_model = selected.model_path
+                        else:
+                            if selected.storage != "local":
+                                raise ValueError("external model storage requires an explicit Run save policy")
+                            stored_model = Path(selected.model_path)
+                            local_model = stored_model if stored_model.is_absolute() else (REPO_ROOT / stored_model).resolve()
+                            model_problem = _artifact_problem(str(local_model))
+                            if model_problem:
+                                raise ValueError(f"selected champion model is {model_problem}: {local_model}")
                         meta = {
                             "version_tag": expected_tag,
                             "candidate_score": candidate_score,
                             "retained": retained,
                             "model_path": str(local_model) if retained else "",
+                            "storage": selected.storage,
+                            "revision": selected.revision,
                         }
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
                         problems.append(f"registry entry schema is invalid: {exc}")
@@ -5420,6 +5427,15 @@ async def run_ticket(
     output: BaseModel | None = None
     exit_code = 0
     try:
+        if isinstance(inp, RegisterTaskInput) and inp.model_save_policy:
+            from zevo.contracts.model_save import ModelSavePolicy
+            from zevo.engine.run.model_save import save_model
+            receipt = await save_model(session, run, tk,
+                source=inp.checkpoint_path, remote=inp.checkpoint_is_remote,
+                policy=ModelSavePolicy.model_validate(inp.model_save_policy))
+            inp.saved_model_path = receipt["path"]
+            inp.saved_model_revision = receipt["revision"]
+            stdout_sink("Model saved and verified: " + receipt["path"] + "\n")
         result = await driver.run_agent(
             blueprint=blueprint,
             input_payload=inp,

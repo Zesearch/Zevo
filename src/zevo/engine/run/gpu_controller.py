@@ -209,7 +209,7 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
     """Reuse a healthy owned allocation or submit one finite controller job."""
     from sqlalchemy import select
     from zevo.db import InfraInstance, Run, Ticket
-    from zevo.engine.run.remote_jobs import _ssh, _slurm_cli_bootstrap_command
+    from zevo.engine.run.remote_jobs import _ssh, _slurm_cli_bootstrap_command, _slurm_login_command
 
     # Serialize publication inside one Run, including two concurrently ready stages.
     await session.execute(select(Run).where(Run.id == run.id).with_for_update())
@@ -231,8 +231,8 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             continue
         if run.gpu_allocation_mode != "per_run" and row.ticket_id != ticket.id:
             continue
-        checked = await _ssh(info, _slurm_cli_bootstrap_command(info.cluster.env_setup, required=("sbatch", "squeue", "sacct", "scancel")) +
-                             f"squeue -h -j {shlex.quote(row.instance_id)} -o '%T'")
+        checked = await _ssh(info, _slurm_login_command(_slurm_cli_bootstrap_command(info.cluster.env_setup, required=("sbatch", "squeue", "sacct", "scancel")) +
+                             f"squeue -h -j {shlex.quote(row.instance_id)} -o '%T'"))
         if not checked.get("ok"):
             raise ValueError("cannot verify the retained allocation: " + checked.get("error", ""))
         if run.gpu_allocation_mode == "per_submission" and checked.get("stdout", "").strip():
@@ -301,7 +301,7 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
         command += " && " + _slurm_cli_bootstrap_command(info.cluster.env_setup, required=("sbatch", "squeue", "sacct", "scancel")) + "sbatch --parsable -- " + shlex.quote(wrapper_path)
     else:
         command = publish + " && printf '%s\\n' " + shlex.quote(owner.instance_id)
-    result = await _ssh(info, command, timeout_seconds=30)
+    result = await _ssh(info, _slurm_login_command(command), timeout_seconds=30)
     if not result.get("ok"):
         raise ValueError("controller submission failed: " + str(result.get("error") or result.get("stdout")))
     job_id = result.get("stdout", "").strip().splitlines()[-1].split(";", 1)[0]

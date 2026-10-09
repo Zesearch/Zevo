@@ -116,7 +116,7 @@ def _to_dto(
         improvement=model_improvement,
         model_path_abs=(
             host_path_abs("/app/" + m.model_path.lstrip("/"))
-            if m.model_path and not m.model_path.startswith("/")
+            if m.model_path and not m.model_path.startswith(("/", "https://", "ssh://"))
             else m.model_path
         ),
     )
@@ -196,6 +196,8 @@ def kept_models(rows: list[RegistryModel]) -> list[RegistryModel]:
         raw = (model.model_path or "").strip()
         if not raw:
             return False
+        if raw.startswith(("https://huggingface.co/", "ssh://")):
+            return True
         path = Path(raw)
         if path.is_absolute():
             return path.exists()

@@ -8,7 +8,11 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECK = runpy.run_path(str(ROOT / "examples" / "olmo_if_validation_evaluator.py"))[
+LOCAL_EVALUATOR = ROOT / "examples" / "olmo_if_validation_evaluator.py"
+LOCAL_DATA = ROOT / "assets" / "olmo" / "if_validation" / "if_validation.jsonl"
+if not LOCAL_EVALUATOR.is_file() or not LOCAL_DATA.is_file():
+    pytest.skip("OLMo experiment fixtures are local-only", allow_module_level=True)
+CHECK = runpy.run_path(str(LOCAL_EVALUATOR))[
     "check_constraints"
 ]
 

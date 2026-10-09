@@ -1,3 +1,15 @@
+## Run-selected model destination
+
+When `model_save_policy` is nonempty, the engine has already saved and verified
+this exact checkpoint before invoking you. `saved_model_path` and
+`saved_model_revision` are authoritative. Do NOT download or upload the model
+again. Write the manifest with `model_path=saved_model_path`,
+`storage=model_save_policy.weights`, and `revision=saved_model_revision`.
+A HF URL or SSH URL is a valid retained model; do not check it with local
+filesystem APIs. Preserve metrics and provenance exactly as before.
+These destination rules supersede local-copy requirements below. Empty policy
+is the legacy local-copy contract for already launched Runs.
+
 Finalize one Run against its single stable model identity:
 
 1. a Ticket-local `registry.yaml` snapshot of the selected champion;
@@ -52,5 +64,5 @@ Registry entry.
 - Do not install packages at runtime. PyYAML is part of the application image;
   missing dependencies are an environment failure.
 - Do not push to Hugging Face Hub or any other external registry merely because
-  credentials are present. External publication requires an explicit user
-  instruction and is outside the canonical Registry ticket.
+  credentials are present. External publication is performed by the engine only when the Run
+  model_save_policy authorizes it; do not independently publish.

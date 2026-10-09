@@ -152,28 +152,24 @@ async def test_download_copies_registers_and_is_idempotent(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_hf_pushes_from_the_local_copy(tmp_path, monkeypatch) -> None:
+async def test_hf_cancel_uses_shared_save_without_copying_to_zevo(tmp_path, monkeypatch) -> None:
+    import zevo.engine.run.model_save as saver
     Session = await _session()
-    pushed: list[tuple] = []
-    monkeypatch.setattr(rescue, "hf_token", lambda: "hf_x")
-
-    async def fake_push(model_dir, *, repo_id, private, token):
-        pushed.append((Path(model_dir).name, repo_id, private, token))
-        return f"https://huggingface.co/{repo_id}"
-    monkeypatch.setattr(rescue, "push_to_hf", fake_push)
-
+    pushed = []
+    async def fake_save(session, run, ticket, *, source, remote, policy):
+        pushed.append((Path(source).name, remote, policy.hf_repo_id, policy.hf_private))
+        return {"storage": "hf", "path": "https://huggingface.co/me/legal-lora/tree/abc", "revision": "abc"}
+    monkeypatch.setattr(saver, "save_model", fake_save)
     async with Session() as db:
-        run = await _seed(
-            db, tmp_path, history=_hist(0.5),
+        run = await _seed(db, tmp_path, history=_hist(0.5),
             checkpoints=[(1, _checkpoint_dir(tmp_path, "it1"))],
-            cancel_policy=CancelWeightsPolicy(
-                weights="hf", hf_repo_id="me/legal-lora", hf_private=False,
-                local_dir=str(tmp_path / "keep"),
-            ).model_dump(),
-        )
+            cancel_policy=CancelWeightsPolicy(weights="hf", hf_repo_id="me/legal-lora", hf_private=False).model_dump())
         outcome = await rescue.perform_rescue(db, run)
-        assert outcome["hf_url"] == "https://huggingface.co/me/legal-lora"
-        assert pushed == [("it1", "me/legal-lora", False, "hf_x")]
+        assert outcome["hf_url"] == "https://huggingface.co/me/legal-lora/tree/abc"
+        assert pushed == [("it1", False, "me/legal-lora", False)]
+        row = await db.get(RegistryModel, outcome["registry_version_tag"])
+        assert row.model_path == outcome["hf_url"]
+
 
 
 @pytest.mark.asyncio
@@ -383,3 +379,27 @@ async def test_unsafe_checkpoint_path_is_rejected_before_transfer(tmp_path):
     candidate=rescue.RescueCandidate(ticket=SimpleNamespace(id="ticket"),path="/shared/run/../",remote=True,meta={})
     with pytest.raises(RuntimeError,match="canonical"):
         await rescue._copy_off_box(None,candidate,tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('destination', ['hf', 'remote'])
+async def test_external_model_save_finishes_cancel_as_cancelled(tmp_path, monkeypatch, destination):
+    import zevo.engine.run.model_save as saver
+    Session = await _session()
+    monkeypatch.setattr(zevo_db, 'get_session_factory', lambda: Session)
+    async def fake_save(session, run, ticket, **kwargs):
+        return {'storage': destination, 'path': 'https://huggingface.co/me/model/tree/abc' if destination == 'hf'
+                else 'ssh://me@gpu:22/models/M-r1', 'revision': 'abc' if destination == 'hf' else ''}
+    monkeypatch.setattr(saver, 'save_model', fake_save)
+    async with Session() as db:
+        await _seed(db, tmp_path, history=_hist(.5), checkpoints=[(1, _checkpoint_dir(tmp_path, 'it1'))],
+            cancel_requested_at=datetime.now(timezone.utc),
+            cancel_policy=CancelWeightsPolicy(weights=destination, hf_repo_id='me/model', remote_dir='/models').model_dump())
+        assert await rescue.complete_requested_cancels(db) == 1
+        await rescue._ACTIVE['r1']
+    async with Session() as db:
+        run = await db.get(Run, 'r1')
+        assert run.status == 'cancelled'
+        assert run.cancel_outcome['status'] == 'completed'
+        assert run.cancel_outcome['source_retained'] is True
+        assert run.registry_version_tag

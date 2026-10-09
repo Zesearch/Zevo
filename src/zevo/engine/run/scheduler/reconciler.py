@@ -715,7 +715,7 @@ async def _query_slurm_job(
     """Return state, exit code, reason, and actual start for one exact job."""
     if not re.fullmatch(r"[0-9]+(?:_[0-9]+)?", job_id):
         raise ValueError(f"invalid Slurm job id {job_id!r}")
-    from zevo.engine.run.remote_jobs import _slurm_cli_bootstrap_command
+    from zevo.engine.run.remote_jobs import _slurm_cli_bootstrap_command, _slurm_login_command
     bootstrap = _slurm_cli_bootstrap_command(
         connection.get("env_setup", ""), required=("squeue", "sacct", "scontrol"),
     )
@@ -739,7 +739,7 @@ async def _query_slurm_job(
             connect_timeout=15,
         ),
         f"{connection.get('user')}@{connection.get('host')}",
-        command,
+        _slurm_login_command(command),
     ]
     proc = await asyncio.create_subprocess_exec(
         *args,

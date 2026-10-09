@@ -1,3 +1,15 @@
+## Run-selected model destination
+
+When `model_save_policy` is nonempty, the engine has already saved and verified
+this exact checkpoint before invoking you. `saved_model_path` and
+`saved_model_revision` are authoritative. Do NOT download or upload the model
+again. Write the manifest with `model_path=saved_model_path`,
+`storage=model_save_policy.weights`, and `revision=saved_model_revision`.
+A HF URL or SSH URL is a valid retained model; do not check it with local
+filesystem APIs. Preserve metrics and provenance exactly as before.
+These destination rules supersede local-copy requirements below. Empty policy
+is the legacy local-copy contract for already launched Runs.
+
 Registry is the once-per-Run final stage after optimization stops. Its inputs are
 already resolved; use the paths exactly as supplied.
 
