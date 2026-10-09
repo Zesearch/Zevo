@@ -47,3 +47,8 @@ web/tsconfig.tsbuildinfo
 /playbook/skills/infrastructure/*/
 
 web/.cache/
+
+# Local experiment assets and legacy workspace (kept on this machine).
+/assets/
+/examples/
+/workspace/
