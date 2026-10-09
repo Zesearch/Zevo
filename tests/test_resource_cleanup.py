@@ -140,3 +140,24 @@ async def test_terminating_cloud_instance_counts_as_released(db, monkeypatch):
     monkeypatch.setattr(cleanup, "_cloud_provider", lambda *_: Provider())
     assert await cleanup.release_cloud(row, run) is True
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_gpu_saved_model_keeps_cloud_host_until_cancel_anyway(db, monkeypatch):
+    run = await db.get(Run, 'r1')
+    run.lifecycle = {'model_storage': {'storage': 'remote', 'instance_id': '123'}}
+    run.cancel_policy = {'weights': 'remote'}
+    row = InfraInstance(run_id='r1', ticket_id='infra', provider='cloud', instance_id='123', meta={})
+    db.add(row)
+    await db.commit()
+    calls = []
+    async def released(row, run):
+        calls.append(row.instance_id)
+        return True
+    monkeypatch.setattr(cleanup, 'release_cloud', released)
+    await cleanup.cleanup_run_resources(db, run)
+    assert not calls and row.released_at is None
+    run.cancel_policy = {'weights': 'discard'}
+    await db.commit()
+    await cleanup.cleanup_run_resources(db, run)
+    assert calls == ['123'] and row.released_at is not None

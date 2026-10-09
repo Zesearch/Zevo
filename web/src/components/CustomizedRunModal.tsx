@@ -1,3 +1,4 @@
+import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady } from "./ModelSaveFields";
 import { useLaunchSetting } from "../lib/useLaunchSetting";
 import { LaunchLimitsSummary, useLaunchPreflight } from "./LaunchPreflight";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -143,6 +144,7 @@ export function CustomizedRunForm({
   const [error, setError] = useState<string | null>(null);
   const runSetup = useRunSetupProgress();
   const preflight = useLaunchPreflight();
+  const [modelSave, setModelSave] = useState({ ...defaultModelSavePolicy });
   const initialSettingApplied = useRef(false);
 
   const dirtyForm = !!(
@@ -410,8 +412,10 @@ export function CustomizedRunForm({
       if (!Number.isFinite(queueWaitHours) || queueWaitHours <= 0 || queueWaitHours > 168) {
         throw new Error("Max queue wait must be greater than 0 and at most 168 hours.");
       }
+      if (!modelSaveReady(modelSave)) throw new Error("Choose a valid final model destination.");
       const body = {
         mode: "customized_pipeline",
+        model_save_policy: modelSave,
         task_name: taskName.trim(),
         run_name: runName.trim(),
         user_request,
@@ -659,6 +663,7 @@ export function CustomizedRunForm({
           )}
         />
 
+        <ModelSaveFields value={modelSave} onChange={setModelSave} />
         <LaunchLimitsSummary inputs={inputs} />
         {preflight.panel}
       </div>
@@ -710,6 +715,7 @@ export function CustomizedRunForm({
         <button onClick={start} disabled={
           busy
           || requiredMissing.length > 0
+          || !modelSaveReady(modelSave)
           || (!pickedSetting && saveSetting && (nameTaken || !settingName.trim()))
         }
           title={requiredMissing.length

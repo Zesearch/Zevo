@@ -156,6 +156,7 @@ export type AgentCustomization = {
 /** The run envelope every launch mode shares: identity plus limits and where
  *  the work runs. Mode-specific payloads are added in CreateRunRequest. */
 type RunEnvelope = {
+  model_save_policy?: import("../components/ModelSaveFields").ModelSavePolicy;
   task_name: string;
   run_name: string;
   /** Ephemeral correlation id for asynchronous Test/Validation preparation. */
@@ -350,6 +351,8 @@ export type CancelOutcome = {
 
 export type RunSummary = {
   lifecycle?: {
+    model_save_policy?: import("../components/ModelSaveFields").ModelSavePolicy;
+    model_storage?: { storage: "hf" | "remote"; path: string; revision: string };
     finalization?: {
       started_at?: string;
       deadline_at?: string;

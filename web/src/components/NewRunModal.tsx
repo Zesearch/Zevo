@@ -1,3 +1,4 @@
+import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady } from "./ModelSaveFields";
 import { useLaunchSetting } from "../lib/useLaunchSetting";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, Eraser } from "lucide-react";
@@ -182,6 +183,7 @@ export function NewRunModal({
 }) {
   const nav = useNavigate();
   const preflight = useLaunchPreflight();
+  const [modelSave, setModelSave] = useState({ ...defaultModelSavePolicy });
   const { data: tasks = [] } = useSWR<TaskSummary[]>(open ? "/api/tasks" : null);
   const { data: agents = [] } = useSWR<AgentLite[]>(open ? "/api/agents" : null);
 
@@ -698,6 +700,7 @@ export function NewRunModal({
         ...saveFields,
       };
     }
+    body = { ...body, model_save_policy: modelSave };
     if (!(await preflight.check(body))) return;
     const setupId = runSetup.begin();
     body = { ...body, setup_id: setupId };
@@ -717,6 +720,7 @@ export function NewRunModal({
   async function submitAuto() {
     const body: CreateRunRequest = {
       mode: "auto",
+      model_save_policy: modelSave,
       task_name: trimmedTask,
       run_name: runName.trim(),
       user_request: {
@@ -907,6 +911,7 @@ export function NewRunModal({
             disabled={
               busy
               || launchMissing.length > 0
+              || (["auto", "full_pipeline"].includes(mode) && !modelSaveReady(modelSave))
               // A clash would 409 at the end of a launch, which is the worst
               // moment to find out.
               || (saveSetting && !reusableSetting && (nameTaken || !settingName.trim()))
@@ -928,7 +933,7 @@ export function NewRunModal({
   return (
     <Modal open={open} title="Start a new run" onClose={onClose} width="max-w-[78rem]" footer={footer}>
       <div className="space-y-5 pr-2">
-        {(mode === "auto" || mode === "full_pipeline") && <><LaunchLimitsSummary inputs={inputs} />{preflight.panel}</>}
+        {(mode === "auto" || mode === "full_pipeline") && <><ModelSaveFields value={modelSave} onChange={setModelSave} /><LaunchLimitsSummary inputs={inputs} />{preflight.panel}</>}
         {/* Two columns: WHICH kind of run on the left, WHAT it is on the right.
             Stacked across the top, the three mode cards took a third of the
             dialog's height to answer a question asked once, and pushed the form

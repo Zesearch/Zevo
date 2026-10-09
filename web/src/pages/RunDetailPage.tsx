@@ -1342,11 +1342,11 @@ function CancelRunButton({ run, onCancelled }: { run: RunDetail; onCancelled: ()
   const [open, setOpen] = useState(false);
   // Same folder the registry stage uses, so a rescued model sits beside a
   // registered one.
-  const defaultDir = `data/runs/${run.id}/models/M-${run.id.slice(0, 8)}`;
   return (
     <>
       {open && (
-        <CancelRunDialog runId={run.id} defaultDir={defaultDir}
+        <CancelRunDialog runId={run.id}
+          modelSavePolicy={run.lifecycle?.model_save_policy as import("../components/ModelSaveFields").ModelSavePolicy | undefined}
           onClose={() => setOpen(false)} onCancelled={onCancelled} />
       )}
       <button
