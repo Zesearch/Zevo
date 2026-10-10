@@ -1,6 +1,6 @@
 import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
 import { instructionBlocks, stageStatus } from "../lib/stageStatus";
-import { timelineTicketStatus } from "../lib/timelineStatus";
+import { latestTimelineTickets, timelineTicketStatus } from "../lib/timelineStatus";
 import { useState, useMemo, useEffect, Fragment } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
@@ -657,15 +657,16 @@ function PipelineTimeline({
         {groups.map((g) => {
           const open = expanded.has(g.key);
           const groupTickets = [...g.tickets, ...g.mirror];
-          const ticketStatus = timelineTicketStatus(groupTickets);
+          const currentTickets = latestTimelineTickets(groupTickets);
+          const ticketStatus = timelineTicketStatus(currentTickets);
           const groupOrchestrator = orchestratorByGroup.get(g.key) || [];
           const groupHasUnrecordedFailure = unrecordedOrchestratorFailure
             && failureGroupKey === g.key;
-          const groupPaused = groupTickets.some((ticket) => pausedTicketIds.has(ticket.id));
-          const groupRunning = !groupPaused && (groupTickets.some((t) => t.status === "running" || t.status === "repairing")
+          const groupPaused = currentTickets.some((ticket) => pausedTicketIds.has(ticket.id));
+          const groupRunning = !groupPaused && (currentTickets.some((t) => t.status === "running" || t.status === "repairing")
             || groupOrchestrator.some((heartbeat) => heartbeat.is_live));
           const groupFailed = ticketStatus === "failed"
-            || groupOrchestrator.some((heartbeat) => heartbeat.action === "mark_failed")
+            || groupOrchestrator.at(-1)?.action === "mark_failed"
             || groupHasUnrecordedFailure;
           const groupDegraded = ticketStatus === "degraded";
           const groupDone = ticketStatus === "succeeded";
@@ -805,11 +806,7 @@ function PipelineTimeline({
                             {isRunning && (
                               <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${dot} opacity-60`} />
                             )}
-                            {displayStatus === "cancelled" ? (
-                              <span title="Cancelled" aria-label="Cancelled" className="relative flex h-3 w-3 items-center justify-center rounded-full border border-coral-400 text-[10px] leading-none text-coral-300">×</span>
-                            ) : (
-                              <span className={`relative h-3 w-3 rounded-full ${dot} ${isRunning ? "animate-lamp-pulse" : ""}`} />
-                            )}
+                            <span className={`relative h-3 w-3 rounded-full ${dot} ${isRunning ? "animate-lamp-pulse" : ""}`} />
                           </span>
                           <span className="min-w-0 flex-1">
                             <span className="flex items-center justify-between gap-2">

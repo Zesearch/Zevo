@@ -41,7 +41,6 @@ export function statusToneFor(status: string): StatusTone {
     case "paused":
       return { dot: "bg-skyx-400", text: "text-skyx-200", ring: "border-skyx-400/40 bg-skyx-500/10" };
     case "cancelled":
-      return { dot: "bg-coral-400", text: "text-coral-300", ring: "border-coral-500/30 bg-coral-500/10" };
     case "skipped":
       return { dot: "bg-dim", text: "text-slate-400", ring: "border-slate-600/40 bg-slate-800/40" };
     default:
