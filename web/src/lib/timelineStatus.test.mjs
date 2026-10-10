@@ -28,3 +28,11 @@ assert.equal(timelineTicketStatus([failed, { ...failed, created_at: '2026-10-08T
 assert.equal(timelineTicketStatus([]), 'pending');
 assert.equal(failed.status, 'failed');
 console.log('timeline recovery regression checks passed');
+
+const cancelled = { ...failed, status: 'cancelled' };
+assert.equal(timelineTicketStatus([cancelled]), 'cancelled');
+assert.equal(timelineTicketStatus([cancelled, { ...success, agent_id: 'data' }]), 'cancelled');
+assert.equal(timelineTicketStatus([cancelled, { ...success, status: 'queued' }]), 'pending');
+assert.equal(timelineTicketStatus([cancelled, { ...success, status: 'running' }]), 'running');
+assert.equal(timelineTicketStatus([cancelled, success]), 'succeeded');
+assert.equal(timelineTicketStatus([success, { ...cancelled, created_at: '2026-10-08T06:00:00Z' }]), 'cancelled');

@@ -38,5 +38,9 @@ export function timelineTicketStatus(tickets: StageTicket[]): string {
   if (current.length > 0 && current.every((t) => ["succeeded", "skipped"].includes(t.status))) {
     return "succeeded";
   }
+  if (current.some((t) => t.status === "cancelled")
+    && current.every((t) => ["succeeded", "skipped", "cancelled"].includes(t.status))) {
+    return "cancelled";
+  }
   return "pending";
 }
