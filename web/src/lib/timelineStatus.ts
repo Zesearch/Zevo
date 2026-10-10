@@ -10,33 +10,26 @@ type StageTicket = {
 };
 
 function stageKey(ticket: StageTicket): string {
-  // A replacement training attempt may change its parent model. It still
-  // completes the same iteration's training stage, unlike inference lanes
-  // where baseline and checkpoint measurements are distinct work.
-  const modelSource = ticket.agent_id === "train" && ticket.operation === "train"
-    ? "" : ticket.model_source;
   return JSON.stringify([
     ticket.iteration, ticket.lane, ticket.agent_id, ticket.operation,
-    modelSource, ticket.test_set_name,
+    ticket.test_set_name,
   ]);
 }
 
-/** Summarize effective stage outcomes while preserving historical Ticket rows.
- * Only a later success in the same stage can recover an unsuccessful attempt. */
-export function timelineTicketStatus(tickets: StageTicket[]): string {
-  const successes = new Map<string, string>();
+/** Historical attempts remain visible; only the newest ticket in each
+ * iteration/lane/stage contributes to its current status. */
+export function latestTimelineTickets<T extends StageTicket>(tickets: T[]): T[] {
+  const latest = new Map<string, T>();
   for (const ticket of tickets) {
-    if (ticket.status !== "succeeded") continue;
     const key = stageKey(ticket);
-    if (ticket.created_at > (successes.get(key) || "")) {
-      successes.set(key, ticket.created_at);
-    }
+    const previous = latest.get(key);
+    if (!previous || ticket.created_at > previous.created_at) latest.set(key, ticket);
   }
-  const current = tickets.filter((ticket) => {
-    if (!["failed", "degraded", "cancelled"].includes(ticket.status)) return true;
-    const recoveredAt = successes.get(stageKey(ticket));
-    return !recoveredAt || recoveredAt <= ticket.created_at;
-  });
+  return Array.from(latest.values());
+}
+
+export function timelineTicketStatus(tickets: StageTicket[]): string {
+  const current = latestTimelineTickets(tickets);
   if (current.some((t) => ["running", "repairing"].includes(t.status))) return "running";
   if (current.some((t) => t.status === "failed")) return "failed";
   if (current.some((t) => t.status === "degraded")) return "degraded";

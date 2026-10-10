@@ -14,13 +14,13 @@ assert.equal(timelineTicketStatus([failed]), 'failed');
 assert.equal(timelineTicketStatus([success, { ...failed, created_at: '2026-10-08T06:00:00Z' }]), 'failed');
 for (const differentStage of [
   { iteration: 1 }, { lane: 'held_out_test' }, { agent_id: 'train' },
-  { operation: 'release' }, { model_source: 'checkpoint' }, { test_set_name: 'another-benchmark' },
+  { operation: 'release' }, { test_set_name: 'another-benchmark' },
 ]) {
   assert.equal(timelineTicketStatus([failed, { ...success, ...differentStage }]), 'failed');
 }
 assert.equal(timelineTicketStatus([failed, { ...success, status: 'running' }]), 'running');
 assert.equal(timelineTicketStatus([failed, { ...success, status: 'repairing' }]), 'running');
-assert.equal(timelineTicketStatus([failed, { ...success, status: 'skipped' }]), 'failed');
+assert.equal(timelineTicketStatus([failed, { ...success, status: 'skipped' }]), 'succeeded');
 assert.equal(timelineTicketStatus([failed, success, { ...success, agent_id: 'evaluation', status: 'queued' }]), 'pending');
 assert.equal(timelineTicketStatus([{ ...failed, status: 'degraded' }, success]), 'succeeded');
 assert.equal(timelineTicketStatus([{ ...failed, status: 'cancelled' }, success]), 'succeeded');
@@ -45,3 +45,13 @@ assert.equal(timelineTicketStatus([oldTrain, replacementTrain]), 'succeeded');
 assert.equal(timelineTicketStatus([replacementTrain, oldTrain]), 'succeeded');
 assert.equal(timelineTicketStatus([oldTrain, { ...replacementTrain, iteration: 4 }]), 'cancelled');
 assert.equal(timelineTicketStatus([oldTrain, { ...replacementTrain, status: 'queued' }]), 'pending');
+
+for (const oldStatus of ['failed', 'cancelled', 'running', 'repairing', 'queued', 'succeeded']) {
+  for (const [newStatus, expected] of Object.entries({succeeded: 'succeeded', queued: 'pending', awaiting_input: 'pending', waiting_external: 'pending', running: 'running', repairing: 'running', failed: 'failed', cancelled: 'cancelled'})) {
+    const old = { ...failed, status: oldStatus };
+    const latest = { ...success, status: newStatus, model_source: 'checkpoint' };
+    assert.equal(timelineTicketStatus([old, latest]), expected);
+    assert.equal(timelineTicketStatus([latest, old]), expected);
+  }
+}
+console.log('latest-ticket status regression checks passed');
