@@ -1,8 +1,9 @@
+import { useFileDisplayPath } from "../lib/useFileDisplayPath";
 import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { ChevronRight, Folder, Pencil, Plus, Trash2, X } from "lucide-react";
 import { Note } from "./zevo/primitives";
-import { displayFilePath, shortModel, splitDatasetPath } from "../lib/format";
+import { shortModel, splitDatasetPath } from "../lib/format";
 import {
   MODEL_ID_HINT,
   TRAINING_METHOD_OPTIONS,
@@ -74,7 +75,7 @@ export function LevelBadge({ level, title }: { level: string; title?: string }) 
  *  two origins, because then the row is describing two decisions and collapsing
  *  them would hide one.
  */
-function dataRows(s: TaskSettingDTO): {
+function dataRows(s: TaskSettingDTO, displayPath: (path: string) => string): {
   label: "train" | "val"; value: string; slice: string; split: string;
   folder: string; packaged: boolean; file: string; title: string;
 }[] {
@@ -112,7 +113,7 @@ function dataRows(s: TaskSettingDTO): {
     const slice = isHub ? [config, shown].filter(Boolean).join("/") : "";
     return {
       label,
-      value: named ? `${named}/${leaf}` : leaf,
+      value: inCatalogue ? displayPath(raw) : named ? `${named}/${leaf}` : leaf,
       slice,
       folder: named,
       packaged: !!named,
@@ -120,7 +121,7 @@ function dataRows(s: TaskSettingDTO): {
       // mark which of the bundle's entries you arrived for.
       file: isHub ? raw : leaf,
       split,
-      title: displayFilePath(raw) + (slice ? ` (${slice})` : ""),
+      title: displayPath(raw) + (slice ? ` (${slice})` : ""),
     };
   };
   const validationSuite = s.validation_sets ?? [];
@@ -132,7 +133,7 @@ function dataRows(s: TaskSettingDTO): {
     folder: "",
     packaged: false,
     file: "",
-    title: validationSuite.map((item) => `${item.name}: ${displayFilePath(item.test_set)}`).join("\n"),
+    title: validationSuite.map((item) => `${item.name}: ${displayPath(item.test_set)}`).join("\n"),
   } : {
     label: "val" as const,
     value: "From Test suite · 20% per eligible set · minimum 200 Validation rows",
@@ -362,6 +363,7 @@ export function TaskSettingHistory({
   // "" = nothing open, "new" = the blank form, an id = that row being edited.
   const [open, setOpen] = useState("");
   const settings = data ?? [];
+  const displayPath = useFileDisplayPath();
 
   useEffect(() => {
     onAddingChange?.(open === "new");
@@ -418,7 +420,7 @@ export function TaskSettingHistory({
                 not: which rows a setting tunes against is part of what makes it
                 a different attempt, and two settings alike but for their
                 validation split produced two scores never comparable. */}
-            {dataRows(s).map((r) => r.label === "train" ? (
+            {dataRows(s, displayPath).map((r) => r.label === "train" ? (
               <span key={r.label} className="shrink-0 space-y-1">
                 <Fact label="data"
                   value={r.slice ? `${r.value} · ${r.slice}` : r.value} title={r.title}
@@ -499,7 +501,7 @@ export function TaskSettingHistory({
           );
         }
 
-        const [training, validation] = dataRows(s);
+        const [training, validation] = dataRows(s, displayPath);
         const methodTitle = s.training_method === "gkd"
           ? `${s.training_method} · teacher ${String(s.method_config?.teacher_model || "missing")}`
           : s.training_method === "online_dpo"
