@@ -1,8 +1,9 @@
+import { useFileDisplayPath } from "../lib/useFileDisplayPath";
 import { PredictionColumnField } from "./PredictionColumnField";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { CheckCircle2, ChevronRight, Plus, Trash2, Upload, X } from "lucide-react";
-import { displayFilePath, fmtScoringRows, splitDatasetPath } from "../lib/format";
+import { displayFilePath, fmtScoringRows } from "../lib/format";
 import { api } from "../lib/api";
 import type {
   FileSetDTO,
@@ -93,6 +94,7 @@ export function ScoringSuiteManifest({
   showHeader?: boolean;
   summaryLayout?: "stacked" | "inline";
 }) {
+  const short = useFileDisplayPath();
   return (
     <div className="space-y-2">
       {showHeader && <div className="flex flex-wrap items-baseline justify-between gap-2 px-0.5">
@@ -570,7 +572,7 @@ function catalogueOptions(datasets: FileSetDTO[]): Option[] {
         // so a data-root move cannot strand the picker again.
         value: `${d.path}/${f}`,
         split: "", config: "",
-        dataset: d.name, name: f, label: `${d.name}/${f}`, hint: "",
+        dataset: d.display_name || d.name, name: f, label: `${d.display_name || d.name}/${f}`, hint: "",
       });
     }
     for (const r of d.source?.remote ?? []) {
@@ -578,9 +580,9 @@ function catalogueOptions(datasets: FileSetDTO[]): Option[] {
         value: r.id,
         split: r.split ?? "",
         config: r.config ?? "",
-        dataset: d.name,
+        dataset: d.display_name || d.name,
         name: r.id.split("/").pop() || r.id,
-        label: `${d.name}/${r.id.split("/").pop() || r.id}`,
+        label: `${d.display_name || d.name}/${r.id.split("/").pop() || r.id}`,
         hint: `${[r.config, r.split || "train"].filter(Boolean).join("/")} · hf`,
       });
     }
@@ -800,11 +802,11 @@ function UploadBox({
 function Chosen({
   value, onChange, note = "", className = "",
 }: { value: string; onChange: (v: string) => void; note?: string; className?: string }) {
-  const inCatalogue = splitDatasetPath(value);
+  const short = useFileDisplayPath();
   const uploaded = isUploadedPath(value);
   const displayValue = uploaded
     ? uploadedFileName(value)
-    : inCatalogue ? inCatalogue.label : short(value);
+    : short(value);
   return (
     <div className={`flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2 ${className}`}>
       {uploaded && <CheckCircle2 size={15} className="shrink-0 text-phosphor-300" />}
@@ -1310,6 +1312,7 @@ export function MultiFileSlot({
   label, values, onChange, hint = "",
 }: { label: string; values: string[]; onChange: (v: string[]) => void; hint?: string }) {
   const { data: datasets = [] } = useSWR<FileSetDTO[]>("/api/files");
+  const short = useFileDisplayPath();
   const [draft, setDraft] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -1676,6 +1679,7 @@ export function RunInputs({
   // Collapsed by default so the form leads with the actual inputs, not a wall
   // of status. The header still shows the "N missing / ready" badge, so the
   // at-a-glance state is never hidden — the user expands only to see details.
+  const short = useFileDisplayPath();
   const [showChecklist, setShowChecklist] = useState(false);
   const [showTestSetup, setShowTestSetup] = useState(true);
   const [showTraining, setShowTraining] = useState(false);

@@ -1,7 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
-import { Folder, ListChecks, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { ListChecks, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { TaskModal } from "../components/TaskModal";
 import { TaskSettingHistory } from "../components/TaskSettings";
 import { ScoringSuiteManifest } from "../components/RunInputs";
@@ -9,7 +9,7 @@ import { FileSetView } from "../components/FileSetView";
 import { Modal } from "../components/Modal";
 import { Bezel, Detail, Kicker, PageHead } from "../components/zevo/primitives";
 import { PAGE_SIZES, Pager } from "../components/zevo/Pager";
-import { displayFilePath, fmtDate, fmtMetric, splitDatasetPath } from "../lib/format";
+import { fmtDate, fmtMetric } from "../lib/format";
 import { useRowsPerPage } from "../lib/useRowsPerPage";
 import { api } from "../lib/api";
 import type { TaskDTO, TaskSettingDTO } from "../lib/api";
@@ -92,127 +92,31 @@ function ClampedObjective({ text }: { text: string }) {
   );
 }
 
-/** A task's test files, the set itself first.
- *
- *  The card used to name only the folder for a catalogued dataset, on the
- *  grounds that the dataset's own card already lists what is in it. But which
- *  file is the TEST SET is a fact about the task, not about the folder, and it
- *  is the one fact this section exists to state. The other entries describe how
- *  that file is read and are the same for every task built from one bundle, so
- *  they fold away.
- */
-function TestFiles({
-  t, onPeek,
-}: { t: TaskSummary; onPeek: (name: string, file: string) => void }) {
+/** Use the same expandable benchmark summary for every nonempty suite. */
+function TestFiles({ t }: { t: TaskSummary }) {
   const [open, setOpen] = useState(false);
   const suite = t.test_sets ?? [];
-
-  const fileRow = (path: string) => {
-    if (!path) return null;
-    const inCatalogue = splitDatasetPath(path);
-    if (inCatalogue) {
-      return {
-        file: inCatalogue.file,
-        folder: inCatalogue.dataset,
-        packaged: true,
-        label: inCatalogue.label,
-      };
-    }
-    const parts = displayFilePath(path).split("/");
-    const file = parts.pop() || path;
-    const folder = parts.pop() || "";
-    return { file, folder, packaged: false, label: folder ? `${folder}/${file}` : file };
-  };
-
   if (!suite.length) {
     return <span className="font-mono text-xs text-slate-600">none given</span>;
   }
-
-  if (suite.length > 1) {
-    return (
-      <div className="min-w-0 rounded-md border border-hair bg-canvas p-2.5">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <span className="font-mono text-xs text-slate-100">{suite.length} benchmarks</span>
-          <span className="font-mono text-2xs text-slate-500">
-            {fmtMetric(t.metric)} {t.metric_direction === "min" ? "↓" : "↑"}
-          </span>
-        </div>
-
-        {open && (
-          <div className="mt-2">
-            <ScoringSuiteManifest items={suite} showHeader={false} />
-          </div>
-        )}
-
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            setOpen((value) => !value);
-          }}
-          className="mt-2 font-mono text-2xs text-slate-500 transition hover:text-brass-300"
-        >
-          {open ? "hide benchmarks" : "show benchmarks"}
-        </button>
-      </div>
-    );
-  }
-
-  const item = suite[0];
-  const rows = [
-    { label: "data", path: item.test_set, value: "" },
-    { label: "inference query", path: "", value: item.inference_query },
-    { label: "answer fields", path: "", value: item.answer_fields.join(", ") },
-    ...(item.metric_type === "builtin" ? [{ label: "prediction column", path: "", value: item.prediction_column || "Auto" }] : []),
-    {
-      label: "metric",
-      path: "",
-      value: `${fmtMetric(item.metric)} · ${item.metric_type === "custom" ? "custom" : "built-in"} · ${item.metric_direction}`,
-    },
-    ...(item.metric_type === "custom" ? [{
-      label: "evaluator", path: item.evaluation_script, value: "",
-    }] : []),
-    { label: "submission", path: item.sample_submission, value: "" },
-  ].filter((row) => row.path || row.value);
-  const [first, ...rest] = rows;
-
-  const Row = ({ label, path, value }: { label: string; path: string; value: string }) => {
-    const f = fileRow(path);
-    return (
-      <div className="grid min-w-0 grid-cols-[7rem_minmax(0,1fr)] items-baseline gap-2">
-        <span className="whitespace-nowrap font-mono text-2xs text-slate-100">{label}</span>
-        {f ? (
-          f.packaged ? (
-            <button
-              onClick={(event) => { event.stopPropagation(); onPeek(f.folder, f.file); }}
-              title={f.label}
-              className="flex min-w-0 items-baseline gap-1 text-slate-300 transition hover:text-brass-300 hover:underline"
-            >
-              <Folder size={11} className="shrink-0 translate-y-px text-slate-500" />
-              <span className="min-w-0 truncate font-mono text-2xs">{f.label}</span>
-            </button>
-          ) : (
-            <span title={f.label} className="min-w-0 truncate font-mono text-2xs text-slate-300">{f.label}</span>
-          )
-        ) : (
-          <span title={value} className="min-w-0 truncate font-mono text-2xs text-slate-300">{value}</span>
-        )}
-      </div>
-    );
-  };
-
+  const noun = suite.length === 1 ? "benchmark" : "benchmarks";
   return (
-    <div className="min-w-0 space-y-1 rounded-md border border-hair bg-canvas p-2.5">
-      <Row {...first} />
-      {open && <div className="space-y-1">{rest.map((row) => <Row key={row.label} {...row} />)}</div>}
-      {rest.length > 0 && (
-        <button
-          onClick={(event) => { event.stopPropagation(); setOpen((value) => !value); }}
-          className="font-mono text-2xs text-slate-500 transition hover:text-brass-300"
-        >
-          {open ? "show less" : `show ${rest.length} more`}
-        </button>
-      )}
+    <div className="min-w-0 rounded-md border border-hair bg-canvas p-2.5">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <span className="font-mono text-xs text-slate-100">{suite.length} {noun}</span>
+        <span className="font-mono text-2xs text-slate-500">
+          {fmtMetric(t.metric)} {t.metric_direction === "min" ? "↓" : "↑"}
+        </span>
+      </div>
+      {open && <div className="mt-2"><ScoringSuiteManifest items={suite} showHeader={false} /></div>}
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={(event) => { event.stopPropagation(); setOpen((value) => !value); }}
+        className="mt-2 font-mono text-2xs text-slate-500 transition hover:text-brass-300"
+      >
+        {open ? `hide ${noun}` : `show ${noun}`}
+      </button>
     </div>
   );
 }
@@ -432,10 +336,7 @@ export function TasksPage() {
                 <div>
                   <Kicker strong>Test setup</Kicker>
                   <div className="mt-2 space-y-2">
-                    <TestFiles
-                      t={t}
-                      onPeek={(name, file) => setPeekDataset({ name, file })}
-                    />
+                    <TestFiles t={t} />
 
                   </div>
                 </div>

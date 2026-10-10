@@ -301,6 +301,7 @@ export type FileSetSourceDTO = {
 /** One file set, as GET /files serves it (src/zevo/api/routers/ui/files.py). */
 export type FileSetDTO = {
   name: string;
+  display_name?: string;
   path: string;
   size_bytes: number;
   files: string[];

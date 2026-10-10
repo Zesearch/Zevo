@@ -319,7 +319,21 @@ export function splitDatasetPath(
  * than part of the file's name. Catalogue paths keep the dataset plus its path
  * inside that dataset; one-off browser uploads show the original filename.
  */
-export function displayFilePath(path: string): string {
+export type FileDisplayEntry = { name: string; path: string; display_name?: string };
+
+export function displayFilePath(path: string, files: readonly FileDisplayEntry[] = []): string {
+  // Match the complete storage root, including workspace, never just its name.
+  // This is a label only: callers retain the original path for API requests.
+  const match = files
+    .filter((file) => {
+      const root = file.path.replace(/\/+$/, "");
+      return root && (path === root || path.startsWith(`${root}/`));
+    })
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  if (match) {
+    const root = match.path.replace(/\/+$/, "");
+    return `${match.display_name || match.name}${path.slice(root.length)}`;
+  }
   const inCatalogue = splitDatasetPath(path);
   if (inCatalogue) return inCatalogue.label;
 
