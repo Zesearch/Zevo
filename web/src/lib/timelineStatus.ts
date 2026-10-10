@@ -10,9 +10,14 @@ type StageTicket = {
 };
 
 function stageKey(ticket: StageTicket): string {
+  // A replacement training attempt may change its parent model. It still
+  // completes the same iteration's training stage, unlike inference lanes
+  // where baseline and checkpoint measurements are distinct work.
+  const modelSource = ticket.agent_id === "train" && ticket.operation === "train"
+    ? "" : ticket.model_source;
   return JSON.stringify([
     ticket.iteration, ticket.lane, ticket.agent_id, ticket.operation,
-    ticket.model_source, ticket.test_set_name,
+    modelSource, ticket.test_set_name,
   ]);
 }
 

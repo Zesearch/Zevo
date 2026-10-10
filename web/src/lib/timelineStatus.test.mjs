@@ -36,3 +36,12 @@ assert.equal(timelineTicketStatus([cancelled, { ...success, status: 'queued' }])
 assert.equal(timelineTicketStatus([cancelled, { ...success, status: 'running' }]), 'running');
 assert.equal(timelineTicketStatus([cancelled, success]), 'succeeded');
 assert.equal(timelineTicketStatus([success, { ...cancelled, created_at: '2026-10-08T06:00:00Z' }]), 'cancelled');
+
+// Run 1520c6e3 iteration 3: cancelled checkpoint continuation was replaced
+// by a successful base-model training attempt within the same iteration.
+const oldTrain = { ...cancelled, agent_id: 'train', operation: 'train', iteration: 3, model_source: 'checkpoint' };
+const replacementTrain = { ...oldTrain, created_at: success.created_at, model_source: 'base_model', status: 'succeeded' };
+assert.equal(timelineTicketStatus([oldTrain, replacementTrain]), 'succeeded');
+assert.equal(timelineTicketStatus([replacementTrain, oldTrain]), 'succeeded');
+assert.equal(timelineTicketStatus([oldTrain, { ...replacementTrain, iteration: 4 }]), 'cancelled');
+assert.equal(timelineTicketStatus([oldTrain, { ...replacementTrain, status: 'queued' }]), 'pending');

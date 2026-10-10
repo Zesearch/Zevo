@@ -805,11 +805,7 @@ function PipelineTimeline({
                             {isRunning && (
                               <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${dot} opacity-60`} />
                             )}
-                            {displayStatus === "cancelled" ? (
-                              <span title="Cancelled" aria-label="Cancelled" className="relative flex h-3 w-3 items-center justify-center rounded-full border border-coral-400 text-[10px] leading-none text-coral-300">×</span>
-                            ) : (
-                              <span className={`relative h-3 w-3 rounded-full ${dot} ${isRunning ? "animate-lamp-pulse" : ""}`} />
-                            )}
+                            <span className={`relative h-3 w-3 rounded-full ${dot} ${isRunning ? "animate-lamp-pulse" : ""}`} />
                           </span>
                           <span className="min-w-0 flex-1">
                             <span className="flex items-center justify-between gap-2">
