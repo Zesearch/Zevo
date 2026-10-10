@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Cpu, Clock3, Wallet, Repeat2, HardDrive, CloudUpload } from "lucide-react";
+import { modelSaveReady, type ModelSavePolicy } from "./ModelSaveFields";
 import { api } from "../lib/api";
 import type { RunInputValues } from "./RunInputs";
 
@@ -29,10 +31,37 @@ export function useLaunchPreflight() {
   </section> : null };
 }
 
-export function LaunchLimitsSummary({ inputs }: { inputs: RunInputValues }) {
+export function LaunchLimitsSummary({ inputs, modelSave }: { inputs: RunInputValues; modelSave: ModelSavePolicy }) {
   const limit = (value: string, unit = "") => Number(value) > 0 ? `${value}${unit}` : "Unlimited";
-  return <aside aria-label="Execution limits" className="rounded border border-hair bg-raised p-3 text-xs leading-relaxed">
-    <strong>GPU allocation:</strong> {inputs.gpuAllocationMode === "per_run" ? "Entire run" : inputs.gpuAllocationMode === "per_submission" ? "Per submission (Slurm)" : "Per stage"}. <strong>Execution limits:</strong> {limit(inputs.iterations)} rounds · {Number(inputs.budget) > 0 ? `$${inputs.budget}` : "Unlimited spend"} · {limit(inputs.timeLimitHours, " hours")} · {limit(inputs.numGpus)} GPUs · {inputs.queueWaitHours.trim() || "48"} hours queue wait.
-    <p className="mt-1 text-slate-400">Rounds, spend, active runtime, and GPU count start without a user cap. Slurm queue wait defaults to 48 hours. Budgets include estimated agent and rented GPU costs.</p>
+  const limits = [
+    { label: "Rounds", value: limit(inputs.iterations), icon: Repeat2 },
+    { label: "Spend", value: Number(inputs.budget) > 0 ? `$${inputs.budget}` : "Unlimited", icon: Wallet },
+    { label: "Active runtime", value: limit(inputs.timeLimitHours, " hours"), icon: Clock3 },
+    { label: "GPUs", value: limit(inputs.numGpus), icon: Cpu },
+  ];
+  const isHf = modelSave.weights === "hf";
+  const DestinationIcon = isHf ? CloudUpload : HardDrive;
+  const destination = (isHf ? modelSave.hf_repo_id : modelSave.remote_dir).trim();
+  const ready = modelSaveReady(modelSave);
+  return <aside aria-label="Run summary" className="rounded-xl bg-gradient-to-br from-raised to-canvas px-5 py-4 ring-1 ring-inset ring-white/[0.06]">
+    <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-5">
+      {limits.map(({ label, value, icon: Icon }) => <div key={label} className="min-w-0">
+        <dt className="mb-2 flex items-center gap-2 text-sm font-medium text-brass-300"><Icon size={14} />{label}</dt>
+        <dd className="text-sm font-medium tabular-nums text-slate-100">{value}</dd>
+      </div>)}
+      <div className="col-span-2 min-w-0 sm:col-span-1">
+        <dt className="mb-2 flex items-center gap-2 text-sm font-medium text-brass-300"><DestinationIcon size={14} />Final model</dt>
+        <dd>
+          <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-100">
+            {isHf ? "Hugging Face" : "GPU machine"}
+            {isHf && <span className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-normal text-slate-400">{modelSave.hf_private ? "Private" : "Public"}</span>}
+          </div>
+          {destination && <p title={destination} className={`mt-1 truncate font-mono text-[11px] ${ready ? "text-slate-400" : "text-brass-300"}`}>
+            {destination}
+          </p>}
+          {destination && !ready && <p className="mt-1 text-[11px] text-brass-300">Complete destination in Others</p>}
+        </dd>
+      </div>
+    </dl>
   </aside>;
 }

@@ -458,7 +458,7 @@ export function CustomizedRunForm({
   return (
     <>
       <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
-        <RunInputs {...inputs} taskTestSuite={predefined?.test_sets} requiredMissing={requiredMissing}
+        <RunInputs extra={<ModelSaveFields value={modelSave} onChange={setModelSave} />} {...inputs} taskTestSuite={predefined?.test_sets} requiredMissing={requiredMissing}
           requiredPrefixValues={[
             { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
             { name: "Task name", value: taskName.trim() || "Not set", complete: Boolean(taskName.trim()) },
@@ -663,8 +663,7 @@ export function CustomizedRunForm({
           )}
         />
 
-        <ModelSaveFields value={modelSave} onChange={setModelSave} />
-        <LaunchLimitsSummary inputs={inputs} />
+        <LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />
         {preflight.panel}
       </div>
 

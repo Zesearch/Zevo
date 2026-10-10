@@ -933,7 +933,7 @@ export function NewRunModal({
   return (
     <Modal open={open} title="Start a new run" onClose={onClose} width="max-w-[78rem]" footer={footer}>
       <div className="space-y-5 pr-2">
-        {(mode === "auto" || mode === "full_pipeline") && <><ModelSaveFields value={modelSave} onChange={setModelSave} /><LaunchLimitsSummary inputs={inputs} />{preflight.panel}</>}
+        {(mode === "auto" || mode === "full_pipeline") && <><LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />{preflight.panel}</>}
         {/* Two columns: WHICH kind of run on the left, WHAT it is on the right.
             Stacked across the top, the three mode cards took a third of the
             dialog's height to answer a question asked once, and pushed the form
@@ -1148,10 +1148,11 @@ export function NewRunModal({
                   size={12}
                   className={`shrink-0 text-slate-400 transition-transform ${showAutoOthers ? "rotate-90" : ""}`}
                 />
-                <span className="field-label !text-slate-100">Execution limits</span>
+                <span className="field-label !text-slate-100">Others</span>
               </button>
               {showAutoOthers && (
                 <div className="space-y-3">
+                  <ModelSaveFields value={modelSave} onChange={setModelSave} />
                   <div className="grid grid-cols-2 gap-3">
                     <NumberField
                       label="Maximum GPUs" value={inputs.numGpus}
@@ -1235,6 +1236,7 @@ export function NewRunModal({
           />
         ) : mode === "full_pipeline" ? (
           <RunInputs
+            extra={<ModelSaveFields value={modelSave} onChange={setModelSave} />}
             {...inputs}
             taskTestSuite={predefined?.test_sets}
             requiredMissing={fullMissing}
