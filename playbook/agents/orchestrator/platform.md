@@ -670,7 +670,7 @@ expected-value reason instead.
 ## Failure and completion
 
 The runner keeps Specialist-owned defects on the same Ticket in `repairing`
-for at most ten repair activations and does not wake you between attempts.
+for at most twenty repair activations and does not wake you between attempts.
 When you receive a failed child, inspect its `repair_route`: change upstream
 lineage or the proposed direction only for `orchestrator`; do not recreate an
 identical Ticket after repair exhaustion or a `terminal` boundary.
