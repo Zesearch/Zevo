@@ -448,23 +448,23 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert (retry.num_gpus, retry.nodes) == (6, 2)
 
     job_row.meta.update({
-        "execution_attempt": 11,
+        "execution_attempt": runner.MAX_REPAIR_ATTEMPTS + 1,
         "retry_of_bookkeeping_row_id": "request-1",
         "retry_of_job_id": "12345",
     })
-    ticket.repair_attempts = 11
+    ticket.repair_attempts = runner.MAX_REPAIR_ATTEMPTS + 1
     exhausted = asyncio.run(contract())
     assert exhausted.phase == "collect"
-    assert exhausted.attempt == 11
+    assert exhausted.attempt == runner.MAX_REPAIR_ATTEMPTS + 1
     # User-directed replacements are independent of the automatic repair budget.
     ticket.status = "queued"
     ticket._restart_instruction_id = "instruction-1"
     job_row.meta["scheduler_state"] = "COMPLETED"
     replacement = asyncio.run(contract())
     assert replacement.phase == "submit"
-    assert replacement.attempt == 12
+    assert replacement.attempt == runner.MAX_REPAIR_ATTEMPTS + 2
     assert replacement.restart_instruction_id == "instruction-1"
-    assert ticket.repair_attempts == 11
+    assert ticket.repair_attempts == runner.MAX_REPAIR_ATTEMPTS + 1
 
 
 @pytest.mark.parametrize("capacity", [None, SlurmCapacitySnapshot((1,), 1)])
