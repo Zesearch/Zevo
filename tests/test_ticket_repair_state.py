@@ -39,7 +39,7 @@ def test_failure_ownership_is_deterministic() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ten_repairs_stay_on_one_ticket_then_escalate(session: AsyncSession) -> None:
+async def test_twenty_repairs_stay_on_one_ticket_then_escalate(session: AsyncSession) -> None:
     session.add(Run(
         id="r", task_name="t", agent_objective="t", metric="score", status="running",
     ))
@@ -69,9 +69,9 @@ async def test_ten_repairs_stay_on_one_ticket_then_escalate(session: AsyncSessio
     messages = (await session.execute(select(TicketMessage).where(
         TicketMessage.ticket_id == ticket.id,
     ).order_by(TicketMessage.created_at))).scalars().all()
-    assert len(messages) == 10
-    assert "Repair attempt 1/10" in messages[0].body
-    assert "Repair attempt 10/10" in messages[-1].body
+    assert len(messages) == 20
+    assert "Repair attempt 1/20" in messages[0].body
+    assert "Repair attempt 20/20" in messages[-1].body
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,10 @@ async def test_failed_workload_enters_one_repair_without_collect(session, agent)
 @pytest.mark.asyncio
 @pytest.mark.parametrize('state,used,allowed,expected', [
     ('COMPLETED', 0, True, 'queued'),
-    ('FAILED', 10, False, 'failed'),
+    ('FAILED', 9, True, 'repairing'),
+    ('FAILED', 10, True, 'repairing'),
+    ('FAILED', 19, True, 'repairing'),
+    ('FAILED', 20, False, 'failed'),
 ])
 async def test_external_repair_preserves_collection_and_enforces_budget(session, state, used, allowed, expected):
     from zevo.db import InfraInstance
@@ -148,4 +151,4 @@ async def test_external_repair_preserves_collection_and_enforces_budget(session,
     await session.commit()
     assert await _activate_failed_workload_repair(session, ticket) is allowed
     assert ticket.status == expected
-    assert ticket.repair_attempts == used
+    assert ticket.repair_attempts == used + (1 if expected == "repairing" else 0)
