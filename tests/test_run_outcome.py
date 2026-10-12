@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from zevo.engine.run.outcome import terminal_outcome, unresolved_ticket_issues
 
 
@@ -95,3 +97,44 @@ def test_finalization_timeout_replaces_synthetic_limit_ticket_failure() -> None:
     assert outcome["issues"][0]["message"] == (
         "Finalization did not complete before its deadline."
     )
+
+
+def _replacement_run():
+    return _run(lifecycle={"cancelled_ticket_replacements": {
+        "old": {"instruction_id": "user-change", "replacement_ticket_id": "new",
+                "reason": "User requested a revised data plan"},
+    }})
+
+
+def test_explicit_cross_iteration_replacement_resolves_only_cancelled_work():
+    old = _ticket("old", agent="train", status="cancelled", iteration=6)
+    new = _ticket("new", agent="train", status="succeeded", iteration=7, created_offset=1)
+    assert unresolved_ticket_issues([old, new])  # No inference from later success alone.
+    assert unresolved_ticket_issues([old, new], run=_replacement_run()) == []
+    assert terminal_outcome(_replacement_run(), [old, new])["issues"] == []
+    old.status = "failed"
+    assert unresolved_ticket_issues([old, new], run=_replacement_run())[0]["ticket_id"] == "old"
+
+
+def test_cross_iteration_replacement_does_not_hide_other_failures():
+    tickets = [
+        _ticket("old", agent="train", status="cancelled", iteration=6),
+        _ticket("new", agent="train", status="succeeded", iteration=7, created_offset=1),
+        _ticket("test", agent="inference", status="failed", lane="held_out_test", iteration=7),
+        _ticket("registry", agent="registry", status="failed", iteration=7),
+    ]
+    assert {i["ticket_id"] for i in unresolved_ticket_issues(tickets, run=_replacement_run())} == {"test", "registry"}
+
+
+@pytest.mark.parametrize("change", [
+    {"status": "running"}, {"status": "failed"}, {"status": "cancelled"},
+    {"status": "degraded"}, {"status": "skipped"}, {"lane": "held_out_test"},
+    {"agent_id": "data"}, {"run_id": "different-run"}, {"iteration": 5},
+    {"created_at": NOW}, {"payload": {"operation": "different"}},
+])
+def test_unfinished_or_unrelated_replacement_does_not_resolve_cancellation(change):
+    old = _ticket("old", agent="train", status="cancelled", iteration=6)
+    new = _ticket("new", agent="train", status="succeeded", iteration=7, created_offset=1)
+    for key, value in change.items():
+        setattr(new, key, value)
+    assert "old" in {i["ticket_id"] for i in unresolved_ticket_issues([old, new], run=_replacement_run())}

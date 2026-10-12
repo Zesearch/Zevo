@@ -1534,18 +1534,27 @@ async def _ticket_show(ticket_id: str) -> None:
 @ticket_app.command("cancel")
 def ticket_cancel(
     ticket_id: str = typer.Argument(...),
+    instruction_id: str = typer.Option("", "--instruction-id"),
+    replacement_ticket_id: str = typer.Option("", "--replacement-ticket-id"),
+    reason: str = typer.Option("", "--reason"),
     api_base: str = typer.Option(
         os.environ.get("ZEVO_API_BASE", "http://localhost:8001"), "--api-base",
     ),
 ) -> None:
     """Cancel a running ticket: kills the agent driver subprocess and marks it cancelled."""
-    asyncio.run(_ticket_cancel(ticket_id, api_base))
+    if any((instruction_id, replacement_ticket_id, reason)) and not all(
+        value.strip() for value in (instruction_id, replacement_ticket_id, reason)
+    ):
+        raise typer.BadParameter("Provide --instruction-id, --replacement-ticket-id and --reason together")
+    body = ({"instruction_id": instruction_id, "replacement_ticket_id": replacement_ticket_id,
+             "reason": reason} if instruction_id else None)
+    asyncio.run(_ticket_cancel(ticket_id, api_base, body))
 
 
-async def _ticket_cancel(ticket_id: str, api_base: str) -> None:
+async def _ticket_cancel(ticket_id: str, api_base: str, body: dict | None = None) -> None:
     import httpx
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(f"{api_base}/api/tickets/{ticket_id}/cancel")
+        r = await client.post(f"{api_base}/api/tickets/{ticket_id}/cancel", json=body)
         if r.status_code >= 400:
             console.print(f"[red]cancel failed:[/] {r.status_code} {r.text}")
             raise typer.Exit(1)
