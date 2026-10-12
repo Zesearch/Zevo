@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1887,9 +1887,16 @@ async def post_progress(
 
 
 class CancelTicketBody(StrictBody):
-    instruction_id: str = Field(min_length=1)
-    replacement_ticket_id: str = Field(min_length=1)
-    reason: str = Field(min_length=1)
+    instruction_id: str = ""
+    replacement_ticket_id: str = ""
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def complete_replacement(self) -> "CancelTicketBody":
+        values = (self.instruction_id, self.replacement_ticket_id, self.reason)
+        if any(values) and not all(value.strip() for value in values):
+            raise ValueError("Provide instruction_id, replacement_ticket_id and reason together")
+        return self
 
 
 @router.post("/tickets/{ticket_id}/cancel")
@@ -1902,7 +1909,7 @@ async def cancel_ticket(
     t = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
     if t is None:
         raise HTTPException(404, f"ticket {ticket_id} not found")
-    if body is not None:
+    if body is not None and body.instruction_id:
         if t.status in TERMINAL_TICKET_STATUSES and t.status != "cancelled":
             raise HTTPException(409, "Only cancelled tickets can record a replacement")
         instruction = await db.get(RunInstruction, body.instruction_id)

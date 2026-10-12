@@ -483,3 +483,29 @@ async def test_replaced_cancellation_allows_clean_final_run_status(client_and_se
         assert run.halted_reason == ""
         assert run.lifecycle["terminal_outcome"]["issues"] == []
         assert old.status == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [None, {}])
+async def test_plain_cancel_accepts_empty_request_body(client_and_session, monkeypatch, payload):
+    from zevo.api.routers.shared import tickets as tickets_router
+    from zevo.engine.run import remote_jobs
+
+    client, Session = client_and_session
+    client._transport.app.include_router(tickets_router.router, prefix="/api")
+    async def stop(db, ticket):
+        return {"ok": True}
+    monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", stop)
+    response = await client.post("/api/tickets/train-001/cancel", json=payload)
+    assert response.status_code == 200, response.text
+    async with Session() as db:
+        assert (await db.get(Ticket, "train-001")).status == "cancelled"
+        assert not (await db.get(Run, "run-1")).lifecycle.get("cancelled_ticket_replacements")
+
+
+@pytest.mark.parametrize("payload", [{"instruction_id": "i"}, {"replacement_ticket_id": "t", "reason": "r"}, {"instruction_id": "i", "replacement_ticket_id": "t", "reason": " "}])
+def test_cancel_rejects_partial_replacement_body(payload):
+    from pydantic import ValidationError
+    from zevo.api.routers.shared.tickets import CancelTicketBody
+    with pytest.raises(ValidationError):
+        CancelTicketBody.model_validate(payload)
