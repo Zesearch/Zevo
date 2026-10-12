@@ -841,6 +841,7 @@ export function NewRunModal({
   // however long the form is. Customized carries its own footer.
   const footer = mode !== "customized_pipeline" ? (
       <div className="space-y-3">
+        {(mode === "auto" || mode === "full_pipeline") && preflight.panel}
         {error && (
           <div role="alert" className="max-h-32 overflow-auto whitespace-pre-line rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-xs text-coral-300">
             {error}
@@ -933,7 +934,7 @@ export function NewRunModal({
   return (
     <Modal open={open} title="Start a new run" onClose={onClose} width="max-w-[78rem]" footer={footer}>
       <div className="space-y-5 pr-2">
-        {(mode === "auto" || mode === "full_pipeline") && <><LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />{preflight.panel}</>}
+        {(mode === "auto" || mode === "full_pipeline") && <LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />}
         {/* Two columns: WHICH kind of run on the left, WHAT it is on the right.
             Stacked across the top, the three mode cards took a third of the
             dialog's height to answer a question asked once, and pushed the form

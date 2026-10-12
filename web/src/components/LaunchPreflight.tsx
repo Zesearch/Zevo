@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Cpu, Clock3, Wallet, Repeat2, HardDrive, CloudUpload } from "lucide-react";
+import { Cpu, Clock3, Wallet, Repeat2, HardDrive, CloudUpload, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { modelSaveReady, type ModelSavePolicy } from "./ModelSaveFields";
 import { api } from "../lib/api";
 import type { RunInputValues } from "./RunInputs";
@@ -23,11 +23,15 @@ export function useLaunchPreflight() {
     setReview({ key, result });
     return result.status === "ready" || (result.status === "risky" && acknowledged);
   }
-  return { check, panel: review ? <section aria-label="Launch checks" role="status" className="my-4 rounded border border-hair bg-raised p-4 text-sm">
-    <h3 className="font-semibold">{review.result.status === "blocked" ? "Resolve these launch checks" : review.result.status === "risky" ? "Review before launching" : "Configuration checks passed"}</h3>
-    <p className="mt-1 text-xs text-slate-400">Checks verify configuration and local assets. Provider connectivity, available capacity, and final Auto evaluation are verified during setup.</p>
-    <ul className="mt-3 space-y-2">{review.result.items.filter((item) => item.severity !== "info").map((item) => <li key={item.code}><strong>{item.severity === "blocker" ? "Required: " : "Review: "}</strong>{item.message} {item.hint}</li>)}</ul>
-    {review.result.status === "risky" && <p className="mt-3">Click start again to acknowledge these notes and launch. Changing configuration requires a fresh review.</p>}
+  const blocked = review?.result.status === "blocked";
+  const ready = review?.result.status === "ready";
+  const Icon = ready ? CheckCircle2 : AlertTriangle;
+  return { check, panel: review ? <section aria-label="Launch checks" role={blocked ? "alert" : "status"} className={`rounded-lg border p-3 text-sm ${blocked ? "border-coral-500/40 bg-coral-500/10 text-coral-300" : ready ? "border-hair bg-raised text-slate-300" : "border-brass-500/40 bg-brass-500/10 text-brass-200"}`}>
+    <h3 className="flex items-center gap-2 font-semibold"><Icon size={16} className="shrink-0" />{blocked ? "Run not started — check configuration" : ready ? "Configuration checks passed" : "Review before starting your run"}</h3>
+    <div className="max-h-32 overflow-y-auto">
+      <ul className="mt-2 space-y-2 text-xs leading-relaxed">{review.result.items.filter((item) => item.severity !== "info").map((item) => <li key={item.code}><strong>{item.severity === "blocker" ? "Required: " : "Review: "}</strong>{item.message} {item.hint}</li>)}</ul>
+    </div>
+    {review.result.status === "risky" && <p className="mt-2 text-xs font-medium">Run not started. Click start run again to accept these notes and launch.</p>}
   </section> : null };
 }
 
