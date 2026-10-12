@@ -377,3 +377,109 @@ async def test_gpu_stage_scope_reaches_future_optimization_tickets_only(client_a
         assert await requested_slurm_gpus(db, 'future-infer') == 4
         assert await requested_slurm_gpus(db, 'test-001') == 0
         assert await requested_slurm_gpus(db, 'other-data') == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_cancelled", [False, True])
+async def test_user_directed_cancellation_records_replacement(client_and_session, monkeypatch, already_cancelled):
+    from datetime import timedelta
+    from zevo.api.routers.shared.tickets import CancelTicketBody, cancel_ticket
+    from zevo.engine.run import remote_jobs
+    from zevo.engine.run.outcome import unresolved_ticket_issues
+
+    _, Session = client_and_session
+    cleanup = []
+
+    async def stop(db, ticket):
+        cleanup.append(ticket.id)
+        return {"ok": True}
+
+    monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", stop)
+    async with Session() as db:
+        old = await db.get(Ticket, "train-001")
+        old.iteration = 6
+        if already_cancelled:
+            old.status = "cancelled"
+        new = Ticket(id="train-new", run_id=old.run_id, agent_id="train",
+                     status="queued", iteration=7, payload={},
+                     created_at=old.created_at + timedelta(seconds=1))
+        db.add(new)
+        db.add(RunInstruction(id="change-plan", run_id=old.run_id, body="Cancel this train and revise Data", status="scheduled"))
+        await db.commit()
+        body = CancelTicketBody(instruction_id="change-plan", replacement_ticket_id=new.id,
+                                reason="User requested a revised training plan")
+        result = await cancel_ticket(old.id, db=db, body=body)
+        assert result["status"] == "cancelled"
+        run = await db.get(Run, old.run_id)
+        assert run.lifecycle["cancelled_ticket_replacements"][old.id]["instruction_id"] == "change-plan"
+        assert unresolved_ticket_issues([old, new], run=run)
+        new.status = "succeeded"
+        assert unresolved_ticket_issues([old, new], run=run) == []
+        assert old.status == "cancelled"
+        assert cleanup == [old.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["other_run", "other_stage", "other_lane", "self", "missing_instruction", "declined", "failed_original"])
+async def test_cancel_rejects_invalid_replacement(client_and_session, monkeypatch, case):
+    from datetime import timedelta
+    from fastapi import HTTPException
+    from zevo.api.routers.shared.tickets import CancelTicketBody, cancel_ticket
+    from zevo.engine.run import remote_jobs
+
+    _, Session = client_and_session
+    async def unexpected_stop(*args, **kwargs):
+        pytest.fail("Invalid replacement must not cancel remote work")
+    monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", unexpected_stop)
+    async with Session() as db:
+        old = await db.get(Ticket, "train-001")
+        new = Ticket(id="train-new", run_id=old.run_id, agent_id="train", status="succeeded",
+                     iteration=1, payload={}, created_at=old.created_at + timedelta(seconds=1))
+        if case == "other_run":
+            db.add(Run(id="other", task_name="task", status="running", metric="accuracy"))
+            new.run_id = "other"
+        if case == "other_stage": new.agent_id = "data"
+        if case == "other_lane": new.lane = "held_out_test"
+        if case == "failed_original": old.status = "failed"
+        db.add(new)
+        db.add(RunInstruction(id="change-plan", run_id=old.run_id, body="Revise the plan",
+                              status="declined" if case == "declined" else "scheduled"))
+        await db.commit()
+        original_status = old.status
+        with pytest.raises(HTTPException) as error:
+            await cancel_ticket(old.id, db=db, body=CancelTicketBody(
+                instruction_id="missing" if case == "missing_instruction" else "change-plan",
+                replacement_ticket_id=old.id if case == "self" else new.id, reason="Revise plan"))
+        assert error.value.status_code in {409, 422}
+        assert old.status == original_status
+        assert not (await db.get(Run, old.run_id)).lifecycle.get("cancelled_ticket_replacements")
+
+
+@pytest.mark.asyncio
+async def test_replaced_cancellation_allows_clean_final_run_status(client_and_session):
+    from datetime import timedelta
+    from zevo.api.routers.shared.runs import PatchRunRequest, patch_run
+
+    _, Session = client_and_session
+    async with Session() as db:
+        run = await db.get(Run, "run-1")
+        run.summary = "Champion saved after the revised plan completed."
+        run.registry_version_tag = "M-run-1"
+        run.iterations_completed = 7
+        run.lifecycle = {"cancelled_ticket_replacements": {
+            "train-001": {"instruction_id": "change-plan", "replacement_ticket_id": "train-new",
+                          "reason": "User requested the revised plan"}}}
+        old = await db.get(Ticket, "train-001")
+        old.status = "cancelled"
+        old.iteration = 6
+        (await db.get(Ticket, "test-001")).status = "succeeded"
+        db.add(Ticket(id="train-new", run_id=run.id, agent_id="train", iteration=7,
+                      status="succeeded", payload={}, created_at=old.created_at + timedelta(seconds=1)))
+        db.add(Ticket(id="registry-new", run_id=run.id, agent_id="registry",
+                      status="succeeded", payload={}))
+        await db.commit()
+        result = await patch_run(run.id, PatchRunRequest(status="success"), db)
+        assert result.status == "success"
+        assert run.halted_reason == ""
+        assert run.lifecycle["terminal_outcome"]["issues"] == []
+        assert old.status == "cancelled"

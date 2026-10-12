@@ -1886,15 +1886,47 @@ async def post_progress(
     return {"ok": True}
 
 
+class CancelTicketBody(StrictBody):
+    instruction_id: str = Field(min_length=1)
+    replacement_ticket_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
 @router.post("/tickets/{ticket_id}/cancel")
 async def cancel_ticket(
     ticket_id: str,
     db: AsyncSession = Depends(get_db),
+    body: CancelTicketBody | None = None,
 ) -> dict:
     """Cancel a ticket: kill any live heartbeat and mark it cancelled."""
     t = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
     if t is None:
         raise HTTPException(404, f"ticket {ticket_id} not found")
+    if body is not None:
+        if t.status in TERMINAL_TICKET_STATUSES and t.status != "cancelled":
+            raise HTTPException(409, "Only cancelled tickets can record a replacement")
+        instruction = await db.get(RunInstruction, body.instruction_id)
+        replacement = await db.get(Ticket, body.replacement_ticket_id)
+        from zevo.engine.run.outcome import is_ticket_replacement
+        if (instruction is None or instruction.run_id != t.run_id
+                or instruction.status == "declined"):
+            raise HTTPException(422, "Replacement requires a user instruction from this Run")
+        if (replacement is None or not is_ticket_replacement(t, replacement)):
+            raise HTTPException(422, "Replacement must be a newer matching stage and lane in this Run")
+        if not body.reason.strip():
+            raise HTTPException(422, "Replacement reason must not be blank")
+        run = (await db.execute(select(Run).where(Run.id == t.run_id).with_for_update())).scalar_one()
+        lifecycle = dict(run.lifecycle or {})
+        replacements = dict(lifecycle.get("cancelled_ticket_replacements") or {})
+        replacements[t.id] = {
+            "instruction_id": instruction.id,
+            "replacement_ticket_id": replacement.id,
+            "reason": body.reason.strip(),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lifecycle["cancelled_ticket_replacements"] = replacements
+        run.lifecycle = lifecycle
+        await db.commit()
     if t.status in TERMINAL_TICKET_STATUSES:
         # A terminal DB status does not prove a remote child process exited.
         # An operator may deliberately press Cancel again to reap such a leak.

@@ -705,3 +705,16 @@ recoverable work; it does not fulfill an unfinished training plan. Keep recovery
 on the current Train Ticket. A shortened experiment requires an explicit plan
 change, recorded before that revised training execution, rather than treating
 an interrupted checkpoint as the original experiment's completed result.
+
+When a user instruction cancels an old plan in favor of a later iteration,
+keep the old Ticket cancelled and explicitly link its replacement. Once the
+new matching stage Ticket exists, POST `api_routes.cancel_ticket` for the old
+Ticket with `instruction_id`, `replacement_ticket_id`, and a concrete `reason`.
+This is also supported for an already-cancelled Ticket. Cancel promptly without
+these fields if the replacement does not exist yet, then record the link later.
+The replacement must belong to this Run and match the old stage, lane, operation,
+and benchmark. Only a succeeded replacement resolves the old cancellation for
+final Run status; queued, failed, skipped, or cancelled replacements do not.
+Do not use replacement links to excuse execution failures, omit required Test
+evaluation, or bypass Registry. The CLI equivalent is `zevo ticket cancel OLD
+--instruction-id INSTRUCTION --replacement-ticket-id NEW --reason "..."`.

@@ -40,6 +40,18 @@ def _ticket_slot(ticket: Any) -> tuple[str, str, int, str, str]:
     )
 
 
+def is_ticket_replacement(original: Any, replacement: Any) -> bool:
+    """A replacement keeps the work kind and lane, but may advance iteration."""
+    return (
+        replacement.id != original.id
+        and getattr(replacement, "run_id", None) == getattr(original, "run_id", None)
+        and _aware(replacement.created_at) > _aware(original.created_at)
+        and replacement.iteration >= original.iteration
+        and _ticket_slot(replacement)[:2] == _ticket_slot(original)[:2]
+        and _ticket_slot(replacement)[3:] == _ticket_slot(original)[3:]
+    )
+
+
 def _stage_name(ticket: Any) -> str:
     agent = str(getattr(ticket, "agent_id", "") or "stage")
     names = {
@@ -64,7 +76,7 @@ def _limit_reaped(ticket: Any) -> bool:
     return bool(re.search(r"(?i)\brun limit reached\b", text))
 
 
-def unresolved_ticket_issues(tickets: Iterable[Any]) -> list[dict[str, Any]]:
+def unresolved_ticket_issues(tickets: Iterable[Any], *, run: Any = None) -> list[dict[str, Any]]:
     """Describe current unresolved worker failures, excluding old attempts.
 
     A historical failure does not stain the final Run when a newer Ticket for
@@ -72,6 +84,9 @@ def unresolved_ticket_issues(tickets: Iterable[Any]) -> list[dict[str, Any]]:
     Run entered bounded finalization are a consequence of the normal stop
     trigger, not an execution issue of their own.
     """
+    tickets = list(tickets)
+    by_id = {str(ticket.id): ticket for ticket in tickets}
+    resolutions = (getattr(run, "lifecycle", None) or {}).get("cancelled_ticket_replacements", {})
     slots: dict[tuple[str, str, int, str, str], list[Any]] = defaultdict(list)
     for ticket in tickets:
         if str(getattr(ticket, "agent_id", "") or "") == "orchestrator":
@@ -89,6 +104,15 @@ def unresolved_ticket_issues(tickets: Iterable[Any]) -> list[dict[str, Any]]:
             ),
         )
         status = str(getattr(latest, "status", "") or "")
+        resolution = resolutions.get(str(latest.id), {})
+        replacement = by_id.get(resolution.get("replacement_ticket_id", ""))
+        if (status == "cancelled" and resolution.get("instruction_id")
+                and resolution.get("reason") and replacement is not None
+                and replacement.status == "succeeded"
+                and is_ticket_replacement(latest, replacement)):
+            # A recorded user-directed replacement resolves only this cancelled
+            # work order. Failures in any other stage/lane remain independent.
+            continue
         if status in _USABLE_TICKET_STATUSES or status not in _ISSUE_TICKET_STATUSES:
             continue
         if status == "failed" and _limit_reaped(latest):
@@ -170,7 +194,7 @@ def terminal_outcome(
     issues = (
         []
         if str(getattr(run, "status", "") or "") == "cancelled"
-        else list(unresolved_ticket_issues(tickets))
+        else list(unresolved_ticket_issues(tickets, run=run))
     )
     # The legacy value is retained here so old in-flight rescue rows still
     # receive the correct issue after an application-first rolling deploy.

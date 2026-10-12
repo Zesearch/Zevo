@@ -1573,7 +1573,7 @@ async def patch_run(
             ).scalars().all())
         effective_status = body.status
         if body.status in {"success", "degraded"}:
-            issues = unresolved_ticket_issues(terminal_tickets)
+            issues = unresolved_ticket_issues(terminal_tickets, run=r)
             failed = sorted(
                 str(issue.get("ticket_id") or "")
                 for issue in issues
@@ -1630,7 +1630,7 @@ async def patch_run(
             supplied_reason = str(body.halted_reason or "").strip()
             if (
                 effective_status == "degraded"
-                and not unresolved_ticket_issues(terminal_tickets)
+                and not unresolved_ticket_issues(terminal_tickets, run=r)
                 and blockers
             ):
                 extra_issues.append({

@@ -1792,7 +1792,7 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
             terminal_outcome,
             unresolved_ticket_issues,
         )
-        unresolved_issues = unresolved_ticket_issues(tickets)
+        unresolved_issues = unresolved_ticket_issues(tickets, run=r)
         failed_ids = sorted(
             str(issue.get("ticket_id") or "")
             for issue in unresolved_issues
