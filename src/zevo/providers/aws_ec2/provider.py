@@ -24,6 +24,9 @@ What differs from the marketplace clouds, documented on each method:
     ``AWS_EC2_MARKET=spot`` the provider rents one-time Spot instances
     instead, checks the Spot quotas, and prices offers from the current Spot
     price history (lowest AZ, which the launch then prefers).
+  - A launch walks the Availability Zones that offer the type (cheapest Spot
+    zone first) and moves on when one reports no capacity; only account-level
+    refusals (quota, Spot instance count) end the attempt.
   - A launch needs an AMI, a subnet, a security group that admits SSH, and a
     key pair. All four resolve themselves (Deep Learning Base AMI via SSM, the
     default VPC's subnet in an AZ that offers the type, a ``zevo-gpu-ssh``
@@ -456,13 +459,17 @@ class AwsEc2Provider:
         logger.info("Imported SSH key as EC2 key pair %r", name)
         return name
 
-    def _subnet_for(self, instance_type: str) -> dict:
+    def _subnets_for(self, instance_type: str) -> list[dict]:
+        """Candidate subnets for a launch, best first: the pinned subnet alone,
+        else every default-VPC subnet in an AZ that offers the type, the
+        cheapest Spot zone (when known) ahead of the rest. EC2 capacity is per
+        AZ, so a launch walks this list on a capacity error."""
         pinned = os.environ.get("AWS_EC2_SUBNET_ID", "").strip()
         if pinned:
             subnets = self._ec2.describe_subnets(SubnetIds=[pinned]).get("Subnets") or []
             if not subnets:
                 raise RuntimeError(f"AWS_EC2_SUBNET_ID={pinned} does not exist in {self.region}")
-            return subnets[0]
+            return [subnets[0]]
         zones = set(self._zones_by_type([instance_type]).get(instance_type) or [])
         if not zones:
             raise RuntimeError(f"{instance_type} is not offered in any Availability Zone of {self.region}")
@@ -478,7 +485,7 @@ class AwsEc2Provider:
                 f"No default-VPC subnet in {self.region} lies in an AZ that offers {instance_type} "
                 f"({sorted(zones)}). Set AWS_EC2_SUBNET_ID to a public subnet in one of those AZs."
             )
-        return usable[0]
+        return usable
 
     def _security_group_id(self, vpc_id: str) -> str:
         pinned = os.environ.get("AWS_EC2_SECURITY_GROUP_ID", "").strip()
@@ -558,42 +565,64 @@ class AwsEc2Provider:
 
         ami_id = self._ami_id()
         key_name = ssh_key_name or self.resolve_key_pair_name(ssh_key_path)
-        subnet = self._subnet_for(offer_id)
-        group_id = self._security_group_id(str(subnet["VpcId"]))
+        root_device = self._root_device_name(ami_id)
         volume_gb = max(int(disk_gb or 0) or DEFAULT_ROOT_DISK_GB, MIN_ROOT_DISK_GB)
-        payload: dict[str, Any] = {
-            "ImageId": ami_id,
-            "InstanceType": offer_id,
-            "MinCount": 1,
-            "MaxCount": 1,
-            "KeyName": key_name,
-            "NetworkInterfaces": [{
-                "DeviceIndex": 0, "SubnetId": str(subnet["SubnetId"]),
-                "Groups": [group_id], "AssociatePublicIpAddress": True,
-            }],
-            "BlockDeviceMappings": [{
-                "DeviceName": self._root_device_name(ami_id),
-                "Ebs": {"VolumeSize": volume_gb, "VolumeType": "gp3", "DeleteOnTermination": True},
-            }],
-            "InstanceInitiatedShutdownBehavior": "terminate",
-            "TagSpecifications": [
-                {"ResourceType": "instance", "Tags": _managed_tags(name)},
-                {"ResourceType": "volume", "Tags": _managed_tags(name)},
-            ],
-        }
-        if self.market == "spot":
-            payload["InstanceMarketOptions"] = {
-                "MarketType": "spot",
-                "SpotOptions": {"SpotInstanceType": "one-time", "InstanceInterruptionBehavior": "terminate"},
+        groups: dict[str, str] = {}
+        failures: list[str] = []
+        # Capacity is per Availability Zone: walk the offering AZs instead of
+        # failing on the first one that is sold out (run 0869b205 lost its
+        # pinned AWS launch to a single-AZ InsufficientInstanceCapacity).
+        for subnet in self._subnets_for(offer_id):
+            vpc_id = str(subnet["VpcId"])
+            if vpc_id not in groups:
+                groups[vpc_id] = self._security_group_id(vpc_id)
+            zone = str(subnet.get("AvailabilityZone") or "")
+            payload: dict[str, Any] = {
+                "ImageId": ami_id,
+                "InstanceType": offer_id,
+                "MinCount": 1,
+                "MaxCount": 1,
+                "KeyName": key_name,
+                "NetworkInterfaces": [{
+                    "DeviceIndex": 0, "SubnetId": str(subnet["SubnetId"]),
+                    "Groups": [groups[vpc_id]], "AssociatePublicIpAddress": True,
+                }],
+                "BlockDeviceMappings": [{
+                    "DeviceName": root_device,
+                    "Ebs": {"VolumeSize": volume_gb, "VolumeType": "gp3", "DeleteOnTermination": True},
+                }],
+                "InstanceInitiatedShutdownBehavior": "terminate",
+                "TagSpecifications": [
+                    {"ResourceType": "instance", "Tags": _managed_tags(name)},
+                    {"ResourceType": "volume", "Tags": _managed_tags(name)},
+                ],
             }
-        resp = self._ec2.run_instances(**payload)
-        instances = resp.get("Instances") or []
-        if not instances:
-            raise RuntimeError(f"No instance in EC2 RunInstances response: {resp}")
-        instance_id = str(instances[0]["InstanceId"])
-        logger.info("Launched EC2 %s (%s, %s) in %s/%s", instance_id, offer_id, self.market,
-                    self.region, subnet.get("AvailabilityZone"))
-        return {"instance_id": instance_id, "success": True}
+            if self.market == "spot":
+                payload["InstanceMarketOptions"] = {
+                    "MarketType": "spot",
+                    "SpotOptions": {"SpotInstanceType": "one-time", "InstanceInterruptionBehavior": "terminate"},
+                }
+            try:
+                resp = self._ec2.run_instances(**payload)
+            except Exception as e:  # noqa: BLE001 - only capacity errors are retried
+                code = _error_code(e)
+                if code not in CAPACITY_ERROR_CODES:
+                    raise
+                failures.append(f"{zone}: {code}")
+                logger.warning("AWS EC2: %s has no %s capacity in %s (%s); trying the next zone",
+                               offer_id, self.market, zone, code)
+                continue
+            instances = resp.get("Instances") or []
+            if not instances:
+                raise RuntimeError(f"No instance in EC2 RunInstances response: {resp}")
+            instance_id = str(instances[0]["InstanceId"])
+            logger.info("Launched EC2 %s (%s, %s) in %s/%s", instance_id, offer_id, self.market,
+                        self.region, zone)
+            return {"instance_id": instance_id, "success": True}
+        raise RuntimeError(
+            f"No {self.market} capacity for {offer_id} in any offering zone of {self.region} "
+            f"({'; '.join(failures)}). Try another instance type or region."
+        )
 
     async def get_instance(self, instance_id: str) -> dict:
         """Fetch one instance, normalized to the dict downstream reads
@@ -734,6 +763,12 @@ class AwsEc2Provider:
 
 
 _GONE_STATES = ("shutting-down", "terminated", "not-found")
+# RunInstances errors that mean "not in this Availability Zone right now".
+# Account-level refusals (quota, MaxSpotInstanceCountExceeded) are not retried.
+CAPACITY_ERROR_CODES = frozenset({
+    "InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported",
+    "SpotMaxPriceTooLow", "InsufficientHostCapacity",
+})
 
 
 def _managed_tags(name: str) -> list[dict]:

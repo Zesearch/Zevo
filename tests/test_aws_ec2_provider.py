@@ -511,3 +511,63 @@ def test_on_demand_launch_has_no_market_options(tmp_path, monkeypatch):
     p, ec2 = _provider(monkeypatch)
     asyncio.run(p.create_instance("g5.xlarge", "", ssh_key_path=key))
     assert "InstanceMarketOptions" not in dict(ec2.calls)["run_instances"]
+
+
+# -------------------------------------------------------------- AZ fallback
+
+class CapacityEc2(FakeEc2):
+    """RunInstances fails with a per-zone capacity error for the subnets in
+    `sold_out`, and with `hard_error` (account-level) when set."""
+    def __init__(self, sold_out=(), hard_error="", **kw):
+        super().__init__(**kw)
+        self.sold_out = set(sold_out)
+        self.hard_error = hard_error
+        self.tried: list[str] = []
+
+    def run_instances(self, **kw):
+        subnet = kw["NetworkInterfaces"][0]["SubnetId"]
+        self.tried.append(subnet)
+        if self.hard_error:
+            raise ClientError(self.hard_error)
+        if subnet in self.sold_out:
+            raise ClientError("InsufficientInstanceCapacity")
+        return super().run_instances(**kw)
+
+
+def test_launch_moves_to_the_next_zone_on_a_capacity_error(tmp_path, monkeypatch):
+    key = _key(tmp_path, monkeypatch)
+    ec2 = CapacityEc2(sold_out={"subnet-a"})
+    p, _ = _provider(monkeypatch, ec2=ec2)
+    out = asyncio.run(p.create_instance("g6e.xlarge", "us-east-1", ssh_key_path=key))
+    assert out["success"] and ec2.tried == ["subnet-a", "subnet-d"]   # g6e.xlarge offered in a and d
+    run = [kw for name, kw in ec2.calls if name == "run_instances"][-1]
+    assert run["NetworkInterfaces"][0]["SubnetId"] == "subnet-d"
+    assert [c[0] for c in ec2.calls].count("create_security_group") == 1  # one group per VPC, reused
+
+
+def test_every_zone_sold_out_fails_naming_the_zones(tmp_path, monkeypatch):
+    key = _key(tmp_path, monkeypatch)
+    ec2 = CapacityEc2(sold_out={"subnet-a", "subnet-d"})
+    p, _ = _provider(monkeypatch, ec2=ec2)
+    with pytest.raises(RuntimeError, match=r"No on-demand capacity for g6e.xlarge .*us-east-1a: InsufficientInstanceCapacity; us-east-1d: InsufficientInstanceCapacity"):
+        asyncio.run(p.create_instance("g6e.xlarge", "us-east-1", ssh_key_path=key))
+    assert ec2.tried == ["subnet-a", "subnet-d"]
+
+
+def test_account_level_refusals_are_not_retried_across_zones(tmp_path, monkeypatch):
+    key = _key(tmp_path, monkeypatch)
+    ec2 = CapacityEc2(hard_error="MaxSpotInstanceCountExceeded")
+    p, _ = _provider(monkeypatch, ec2=ec2)
+    with pytest.raises(ClientError, match="MaxSpotInstanceCountExceeded"):
+        asyncio.run(p.create_instance("g6e.xlarge", "us-east-1", ssh_key_path=key))
+    assert ec2.tried == ["subnet-a"]
+
+
+def test_pinned_subnet_is_the_only_candidate(tmp_path, monkeypatch):
+    key = _key(tmp_path, monkeypatch)
+    ec2 = CapacityEc2(sold_out={"subnet-pinned"})
+    p, _ = _provider(monkeypatch, ec2=ec2)
+    monkeypatch.setenv("AWS_EC2_SUBNET_ID", "subnet-pinned")   # after _provider, which clears the pins
+    with pytest.raises(RuntimeError, match="No on-demand capacity"):
+        asyncio.run(p.create_instance("g6e.xlarge", "", ssh_key_path=key))
+    assert ec2.tried == ["subnet-pinned"]
