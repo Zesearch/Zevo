@@ -863,6 +863,10 @@ def test_cross_agent_artifacts_have_exact_machine_contracts(tmp_path: Path) -> N
             "host": "gpu.example", "port": 22, "user": "root",
             "key_path": "/root/.ssh/id_ed25519",
         },
+        instance={
+            "workdir": "/root/zevo/run-1", "hf_cache": "/root/zevo/hf_cache",
+            "visible_devices": "0",
+        },
         gpu={
             "gpu_count": 1,
             "gpu_name": "NVIDIA GPU",

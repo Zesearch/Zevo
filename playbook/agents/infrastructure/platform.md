@@ -160,6 +160,13 @@ cloud hardware, ids, prices, and timestamps are illustrative values only:
     "recommended_torch_index": "cu121"
   },
   "cost": {"dph_total": 0.42},
+  "cluster": null,
+  "instance": {
+    "env_setup": "",
+    "workdir": "/root/zevo/<run id>",
+    "hf_cache": "/root/zevo/hf_cache",
+    "visible_devices": "0"
+  },
   "resource_plan": {
     "purpose": "inference",
     "required_working_set_gib": 40,
@@ -221,7 +228,13 @@ For cluster also set `instance_id=""`, `instance=null`, `gpu=null`, `cuda=null`,
 `container_image`; when it is empty, a matching site Skill may supply a verified
 default to the later stage.
 
-For `instance`, set `cluster=null` and add a direct route:
+For `cloud` and `instance`, set `cluster=null` and add a direct route. On a
+rented box use the login user's home: `workdir` is `<home>/zevo/<run-id>`,
+`hf_cache` is `<home>/zevo/hf_cache` (`/root/...` for Vast.ai, `/home/ubuntu/...`
+for Lambda and AWS), `env_setup` is empty (the pinned environment helper under
+`~/zevo/env` is what later stages use), and `visible_devices` lists the probed
+indices. Data, Inference, and Train read their remote directories from this
+block, so a cloud device without it is unusable:
 
 ```json
 {

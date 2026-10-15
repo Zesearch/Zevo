@@ -791,10 +791,16 @@ class InfrastructureDeviceInfo(BaseModel):
                 raise ValueError("cloud device info requires cloud_backend")
             if self.cluster is not None:
                 raise ValueError("cloud device info must not contain cluster routing")
-            if self.instance is not None:
-                raise ValueError("cloud device info must not contain instance routing")
+            # A rented box is reached exactly like a fixed instance, and the
+            # remote data plane (Hub download, preparation, receipts) and the
+            # stage work directories live on it: the direct route names them.
+            if self.instance is None:
+                raise ValueError(
+                    "cloud device info requires instance routing (workdir, hf_cache, "
+                    "visible_devices) for the remote data plane"
+                )
             if not self.instance_id or self.gpu is None or self.cuda is None:
-                raise ValueError("cloud device info requires instance and measured GPU/CUDA")
+                raise ValueError("cloud device info requires instance_id and measured GPU/CUDA")
         elif self.provider == "cluster":
             if self.cloud_backend:
                 raise ValueError("non-cloud device info must use empty cloud_backend")
