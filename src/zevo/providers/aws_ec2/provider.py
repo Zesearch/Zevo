@@ -133,9 +133,16 @@ def _error_code(exc: BaseException) -> str:
 
 
 def mib_to_nameplate_gb(mib: float) -> float:
-    """EC2 reports GPU memory in MiB (A10G: 22888); providers and plans speak in
-    the decimal GB printed on the card (24 GB). One rounding, done here."""
-    return round(float(mib or 0) * (2 ** 20) / 1e9)
+    """EC2 reports GPU memory in MiB; providers and plans speak in the GB
+    printed on the card. EC2 is inconsistent about which figure it stores: the
+    usable total for some cards (A10G 22888, L40S 45776, which are 24 GB and
+    48 GB decimal) and the nameplate in whole GiB for others (A100 81920,
+    T4 16384, which are 80 GB and 16 GB). A whole-GiB figure is read as the
+    nameplate; anything else is converted to decimal GB. One rounding, here."""
+    mib = float(mib or 0)
+    if mib and mib % 1024 == 0:
+        return float(mib // 1024)
+    return float(round(mib * (2 ** 20) / 1e9))
 
 
 class AwsEc2Provider:

@@ -239,7 +239,10 @@ def test_region_resolution_prefers_ec2_specific_variable(monkeypatch):
 def test_mib_becomes_nameplate_gb():
     assert mib_to_nameplate_gb(22888) == 24
     assert mib_to_nameplate_gb(45776) == 48
-    assert mib_to_nameplate_gb(81920) == 86  # the A100 80GB card as EC2 reports it
+    assert mib_to_nameplate_gb(81920) == 80   # A100/H100 80GB: EC2 stores whole GiB
+    assert mib_to_nameplate_gb(16384) == 16   # T4
+    assert mib_to_nameplate_gb(98304) == 96   # RTX PRO 6000
+    assert mib_to_nameplate_gb(0) == 0
 
 
 def test_search_returns_launchable_types_cheapest_first(monkeypatch):
