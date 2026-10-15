@@ -65,6 +65,9 @@ ALLOWED_KEYS = {
     "VASTAI_API_KEY",
     "LAMBDA_API_KEY",       # Lambda Cloud (lambda.ai) API key
     "LAMBDA_SSH_KEY_NAME",  # optional: name of a pre-registered Lambda account SSH key
+    "AWS_ACCESS_KEY_ID",    # AWS EC2 GPU rental (IAM access key pair)
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_EC2_REGION",       # optional: EC2 region for rentals (defaults to AWS_REGION)
     DEFAULT_COMPUTE_KEY,      # cloud:<backend> | environment:<category> | connection:<id>
     "ZEVO_CLOUD_BACKEND",    # "vastai" | "lambda" — which cloud backend to rent on
     # Hugging Face Hub access for gated/private model and dataset downloads.
@@ -98,8 +101,11 @@ KEY_FORMATS: dict[str, re.Pattern] = {
     # Lambda Cloud keys look like 'secret_<label>_<hex>'; stay lenient.
     "LAMBDA_API_KEY":            re.compile(r"^secret_[A-Za-z0-9._-]{16,}$"),
     "LAMBDA_SSH_KEY_NAME":       re.compile(r"^[A-Za-z0-9 ._-]{1,64}$"),
+    "AWS_ACCESS_KEY_ID":         re.compile(r"^(?:AKIA|ASIA)[A-Z0-9]{16}$"),
+    "AWS_SECRET_ACCESS_KEY":     re.compile(r"^[A-Za-z0-9/+=]{40}$"),
+    "AWS_EC2_REGION":            re.compile(r"^[a-z]{2}-[a-z]+-\d$"),
     DEFAULT_COMPUTE_KEY:           DEFAULT_COMPUTE_PATTERN,
-    "ZEVO_CLOUD_BACKEND":         re.compile(r"^(vastai|lambda)$"),
+    "ZEVO_CLOUD_BACKEND":         re.compile(r"^(vastai|lambda|aws)$"),
     "HF_TOKEN":                    re.compile(r"^hf_[A-Za-z0-9]{20,}$"),
     "WANDB_API_KEY":              re.compile(r"^[A-Za-z0-9_-]{20,}$"),
     "WANDB_ENTITY":               re.compile(r"^[A-Za-z0-9_.-]{1,128}$"),

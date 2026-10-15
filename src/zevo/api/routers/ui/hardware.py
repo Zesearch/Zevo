@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from zevo.contracts._base import StrictBody
 
+from zevo.providers.aws_ec2 import AwsEc2Provider
 from zevo.providers.lambda_labs.provider import LambdaCloudProvider
 from zevo.providers.vastai import VastAIProvider, load_api_key
 
@@ -90,13 +91,14 @@ async def detect_local() -> LocalGPUInfo:
     )
 
 
-# ---------- cloud GPUs: vast.ai or lambda.ai -------------------------------
+# ---------- cloud GPUs: vast.ai, lambda.ai, or AWS EC2 -------------------------------
 
 # Both providers, by the id the rest of the system uses for them
 # (ZEVO_CLOUD_BACKEND, gpu_provider blocks, the Settings page).
 BACKENDS: dict[str, dict[str, Any]] = {
     "vastai": {"label": "Vast.ai", "cls": VastAIProvider},
     "lambda": {"label": "Lambda.ai", "cls": LambdaCloudProvider},
+    "aws": {"label": "AWS EC2", "cls": AwsEc2Provider},
 }
 
 
@@ -205,7 +207,7 @@ class RentRequest(StrictBody):
     offer_id: str
     docker_image: str = "nvidia/cuda:12.1.1-devel-ubuntu22.04"
     disk_gb: int = 50
-    region: str = ""     # Lambda needs one; Vast.ai ignores it
+    region: str = ""     # Lambda needs one; AWS checks it; Vast.ai ignores it
 
 
 class RentResponse(BaseModel):
@@ -223,6 +225,12 @@ async def cloud_rent(backend: str, req: RentRequest) -> RentResponse:
             result = await provider.create_instance(
                 offer_id=int(req.offer_id),
                 docker_image=req.docker_image,
+                disk_gb=req.disk_gb,
+            )
+        elif backend == "aws":
+            result = await provider.create_instance(
+                offer_id=req.offer_id,
+                region=req.region,
                 disk_gb=req.disk_gb,
             )
         else:
@@ -266,6 +274,15 @@ async def cloud_instances(backend: str) -> dict[str, Any]:
                 "dph_total": float(i.get("dph_total", 0.0) or 0.0),
                 "ssh_host": i.get("ssh_host", ""),
                 "ssh_port": int(i.get("ssh_port", 0) or 0),
+            })
+        elif backend == "aws":
+            out.append({
+                "id": str(i.get("id", "")),
+                "gpu_name": i.get("gpu_name", "") or i.get("instance_type", ""),
+                "actual_status": i.get("status", ""),
+                "dph_total": float(i.get("dph_total", 0.0) or 0.0),
+                "ssh_host": i.get("ssh_host", ""),
+                "ssh_port": int(i.get("ssh_port", 22) or 22),
             })
         else:
             it = i.get("instance_type", {}) or {}

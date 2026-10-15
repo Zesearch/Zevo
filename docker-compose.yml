@@ -57,6 +57,10 @@ x-zevo-env: &zevo-env
   ZEVO_CLOUD_BACKEND: ${ZEVO_CLOUD_BACKEND:-}
   LAMBDA_API_KEY: ${LAMBDA_API_KEY:-}
   LAMBDA_SSH_KEY_NAME: ${LAMBDA_SSH_KEY_NAME:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_EC2_REGION: ${AWS_EC2_REGION:-}
+  AWS_EC2_MARKET: ${AWS_EC2_MARKET:-}
   # Private key (in-container path) whose .pub we register with Lambda; the
   # host ~/.ssh is mounted at /root/.ssh. Empty = probe id_ed25519 then
   # id_rsa (zevo.providers.resolve_ssh_key). Set only if your key has

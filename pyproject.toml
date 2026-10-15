@@ -104,6 +104,7 @@ packages = [
   "zevo.providers",
   "zevo.providers.vastai",
   "zevo.providers.lambda_labs",
+  "zevo.providers.aws_ec2",
 ]
 
 [tool.pytest.ini_options]

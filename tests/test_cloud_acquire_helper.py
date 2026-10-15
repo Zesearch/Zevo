@@ -5,6 +5,7 @@ healthy rental (unit slip, mis-spelled nvidia-smi section, ssh["host"] for
 ssh_host)."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -146,3 +147,30 @@ async def test_missing_ssh_host_from_provider_is_a_cleanup_not_a_hang(tmp_path, 
     monkeypatch.setattr(acquire, "make_provider", lambda backend: provider)
     rc = await acquire.run(_args(tmp_path))
     assert rc == 1 and provider.destroyed == ["i-1"]
+
+
+def test_aws_backend_uses_ubuntu_on_22_and_passes_disk_to_create() -> None:
+    assert acquire.ssh_route({"ssh_host": "203.0.113.7"}, "aws") == {"host": "203.0.113.7", "port": 22, "user": "ubuntu"}
+
+    class P:
+        async def create_instance(self, *a, **k):
+            self.args, self.kwargs = a, k
+            return {"instance_id": "i-abc"}
+
+    p = P()
+    args = SimpleNamespace(offer_id="g6e.xlarge", region="us-east-1", ssh_key_path="/k", name="zevo-r", disk_gb=200)
+    assert asyncio.run(acquire.create(p, "aws", args)) == "i-abc"
+    assert p.args == ("g6e.xlarge", "us-east-1")
+    assert p.kwargs == {"ssh_key_path": "/k", "name": "zevo-r", "disk_gb": 200}
+
+
+def test_aws_is_an_accepted_backend_without_region_or_image(monkeypatch) -> None:
+    seen = {}
+
+    async def fake_run(args):
+        seen["backend"] = args.backend
+        return 0
+    monkeypatch.setattr(acquire, "run", fake_run)
+    rc = acquire.main(["--backend", "aws", "--offer-id", "g5.xlarge", "--ssh-key-path", "/k",
+                       "--run-id", "r", "--ticket-id", "t"])
+    assert rc == 0 and seen["backend"] == "aws"

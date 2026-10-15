@@ -173,7 +173,7 @@ type RunEnvelope = {
   gpu_allocation_mode?: "per_stage" | "per_run" | "per_submission";
   // Which cloud to rent on when gpu_provider === "cloud" (empty = deployment
   // default). Sent by the run modals; declared here so the body is fully typed.
-  cloud_backend?: "" | "vastai" | "lambda";
+  cloud_backend?: "" | "vastai" | "lambda" | "aws";
   // Verified SSH profile id for a cluster/instance run (empty = env fallback).
   ssh_host_id?: string;
 };

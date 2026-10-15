@@ -3512,7 +3512,7 @@ def set_cloud_backend(
 ) -> None:
     """Choose the non-secret cloud GPU backend, matching the Settings selector."""
     normalized = backend.strip().lower()
-    if normalized not in ("vastai", "lambda", "auto"):
+    if normalized not in ("vastai", "lambda", "aws", "auto"):
         console.print("[red]backend must be vastai, lambda, or auto[/]")
         raise typer.Exit(2)
     value = "" if normalized == "auto" else normalized

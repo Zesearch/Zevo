@@ -16,11 +16,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.db import SshHost
+from zevo.providers.aws_ec2 import (
+    AWS_EC2_CREDENTIAL_ENVS, DEFAULT_CREDENTIALS_OPT_IN_ENV, aws_credentials_present,
+)
 
 
 DEFAULT_COMPUTE_KEY = "ZEVO_DEFAULT_COMPUTE"
 DEFAULT_COMPUTE_PATTERN = re.compile(
-    r"^(?:cloud:(?:vastai|lambda)|environment:(?:cluster|instance)|"
+    r"^(?:cloud:(?:vastai|lambda|aws)|environment:(?:cluster|instance)|"
     r"connection:[A-Za-z0-9._-]{1,128})$"
 )
 
@@ -101,16 +104,22 @@ async def resolve_default_compute(db: AsyncSession) -> ComputeTarget:
         )
     target = parse_compute_target(raw)
     if target.provider == "cloud":
-        credential_key = (
-            "VASTAI_API_KEY"
-            if target.cloud_backend == "vastai"
-            else "LAMBDA_API_KEY"
-        )
-        legacy_lambda = (
-            target.cloud_backend == "lambda"
-            and bool(runtime_setting("LAMBDA_CLOUD_API_KEY"))
-        )
-        if not runtime_setting(credential_key) and not legacy_lambda:
+        if target.cloud_backend == "aws":
+            present = aws_credentials_present(
+                {k: runtime_setting(k) or "" for k in (*AWS_EC2_CREDENTIAL_ENVS, DEFAULT_CREDENTIALS_OPT_IN_ENV)}
+            )
+        else:
+            credential_key = (
+                "VASTAI_API_KEY"
+                if target.cloud_backend == "vastai"
+                else "LAMBDA_API_KEY"
+            )
+            legacy_lambda = (
+                target.cloud_backend == "lambda"
+                and bool(runtime_setting("LAMBDA_CLOUD_API_KEY"))
+            )
+            present = bool(runtime_setting(credential_key)) or legacy_lambda
+        if not present:
             raise DefaultComputeError(
                 f"Default compute {target.cloud_backend} is no longer available. "
                 "Add its API key or choose another default in Settings."

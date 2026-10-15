@@ -37,6 +37,7 @@ const SETTINGS_KEYS = [
   "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
   "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION",
   "OPENROUTER_API_KEY", "VASTAI_API_KEY", "LAMBDA_API_KEY",
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_EC2_REGION",
   "HF_TOKEN", "WANDB_ENTITY", "WANDB_PROJECT", "WANDB_API_KEY",
 ];
 
@@ -94,6 +95,15 @@ export function SettingsPage() {
       detail: "Lambda Cloud GPU rental",
       available: hasSecret("LAMBDA_API_KEY"),
       note: hasSecret("LAMBDA_API_KEY") ? "API key set" : "API key required",
+    },
+    {
+      key: "cloud:aws",
+      icon: "cloud",
+      name: "AWS EC2",
+      type: "Cloud",
+      detail: "On-demand EC2 GPU instances",
+      available: hasSecret("AWS_ACCESS_KEY_ID") && hasSecret("AWS_SECRET_ACCESS_KEY"),
+      note: hasSecret("AWS_ACCESS_KEY_ID") && hasSecret("AWS_SECRET_ACCESS_KEY") ? "Credentials set" : "Access key required",
     },
     ...(data?.ssh_connections ?? [])
       .filter((connection) => connection.configured)
