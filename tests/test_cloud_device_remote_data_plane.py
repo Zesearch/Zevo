@@ -56,4 +56,6 @@ def test_cloud_device_still_rejects_cluster_routing() -> None:
     with pytest.raises(ValidationError, match="must not contain cluster routing"):
         InfrastructureDeviceInfo(**_cloud(cluster={
             "requested_gpus": 1, "nodes": 1, "workdir": "/x/run-1", "hf_cache": "/x/hf",
+            "gpu_constraints": {"min_gpus_per_job": 1, "allocation_step": 1, "gpus_per_node": 8,
+                                "gpu_vram_gib": 80, "whole_node": False, "source": "test"},
         }))
