@@ -653,6 +653,27 @@ def _num_gpus(run: Run) -> int:
 # purpose: `__CONFIG__` also carries things that are not ticket inputs (a sample
 # prompt, row counts, a timestamp), and copying those in would turn the payload
 # from "the ticket" into "a second transcript".
+def _pin_cloud_backend(available: list[str], pinned: str) -> list[str]:
+    """Apply a Run's cloud_backend pin to the credentialed backends.
+
+    A pin names the only backend the Run may rent on. Run 0869b205 (2026-10-15)
+    was pinned to AWS, met a one-AZ capacity error there, and the agent fell
+    back to Lambda on the same member's other key: a provider the member did
+    not choose spent their money. With a pin, the list is exactly that backend;
+    a pin with no credential is a configuration error, not a fallback.
+    """
+    if not pinned:
+        return available
+    if pinned not in ("vastai", "lambda", "aws"):
+        raise ValueError(f"unsupported cloud_backend pin {pinned!r}")
+    if pinned not in available:
+        raise ValueError(
+            f"run pins cloud_backend={pinned!r} but no credential for it is available; "
+            "add its key or launch with another backend"
+        )
+    return [pinned]
+
+
 async def _build_infra_input(
     ticket: Ticket, payload: dict, inputs: dict, work_dir: str,
     run: Run, session: AsyncSession, specialist_context: dict | None = None,
@@ -689,10 +710,13 @@ async def _build_infra_input(
             available_cloud_backends.append("lambda")
         if aws_credentials_present():
             available_cloud_backends.append("aws")
-        # A per-run pin (from the launch picker, stored on the run) chooses
-        # Vast.ai vs Lambda for this run; otherwise the deployment default.
+        # A per-run pin (from the launch picker, stored on the run) is the
+        # member's instruction: the run rents on that backend or not at all.
+        # Without a pin the deployment default is a preference only.
+        pinned_cloud_backend = str(run.cloud_backend or "").strip().lower()
+        available_cloud_backends = _pin_cloud_backend(available_cloud_backends, pinned_cloud_backend)
         preferred_cloud_backend = (
-            str(run.cloud_backend or "").strip().lower()
+            pinned_cloud_backend
             or os.environ.get("ZEVO_CLOUD_BACKEND", "").strip().lower()
         )
         if preferred_cloud_backend not in ("", "vastai", "lambda", "aws"):

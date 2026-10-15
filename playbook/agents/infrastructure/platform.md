@@ -30,7 +30,9 @@ Resolve one `resource_plan` before searching, submitting, or leasing anything:
 - when model/method values are not fixed yet, size a defensible run envelope
   from the task and budget rather than pretending an exact Train configuration
   already exists; downstream execution preflight rejects a workload that exceeds it;
-- for cloud, choose among `available_cloud_backends`; honor
+- for cloud, choose among `available_cloud_backends`; when the Run pins a
+  backend that list holds exactly one entry and no other backend may be used,
+  whatever another credential would allow; otherwise honor
   `preferred_cloud_backend` only when it is available and feasible, then choose
   a priced offer inside the budget;
 - use the selected site Skill and live Slurm state to resolve partition,
@@ -305,9 +307,12 @@ contract.
 
 ## Cloud provider
 
-For provision, select `cloud_backend` once from the available, feasible
-backends (respecting a valid deployment preference), then keep it fixed through
-acquisition and cleanup. Use only the shipped client:
+For provision, select `cloud_backend` once from `available_cloud_backends`
+(respecting a valid deployment preference), then keep it fixed through
+acquisition and cleanup. A single-entry list is the Run's pin: if that backend
+has no feasible offer or its launch fails for capacity, fail the ticket with
+that evidence (name the backend, type, zone, and the provider's error) instead
+of renting on any other backend. Use only the shipped client:
 
 ```python
 from zevo.providers.vastai import VastAIProvider

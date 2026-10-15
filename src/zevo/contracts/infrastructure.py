@@ -995,8 +995,9 @@ class InfraTaskInput(AgentTaskInput):
         default_factory=list,
         description=(
             "Credentialed cloud backends available to Infrastructure. Empty "
-            "for non-cloud providers. This is capability context, not a user "
-            "selection; Infrastructure chooses and reports one for provision."
+            "for non-cloud providers. When the Run pins a backend this list is "
+            "exactly that backend and no other may be used; otherwise it is "
+            "capability context and Infrastructure chooses and reports one."
         ),
     )
     preferred_cloud_backend: Literal["", "vastai", "lambda", "aws"] = Field(

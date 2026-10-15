@@ -1,0 +1,50 @@
+"""What to do with the trained weights when a Run is cancelled.
+
+`POST /runs/{id}/cancel` takes one of these. `download` and `hf` keep the
+champion checkpoint (copied off the GPU box before it is destroyed); `discard`
+is the old behaviour: kill everything and tear down at once.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+CancelWeights = Literal["download", "hf", "remote", "discard"]
+
+_HF_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
+
+
+class CancelWeightsPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    weights: CancelWeights = "download"
+    # Absolute folder visible to the Zevo server. Empty means the run's own
+    # models folder under the work dir, which the registry stage also uses.
+    local_dir: str = ""
+    # `hf` only: `owner/name` on the Hugging Face Hub. The HF_TOKEN from
+    # Settings must be able to write it.
+    hf_repo_id: str = ""
+    hf_private: bool = True
+    remote_dir: str = ""
+    # Rescue work is bounded. By default a failed copy retains the source and
+    # requires an explicit retry/discard; rented compute may continue billing.
+    rescue_timeout_seconds: int = Field(default=900, ge=30, le=3600)
+    attempt_timeout_seconds: int = Field(default=300, ge=10, le=3600)
+    max_attempts: int = Field(default=3, ge=1, le=5)
+    discard_on_failure: bool = False
+    # `hf` only: keep the local copy the upload was made from.
+    keep_local_copy: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def _check(self) -> "CancelWeightsPolicy":
+        if self.weights == "remote":
+            from zevo.contracts.model_save import ModelSavePolicy
+            ModelSavePolicy(weights="remote", remote_dir=self.remote_dir)
+        if self.local_dir and not Path(self.local_dir).is_absolute():
+            raise ValueError("local_dir must be an absolute path")
+        if self.weights == "hf" and not _HF_REPO.match(self.hf_repo_id):
+            raise ValueError("hf_repo_id must look like owner/name")
+        return self
