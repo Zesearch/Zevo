@@ -546,7 +546,7 @@ class InfrastructureResourcePlan(BaseModel):
         description="Effective verified minimum of partition, QoS, account and provider duration limits; null if unknown/unlimited.")
     runtime_estimate_evidence: str = ""
     platform_runtime_limit_evidence: str = ""
-    cloud_backend: Literal["", "vastai", "lambda"] = ""
+    cloud_backend: Literal["", "vastai", "lambda", "aws"] = ""
     gpu_type: str = ""
     docker_image: str = ""
     disk_gb: int = Field(ge=0)
@@ -762,7 +762,7 @@ class InfrastructureDeviceInfo(BaseModel):
     ticket_id: str = Field(min_length=1)
     purpose: Literal["train", "inference"]
     provider: Literal["cluster", "cloud", "instance"]
-    cloud_backend: Literal["", "vastai", "lambda"] = ""
+    cloud_backend: Literal["", "vastai", "lambda", "aws"] = ""
     instance_id: str = ""
     auto_release: bool
     host: str = Field(min_length=1)
@@ -982,7 +982,7 @@ class InfraTaskInput(AgentTaskInput):
         ),
     )
     gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_stage"
-    cloud_backend: Literal["", "vastai", "lambda"] = Field(
+    cloud_backend: Literal["", "vastai", "lambda", "aws"] = Field(
         "",
         description=(
             "Release-only lifecycle identity. For release, identify the cloud "
@@ -991,7 +991,7 @@ class InfraTaskInput(AgentTaskInput):
             "from available_cloud_backends."
         ),
     )
-    available_cloud_backends: list[Literal["vastai", "lambda"]] = Field(
+    available_cloud_backends: list[Literal["vastai", "lambda", "aws"]] = Field(
         default_factory=list,
         description=(
             "Credentialed cloud backends available to Infrastructure. Empty "
@@ -999,7 +999,7 @@ class InfraTaskInput(AgentTaskInput):
             "selection; Infrastructure chooses and reports one for provision."
         ),
     )
-    preferred_cloud_backend: Literal["", "vastai", "lambda"] = Field(
+    preferred_cloud_backend: Literal["", "vastai", "lambda", "aws"] = Field(
         "",
         description=(
             "Optional deployment preference from ZEVO_CLOUD_BACKEND. It is "
@@ -1273,7 +1273,7 @@ class InfraResult(AgentResult):
             "Cluster and instance results leave it empty."
         ),
     )
-    cloud_backend: Literal["", "vastai", "lambda"] = Field(
+    cloud_backend: Literal["", "vastai", "lambda", "aws"] = Field(
         "",
         description=(
             "Release/failure cloud lifecycle identity. Empty on usable provision "

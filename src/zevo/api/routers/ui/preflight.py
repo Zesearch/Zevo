@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.compute_defaults import DefaultComputeError, resolve_default_compute
+from zevo.providers.aws_ec2 import aws_credentials_present
 from zevo.api.database import get_db
 from zevo.db import Agent, InfraInstance, SshHost
 from zevo.contracts.customizations import RunCustomizations
@@ -73,7 +74,7 @@ class PreflightBody(BaseModel):
     # UserRequest. A missing provider resolves to the concrete Settings default.
     gpu_provider: Literal["cluster", "cloud", "instance"] | None = None
     gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_run"
-    cloud_backend: Literal["", "vastai", "lambda"] = ""
+    cloud_backend: Literal["", "vastai", "lambda", "aws"] = ""
     ssh_host_id: str = ""
     num_gpus: int | None = Field(None, ge=0)
     generation_backend: Literal["hf", "vllm"] | None = None
@@ -498,11 +499,12 @@ def _check_infra(
             os.environ.get("LAMBDA_API_KEY", "").strip()
             or os.environ.get("LAMBDA_CLOUD_API_KEY", "").strip()
         )
-        if backend not in ("", "vastai", "lambda"):
+        has_aws = aws_credentials_present()
+        if backend not in ("", "vastai", "lambda", "aws"):
             _block(
                 items,
                 "cloud_backend_invalid",
-                "ZEVO_CLOUD_BACKEND must be empty, vastai, or lambda.",
+                "ZEVO_CLOUD_BACKEND must be empty, vastai, lambda, or aws.",
                 "Clear it to let Infrastructure choose, or set a supported preference.",
             )
         elif backend == "lambda":
@@ -514,6 +516,16 @@ def _check_infra(
             else:
                 _ok(items, "cloud_ready",
                     "gpu_provider=cloud (Lambda Cloud) and LAMBDA_API_KEY is present.")
+        elif backend == "aws":
+            if not has_aws:
+                _block(items, "cloud_no_credentials",
+                       "gpu_provider=cloud, ZEVO_CLOUD_BACKEND=aws but AWS_ACCESS_KEY_ID / "
+                       "AWS_SECRET_ACCESS_KEY are not set.",
+                       "Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY via the /settings page "
+                       "(AWS_REGION picks the EC2 region), then restart the backend + scheduler.")
+            else:
+                _ok(items, "cloud_ready",
+                    "gpu_provider=cloud (AWS EC2) and AWS credentials are present.")
         elif backend == "vastai":
             if not has_vast:
                 _block(items, "cloud_no_credentials",
@@ -523,12 +535,13 @@ def _check_infra(
             else:
                 _ok(items, "cloud_ready",
                     "gpu_provider=cloud (Vast.ai) and VASTAI_API_KEY is present.")
-        elif not (has_vast or has_lambda):
+        elif not (has_vast or has_lambda or has_aws):
             _block(
                 items,
                 "cloud_no_credentials",
                 "gpu_provider=cloud but no supported cloud credential is configured.",
-                "Add VASTAI_API_KEY or LAMBDA_API_KEY via Settings, then restart backend + scheduler.",
+                "Add VASTAI_API_KEY, LAMBDA_API_KEY, or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY "
+                "via Settings, then restart backend + scheduler.",
             )
         else:
             available = [

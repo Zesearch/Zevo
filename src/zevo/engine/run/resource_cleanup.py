@@ -74,6 +74,9 @@ def _cloud_provider(backend: str):
     if backend == "lambda":
         from zevo.providers.lambda_labs import LambdaCloudProvider
         return LambdaCloudProvider()
+    if backend == "aws":
+        from zevo.providers.aws_ec2 import AwsEc2Provider
+        return AwsEc2Provider()
     raise ValueError("cloud backend is unknown; refusing cross-provider destruction")
 
 

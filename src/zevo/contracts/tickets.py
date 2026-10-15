@@ -228,7 +228,7 @@ class InfrastructureProvisionPayload(StoredPayload):
 class InfrastructureReleasePayload(StoredPayload):
     operation: Literal["release"]
     instance_id: str = Field(min_length=1)
-    cloud_backend: Literal["", "vastai", "lambda"] = ""
+    cloud_backend: Literal["", "vastai", "lambda", "aws"] = ""
 
 
 class PipelineDataRequestPayload(StoredPayload):

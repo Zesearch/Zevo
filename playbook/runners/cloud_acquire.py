@@ -21,6 +21,7 @@ Usage (from the Infrastructure work dir)::
         --ssh-key-path /app/data/.ssh/id_ed25519 --name zevo-<run8> \
         --run-id R --ticket-id T --dph 1.29 --state acquire_state.json
     python3 zevo_cloud_acquire.py --backend vastai --offer-id 1234567 --docker-image IMG --disk-gb 100 ...
+    python3 zevo_cloud_acquire.py --backend aws --offer-id g6e.xlarge --region us-east-1 [--disk-gb 200] ...
 
 Output: the state file (JSON) and the same JSON on stdout. Exit 0 when the
 device is ready, probed and healthy; 1 when provisioning failed and cleanup
@@ -44,6 +45,7 @@ from typing import Any
 
 API_BASE = os.environ.get("ZEVO_API_BASE", "").rstrip("/")
 AUTH_HEADER = os.environ.get("ZEVO_API_AUTH_HEADER", "").strip()
+_UBUNTU_BACKENDS = ("lambda", "aws")
 _PROBE_RE = re.compile(r"^\s*(\d+)\s*,\s*(.+?)\s*,\s*(\d+)\s*(?:MiB)?\s*$", re.I)
 
 
@@ -87,6 +89,9 @@ def make_provider(backend: str):
     if backend == "vastai":
         from zevo.providers.vastai import VastAIProvider
         return VastAIProvider()
+    if backend == "aws":
+        from zevo.providers.aws_ec2 import AwsEc2Provider
+        return AwsEc2Provider()
     raise ValueError(f"unsupported cloud backend {backend!r}")
 
 
@@ -94,6 +99,11 @@ async def create(provider, backend: str, args) -> str:
     if backend == "lambda":
         created = await provider.create_instance(
             args.offer_id, args.region, ssh_key_path=args.ssh_key_path, name=args.name,
+        )
+    elif backend == "aws":
+        created = await provider.create_instance(
+            args.offer_id, args.region, ssh_key_path=args.ssh_key_path, name=args.name,
+            disk_gb=int(args.disk_gb or 0),
         )
     else:
         created = await provider.create_instance(
@@ -108,8 +118,8 @@ async def create(provider, backend: str, args) -> str:
 def ssh_route(details: dict[str, Any], backend: str) -> dict[str, Any]:
     """The client's keys are ssh_host / ssh_port / ssh_user. Nothing else."""
     host = str(details.get("ssh_host") or "").strip()
-    port = int(details.get("ssh_port") or (22 if backend == "lambda" else 0) or 0)
-    user = str(details.get("ssh_user") or ("ubuntu" if backend == "lambda" else "root"))
+    port = int(details.get("ssh_port") or (22 if backend in _UBUNTU_BACKENDS else 0) or 0)
+    user = str(details.get("ssh_user") or ("ubuntu" if backend in _UBUNTU_BACKENDS else "root"))
     if not host or port <= 0:
         raise RuntimeError(f"provider SSH details incomplete: {details!r}")
     return {"host": host, "port": port, "user": user}
@@ -314,7 +324,7 @@ async def run(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Acquire one cloud GPU instance end to end")
-    parser.add_argument("--backend", choices=("lambda", "vastai"), required=True)
+    parser.add_argument("--backend", choices=("lambda", "vastai", "aws"), required=True)
     parser.add_argument("--offer-id", required=True)
     parser.add_argument("--region", default="")
     parser.add_argument("--docker-image", default="")

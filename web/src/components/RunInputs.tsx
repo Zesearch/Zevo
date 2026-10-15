@@ -1035,7 +1035,7 @@ export type RunInputValues = {
   seed: string;
   gpuProvider: GpuProvider | "";
   /** When gpuProvider === "cloud", which cloud to rent on. Empty = deployment default. */
-  cloudBackend: "" | "vastai" | "lambda";
+  cloudBackend: "" | "vastai" | "lambda" | "aws";
   /** Verified SSH profile selected for a cluster/instance run. */
   sshHostId: string;
   /** Maximum GPUs the Run may use at once. Empty means no upper bound;
@@ -1433,7 +1433,7 @@ export type ComputeTargetOption = {
   value: string;
   label: string;
   gpuProvider: GpuProvider;
-  cloudBackend: "" | "vastai" | "lambda";
+  cloudBackend: "" | "vastai" | "lambda" | "aws";
   sshHostId: string;
 };
 
@@ -1476,6 +1476,10 @@ export function useComputeTargets() {
         value: "cloud:lambda", label: "Lambda.ai", gpuProvider: "cloud" as const,
         cloudBackend: "lambda" as const, sshHostId: "",
       }] : []),
+      ...(keyPresent("AWS_ACCESS_KEY_ID") && keyPresent("AWS_SECRET_ACCESS_KEY") ? [{
+        value: "cloud:aws", label: "AWS EC2", gpuProvider: "cloud" as const,
+        cloudBackend: "aws" as const, sshHostId: "",
+      }] : []),
       ...(settings?.ssh_connections ?? [])
         .filter((connection) => connection.configured)
         .map((connection) => ({
@@ -1514,7 +1518,7 @@ export function BackendPicker({
   gpuProvider, cloudBackend, sshHostId, onChange,
 }: {
   gpuProvider: GpuProvider | "";
-  cloudBackend: "" | "vastai" | "lambda";
+  cloudBackend: "" | "vastai" | "lambda" | "aws";
   sshHostId: string;
   onChange: (patch: Partial<RunInputValues>) => void;
 }) {

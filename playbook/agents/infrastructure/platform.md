@@ -312,9 +312,10 @@ acquisition and cleanup. Use only the shipped client:
 ```python
 from zevo.providers.vastai import VastAIProvider
 from zevo.providers.lambda_labs import LambdaCloudProvider
+from zevo.providers.aws_ec2 import AwsEc2Provider
 ```
 
-Do not call provider REST endpoints directly. Both clients expose
+Do not call provider REST endpoints or boto3 directly. All three clients expose
 `search_gpus`, `create_instance`, `list_instances`, `wait_for_ready`,
 `get_ssh_details`, `wait_for_ssh`, and `destroy_instance`.
 
@@ -326,7 +327,12 @@ instance, fail with that evidence.
 
 Search once with `resource_plan.num_gpus` and the remaining resolved resource plan. Vast.ai applies
 host RAM/CPU filters and uses the supplied image/disk; Lambda offers fixed
-instance types and ignores those fields. Require a non-empty offer list. Post a
+instance types and ignores those fields; AWS offers EC2 instance types in the
+configured region, already filtered to what the account's on-demand vCPU quota
+can launch (`quota_vcpus` on each offer), and sizes the root disk from
+`--disk-gb`. An empty AWS list usually means the quota for that GPU family is
+below the smallest type's vCPU count; say so in the failure. Require a
+non-empty offer list. Post a
 cost-transparency message naming backend, offer/type, region when applicable,
 GPU count/type/VRAM, and `dph_total` before creation.
 
@@ -334,7 +340,7 @@ Create and bring up the selected cheapest valid offer with the supplied
 helper, not with code you write: from `work_dir`, run
 
 ```
-python3 <cloud_acquire_helper_path> --backend <lambda|vastai> --offer-id <id> \
+python3 <cloud_acquire_helper_path> --backend <lambda|vastai|aws> --offer-id <id> \
   [--region <r>] [--docker-image <img> --disk-gb <n>] --ssh-key-path <key> \
   --name zevo-<run8> --run-id $RUN_ID --ticket-id $TICKET_ID --dph <dph_total> \
   --state acquire_state.json

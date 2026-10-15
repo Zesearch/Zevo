@@ -1365,7 +1365,7 @@ class CreateRunRequest(BaseModel):
     ssh_host_id: str = ""
     # Which cloud to rent on when gpu_provider == "cloud" (pins Vast.ai vs Lambda
     # for this run instead of the deployment default). Empty = deployment default.
-    cloud_backend: Literal["", "vastai", "lambda"] = ""
+    cloud_backend: Literal["", "vastai", "lambda", "aws"] = ""
     mode: Literal["full_pipeline", "customized_pipeline", "auto"] = "full_pipeline"
     customizations: RunCustomizations | None = None
     # Whether this run's configuration is written down as a reusable setting,

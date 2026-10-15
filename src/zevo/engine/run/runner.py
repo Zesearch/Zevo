@@ -61,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from zevo.paths import work_dir_root as paths_work_dir_root
 from zevo.api.artifacts import host_path
 from zevo.providers import resolve_ssh_key
+from zevo.providers.aws_ec2 import aws_credentials_present
 from zevo.engine.agent.loader import AgentBlueprint, REPO_ROOT, load_agent
 from zevo.engine.agent.memory import (
     applicability_for,
@@ -672,7 +673,7 @@ async def _build_infra_input(
         if live is not None and live.ticket_id != ticket.id:
             raise ValueError("this Run already owns a cloud instance; reuse its device_info or wait for confirmed stage release")
     cloud_backend = str(payload.get("cloud_backend") or "").strip().lower()
-    if cloud_backend not in ("", "vastai", "lambda"):
+    if cloud_backend not in ("", "vastai", "lambda", "aws"):
         raise ValueError(
             f"ticket {ticket.id}: unsupported cloud_backend={cloud_backend!r}"
         )
@@ -686,15 +687,17 @@ async def _build_infra_input(
             or os.environ.get("LAMBDA_CLOUD_API_KEY", "").strip()
         ):
             available_cloud_backends.append("lambda")
+        if aws_credentials_present():
+            available_cloud_backends.append("aws")
         # A per-run pin (from the launch picker, stored on the run) chooses
         # Vast.ai vs Lambda for this run; otherwise the deployment default.
         preferred_cloud_backend = (
             str(run.cloud_backend or "").strip().lower()
             or os.environ.get("ZEVO_CLOUD_BACKEND", "").strip().lower()
         )
-        if preferred_cloud_backend not in ("", "vastai", "lambda"):
+        if preferred_cloud_backend not in ("", "vastai", "lambda", "aws"):
             raise ValueError(
-                "ZEVO_CLOUD_BACKEND must be empty, 'vastai', or 'lambda'"
+                "ZEVO_CLOUD_BACKEND must be empty, 'vastai', 'lambda', or 'aws'"
             )
 
     # Cluster/Instance SSH data comes from the verified profile selected on the
