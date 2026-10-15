@@ -367,7 +367,8 @@ def _build_data_input(
         route = device_info.cluster or device_info.instance
         if route is None:
             raise ValueError(
-                "remote Hugging Face Data requires a cluster or fixed-instance route"
+                "remote Hugging Face Data requires a cluster, instance, or cloud route "
+                "with workdir and hf_cache"
             )
         remote_hf_cache_path = str(PurePosixPath(route.hf_cache))
         remote_workdir = PurePosixPath(route.workdir)
