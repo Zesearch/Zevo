@@ -75,12 +75,17 @@ function AuthBadge({ status }: { status?: AuthStatusDriver }) {
   );
 }
 
-function Money({ inputUsd, outputUsd }: { inputUsd?: number; outputUsd?: number }) {
+function Money({ inputUsd, outputUsd, cacheReadUsd, cacheWrite5mUsd, cacheWrite1hUsd }: { inputUsd?: number; outputUsd?: number; cacheReadUsd?: number; cacheWrite5mUsd?: number; cacheWrite1hUsd?: number }) {
   if (inputUsd == null && outputUsd == null) return null;
   const fmt = (n?: number) => (n == null ? "?" : n < 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(2)}`);
   return (
     <span className="font-mono text-[14px] text-slate-500">
       {fmt(inputUsd)} in / {fmt(outputUsd)} out per Mtok
+      {cacheReadUsd != null && (
+        <span className="block">
+          Cache: {fmt(cacheReadUsd)} read / {fmt(cacheWrite5mUsd)} write (5m) / {fmt(cacheWrite1hUsd)} write (1h) per Mtok
+        </span>
+      )}
     </span>
   );
 }
@@ -304,7 +309,7 @@ export function AgentConfigCard({
               <p className="mt-0.5 text-[15px] text-slate-400">{focusedModel.note}</p>
             )}
           </div>
-          <Money inputUsd={focusedModel.inputUsd} outputUsd={focusedModel.outputUsd} />
+          <Money {...focusedModel} />
         </div>
       )}
 

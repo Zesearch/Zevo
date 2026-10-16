@@ -4,7 +4,8 @@ Drivers emit `turn_completed` events with per-turn `usage` dicts in the
 canonical harness shape:
 
     {"input_tokens": N, "output_tokens": M,
-     "cached_input_tokens": K, "reasoning_output_tokens": R}
+     "cached_input_tokens": K, "reasoning_output_tokens": R,
+     "cache_write_5m_tokens": W5, "cache_write_1h_tokens": W1}
 
 The runner accumulates these per-heartbeat. At heartbeat-close, we
 multiply by a per-model `$/M token` table to record the estimated
@@ -12,12 +13,11 @@ spend on the row. Cost is FROZEN at write-time -- historical heartbeats
 keep showing what they cost at the time, not what they would cost at
 today's prices.
 
-Every rate below comes from OpenRouter's public catalogue
-(`GET https://openrouter.ai/api/v1/models`, `pricing.prompt` /
-`pricing.input_cache_read` / `pricing.completion`, which are $/token — multiply
-by 1e6). One source for all four drivers: whatever the driver, the same model
-is billed at the same published rate, and a single fetch re-checks them all.
-Anything the catalogue does not carry keeps a hand-entered rate and says so.
+Claude standard API rates were checked against Anthropic's official pricing
+on 2026-10-16: https://platform.claude.com/docs/en/about-claude/pricing.
+Other model rates are from OpenRouter's catalogue. Claude CLI final reported
+cost takes precedence over estimates, including auxiliary model calls and
+provider pricing modifiers. The table is the fallback for interim usage.
 
 Prices move. Re-fetch before trusting a cost, and remember that a run on a
 Claude Max or ChatGPT subscription is billed by the plan, not per token — the
@@ -68,7 +68,7 @@ PRICES_USD_PER_MTOK: dict[str, dict[str, float]] = {
     # meter overstates it — same caveat as codex on a ChatGPT plan.
     "claude-opus-5":                       {"input": 5.0, "cached_input": 0.5, "output": 25.0},
     "claude-sonnet-5":                     {"input": 2.0, "cached_input": 0.2, "output": 10.0},
-    "claude-fable-5-1":                    {"input": 10.0, "cached_input": 1.0, "output": 50.0},
+    "claude-fable-5-1":                    {"input": 10.0, "cached_input": 0.25, "output": 50.0},
     "claude-fable-5":                      {"input": 10.0, "cached_input": 1.0, "output": 50.0},
     "claude-opus-4-8":                     {"input": 5.0, "cached_input": 0.5, "output": 25.0},
     "claude-opus-4-7":                     {"input": 5.0, "cached_input": 0.5, "output": 25.0},
@@ -105,6 +105,19 @@ PRICES_USD_PER_MTOK: dict[str, dict[str, float]] = {
     "deepseek/deepseek-v4-flash-0731":     {"input": 0.09, "cached_input": 0.018, "output": 0.18},
     "qwen/qwen3.7-flash":                  {"input": 0.03, "cached_input": 0.006, "output": 0.13},
 }
+
+
+# Standard prompt-cache writes: 5-minute TTL costs 1.25x input, 1-hour 2x.
+for _model, _rates in PRICES_USD_PER_MTOK.items():
+    if _model.startswith(("claude-", "us.anthropic.claude-")):
+        _rates["cache_write_5m"] = _rates["input"] * 1.25
+        _rates["cache_write_1h"] = _rates["input"] * 2
+PRICES_USD_PER_MTOK["claude-haiku-4-5-20251001"] = dict(PRICES_USD_PER_MTOK["claude-haiku-4-5"])
+
+USAGE_FIELDS = (
+    "input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens",
+    "cache_write_5m_tokens", "cache_write_1h_tokens",
+)
 
 
 # ─── GPU price by type ($ per GPU-hour) ─────────────────────────────────────
@@ -209,7 +222,8 @@ def estimate_cost(model: str, usage: dict[str, Any]) -> float:
 
     Handles cached-input correctly: OpenAI's reported `input_tokens`
     typically *includes* `cached_input_tokens`. We bill cached separately
-    at the cached rate and the remainder at the input rate.
+    at the cached rate. Claude cache writes use their TTL-specific rate;
+    only the remaining input is billed at the ordinary input rate.
     """
     if not isinstance(usage, dict):
         return 0.0
@@ -230,11 +244,15 @@ def estimate_cost(model: str, usage: dict[str, Any]) -> float:
     inp = _i("input_tokens")
     out = _i("output_tokens")
     cached = _i("cached_input_tokens")
-    non_cached = max(0, inp - cached)
+    write_5m = _i("cache_write_5m_tokens")
+    write_1h = _i("cache_write_1h_tokens")
+    non_cached = max(0, inp - cached - write_5m - write_1h)
     cost = (
         non_cached * price(model, "input")
         + cached    * price(model, "cached_input")
         + out       * price(model, "output")
+        + write_5m  * price(model, "cache_write_5m")
+        + write_1h  * price(model, "cache_write_1h")
     ) / 1_000_000.0
     return round(cost, 6)
 
@@ -243,7 +261,7 @@ def accumulate_usage(
     running: dict[str, int], new_usage: dict[str, Any]
 ) -> dict[str, int]:
     """Add `new_usage` numeric fields into `running` in place. Returns running."""
-    for k in ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens"):
+    for k in USAGE_FIELDS:
         try:
             running[k] = int(running.get(k, 0)) + int(new_usage.get(k, 0) or 0)
         except (TypeError, ValueError):

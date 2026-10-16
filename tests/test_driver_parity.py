@@ -258,7 +258,7 @@ def test_no_schema_omits_required_output_block(payload) -> None:
 
 
 def test_usage_mappers_produce_canonical_keys() -> None:
-    """Every usage mapper must produce a dict with EXACTLY these keys:
+    """Every usage mapper supplies these common keys (Claude adds cache TTLs):
     input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens.
     The pricing module then accumulates + estimates from this shape."""
     CANON = {"input_tokens", "output_tokens", "cached_input_tokens",
@@ -270,10 +270,10 @@ def test_usage_mappers_produce_canonical_keys() -> None:
         "cache_read_input_tokens": 30, "cache_creation_input_tokens": 5,
     }
     claude_out = claude_normalise(claude_raw)
-    assert set(claude_out.keys()) == CANON
-    # Claude CLI sums cache_read + cache_creation into cached_input_tokens
-    # AND adds them into input_tokens (so cost subtraction works).
-    assert claude_out["cached_input_tokens"] == 35
+    assert set(claude_out.keys()) == CANON | {"cache_write_5m_tokens", "cache_write_1h_tokens"}
+    # Input includes all cache tokens, but reads and writes are billed separately.
+    assert claude_out["cached_input_tokens"] == 30
+    assert claude_out["cache_write_5m_tokens"] == 5
     assert claude_out["input_tokens"] == 135
 
     # Bedrock (camelCase: inputTokens / cacheReadInputTokens)
@@ -288,6 +288,7 @@ def test_usage_mappers_handle_missing_or_none() -> None:
     """All mappers must defend against None / missing keys without
     raising — the runner can't recover from a normaliser crash."""
     assert claude_normalise({}) == {
+        "cache_write_5m_tokens": 0, "cache_write_1h_tokens": 0,
         "input_tokens": 0, "output_tokens": 0,
         "cached_input_tokens": 0, "reasoning_output_tokens": 0,
     }
