@@ -1,3 +1,4 @@
+import { resourceSummaryValues, scoringSummaryValues } from "../lib/runSummary";
 import { useFileDisplayPath } from "../lib/useFileDisplayPath";
 import { PredictionColumnField } from "./PredictionColumnField";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
@@ -41,8 +42,8 @@ const fieldCls =
   "w-full rounded-md border border-hair bg-canvas p-2.5 text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none";
 const completeFieldCls =
   "!border-brass-500/55 !bg-brass-500/[0.07] !text-brass-100";
-export const requiredFieldStateCls = (_complete: boolean) =>
-  "!border-hair !bg-canvas !text-slate-200 focus:!border-brass-500/50";
+export const requiredFieldStateCls = (complete: boolean) =>
+  complete ? completeFieldCls : "!border-hair !bg-canvas !text-slate-200 focus:!border-brass-500/50";
 
 async function uploadFile(f: File): Promise<string> {
   const fd = new FormData();
@@ -389,7 +390,7 @@ export function ScoringSuiteEditor({
                   onChange={(value) => update(index, { metric_direction: value as "max" | "min" })}
                   options={[{ value: "max", label: "Maximize" }, { value: "min", label: "Minimize" }]}
                   ariaLabel={`Target for ${lane} set ${index + 1}`}
-                  buttonClassName={`${fieldCls} h-10 font-mono`}
+                  buttonClassName={`${fieldCls} h-10 font-mono ${requiredFieldStateCls(Boolean(item.metric_direction))}`}
                 />
               </div>
               <div>
@@ -507,10 +508,10 @@ function SummaryColumn({
         <tbody>
           {values.map(({ name, value, complete, overridden }) => (
             <tr key={name} className="group">
-              <th className="w-[42%] rounded-l px-2 py-1.5 text-left font-normal text-slate-500 transition-colors group-hover:bg-white/[0.025]">
+              <th className="w-[42%] align-top rounded-l px-2 py-1.5 text-left font-normal text-slate-500 transition-colors group-hover:bg-white/[0.025]">
                 {name}
               </th>
-              <td className="rounded-r px-2 py-1.5 text-right transition-colors group-hover:bg-white/[0.025]">
+              <td className="align-top rounded-r px-2 py-1.5 text-right transition-colors group-hover:bg-white/[0.025]">
                 <span className="inline-flex max-w-full items-center justify-end gap-1.5">
                   {required && (
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
@@ -518,7 +519,7 @@ function SummaryColumn({
                     }`} />
                   )}
                   <span
-                    className={`truncate ${
+                    className={`break-words whitespace-pre-wrap ${
                       required
                         ? complete ? "text-slate-200" : "italic text-slate-600"
                         : overridden ? "text-brass-300" : "text-slate-400"
@@ -537,6 +538,8 @@ function SummaryColumn({
   );
 }
 
+const LAUNCH_SUMMARY_FIELDS = new Set(["Iterations", "Budget", "Time limit", "Maximum GPUs", "Final model destination", "Hugging Face repository", "Directory on the GPU machine", "Repository visibility"]);
+
 export function RunSummaryTable({
   requiredValues, optionalValues,
 }: {
@@ -546,8 +549,8 @@ export function RunSummaryTable({
   return (
     <div className="mt-3">
       <div className="grid gap-3 md:grid-cols-2">
-        <SummaryColumn title="Required Values" values={requiredValues} required />
-        <SummaryColumn title="Optional Values" values={optionalValues} />
+        <SummaryColumn title="Required Values" values={requiredValues.filter(value => !LAUNCH_SUMMARY_FIELDS.has(value.name))} required />
+        <SummaryColumn title="Optional Values" values={optionalValues.filter(value => !LAUNCH_SUMMARY_FIELDS.has(value.name))} />
       </div>
     </div>
   );
@@ -808,7 +811,7 @@ function Chosen({
     ? uploadedFileName(value)
     : short(value);
   return (
-    <div className={`flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2 ${className}`}>
+    <div className={`flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2 ${completeFieldCls} ${className}`}>
       {uploaded && <CheckCircle2 size={15} className="shrink-0 text-phosphor-300" />}
       <span className="min-w-0 flex-1" title={displayValue}>
         <span className="block truncate font-mono text-sm text-slate-100">{displayValue}</span>
@@ -955,7 +958,7 @@ export function TrainingDataField({
             <label className="block">
               <span className={hubLabelCls}>Split</span>
               <input
-                className={hubBoxCls} value={split ?? ""}
+                className={`${hubBoxCls} ${requiredFieldStateCls(Boolean(split || splitPlaceholder))}`} value={split || splitPlaceholder}
                 onChange={(e) => onSplit(e.target.value)}
                 list="zevo-hf-splits" placeholder={splitPlaceholder}
               />
@@ -963,7 +966,7 @@ export function TrainingDataField({
             <label className="block">
               <span className={hubLabelCls}>Config</span>
               <input
-                className={hubBoxCls} value={config ?? ""}
+                className={`${hubBoxCls} ${config?.trim() ? completeFieldCls : ""}`} value={config ?? ""}
                 onChange={(e) => onConfig(e.target.value)}
                 placeholder="only if the repo has several"
               />
@@ -1042,6 +1045,7 @@ export type RunInputValues = {
    *  Infrastructure selects a concrete positive count. */
   gpuAllocationMode: "per_stage" | "per_run" | "per_submission";
   numGpus: string;
+  adaptiveMidTrainingEvaluation: boolean;
   generation_backend: GenerationBackend | "";
   iterations: string;
   budget: string;
@@ -1069,7 +1073,8 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   gpuProvider: "",
   cloudBackend: "",
   sshHostId: "",
-  generation_backend: "",
+  adaptiveMidTrainingEvaluation: false,
+  generation_backend: "vllm",
   // Blank leaves the GPU count to Zevo's stage planner.
   gpuAllocationMode: "per_run",
   numGpus: "",
@@ -1135,7 +1140,8 @@ export function TextField({
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder || hint}
+        placeholder={placeholder || (label === "Maximum GPUs" ? "Unlimited" : label === "Stop threshold" ? "Not set" : hint)}
+        title={hint}
         spellCheck={false}
         className={`${fieldCls} ${mono ? "font-mono" : ""} ${
           required ? requiredFieldStateCls(Boolean(value.trim())) : value.trim() ? completeFieldCls : ""
@@ -1295,7 +1301,8 @@ export function LimitField({
           min={0}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={hint}
+          placeholder="Unlimited"
+          title={hint}
           className={`${fieldCls} h-11 font-mono ${prefix ? "!pl-7" : ""} ${value.trim() ? completeFieldCls : ""}`}
         />
       </div>
@@ -1661,10 +1668,10 @@ export function RunInputs({
   datasetSplit, datasetConfig, dataQuery,
   baseModel, modelQuery, trainingMethod, methodQuery,
   teacherModel, rewardModel, usePeft,
-  gpuProvider, cloudBackend, sshHostId, numGpus, gpuAllocationMode, generation_backend,
+  gpuProvider, cloudBackend, sshHostId, numGpus, gpuAllocationMode, generation_backend, adaptiveMidTrainingEvaluation,
   iterations, budget, timeLimitHours, queueWaitHours, stopThreshold,
   onChange, extra, requiredPrefix, optionalPrefix, beforeChecklist,
-  requiredMissing = [], requiredPrefixValues = [], taskTestSuite,
+  requiredMissing = [], requiredPrefixValues = [], extraRequiredValues = [], extraOptionalValues = [], taskTestSuite,
 }: RunInputValues & {
   onChange: (patch: Partial<RunInputValues>) => void;
   /** Slot for anything the named fields don't cover — rendered under Optional,
@@ -1676,6 +1683,8 @@ export function RunInputs({
   beforeChecklist?: React.ReactNode;
   requiredMissing?: string[];
   requiredPrefixValues?: RunSummaryValue[];
+  extraRequiredValues?: RunSummaryValue[];
+  extraOptionalValues?: RunSummaryValue[];
   /** Present for a predefined Task. Its Test suite is immutable at launch;
    *  edit it from Tasks instead. */
   taskTestSuite?: TaskTestSet[];
@@ -1703,6 +1712,7 @@ export function RunInputs({
     ? scoringSuiteMissing(validationSets, "Validation") : [];
   const requiredValues: RunSummaryValue[] = [
     ...requiredPrefixValues,
+    ...extraRequiredValues,
     {
       name: "GPU backend",
       value: effectiveComputeTarget?.label || "Not set",
@@ -1748,6 +1758,8 @@ export function RunInputs({
       },
     ]),
     { name: "Training data", value: dataset.trim() ? short(dataset) : "Prepared by Zevo", overridden: !!dataset.trim() },
+    { name: "Training split", value: datasetSplit || "Default", overridden: !!datasetSplit },
+    { name: "Training config", value: datasetConfig || "Default", overridden: !!datasetConfig },
     { name: "Data query", value: dataQuery.trim() || "not set", overridden: !!dataQuery.trim() },
     { name: "Base model", value: baseModel.trim() || "Selected by Zevo", overridden: !!baseModel.trim() },
     { name: "Model query", value: modelQuery.trim() || "not set", overridden: !!modelQuery.trim() },
@@ -1756,13 +1768,10 @@ export function RunInputs({
     ...(trainingMethodSupportsLora(trainingMethod)
       ? [{ name: "Use LoRA", value: useLoraLabel(usePeft), overridden: Boolean(usePeft) }]
       : []),
-    { name: "Maximum GPUs", value: numGpus.trim() || "unlimited", overridden: !!numGpus.trim() },
-    { name: "Generation backend", value: (generation_backend || "vllm").toUpperCase(), overridden: !!generation_backend },
-    { name: "Iterations", value: iterations.trim() || "unlimited", overridden: !!iterations.trim() },
-    { name: "Budget", value: budget.trim() ? `$${budget.trim()}` : "unlimited", overridden: !!budget.trim() },
-    { name: "Time limit", value: timeLimitHours.trim() ? `${timeLimitHours.trim()} h` : "unlimited", overridden: !!timeLimitHours.trim() },
-    { name: "Queue limit", value: queueWaitHours.trim() ? `${queueWaitHours.trim()} h` : "24 h", overridden: !!queueWaitHours.trim() },
-    { name: "Stop threshold", value: stopThreshold.trim() || "not set", overridden: !!stopThreshold.trim() },
+    ...resourceSummaryValues({ numGpus, gpuAllocationMode, generation_backend, adaptiveMidTrainingEvaluation, iterations, budget, timeLimitHours, queueWaitHours, stopThreshold }),
+    ...scoringSummaryValues(taskTestSuite || testSets, "Test"),
+    ...scoringSummaryValues(validationSets, "Validation"),
+    ...extraOptionalValues,
   ];
   return (
     <div className="space-y-6">
@@ -1929,7 +1938,13 @@ export function RunInputs({
             hint="Entire run retains GPUs across stages. Per stage retains GPUs within a stage, including repair. Per submission (Slurm only) releases GPUs after each workload and requests a new allocation for retries."
           />
           <ChoiceField
-            label="Generation backend" value={generation_backend}
+            label="Mid-training evaluation" value={adaptiveMidTrainingEvaluation ? "enabled" : "disabled"}
+            onChange={(v) => onChange({ adaptiveMidTrainingEvaluation: v === "enabled" })}
+            options={[["disabled", "Off"], ["enabled", "Agent decides"]]}
+            hint="Allow Validation checks during training. The agent chooses when to evaluate and whether to stop early."
+          />
+          <ChoiceField
+            label="Generation backend" value={generation_backend || "vllm"}
             onChange={(v) => onChange({ generation_backend: v as GenerationBackend | "" })}
             options={[["vllm", "vllm"], ["hf", "hf"]]}
             hint="Backend used to generate predictions; blank defaults to vLLM."
@@ -1945,7 +1960,7 @@ export function RunInputs({
           <LimitField label="Time limit (hours)" value={timeLimitHours}
             onChange={(v) => onChange({ timeLimitHours: v })}
             hint="Active experiment time only; Slurm queue wait is excluded." />
-          <LimitField label="Max queue wait (hours)" value={queueWaitHours}
+          <LimitField label="Max queue wait (hours)" value={queueWaitHours || "48"}
             onChange={(v) => onChange({ queueWaitHours: v })}
             hint="Maximum Slurm PENDING time; blank defaults to 48 hours (max 168)." />
           <NumberField
@@ -1978,9 +1993,9 @@ export function RunInputs({
             <h3 className="section-title !text-brass-300">Checklist</h3>
           </span>
           <span className={`font-mono text-[0.62rem] uppercase tracking-[0.12em] ${
-            requiredMissing.length ? "text-coral-300" : "text-phosphor-300"
+            (requiredMissing.length || requiredValues.some(v => !v.complete)) ? "text-coral-300" : "text-phosphor-300"
           }`}>
-            {requiredMissing.length ? `${requiredMissing.length} missing` : "ready"}
+            {Math.max(requiredMissing.length, requiredValues.filter(v => !v.complete).length) ? `${Math.max(requiredMissing.length, requiredValues.filter(v => !v.complete).length)} missing` : "ready"}
           </span>
         </button>
         {showChecklist && (

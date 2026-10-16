@@ -283,6 +283,10 @@ class PipelineDataRequestPayload(StoredPayload):
 class PipelineTrainRequestPayload(StoredPayload):
     """Orchestrator-authored Train request; user pins are API-stamped."""
 
+    first_validation_fraction: float | None = Field(
+        default=None, gt=0, lt=1, allow_inf_nan=False,
+        description="Orchestrator-selected fraction of the full optimizer-step plan for the first Validation check; required when mid-training evaluation is enabled.",
+    )
     operation: Literal["train"]
     base_model: str = Field(min_length=1)
     model_source: Literal["base_model", "checkpoint"]
@@ -507,6 +511,10 @@ class DataPayload(StoredPayload):
 
 
 class TrainPayload(StoredPayload):
+    first_validation_fraction: float | None = Field(
+        default=None, gt=0, lt=1, allow_inf_nan=False,
+        description="Orchestrator-selected fraction of the full optimizer-step plan for the first Validation check; required when mid-training evaluation is enabled.",
+    )
     operation: Literal["train"]
     base_model: str = Field(min_length=1)
     training_method_pin: str = ""

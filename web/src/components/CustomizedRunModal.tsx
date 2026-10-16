@@ -1,4 +1,4 @@
-import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady } from "./ModelSaveFields";
+import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady, modelSaveSummaryValues } from "./ModelSaveFields";
 import { useLaunchSetting } from "../lib/useLaunchSetting";
 import { LaunchLimitsSummary, useLaunchPreflight } from "./LaunchPreflight";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -269,6 +269,7 @@ export function CustomizedRunForm({
     !taskName.trim() && "Task name",
     !objective.trim() && "Objective",
     !effectiveComputeTarget && "GPU backend",
+    !modelSaveReady(modelSave) && "Final model destination",
     ...(!predefined?.test_sets?.length ? scoringSuiteMissing(inputs.testSets, "Test") : []),
     ...(inputs.validationSets.length
       ? scoringSuiteMissing(inputs.validationSets, "Validation") : []),
@@ -431,6 +432,7 @@ export function CustomizedRunForm({
         ...(["cluster", "instance"].includes(inputs.gpuProvider) && inputs.sshHostId ? { ssh_host_id: inputs.sshHostId } : {}),
         num_gpus: Number(inputs.numGpus) || 0,
         gpu_allocation_mode: inputs.gpuAllocationMode,
+        adaptive_mid_training_evaluation: inputs.adaptiveMidTrainingEvaluation,
         ...(inputs.generation_backend ? { generation_backend: inputs.generation_backend } : {}),
         ...(pickedSetting ? { setting_id: pickedSetting } : {}),
         ...(!pickedSetting && saveSetting
@@ -455,10 +457,28 @@ export function CustomizedRunForm({
     }
   }
 
+  const customizedSummary = [
+    ...([ ["Prompt framing", inputs.promptFraming], ["System prompt", inputs.systemPrompt],
+      ["Loss objective config", inputs.lossObjectiveConfig], ["Inference config", inputs.inferenceConfig],
+      ["Decoding strategy", inputs.decodingStrategy], ["Max new tokens", inputs.maxNewTokens],
+      ["Temperature", inputs.temperature], ["Top p", inputs.topP], ["Top k", inputs.topK],
+      ["Repetition penalty", inputs.repetitionPenalty], ["Seed", inputs.seed],
+    ] as [string, string][]).map(([name, value]) => ({ name, value: value || "Decided by Zevo", overridden: !!value })),
+    ...PIPELINE.flatMap(spec => {
+      const agent = agents[spec.id];
+      return ([
+        ["Instructions", agent.instructions], ["Enforcement", agent.enforcement || "strict"],
+        ["Input files", agent.inputs.map(input => input.name).join(", ")], ["Output location", agent.output_dir],
+        ...spec.parameters.map(param => [param.label, agent.parameters[param.k] || ""]),
+      ] as [string, string][]).map(([key, value]) => ({ name: `${spec.label} · ${key}`, value: value || "Default", overridden: !!value }));
+    }),
+  ];
+
   return (
     <>
-      <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
-        <RunInputs extra={<ModelSaveFields value={modelSave} onChange={setModelSave} />} {...inputs} taskTestSuite={predefined?.test_sets} requiredMissing={requiredMissing}
+      <div className="space-y-4">
+        <LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />
+        <RunInputs extraRequiredValues={modelSaveSummaryValues(modelSave)} extraOptionalValues={customizedSummary} extra={<ModelSaveFields value={modelSave} onChange={setModelSave} />} {...inputs} taskTestSuite={predefined?.test_sets} requiredMissing={requiredMissing}
           requiredPrefixValues={[
             { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
             { name: "Task name", value: taskName.trim() || "Not set", complete: Boolean(taskName.trim()) },
@@ -485,7 +505,7 @@ export function CustomizedRunForm({
               <div>
                 <label className={labelCls}>Objective</label>
                 {predefined ? (
-                  <p className="rounded-md border border-hair bg-canvas p-2.5 font-mono text-sm leading-relaxed text-slate-100">
+                  <p className={`rounded-md border bg-canvas p-2.5 font-mono text-sm leading-relaxed ${requiredFieldStateCls(true)}`}>
                     {predefined.task_objective}
                   </p>
                 ) : (
@@ -547,11 +567,11 @@ export function CustomizedRunForm({
                   <div>
                     <label className={labelCls}>Instructions to this agent</label>
                     <textarea value={a.instructions} onChange={(e) => patch(spec.id, { instructions: e.target.value })} rows={2}
-                      placeholder="Additional guidance applied only to this agent" className={fieldCls} />
+                      placeholder="Additional guidance applied only to this agent" className={`${fieldCls} ${requiredFieldStateCls(Boolean(a.instructions.trim()))}`} />
                   </div>
                   <div>
                     <label className={labelCls}>Enforcement</label>
-                    <ThemedSelect value={a.enforcement}
+                    <ThemedSelect value={a.enforcement || "strict"}
                       onChange={(value) => patch(spec.id, { enforcement: value as "strict" | "advisory" })}
                       options={[
                         { value: "strict", label: "Strict" },
@@ -559,7 +579,7 @@ export function CustomizedRunForm({
                       ]}
                       placeholder="Strict by default: fail rather than deviate"
                       ariaLabel="Enforcement"
-                      buttonClassName={fieldCls} />
+                      buttonClassName={`${fieldCls} ${requiredFieldStateCls(true)}`} />
                   </div>
                   {spec.id === "train" && (
                     <div>
@@ -632,12 +652,12 @@ export function CustomizedRunForm({
                               options={(p.opts || []).map((o) => ({ value: o, label: o }))}
                               placeholder={p.placeholder || `${p.label} used by this agent`}
                               ariaLabel={p.label}
-                              buttonClassName={fieldCls} />
+                              buttonClassName={`${fieldCls} ${requiredFieldStateCls(Boolean(a.parameters[p.k]?.trim()))}`} />
                           ) : (
                             <input type={p.type === "number" ? "number" : "text"} step={p.step ?? (p.integer ? "1" : undefined)}
                               min={p.type === "number" ? (p.min ?? 0) : undefined}
                               value={a.parameters[p.k] ?? ""} onChange={(e) => setParam(spec.id, p.k, e.target.value)}
-                              placeholder={p.placeholder || `${p.label} used by this agent`} className={fieldCls} />
+                              placeholder={p.placeholder || `${p.label} used by this agent`} className={`${fieldCls} ${requiredFieldStateCls(Boolean(a.parameters[p.k]?.trim()))}`} />
                           )}
                         </div>
                       ))}
@@ -650,7 +670,7 @@ export function CustomizedRunForm({
                   <div>
                     <label className={labelCls}>Output location</label>
                     <input value={a.output_dir} onChange={(e) => patch(spec.id, { output_dir: e.target.value })}
-                      placeholder="Directory for this agent's outputs; blank uses its ticket workspace" className={fieldCls} />
+                      placeholder="Directory for this agent's outputs; blank uses its ticket workspace" className={`${fieldCls} ${requiredFieldStateCls(Boolean(a.output_dir.trim()))}`} />
                   </div>
                 </div>
               )}
@@ -663,7 +683,6 @@ export function CustomizedRunForm({
           )}
         />
 
-        <LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />
         {preflight.panel}
       </div>
 

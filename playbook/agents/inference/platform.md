@@ -387,21 +387,72 @@ model context limit, and user resource constraints to choose an initial budget.
 An input-plus-output configuration fitting the context or GPU memory is a
 feasibility check, not evidence that responses can finish within that budget.
 
-Use a bounded, reproducible sample of the supplied questions-only inputs that
-covers their length distribution and relevant task types, including long or
-complex inputs. Exercise the real model, template, stopping controls, and
-serving backend on the assigned GPU allocation. Validate each provisional
-configuration before its calibration generation. Do not read reference answers,
-call the scorer, or choose a budget by measured answer correctness.
+Calibrate each supplied benchmark separately on 64 questions, or all questions
+when it has fewer than 64. The target truncation rate is at most 5% per benchmark,
+not a pooled suite average. Count a question as truncated if any of its generation
+requests ends with backend `finish_reason=length`, even if it already contains an
+answer. For 64 questions, three truncated questions meet the target and four require adjustment or the documented exception below.
 
-Record generated lengths, backend termination reasons, truncation frequency,
-latency, and memory use. Set a task-appropriate truncation tolerance and a
-bounded calibration budget before observing outputs. If the output cap cuts
-off too many responses, increase the unpinned output budget and repeat on the
-same sample while resource and model limits permit. Check stopping behavior
-when generations fail to terminate; increasing the cap alone may not solve it.
-When a binding limit prevents further increases, record the residual truncation
-and the limiting constraint. Do not silently override pinned values.
+When `length_calibration_helper_path` is supplied, copy that exact system helper
+to the GPU runtime as `zevo_length_calibration.py`. For each member:
+
+1. Run `python zevo_length_calibration.py prepare --questions <member-questions.csv>
+   --output <separate-calibration-questions.csv>`. This selects a reproducible
+   length-stratified sample including both tails. Never use labels or scoring.
+2. Validate a provisional YAML with `config_validation_command`, then generate
+   only this sample with the real model, prompt, stop controls and serving backend.
+   Write separate GenerationDiagnostics with sample-local row/request indices.
+3. Run `python zevo_length_calibration.py check --config <member-config.yaml>
+   --questions <member-questions.csv> --diagnostics <calibration-diagnostics.json>`.
+   A nonzero exit blocks measured generation. If too many questions truncate,
+   increase the unpinned output budget, recompute context and memory settings,
+   revalidate the YAML, and repeat on the SAME sample. Check stopping behavior
+   too; more tokens do not fix a model that never terminates.
+   Limit this to 2–3 adjustments after the initial attempt. If truncation remains
+   above 5%, inspect actual outputs and verified EOS/stop controls. When repeated
+   text, continuing after an answer, or failure to terminate explains the residual
+   truncation, accept it as model output behavior; do not increase budgets forever.
+   Retry count alone, memory pressure, or a pinned cap does not justify acceptance.
+   To request this exception, include `output_behavior_waiver` in diagnostics:
+   - `previous_attempts`: 2–3 earlier attempts, each with `config_sha256`,
+     `questions_sha256`, `sample_row_indices`, complete `records` (same format),
+     and `adjustment` describing the change to the next attempt. Preserve this
+     evidence from each real attempt; distinct adjusted configs are required.
+   - `reason`: why observed behavior, rather than insufficient budget, explains it.
+   - `stop_controls_checked`: the EOS/stop checks and findings.
+   - `examples`: actual final truncated outputs, each with `request_index`,
+     `output_excerpt`, and `observation` explaining the output behavior.
+   Re-run `check` with the final config and these diagnostics. Record the residual
+   count/rate and reason in the journal; this is accepted residual truncation,
+   not a claim of meeting 5%. Never alter predictions or scores to compensate.
+4. Only after every member meets the target or has an accepted documented waiver, freeze the final configurations and start the
+   full measured Baseline. Preserve each helper-produced `length_calibration.json`
+   beside its final YAML and copy both back. The engine verifies the exact config
+   and questions hashes, sample coverage and finish reasons; a passed flag alone
+   is not acceptance evidence. Do not change the YAML after its successful check.
+
+Launch the measured command through the system gate, including single-member
+and non-cluster workloads:
+
+```
+python zevo_length_calibration.py run --suite suite.json -- python predict.py ...
+```
+
+For parallel inference, use `python zevo_parallel_inference.py ...` as the wrapped
+command instead. The manifest uses the existing member `config` and `questions`
+paths. The wrapper checks ALL members before launching any measured work. Keep
+calibration generations outside this wrapper. Reuse mode does not recalibrate
+or invoke this gate; it continues to use the exact frozen baseline contract.
+
+Submitting or validating a provisional YAML is NOT freezing the measurement
+contract. A single Slurm job can run calibration, update provisional configs,
+validate them, check each member and then run measured generation sequentially.
+Prepare this control flow before submission; do not defer calibration decisions
+until collect. Do not treat the single-job lifecycle as a resource limit or use
+"already frozen" to skip a failed check. If an actual model/resource limit or a
+user-pinned value prevents passing and the output-behavior exception is not justified, report the blocker instead of generating the
+full Baseline or claiming success. Never silently override pinned values.
+Calibration must use the exact member's final prompt, not another split's prompt.
 
 Derive the runtime total-context limit from the supported rendered input length
 plus the selected output allowance, within the model's verified context limit.

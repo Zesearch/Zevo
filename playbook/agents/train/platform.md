@@ -811,3 +811,80 @@ has completed but saving failed, repair publication from the completed state
 and validate the final files without repeating optimization. Keep the original
 plan unchanged during recovery; a shorter plan requires an explicit new user
 or coordinator decision rather than retroactively lowering the completion target.
+
+## Optional mid-training Validation
+
+Read `adaptive_mid_training_evaluation` from the typed input. Off preserves the
+ordinary training path. When on, set `training.adaptive_evaluation=true` in the
+YAML; do not combine this mode with loss-based `training.early_stopping`.
+Use the system-owned `adaptive_training_helper_path`, copied unchanged as
+`zevo_adaptive_training.py`. Copy the entire `adaptive-validation` directory
+beside it, preserving its contract and artifact bytes. It contains Validation
+only, every suite member, frozen baseline inference YAMLs, labels and evaluators.
+Never acquire or read Test for this controller.
+
+The Orchestrator owns the first evaluation position: read
+`first_validation_fraction` from typed input and the frozen contract. Set
+`first_step = max(1, math.ceil(planned_steps * first_validation_fraction))`
+after resolving the full optimizer-step count. Do not choose or override this
+fraction; a missing plan must be repaired by the Orchestrator. Keep the original
+full optimizer-step and epoch target fixed. In train.py, invoke
+`run_adaptive_training(ticket_id=..., contract_path=...,
+contract_sha256=adaptive_validation_contract_sha256, planned_steps=...,
+first_step=..., train_command=[...], evaluate_command=[...], work_dir=..., world_size=<training.world_size>)`.
+The work_dir must be inside this Ticket's remote directory. The controller
+holds no CUDA model. Launch the entire DDP training child as one argv command;
+wait for all ranks to exit before running Validation. The existing allocation
+remains reserved while awaiting an agent decision; do not rent extra GPUs.
+
+The training child reads `ZEVO_ADAPTIVE_TARGET_STEP`,
+`ZEVO_ADAPTIVE_PLANNED_STEPS`, `ZEVO_ADAPTIVE_RESUME_CHECKPOINT`, and
+`ZEVO_ADAPTIVE_CHECKPOINT`. Keep Trainer.max_steps at the FULL original target;
+use a callback at the target step to request save + orderly training stop.
+Save model, tokenizer, optimizer, scheduler, trainer state and all rank RNG
+states to the exact requested checkpoint directory before exiting. Resume with
+Trainer's full `resume_from_checkpoint` and normal data skipping (never
+ignore_data_skip); do not load weights alone, reset the LR schedule, or change
+data ordering. Preserve the original seed and dataset. Use the framework's actual resumable checkpoint format. The helper recognizes
+Trainer/DDP state, DeepSpeed ZeRO model/optimizer shards with their latest tag,
+and FSDP model/optimizer distributed checkpoint directories. Do not treat a
+weights-only export as resumable. Verify restart locally with the chosen
+framework before submitting the full experiment. Configure
+retention so neither the last resumable checkpoint nor the best measured one
+can be deleted. Segment checkpoints are internal recovery state, not
+TrainResult's weights-only intermediate branch points.
+
+The evaluation child reads `ZEVO_ADAPTIVE_CHECKPOINT`,
+`ZEVO_ADAPTIVE_VALIDATION_CONTRACT` and `ZEVO_ADAPTIVE_PREDICTIONS_DIR`.
+Generate answers for ALL frozen Validation members using the supplied,
+unchanged baseline predict script and inference configurations. Invoke the
+baseline script's existing CLI with the checkpoint and member data paths;
+do not rewrite its parsing or decoding logic. Write each member's predictions
+to `<ZEVO_ADAPTIVE_PREDICTIONS_DIR>/<zero-padded index>/predictions.csv`.
+Do not author scores: the system helper validates sample-submission columns,
+row count/order and invokes the frozen evaluator or the platform's exact
+built-in implementation. Keep predictions and evaluator outputs for audit.
+An evaluation exception fails that attempt without a negative score; the
+saved training segment is reused on repair.
+
+The helper emits an adaptive_validation progress marker and waits for a live
+Orchestrator decision after each nonterminal measurement. It executes the
+returned next step, or stops normally when instructed. Never write its
+decision files yourself. A timeout preserves resumable state and is a repair
+condition, not permission to stop or silently proceed.
+
+After the controller returns, publish its selected Validation-best checkpoint
+through `publish_adaptive_checkpoint(report_path, final_dir=...,
+plan_path=...)`, where report_path is work_dir/adaptive-training.json.
+For ZeRO/FSDP, first consolidate the selected checkpoint through its framework's
+official export path. Pass that weights-only directory as consolidated_dir and
+include adaptive-source.json with exactly
+`{"checkpoint":"<report.selected_checkpoint>","step":<report.selected_step>}`.
+Do not consolidate the last checkpoint if Validation selected an earlier one. Freeze
+the full plan with `record_training_plan` before any training. This publisher
+uses the ordinary checkpoint transaction and records why the original plan
+completed or stopped early. Return the report copied locally as
+`TrainResult.adaptive_training_report_path`. Report training steps honestly;
+the selected model may precede the last step trained. A valid agent-approved
+early stop is succeeded, not failed or cancelled. Normal candidate Inference,
+Evaluation and held-out Test still run after Train completes.

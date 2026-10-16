@@ -184,6 +184,7 @@ def record_training_plan(path, *, ticket_id, config_path, planned_steps, planned
         "planned_steps": planned_steps,
         "planned_epochs": planned_epochs,
         "early_stopping": policy,
+        "adaptive_evaluation": bool(training.get("adaptive_evaluation", False)),
     }
     path = Path(path)
     if path.exists():
@@ -195,7 +196,36 @@ def record_training_plan(path, *, ticket_id, config_path, planned_steps, planned
     return plan
 
 
-def _validate_training_progress(plan, state):
+def _validate_adaptive_completion(plan, state, report):
+    import math
+    if (not report or report.get("complete") is not True
+            or report.get("ticket_id") != plan["ticket_id"]
+            or report.get("planned_steps") != plan["planned_steps"]
+            or report.get("completed_steps") != state["global_step"]):
+        raise ValueError("adaptive completion does not match the full training plan")
+    rows = report.get("measurements", [])
+    if not rows or rows[-1]["step"] != state["global_step"]:
+        raise ValueError("adaptive completion requires final checkpoint Validation")
+    previous = 0
+    for row in rows:
+        if not previous < row["step"] <= state["global_step"] or not math.isfinite(row["score"]):
+            raise ValueError("invalid adaptive Validation history")
+        previous = row["step"]
+    direction = report.get("direction")
+    if direction not in {"max", "min"}:
+        raise ValueError("adaptive completion lacks a metric direction")
+    best = (max if direction == "max" else min)(rows, key=lambda row: row["score"])
+    if report.get("selected_step") != best["step"] or report.get("selected_checkpoint") != best["checkpoint"]:
+        raise ValueError("adaptive completion must preserve the best Validation checkpoint")
+    if state["global_step"] >= plan["planned_steps"]:
+        return "plan_completed"
+    decisions = report.get("decisions", [])
+    if len(rows) < 3 or not decisions or decisions[-1].get("action") != "stop" or not decisions[-1].get("reason"):
+        raise ValueError("adaptive early stopping needs repeated Validation and an agent decision")
+    return "adaptive_early_stopping"
+
+
+def _validate_training_progress(plan, state, adaptive_report=None):
     import math
     target = plan.get("planned_steps")
     step = state.get("global_step")
@@ -203,6 +233,8 @@ def _validate_training_progress(plan, state):
         raise ValueError("training completion requires positive planned and completed steps")
     if state.get("max_steps") != target:
         raise ValueError("runtime step target differs from the frozen training plan")
+    if plan.get("adaptive_evaluation"):
+        return _validate_adaptive_completion(plan, state, adaptive_report)
     if step >= target:
         return "plan_completed"
     policy = plan.get("early_stopping")
@@ -231,17 +263,18 @@ def _validate_training_progress(plan, state):
     raise ValueError(f"training incomplete: {step}/{target}; declared early stopping not reached")
 
 
-def commit_training_checkpoint(staging_dir, final_dir, *, plan_path, trainer_state_path):
+def commit_training_checkpoint(staging_dir, final_dir, *, plan_path, trainer_state_path, adaptive_report_path=None):
     """Publish a final model only after its original training target is satisfied."""
     plan = json.loads(Path(plan_path).read_text())
     state = json.loads(Path(trainer_state_path).read_text())
-    reason = _validate_training_progress(plan, state)
+    adaptive_report = json.loads(Path(adaptive_report_path).read_text()) if adaptive_report_path else None
+    reason = _validate_training_progress(plan, state, adaptive_report)
     metric = (plan.get("early_stopping") or {}).get("metric")
     completion = {"plan": plan, "state": {
         "global_step": state["global_step"], "max_steps": state["max_steps"],
         "log_history": [{"step": row.get("step"), metric: row[metric]}
                         for row in state.get("log_history", []) if metric and metric in row],
-    }, "reason": reason}
+    }, "reason": reason, "adaptive_report": adaptive_report}
     result = commit_checkpoint_directory(staging_dir, final_dir, metadata={"training_completion": completion})
     if result.get("metadata", {}).get("training_completion") != completion:
         raise ValueError("published checkpoint belongs to a different training completion")
@@ -267,8 +300,11 @@ def verify_training_completion(checkpoint_dir, *, ticket_id, config_sha256, trai
         raise ValueError("training completion belongs to another Ticket or configuration")
     if plan.get("planned_epochs") != training["num_epochs"] or plan.get("early_stopping") != training.get("early_stopping"):
         raise ValueError("training completion changed the configured termination policy")
-    reason = _validate_training_progress(plan, completion["state"])
+    if bool(plan.get("adaptive_evaluation")) != bool(training.get("adaptive_evaluation", False)):
+        raise ValueError("adaptive completion differs from the configured policy")
+    reason = _validate_training_progress(plan, completion["state"], completion.get("adaptive_report"))
     if reason != completion.get("reason"):
         raise ValueError("training completion reason is inconsistent")
     return {"reason": reason, "completed_steps": completion["state"]["global_step"],
-            "planned_steps": plan["planned_steps"]}
+            "planned_steps": plan["planned_steps"],
+            **({"adaptive_report": completion["adaptive_report"]} if completion.get("adaptive_report") else {})}

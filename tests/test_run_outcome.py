@@ -138,3 +138,27 @@ def test_unfinished_or_unrelated_replacement_does_not_resolve_cancellation(chang
     for key, value in change.items():
         setattr(new, key, value)
     assert "old" in {i["ticket_id"] for i in unresolved_ticket_issues([old, new], run=_replacement_run())}
+
+
+def test_audited_user_stop_is_success_eligible_without_hiding_other_failures():
+    stopped = _ticket("data-stop", agent="data", status="cancelled")
+    failed = _ticket("infer-failure", agent="inference", status="failed")
+    run = _run(lifecycle={"user_requested_stage_cancellations": {
+        stopped.id: {"instruction_id": "user-stop", "reason": "register champion", "recorded_at": NOW.isoformat()}
+    }})
+    assert unresolved_ticket_issues([stopped], run=run) == []
+    assert [i["ticket_id"] for i in unresolved_ticket_issues([stopped, failed], run=run)] == [failed.id]
+
+
+def test_user_stop_of_retry_does_not_erase_original_execution_failure():
+    failed = _ticket("data-failed", agent="data", status="failed")
+    retry = _ticket("data-retry", agent="data", status="cancelled", created_offset=1)
+    run = _run(lifecycle={"user_requested_stage_cancellations": {
+        retry.id: {"instruction_id": "stop", "reason": "stop retry", "recorded_at": NOW.isoformat()}
+    }})
+    assert [i["ticket_id"] for i in unresolved_ticket_issues([failed, retry], run=run)] == [failed.id]
+
+
+def test_generic_cancel_text_does_not_prove_user_intent():
+    ticket = _ticket("data-abnormal", agent="data", status="cancelled", error="cancelled by user")
+    assert unresolved_ticket_issues([ticket], run=_run())[0]["code"] == "ticket_cancelled"

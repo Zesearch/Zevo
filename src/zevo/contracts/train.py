@@ -224,9 +224,20 @@ class TrainTaskInput(AgentTaskInput):
     )
     work_dir: str = Field(min_length=1)
     generation_backend: Literal["hf", "vllm"] = "vllm"
+    first_validation_fraction: float | None = Field(default=None, gt=0, lt=1, allow_inf_nan=False)
+    adaptive_mid_training_evaluation: bool = False
+    adaptive_training_helper_path: str = ""
+    adaptive_validation_contract_path: str = ""
+    adaptive_validation_contract_sha256: str = ""
 
     @model_validator(mode="after")
     def require_selected_parent(self) -> "TrainTaskInput":
+        if self.adaptive_mid_training_evaluation and not (
+            self.first_validation_fraction is not None
+            and self.adaptive_training_helper_path and self.adaptive_validation_contract_path
+            and len(self.adaptive_validation_contract_sha256) == 64
+        ):
+            raise ValueError("adaptive training requires the engine helper and frozen Validation contract")
         if self.dataset_is_remote and not self.remote_data_receipt_path:
             raise ValueError(
                 "a remote training dataset requires remote_data_receipt_path"
@@ -326,6 +337,7 @@ class TrainResult(AgentResult):
         ),
     )
     checkpoint_is_remote: bool = False
+    adaptive_training_report_path: str = ""
     intermediate_checkpoints: list[IntermediateCheckpoint] = Field(
         default_factory=list,
         max_length=8,

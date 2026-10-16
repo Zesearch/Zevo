@@ -1,4 +1,4 @@
-import { ChoiceField } from "./RunInputs";
+import { ChoiceField, requiredFieldStateCls, type RunSummaryValue } from "./RunInputs";
 
 export type ModelSavePolicy = {
   weights: "hf" | "remote";
@@ -15,6 +15,15 @@ export function modelSaveReady(value: ModelSavePolicy): boolean {
     : value.remote_dir.trim().startsWith("/") && value.remote_dir.trim() !== "/"
       && !value.remote_dir.split("/").includes("..");
 }
+export function modelSaveSummaryValues(value: ModelSavePolicy): RunSummaryValue[] {
+  const hf = value.weights === "hf";
+  return [
+    { name: "Final model destination", value: hf ? "Hugging Face" : "GPU machine", complete: true },
+    { name: hf ? "Hugging Face repository" : "Directory on the GPU machine", value: (hf ? value.hf_repo_id : value.remote_dir).trim() || "Not set", complete: modelSaveReady(value) },
+    ...(hf ? [{ name: "Repository visibility", value: value.hf_private ? "Private" : "Public", complete: true }] : []),
+  ];
+}
+
 export function ModelSaveFields({ value, onChange }: {
   value: ModelSavePolicy; onChange: (value: ModelSavePolicy) => void;
 }) {
@@ -28,12 +37,12 @@ export function ModelSaveFields({ value, onChange }: {
         <span className="field-label mb-1.5 block">Hugging Face repository</span>
         <input aria-label="Hugging Face repository" value={value.hf_repo_id}
           onChange={e => onChange({ ...value, hf_repo_id: e.target.value })} placeholder="owner/model-name"
-          spellCheck={false} className={fieldClass} />
+          spellCheck={false} className={`${fieldClass} ${requiredFieldStateCls(Boolean(value.hf_repo_id.trim()))}`} />
       </label> : <label className="block">
         <span className="field-label mb-1.5 block">Directory on the GPU machine</span>
         <input aria-label="Directory on the GPU machine" value={value.remote_dir}
           onChange={e => onChange({ ...value, remote_dir: e.target.value })} placeholder="/lustre/my-project/models"
-          spellCheck={false} className={fieldClass} />
+          spellCheck={false} className={`${fieldClass} ${requiredFieldStateCls(Boolean(value.remote_dir.trim()))}`} />
       </label>}
     </div>
     {value.weights === "hf" ? <>

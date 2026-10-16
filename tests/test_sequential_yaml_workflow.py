@@ -1520,3 +1520,69 @@ def test_conversation_runtime_nonempty_empty_and_malformed_inputs():
     assert conversation_messages(mapping, {'messages': existing}, system_prompt='Default') == existing
     with pytest.raises(ValueError, match='declared'):
         validate_inference_config({**mapping, 'conversation_field': 'unknown'})
+
+
+def test_baseline_acceptance_requires_calibration_for_every_member(tmp_path: Path) -> None:
+    from zevo.contracts.inference import InferenceSuiteMemberInput, InferenceSuiteMemberResult
+    from zevo.contracts.length_calibration import check
+
+    def inputs(root: Path):
+        root.mkdir(parents=True, exist_ok=True)
+        questions = root / "questions.csv"
+        questions.write_text("id,question\n0,Short question\n1,Longer question\n")
+        evidence = root / "calibration_diagnostics.json"
+        evidence.write_text(json.dumps({"records": [
+            {"request_index": i, "row_index": i, "finish_reason": "stop", "generated_tokens": 1}
+            for i in range(2)
+        ]}))
+        return root / "inference_config.yaml", questions, evidence
+
+    config_path = _write_inference_config(tmp_path)
+    original = config_path.read_text()
+    _, questions, calibration_diagnostics = inputs(tmp_path)
+    config_path.write_text(original)
+    diagnostics = tmp_path / "generation_diagnostics.json"
+    diagnostics.write_text(json.dumps({"records": [
+        {"request_index": i, "row_index": i, "turn": 1,
+         "finish_reason": "stop", "generated_tokens": 1}
+        for i in range(3)
+    ]}))
+    inp = InferenceTaskInput.model_construct(
+        configuration_mode="select", base_model="Qwen/Qwen3-0.6B-Base",
+        generation_backend="vllm", config_validation_command="",
+        scoring_set=str(questions), length_calibration_helper_path="/system/helper.py",
+    )
+    result = InferenceResult(
+        ticket_id="infer-test", status="succeeded", error_message="", notes="",
+        inference_config_path=str(config_path), predictions_path="/predictions.csv",
+        generation_diagnostics_path=str(diagnostics), n_rows=3, n_requests=3,
+    )
+    with pytest.raises(FileNotFoundError, match="length_calibration.json"):
+        _validate_specialist_yaml(result, inp)
+    check(config_path, questions, calibration_diagnostics)
+    _validate_specialist_yaml(result, inp)
+
+    member_config, member_questions, member_diagnostics = inputs(tmp_path / "member")
+    member_config.write_text(original)
+    inp.suite_members = [InferenceSuiteMemberInput.model_construct(
+        name="second", test_set_name="second", configuration_mode="select",
+        scoring_set=str(member_questions),
+    )]
+    result.suite_members = [InferenceSuiteMemberResult(
+        name="second", test_set_name="second", inference_config_path=str(member_config),
+        predictions_path="/member-predictions.csv", generation_diagnostics_path=str(diagnostics),
+        n_rows=3, n_requests=3,
+    )]
+    with pytest.raises(FileNotFoundError, match="length_calibration.json"):
+        _validate_specialist_yaml(result, inp)
+    check(member_config, member_questions, member_diagnostics)
+    _validate_specialist_yaml(result, inp)
+
+    # Later candidates reuse the old contract; they do not need to recalibrate.
+    inp.configuration_mode = "reuse"
+    inp.inference_config_path = str(config_path)
+    inp.suite_members[0].configuration_mode = "reuse"
+    inp.suite_members[0].inference_config_path = str(member_config)
+    config_path.with_name("length_calibration.json").unlink()
+    member_config.with_name("length_calibration.json").unlink()
+    _validate_specialist_yaml(result, inp)

@@ -852,6 +852,26 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
             n_requests=3,
             n_unparseable=0,
         ))
+    if payload.get("length_calibration_helper_path"):
+        from zevo.contracts.length_calibration import check, sample_rows
+
+        def stub_calibration(path: str, questions: str) -> None:
+            _, rows, _ = sample_rows(questions)
+            evidence = Path(path).with_name("stub_calibration_diagnostics.json")
+            evidence.write_text(json.dumps({"records": [
+                {"request_index": i, "row_index": i, "finish_reason": "stop",
+                 "generated_tokens": 1}
+                for i in range(len(rows))
+            ]}), encoding="utf-8")
+            check(path, questions, evidence)
+
+        if payload.get("configuration_mode") == "select":
+            stub_calibration(str(config_path), str(payload["scoring_set"]))
+        member_inputs = {m["name"]: m for m in payload.get("suite_members", [])}
+        for result in suite_results:
+            member = member_inputs[result.name]
+            if member.get("configuration_mode") == "select":
+                stub_calibration(result.inference_config_path, member["scoring_set"])
     return InferenceResult(
         status="succeeded", operation="run_inference",
         ticket_id=payload.get("ticket_id", "infer-stub"),

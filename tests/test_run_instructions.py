@@ -509,3 +509,79 @@ def test_cancel_rejects_partial_replacement_body(payload):
     from zevo.api.routers.shared.tickets import CancelTicketBody
     with pytest.raises(ValidationError):
         CancelTicketBody.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_explicit_user_stop_records_audit_without_replacement(client_and_session, monkeypatch):
+    from zevo.api.routers.shared.tickets import CancelTicketBody, cancel_ticket
+    from zevo.engine.run import remote_jobs
+    from zevo.engine.run.outcome import unresolved_ticket_issues
+    _, Session = client_and_session
+    async def stop(*args, **kwargs):
+        return {"ok": True}
+    monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", stop)
+    async with Session() as db:
+        db.add(RunInstruction(id="stop-user", run_id="run-1", body="Cancel remaining training and register.", status="queued"))
+        await db.commit()
+        await cancel_ticket("train-001", db=db, body=CancelTicketBody(
+            user_requested_stop=True, instruction_id="stop-user", reason="User requested registration now"))
+        run = await db.get(Run, "run-1")
+        ticket = await db.get(Ticket, "train-001")
+        assert ticket.status == "cancelled"
+        assert run.lifecycle["user_requested_stage_cancellations"][ticket.id]["instruction_id"] == "stop-user"
+        assert unresolved_ticket_issues([ticket], run=run) == []
+        # A late annotation must not rewrite an already-ended stage as intentional.
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as error:
+            await cancel_ticket("train-001", db=db, body=CancelTicketBody(
+                user_requested_stop=True, instruction_id="stop-user", reason="again"))
+        assert error.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_dashboard_cancel_records_intent_in_same_operation(client_and_session, monkeypatch):
+    from zevo.api.routers.shared.tickets import cancel_ticket_by_user
+    from zevo.engine.run import remote_jobs
+    from zevo.engine.run.outcome import unresolved_ticket_issues
+    _, Session = client_and_session
+    async def stop(*args, **kwargs):
+        return {"ok": True}
+    monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", stop)
+    async with Session() as db:
+        await cancel_ticket_by_user("train-001", db=db)
+        run = await db.get(Run, "run-1")
+        ticket = await db.get(Ticket, "train-001")
+        audit = run.lifecycle["user_requested_stage_cancellations"][ticket.id]
+        instruction = await db.get(RunInstruction, audit["instruction_id"])
+        assert instruction.body == "Cancel stage train-001 at my request."
+        assert unresolved_ticket_issues([ticket], run=run) == []
+        wakes = (await db.execute(select(AgentWakeupRequest))).scalars().all()
+        assert any(w.ticket_id == "orchestrate-001" for w in wakes)
+
+
+@pytest.mark.asyncio
+async def test_intentional_stop_can_finish_success_but_an_exception_stays_degraded(client_and_session, monkeypatch):
+    from zevo.api.routers.shared.tickets import cancel_ticket_by_user
+    from zevo.api.routers.shared.runs import patch_run, PatchRunRequest
+    from zevo.engine.run import remote_jobs
+    _, Session = client_and_session
+    async def stop(*args, **kwargs):
+        return {"ok": True}
+    monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", stop)
+    async with Session() as db:
+        await cancel_ticket_by_user("train-001", db=db)
+        run = await db.get(Run, "run-1")
+        run.registry_version_tag = "M-champion"
+        run.iterations_completed = 1
+        run.history = [{"iteration": 1, "source": "trained", "score": .5,
+                        "action": "train", "result": "measured", "analysis": "improved", "next": "stop"}]
+        (await db.get(Ticket, "test-001")).status = "succeeded"
+        await db.commit()
+        result = await patch_run("run-1", PatchRunRequest(status="degraded", summary="Champion registered."), db)
+        assert result.status == "success"  # Even a conservative agent request is normalized.
+        run.status = "running"
+        (await db.get(Ticket, "test-001")).status = "failed"
+        await db.commit()
+        result = await patch_run("run-1", PatchRunRequest(status="degraded"), db)
+        assert result.status == "degraded"
+        assert "test-001" in result.halted_reason

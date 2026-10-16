@@ -255,6 +255,8 @@ class RuntimeSpec(BaseModel):
             "actual plans always select at least one."
         ),
     )
+    adaptive_mid_training_evaluation: bool = False
+    adaptive_training_requests: list[dict[str, Any]] = Field(default_factory=list)
     generation_backend: Literal["hf", "vllm"]
     gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_stage"
     max_queue_wait_hours: float = Field(48, gt=0, le=168)
@@ -306,6 +308,9 @@ class OrchestratorApiRoutes(BaseModel):
     rerun_ticket: Literal[
         "/api/tickets/{ticket_id}/rerun"
     ] = "/api/tickets/{ticket_id}/rerun"
+    adaptive_training_decision: Literal[
+        "/api/runs/{run_id}/adaptive-training/{ticket_id}/decision"
+    ] = "/api/runs/{run_id}/adaptive-training/{ticket_id}/decision"
     cancel_ticket: Literal[
         "/api/tickets/{ticket_id}/cancel"
     ] = "/api/tickets/{ticket_id}/cancel"

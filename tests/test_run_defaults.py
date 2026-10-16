@@ -440,7 +440,8 @@ def test_user_request_accepts_structured_experiment_preferences() -> None:
 
 
 @pytest.mark.asyncio
-async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("adaptive", [False, True])
+async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_path, monkeypatch, adaptive) -> None:
     from zevo.api.routers.shared import runs as runs_router
 
     monkeypatch.setenv("ZEVO_WORK_DIR", str(tmp_path / "runs"))
@@ -488,6 +489,7 @@ async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_
 
         response = await create_run(CreateRunRequest(
             task_name="budgeted", run_name="budgeted-defaults",
+            adaptive_mid_training_evaluation=adaptive,
         ), db)
         run = await db.get(Run, response.run_id)
         settings = (await db.execute(
@@ -514,6 +516,8 @@ async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_
         assert sup.payload["task_objective"] == "Improve the model."
         assert sup.payload["user_request"]["task_objective"] == "Improve the model."
         assert sup.payload["agent_objective"] == run.agent_objective
+        assert run.lifecycle["adaptive_mid_training_evaluation"] is adaptive
+        assert sup.payload["runtime"]["adaptive_mid_training_evaluation"] is adaptive
         assert settings == []
 
     await engine.dispose()
@@ -858,6 +862,8 @@ async def test_run_request_reports_the_persisted_runtime() -> None:
             agent_objective="inspect runtime",
             status="running", gpu_provider="cluster", num_gpus=4,
             generation_backend="hf", holdout={}, history=[],
+            gpu_allocation_mode="per_run", max_queue_wait_hours=48,
+            lifecycle={"model_save_policy": {"weights": "remote", "remote_dir": "/models"}},
         ))
         await db.commit()
 
@@ -867,6 +873,9 @@ async def test_run_request_reports_the_persisted_runtime() -> None:
         assert response.gpu_provider == "cluster"
         assert response.num_gpus == 4
         assert response.generation_backend == "hf"
+        assert response.gpu_allocation_mode == "per_run"
+        assert response.max_queue_wait_hours == 48
+        assert response.model_save_policy == {"weights": "remote", "remote_dir": "/models"}
 
     await engine.dispose()
 
@@ -1519,4 +1528,35 @@ async def test_journal_patch_changes_only_narrative_on_an_existing_fact() -> Non
                 }), db)
         assert exc.value.status_code == 409
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_configuration_includes_executed_system_and_registry_roles_only() -> None:
+    from zevo.api.routers.shared.runs import _agent_config_of_run
+    from zevo.db import Agent, HeartbeatRun, Ticket
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    async with Session() as db:
+        db.add(Run(id="agent-display", metric="accuracy"))
+        for role in ["data", "evaluation", "registry", "train"]:
+            db.add(Agent(id=role, name=role, title=role, reports_to="orchestrator", identity_path=f"playbook/agents/{role}/identity.md"))
+            db.add(Ticket(id=f"display-{role}", run_id="agent-display", agent_id=role))
+        for role, driver, model in [
+            ("data", "anthropic", "claude-opus-5"),
+            ("data", "holdout_data_runner", "no-llm"),
+            ("evaluation", "evaluation_runner", "no-llm"),
+            ("registry", "anthropic", "claude-opus-5"),
+        ]:
+            db.add(HeartbeatRun(id=f"display-{role}-{driver}", ticket_id=f"display-{role}",
+                                agent_id=role, driver=driver, model=model))
+        await db.commit()
+        roles = {row["agent_id"]: row for row in await _agent_config_of_run(db, "agent-display")}
+        assert set(roles) == {"data", "evaluation", "registry"}
+        assert roles["evaluation"]["variants"][0]["model"] == "no-llm"
+        assert roles["registry"]["variants"][0]["model"] == "claude-opus-5"
+        assert len(roles["data"]["variants"]) == 2
     await engine.dispose()

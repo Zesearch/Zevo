@@ -150,6 +150,7 @@ from zevo.contracts.train import (
     TrainResult,
 )
 from zevo.contracts.freeform import FreeformInput
+from zevo.contracts.length_calibration import validate as validate_length_calibration
 from zevo.contracts.inference import (
     InferenceSuiteMemberInput,
     InferenceTaskInput,
@@ -1096,6 +1097,8 @@ async def _build_train_input(
     ticket: Ticket, payload: dict, inputs: dict, work_dir: str, generation_backend: str,
     run: Run, session: AsyncSession, specialist_context: dict | None = None,
 ) -> BaseModel:
+    from zevo.engine.run.adaptive_training import build_validation_contract
+    adaptive = await build_validation_contract(session, run, ticket, work_dir)
     iteration = int(ticket.iteration or 0)
     parent_model = payload.get("model_source") == "checkpoint"
     wandb_values = {
@@ -1190,6 +1193,11 @@ async def _build_train_input(
             if str(run.gpu_provider or "instance") != "cluster" else ""
         ),
         checkpoint_helper_path=str(Path(work_dir) / "zevo_train_checkpoint.py"),
+        first_validation_fraction=payload.get("first_validation_fraction"),
+        adaptive_mid_training_evaluation=bool(adaptive),
+        adaptive_training_helper_path=str(Path(work_dir) / "zevo_adaptive_training.py") if adaptive else "",
+        adaptive_validation_contract_path=adaptive.get("path", ""),
+        adaptive_validation_contract_sha256=adaptive.get("sha256", ""),
         execution_contract=TrainExecutionContract(
             required_environment=required_environment,
             secret_environment_names=["WANDB_API_KEY"] if wandb_enabled else [],
@@ -1487,6 +1495,10 @@ async def _build_inference_input(
         memory_helper_path=(
             str(Path(work_dir) / "zevo_inference_memory.py")
             if generation_backend == "vllm" else ""
+        ),
+        length_calibration_helper_path=(
+            str(Path(work_dir) / "zevo_length_calibration.py")
+            if not inference_config_path else ""
         ),
         parallel_runner_path=str(Path(work_dir) / "zevo_parallel_inference.py"),
         remote_env_helper_path=(
@@ -1788,6 +1800,9 @@ async def _build_input(
             agent_id=agent_id, ticket=ticket, payload=payload, work_dir=work_dir
         )
     if agent_id == "orchestrator":
+        payload = {**payload, "runtime": {**payload.get("runtime", {}),
+            "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
+            "adaptive_training_requests": list((run.lifecycle or {}).get("adaptive_training_requests", {}).values())}}
         return _build_orchestrate_input(ticket, payload)
     if agent_id == "data":
         data_input = _build_data_input(
@@ -1929,6 +1944,7 @@ async def _build_specialist_context(
             "gpu_allocation_mode": getattr(run, "gpu_allocation_mode", None) or "per_stage",
             "num_gpus": run.num_gpus,
             "generation_backend": run.generation_backend,
+            "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
             "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),
         },
         "budget": {
@@ -2168,6 +2184,12 @@ def _validate_specialist_yaml(
                 raise ValueError(
                     f"inference_config.yaml violates pinned decoding_config.{key}"
                 )
+        if (
+            inp.length_calibration_helper_path
+            and inp.configuration_mode == "select"
+            and config.measurement.inference_config.get("scoring_mode", "generate") == "generate"
+        ):
+            validate_length_calibration(result.inference_config_path, inp.scoring_set)
         require_suggestion_decisions(config, inp.configuration_suggestions)
         if inp.inference_config_path:
             supplied = load_inference_config(inp.inference_config_path)
@@ -2233,6 +2255,14 @@ def _validate_specialist_yaml(
                 )
             if "--adaptive-vllm-memory" in inp.config_validation_command:
                 validate_adaptive_vllm_memory_config(member_config)
+            if (
+                inp.length_calibration_helper_path
+                and member.configuration_mode == "select"
+                and member_config.measurement.inference_config.get("scoring_mode", "generate") == "generate"
+            ):
+                validate_length_calibration(
+                    member_result.inference_config_path, member.scoring_set,
+                )
             member_runtime = {
                 "base_model": member_config.base_model,
                 "generation_backend": member_config.generation_backend,
@@ -2341,6 +2371,12 @@ def _validate_specialist_yaml(
             raise ValueError(
                 "train_config.yaml generation_backend differs from Run runtime"
             )
+        if config.training.adaptive_evaluation and config.training.early_stopping is not None:
+            raise ValueError("adaptive Validation decisions cannot be combined with trainer loss early stopping")
+        if config.training.adaptive_evaluation != inp.adaptive_mid_training_evaluation:
+            raise ValueError("train_config adaptive_evaluation must match the Run switch")
+        if inp.adaptive_mid_training_evaluation and not result.adaptive_training_report_path:
+            raise ValueError("adaptive training must return its checkpoint Validation report")
         current_inference_config_sha256 = file_sha256(inp.inference_config_path)
         if current_inference_config_sha256 != inp.expected_inference_config_sha256:
             raise ValueError(
@@ -2575,15 +2611,16 @@ def _python_checkpoint_helper_problem(path: str) -> str:
         "save_transformers_model_rank_zero",
         "commit_checkpoint_directory",
         "commit_training_checkpoint",
+        "publish_adaptive_checkpoint",
     }
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "zevo_train_checkpoint":
+        if isinstance(node, ast.ImportFrom) and node.module in {"zevo_train_checkpoint", "zevo_adaptive_training"}:
             for imported in node.names:
                 if imported.name in accepted:
                     direct_names.add(imported.asname or imported.name)
         elif isinstance(node, ast.Import):
             for imported in node.names:
-                if imported.name == "zevo_train_checkpoint":
+                if imported.name in {"zevo_train_checkpoint", "zevo_adaptive_training"}:
                     module_names.add(imported.asname or imported.name)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -2716,6 +2753,8 @@ def _slurm_stage_result_problem(
             return "cluster Train must report train_config_path before submission handoff"
         try:
             train_config = load_train_config(configuration_path)
+            if train_config.training.adaptive_evaluation != bool(getattr(inp, "adaptive_mid_training_evaluation", False)):
+                raise ValueError("adaptive_evaluation must match the Run switch")
             validate_cluster_train_config(train_config)
             validate_train_stage_shape(
                 train_config, world_size=contract.num_gpus, nodes=contract.nodes,
@@ -3159,6 +3198,7 @@ _TICKET_ARTIFACTS: dict[str, list[tuple[str, str]]] = {
                        ("validation_dataset_path", "validation_dataset"),
                        ("sample_submission_path", "sample_submission")],
     "train":     [("checkpoint_path", "checkpoint"), ("train_config_path", "train_config"),
+                   ("adaptive_training_report_path", "adaptive_training_report"),
                    ("train_script_path", "script"),
                    ("slurm_script_path", "slurm_script"), ("log_path", "log")],
     "inference":      [("predictions_path", "predictions"),
@@ -4523,6 +4563,8 @@ async def run_ticket(
             raise ValueError(f"system cloud acquisition helper is missing: {acquire_source}")
         shutil.copyfile(acquire_source, Path(work_dir) / "zevo_cloud_acquire.py")
     if tk.agent_id == "train":
+        shutil.copyfile(REPO_ROOT / "playbook" / "runners" / "adaptive_training.py",
+                        Path(work_dir) / "zevo_adaptive_training.py")
         telemetry_source = REPO_ROOT / "playbook" / "runners" / "train_telemetry.py"
         if not telemetry_source.is_file():
             raise ValueError(f"system training telemetry helper is missing: {telemetry_source}")
@@ -4560,6 +4602,8 @@ async def run_ticket(
             option_scoring_source,
             Path(work_dir) / "zevo_option_scoring.py",
         )
+        calibration_source = REPO_ROOT / "src" / "zevo" / "contracts" / "length_calibration.py"
+        shutil.copyfile(calibration_source, Path(work_dir) / "zevo_length_calibration.py")
         parallel_source = REPO_ROOT / "playbook" / "runners" / "parallel_inference.py"
         if not parallel_source.is_file():
             raise ValueError(f"system parallel inference helper is missing: {parallel_source}")
@@ -8515,6 +8559,8 @@ async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
         "gpu_allocation_mode": getattr(run, "gpu_allocation_mode", None) or "per_stage",
         "num_gpus": _num_gpus(run),
         "generation_backend": run.generation_backend,
+        "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
+        "adaptive_training_requests": list((run.lifecycle or {}).get("adaptive_training_requests", {}).values()),
         "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),
     }
     existing = (await session.execute(select(Ticket).where(Ticket.id == sup_id))).scalar_one_or_none()

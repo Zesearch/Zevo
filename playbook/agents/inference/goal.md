@@ -22,8 +22,10 @@ comparable Inference configuration.
    terminator used by the selected template. Record them in `stop_token_ids`;
    never rely on a special-token string surviving detokenization.
 5. Before measured Baseline generation, calibrate unpinned generation-length
-   budgets on a bounded, representative questions-only sample using the real
-   model and serving path. Follow platform.md: assess truncation and resource
+   budgets on 64 questions per benchmark (all if fewer), using the real
+   model and serving path. Target at most 5% truncated questions per benchmark; after 2–3 adjustments,
+   documented persistent model output behavior may justify accepting residual truncation;
+   use the supplied length-calibration helper to gate measured generation. Follow platform.md: assess truncation and resource
    use without labels or scoring, then freeze the selected budget. Keep
    calibration separate from benchmark predictions and progress.
 6. Record every realized field, the exact supported `template_kwargs`, each

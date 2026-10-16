@@ -110,6 +110,17 @@ class InferenceTaskInput(AgentTaskInput):
             "and must execute it without modification."
         ),
     )
+    length_calibration_helper_path: str = Field(
+        "",
+        description=(
+            "System helper for new baseline calibration: 64 questions per member "
+            "(all if smaller), target at most 5% length-limited questions. Documented model output behavior may justify a waiver after 2–3 adjustments (see platform.md). Run prepare, "
+            "generate the sample, then check before measured generation; copy "
+            "length_calibration.json beside each final config for engine acceptance. "
+            "Provisional configuration validation is not freezing."
+        ),
+    )
+
     inference_config_schema: dict[str, Any] = Field(
         ...,
         description=(
