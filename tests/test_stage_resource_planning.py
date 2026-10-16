@@ -393,6 +393,7 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     config_path.write_text("test stub", encoding="utf-8")
     training = SimpleNamespace(
         world_size=8, distributed=SimpleNamespace(nodes=1, gpus_per_node=8),
+        adaptive_evaluation=False,
     )
     monkeypatch.setattr(
         runner, "load_train_config", lambda _path: SimpleNamespace(training=training),
