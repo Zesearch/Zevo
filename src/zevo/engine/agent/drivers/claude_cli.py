@@ -554,6 +554,10 @@ def _normalise_claude_event(obj: dict) -> list[dict]:
         out.append({"type": "turn_completed", "payload": {
             "usage": _normalise_usage(obj["usage"]) if obj.get("usage") else {},
             "usage_kind": "cumulative",
+            # Preserve provider totals and per-model detail in the transcript.
+            # Final cost includes CLI auxiliary models (e.g. Haiku).
+            "reported_cost_usd": obj.get("total_cost_usd"),
+            "model_usage": obj.get("modelUsage"),
         }})
         result_text = obj.get("result") or ""
         if isinstance(result_text, str) and result_text.strip():
@@ -576,23 +580,25 @@ def _normalise_claude_event(obj: dict) -> list[dict]:
 
 
 def _normalise_usage(u: dict) -> dict:
-    """Convert Claude usage keys to the canonical keys our runner
-    accumulates on. Claude uses cache_read/cache_creation; we fold them
-    into cached_input_tokens for the harness's pricing.estimate_cost.
+    """Total input includes reads/writes; cached_input_tokens means reads only.
+
+    Older CLI versions omit the TTL split; their writes use the API's default
+    five-minute TTL. Final provider-reported cost supersedes this estimate.
     """
     inp = int(u.get("input_tokens") or 0)
     out = int(u.get("output_tokens") or 0)
     cache_read = int(u.get("cache_read_input_tokens") or 0)
     cache_create = int(u.get("cache_creation_input_tokens") or 0)
-    # Claude reports input_tokens EXCLUDING cache; our cost code
-    # expects input_tokens INCLUDING cache (then subtracts cached at the
-    # cached-rate), so add them.
-    total_in = inp + cache_read + cache_create
-    cached = cache_read + cache_create
+    creation = u.get("cache_creation") or {}
+    write_1h = int(creation.get("ephemeral_1h_input_tokens") or 0)
+    write_5m = int(creation.get("ephemeral_5m_input_tokens") or 0)
+    write_5m += max(0, cache_create - write_1h - write_5m)
     return {
-        "input_tokens": total_in,
+        "input_tokens": inp + cache_read + write_5m + write_1h,
         "output_tokens": out,
-        "cached_input_tokens": cached,
+        "cached_input_tokens": cache_read,
+        "cache_write_5m_tokens": write_5m,
+        "cache_write_1h_tokens": write_1h,
         "reasoning_output_tokens": 0,
     }
 

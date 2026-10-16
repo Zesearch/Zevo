@@ -28,7 +28,7 @@ from zevo.engine.cost.pricing import PRICES_USD_PER_MTOK, accumulate_usage, esti
 
 # -------------------------- normaliser invariants ---------------------------
 
-def test_claude_normalise_folds_cache_into_cached_and_total() -> None:
+def test_claude_normalise_keeps_cache_reads_and_writes_separate() -> None:
     # Raw Claude usage shape (what stream-json emits):
     raw = {
         "input_tokens": 100,
@@ -37,8 +37,10 @@ def test_claude_normalise_folds_cache_into_cached_and_total() -> None:
         "cache_creation_input_tokens": 30,
     }
     out = claude_normalise(raw)
-    # cached_input_tokens = cache_read + cache_creation
-    assert out["cached_input_tokens"] == 230
+    # cached_input_tokens contains cache reads only
+    assert out["cached_input_tokens"] == 200
+    assert out["cache_write_5m_tokens"] == 30
+    assert out["cache_write_1h_tokens"] == 0
     # input_tokens INCLUDES the cached portion (so estimate_cost can
     # subtract it cleanly)
     assert out["input_tokens"] == 100 + 200 + 30 == 330
@@ -54,6 +56,8 @@ def test_claude_normalise_handles_missing_keys() -> None:
         "input_tokens": 1234,
         "output_tokens": 567,
         "cached_input_tokens": 0,
+        "cache_write_5m_tokens": 0,
+        "cache_write_1h_tokens": 0,
         "reasoning_output_tokens": 0,
     }
 
@@ -63,6 +67,8 @@ def test_claude_normalise_handles_all_zero() -> None:
         "input_tokens": 0,
         "output_tokens": 0,
         "cached_input_tokens": 0,
+        "cache_write_5m_tokens": 0,
+        "cache_write_1h_tokens": 0,
         "reasoning_output_tokens": 0,
     }
 
@@ -125,17 +131,16 @@ def test_full_chain_claude_sonnet_three_turns_matches_hand_math() -> None:
     # Hand-check totals:
     # input_tokens = (1000+0+500) + (50+1500+0) + (50+1500+0) = 1500+1550+1550 = 4600
     # output_tokens = 100+20+10 = 130
-    # cached       = 500 + 1500 + 1500 = 3500
+    # cached reads = 1500 + 1500 = 3000; writes = 500
     assert running["input_tokens"]        == 4600
     assert running["output_tokens"]       == 130
-    assert running["cached_input_tokens"] == 3500
+    assert running["cached_input_tokens"] == 3000
+    assert running["cache_write_5m_tokens"] == 500
 
     cost = estimate_cost("claude-sonnet-4-6", running)
-    # non_cached = 4600 - 3500 = 1100  → 1100 * 3.00/M  = 0.0033
-    # cached     = 3500              → 3500 * 0.30/M = 0.00105
-    # output     = 130               → 130 * 15.00/M = 0.00195
-    # total                                           = 0.0063
-    assert abs(cost - 0.0063) < 1e-6, f"got {cost}"
+    # Ordinary input $0.0033 + reads $0.0009 + writes $0.001875 + output $0.00195.
+    assert abs(cost - 0.008025) < 1e-6, f"got {cost}"
+
 
 
 def _expected(model: str, inp: int, out: int, cached: int = 0) -> float:

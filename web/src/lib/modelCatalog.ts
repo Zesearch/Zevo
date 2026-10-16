@@ -14,6 +14,9 @@ export type ModelOption = {
   tag?: string;          // short qualifier shown next to the name (e.g. "newest", "fast")
   contextK?: number;     // input context window in thousand tokens (for the hint)
   inputUsd?: number;     // $/Mtok in
+  cacheReadUsd?: number;
+  cacheWrite5mUsd?: number;
+  cacheWrite1hUsd?: number;
   outputUsd?: number;    // $/Mtok out
   note?: string;         // single-line description (intelligence/speed/cost trade-off)
 };
@@ -59,19 +62,19 @@ export const DRIVERS: DriverSpec[] = [
     short: "Claude Code CLI",
     defaultModel: "claude-opus-5",
     models: [
-      { id: "claude-opus-5",      label: "Claude Opus 5",     tag: "default",  contextK: 1000, inputUsd: 5.0, outputUsd: 25.0,
+      { id: "claude-opus-5",      label: "Claude Opus 5",     tag: "default",  contextK: 1000, inputUsd: 5.0, outputUsd: 25.0, cacheReadUsd: 0.5, cacheWrite5mUsd: 6.25, cacheWrite1hUsd: 10,
         note: "Current Opus. Strongest on long agentic runs; the default here." },
-      { id: "claude-sonnet-5",    label: "Claude Sonnet 5",                    contextK: 1000, inputUsd: 2.0, outputUsd: 10.0,
+      { id: "claude-sonnet-5",    label: "Claude Sonnet 5",                    contextK: 1000, inputUsd: 2.0, outputUsd: 10.0, cacheReadUsd: 0.2, cacheWrite5mUsd: 2.5, cacheWrite1hUsd: 4,
         note: "Near-Opus quality on coding at Sonnet cost. Introductory rate." },
-      { id: "claude-fable-5-1",   label: "Claude Fable 5.1",  tag: "flagship", contextK: 1000, inputUsd: 10.0, outputUsd: 50.0,
+      { id: "claude-fable-5-1",   label: "Claude Fable 5.1",  tag: "flagship", contextK: 1000, inputUsd: 10.0, outputUsd: 50.0, cacheReadUsd: 0.25, cacheWrite5mUsd: 12.5, cacheWrite1hUsd: 20,
         note: "Most capable Claude. Newest Fable. For the hardest reasoning only." },
-      { id: "claude-fable-5",     label: "Claude Fable 5",                     contextK: 1000, inputUsd: 10.0, outputUsd: 50.0,
+      { id: "claude-fable-5",     label: "Claude Fable 5",                     contextK: 1000, inputUsd: 10.0, outputUsd: 50.0, cacheReadUsd: 1, cacheWrite5mUsd: 12.5, cacheWrite1hUsd: 20,
         note: "Previous Fable. Same price. Pin it to reproduce an older run." },
-      { id: "claude-opus-4-8",    label: "Claude Opus 4.8",                    contextK: 1000, inputUsd: 5.0, outputUsd: 25.0,
+      { id: "claude-opus-4-8",    label: "Claude Opus 4.8",                    contextK: 1000, inputUsd: 5.0, outputUsd: 25.0, cacheReadUsd: 0.5, cacheWrite5mUsd: 6.25, cacheWrite1hUsd: 10,
         note: "Previous Opus. Same price. Pin it to reproduce an older run." },
-      { id: "claude-opus-4-7",    label: "Claude Opus 4.7",                    contextK: 1000, inputUsd: 5.0, outputUsd: 25.0,
+      { id: "claude-opus-4-7",    label: "Claude Opus 4.7",                    contextK: 1000, inputUsd: 5.0, outputUsd: 25.0, cacheReadUsd: 0.5, cacheWrite5mUsd: 6.25, cacheWrite1hUsd: 10,
         note: "The Opus before 4.8. Same price. Pin it to reproduce an older run." },
-      { id: "claude-haiku-4-5",   label: "Claude Haiku 4.5",   tag: "fast",    contextK:  200, inputUsd: 1.0, outputUsd: 5.0,
+      { id: "claude-haiku-4-5",   label: "Claude Haiku 4.5",   tag: "fast",    contextK:  200, inputUsd: 1.0, outputUsd: 5.0, cacheReadUsd: 0.1, cacheWrite5mUsd: 1.25, cacheWrite1hUsd: 2,
         note: "Cheap + fast. Good for orchestration." },
     ],
   },
