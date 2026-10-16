@@ -72,11 +72,11 @@ async def cost_total(
         select(
             func.coalesce(func.sum(HeartbeatRun.estimated_cost_usd), 0.0),
             func.count(HeartbeatRun.id),
+            # Cache reads are included in input; reasoning is included in output.
+            # These breakdown fields must not be added again.
             func.coalesce(func.sum(
                 HeartbeatRun.input_tokens
                 + HeartbeatRun.output_tokens
-                + HeartbeatRun.cached_input_tokens
-                + HeartbeatRun.reasoning_output_tokens
             ), 0),
         ).where(*hb_where)
     )).one()
