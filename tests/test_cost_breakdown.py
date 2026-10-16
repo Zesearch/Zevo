@@ -111,3 +111,34 @@ async def test_cost_breakdown_empty_run_is_zeroed() -> None:
         assert cb.total_cost_usd == 0.0
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", ["all", "1d", "1w", "1m"])
+async def test_cost_total_counts_cache_and_reasoning_only_once(window: str) -> None:
+    from zevo.api.routers.ui.cost import cost_total
+    from types import SimpleNamespace
+
+    engine, Session = await _session()
+    async with Session() as db:
+        db.add(Agent(id="train", name="train", title="train", reports_to="orchestrator",
+                     identity_path="playbook/agents/train/identity.md"))
+        run = Run(id="token-run", metric="accuracy", metric_direction="max")
+        ticket = Ticket(id="token-ticket", run_id=run.id, agent_id="train", iteration=1)
+        db.add_all([run, ticket])
+        db.add_all([
+            HeartbeatRun(id="token-hb1", ticket_id=ticket.id, agent_id="train",
+                         driver="stub", model="stub", input_tokens=1000,
+                         cached_input_tokens=800, output_tokens=200,
+                         reasoning_output_tokens=150, estimated_cost_usd=1.25),
+            HeartbeatRun(id="token-hb2", ticket_id=ticket.id, agent_id="train",
+                         driver="stub", model="stub", input_tokens=100,
+                         output_tokens=50, estimated_cost_usd=0.25),
+        ])
+        await db.commit()
+        result = await cost_total(window=window, db=db)
+        assert result.n_tokens == 1350
+        assert result.n_heartbeats == 2
+        assert result.agent_usd == pytest.approx(1.5)
+        assert result.total_usd == pytest.approx(1.5)
+    await engine.dispose()
