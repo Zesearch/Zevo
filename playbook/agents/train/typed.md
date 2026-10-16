@@ -131,3 +131,12 @@ The runner—not Train—derives `training_diagnostics.json` from the newest rea
 Trainer attempt's telemetry. It summarizes available training-loss and trainer
 Validation-loss series without asserting a diagnosis. Do not invent or hand-edit
 this artifact.
+
+
+When adaptive_mid_training_evaluation is enabled, adaptive_training_helper_path
+and adaptive_validation_contract_path are engine-owned inputs. Follow the
+Optional mid-training Validation protocol in platform.md. The Orchestrator
+provides first_validation_fraction; convert it to ceil(full planned steps × fraction),
+with minimum step 1, without changing the fraction. The result must
+include adaptive_training_report_path; early stopping requires a backend-recorded
+Orchestrator decision and preserves the best measured checkpoint.

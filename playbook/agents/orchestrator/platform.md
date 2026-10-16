@@ -718,3 +718,44 @@ final Run status; queued, failed, skipped, or cancelled replacements do not.
 Do not use replacement links to excuse execution failures, omit required Test
 evaluation, or bypass Registry. The CLI equivalent is `zevo ticket cancel OLD
 --instruction-id INSTRUCTION --replacement-ticket-id NEW --reason "..."`.
+
+
+### User requested stop with a retained champion
+
+When the user explicitly asks to abandon remaining stage work and register the
+champion, cancel each live stage through `api_routes.cancel_ticket` with
+`{"user_requested_stop": true, "instruction_id": "<that Run instruction>", "reason": "<user-directed reason>"}`.
+Do not supply a replacement ticket for this intentional stop. This records the
+user's decision without treating the cancelled stage as an unresolved failure.
+Do not use this flag for execution errors, infrastructure failures, or your own
+decision to abandon an experiment. Those remain degraded unless successfully
+resolved. Once registration and all ordinary completion requirements are met,
+finish as success. Preserve unrelated failures and the cancellation audit.
+
+### Mid-training Validation decisions
+
+When runtime.adaptive_mid_training_evaluation is enabled, you must choose
+`first_validation_fraction` (strictly between 0 and 1) in every Train request,
+for example 0.2 for 20% of the full optimizer-step plan. Choose using expected
+training duration, checkpoint/Validation overhead and prior learning curves;
+explain the choice in the training plan. Train only converts this fraction to
+`max(1, ceil(planned_steps * fraction))`; it does not choose the first boundary.
+Do not ask the user for an interval. Train can request
+decisions without ending its Ticket. Inspect runtime.adaptive_training_requests
+for status=pending. These contain Validation metrics only, checkpoint steps,
+the frozen planned steps, and the same-iteration measurement history.
+Respond promptly via api_routes.adaptive_training_decision with
+`{"request_id":"...","action":"continue","next_step":N,"reason":"..."}`
+or `{"request_id":"...","action":"stop","reason":"..."}`.
+
+Choose the next step using progress, metric noise and marginal cost; it must
+advance but cannot exceed planned_steps. At least three successful checks are
+required before stopping; one flat measurement is insufficient. Weigh repeated
+lack of improvement against evaluation overhead and remaining runtime.
+Do not use Test, training loss alone, or evaluation/connection errors as a
+negative Validation observation. Preserve the user's pause before deciding.
+Do not create a new Train/Inference/Evaluation Ticket for these requests:
+they remain inside the current Train iteration, which returns the best
+measured checkpoint and then enters the ordinary final evaluation chain.
+A decision timeout retains full state for repair; resolve the same request
+rather than recreating the experiment.

@@ -108,10 +108,10 @@ export function ConsoleOverview() {
           </div>
         </div>
 
-        <div className="lg:pr-5">
+        <div className="flex min-h-0 flex-col lg:pr-5 lg:[contain:size]">
           <button
             onClick={() => setTasksOpen((open) => !open)}
-            className="flex w-full items-center justify-between gap-3 text-left"
+            className="flex w-full shrink-0 items-center justify-between gap-3 text-left"
           >
             <Kicker strong className="!text-[0.8rem]">All Evaluated Tasks</Kicker>
             {tasksOpen
@@ -120,7 +120,7 @@ export function ConsoleOverview() {
           </button>
 
           {tasksOpen && (
-            <div className="mt-3 max-h-[18rem] overflow-y-auto pr-1">
+            <div className="mt-3 min-h-0 max-h-[18rem] overflow-y-auto pr-1 lg:max-h-none lg:flex-1">
               {summaries.map((summary, index) => {
                 const active = summary.key === selected.key;
                 return (

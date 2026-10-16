@@ -2003,6 +2003,9 @@ async def reconcile_runs_and_tickets(
             report["slurm_jobs_checked"] = checked
             report["slurm_tickets_resumed"] = resumed
         async with Session() as s:
+            from zevo.engine.run.adaptive_training import reconcile_adaptive_training
+            report["adaptive_training_requests"] = await reconcile_adaptive_training(s)
+        async with Session() as s:
             report["slurm_allocations_checked"] = await _reconcile_slurm_allocation_owners(s)
         async with Session() as s:
             report["tickets_failed"] = await _sweep_stuck_tickets(s, stale_ticket_seconds)

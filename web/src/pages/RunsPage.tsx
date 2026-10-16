@@ -1,3 +1,4 @@
+import { agentExecutionLabel, gpuAllocationLabel } from "../lib/runSummary";
 import { Fragment, useEffect, useState } from "react";
 import useSWR from "swr";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -92,8 +93,12 @@ type RunRequest = {
   validation_metric_direction: "max" | "min";
   max_cost_usd: number;
   max_runtime_hours: number;
+  max_queue_wait_hours: number;
+  gpu_allocation_mode: string;
+  model_save_policy?: import("../components/ModelSaveFields").ModelSavePolicy | null;
   gpu_provider: GpuProvider;
   num_gpus: number;
+  adaptive_mid_training_evaluation?: boolean;
   generation_backend: GenerationBackend;
   files: {
     role: string;
@@ -148,9 +153,16 @@ const COLUMNS: { label: string; sort?: string }[] = [
   { label: "" },
 ];
 
+// Retain list controls while the detail route unmounts this page.
+const lastRunListView = {
+  group: "", sort: "started", order: "desc" as "asc" | "desc",
+  selectedTasks: [] as string[], selectedStatuses: [] as string[],
+  pageSizePref: PAGE_SIZES[0],
+};
+
 export function RunsPage() {
   // 0 means "as many as fit"; anything else is an explicit choice.
-  const [pageSizePref, setPageSizePref] = useState(PAGE_SIZES[0]);
+  const [pageSizePref, setPageSizePref] = useState(lastRunListView.pageSizePref);
   // Held in state, not a ref: the hook has to re-measure when the list
   // actually mounts, and a ref object never changes identity.
   const [listEl, setListEl] = useState<HTMLDivElement | null>(null);
@@ -166,16 +178,19 @@ export function RunsPage() {
   const query = params.get("q") ?? "";
   const setQuery = (v: string) =>
     setParams(v ? { q: v } : {}, { replace: true });
-  const [sort, setSort] = useState<string>("started");
+  const [sort, setSort] = useState<string>(lastRunListView.sort);
   // Direction is state: a column header has to be able to flip it.
-  const [order, setOrder] = useState<"asc" | "desc">("desc");
+  const [order, setOrder] = useState<"asc" | "desc">(lastRunListView.order);
   // Headers are drawn between the groups — the only form of grouping that stays
   // correct once the list is paginated.
-  const [group, setGroup] = useState<string>("");
+  const [group, setGroup] = useState<string>(lastRunListView.group);
   const grouped = group === "task";
   const groupedByStatus = group === "status";
-  const [selectedTasks, setSelectedTasks] = useState<string[]>([]);
-  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
+  const [selectedTasks, setSelectedTasks] = useState<string[]>(lastRunListView.selectedTasks);
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>(lastRunListView.selectedStatuses);
+  useEffect(() => {
+    Object.assign(lastRunListView, { group, sort, order, selectedTasks, selectedStatuses, pageSizePref });
+  }, [group, sort, order, selectedTasks, selectedStatuses, pageSizePref]);
   const filters = new URLSearchParams();
   if (grouped) selectedTasks.forEach(task => filters.append("task", task));
   if (groupedByStatus) selectedStatuses.forEach(status => filters.append("status", status));
@@ -524,12 +539,8 @@ export function RunsPage() {
 
             <div className="border-t border-hair pt-4">
               <div className="font-mono text-2xs uppercase tracking-[0.16em] text-ink">Settings</div>
-              {/* Label above value, in a row of even columns. As `label ....
-                  value` pairs these were two words at opposite ends of half a
-                  dialog, so every row read as a gap with text on both sides and
-                  the eye had to travel to pair them up. Stacked, each fact is
-                  one small block and the row fills evenly. */}
-              <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+              {/* Settings, agent execution and files share the same label/value columns. */}
+              <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
                 {([
                   ["model", shortModel(peeked.base_model) || "\u2014"],
                   ["method", peeked.training_method || "\u2014"],
@@ -543,7 +554,13 @@ export function RunsPage() {
                     "maximum GPUs",
                     `${peeked.gpu_provider} · ${peeked.num_gpus ? peeked.num_gpus : "∞"}`,
                   ],
+                  ["GPU allocation", gpuAllocationLabel(peeked.gpu_allocation_mode)],
                   ["generation backend", peeked.generation_backend],
+                  ["Mid-training evaluation", peeked.adaptive_mid_training_evaluation ? "Agent decides" : "Off"],
+                  ["queue limit", peeked.max_queue_wait_hours ? `${peeked.max_queue_wait_hours} h` : "Not recorded"],
+                  ["final model destination", peeked.model_save_policy ? (peeked.model_save_policy.weights === "hf" ? "Hugging Face" : "GPU machine") : "Not recorded"],
+                  ["model save path", peeked.model_save_policy ? (peeked.model_save_policy.weights === "hf" ? peeked.model_save_policy.hf_repo_id : peeked.model_save_policy.remote_dir) || "Not set" : "Not recorded"],
+                  ...(peeked.model_save_policy?.weights === "hf" ? [["repository visibility", peeked.model_save_policy.hf_private ? "Private" : "Public"]] : []),
                   ["iterations", peeked.iteration_budget ? String(peeked.iteration_budget) : "\u221e"],
                   ["budget", peeked.max_cost_usd ? `$${peeked.max_cost_usd}` : "\u221e"],
                   ["time limit", peeked.max_runtime_hours ? `${peeked.max_runtime_hours} h` : "\u221e"],
@@ -551,8 +568,8 @@ export function RunsPage() {
                   ["validation metric / target", `${fmtMetric(peeked.validation_metric)} · ${peeked.validation_metric_direction === "min" ? "Min" : "Max"}`],
                   ["stop threshold", peeked.stop_threshold != null ? String(peeked.stop_threshold) : "not set"],
                 ] as [string, string][]).map(([k, v]) => (
-                  <div key={k} className="min-w-0">
-                    <dt className="truncate font-mono text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">
+                  <div key={k} className="grid min-w-0 grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] items-start gap-3">
+                    <dt className="break-words font-mono text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">
                       {k}
                     </dt>
                     {/* `∞` is a small glyph at this size — it sits around the
@@ -561,7 +578,7 @@ export function RunsPage() {
                         stays the size of every other value in the row. */}
                     <dd
                       title={k === "model" ? peeked.base_model || v : v}
-                      className={`mt-1 truncate font-mono text-slate-200 ${
+                      className={`break-words font-mono text-slate-200 ${
                         v === "\u221e" ? "text-base leading-none" : "text-2xs"
                       }`}
                     >{v}</dd>
@@ -579,19 +596,19 @@ export function RunsPage() {
                     config is editable between runs, so the table says what an
                     agent would run on today, not what this run used. An agent
                     reconfigured mid-run shows every model it ran on. */}
-                <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
+                <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
                   {peeked.agents.map((a) => (
-                    <div key={a.agent_id} className="min-w-0">
-                      <dt className="truncate font-mono text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">
+                    <div key={a.agent_id} className="grid min-w-0 grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] items-start gap-3">
+                      <dt className="break-words font-mono text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">
                         {a.agent_id}
                       </dt>
                       {a.variants.map((v) => (
                         <dd
                           key={`${v.driver}/${v.model}`}
                           title={`${v.driver} · ${v.model} · ${v.heartbeats} heartbeat${v.heartbeats === 1 ? "" : "s"}`}
-                          className="mt-1 truncate font-mono text-2xs text-slate-200"
+                          className="col-start-2 break-words font-mono text-2xs text-slate-200"
                         >
-                          {shortModel(v.model) || "\u2014"}
+                          {agentExecutionLabel(v.driver, shortModel(v.model)) || "\u2014"}
                         </dd>
                       ))}
                     </div>
@@ -602,11 +619,11 @@ export function RunsPage() {
 
             <div className="border-t border-hair pt-4">
               <div className="font-mono text-2xs uppercase tracking-[0.16em] text-ink">Input files</div>
-              <dl className="mt-3 space-y-2">
+              <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
                 {peeked.files.map((f) => (
-                  <div key={f.role} className="grid grid-cols-4 items-baseline gap-x-6 font-mono text-2xs">
-                    <dt className="col-span-2 whitespace-nowrap text-slate-500">{f.role}</dt>
-                    <dd className="col-span-2 flex min-w-0 items-center gap-2">
+                  <div key={f.role} className="grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] items-start gap-3 font-mono text-2xs">
+                    <dt className="break-words text-slate-500">{f.role}</dt>
+                    <dd className="flex min-w-0 flex-wrap items-center gap-2">
                       {f.kind === "none" ? (
                         <span className="text-slate-600">
                           not given

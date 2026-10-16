@@ -154,11 +154,16 @@ def test_stub_inference_suite_keeps_member_outputs_separate(tmp_path: Path) -> N
     result = _stub_infer(
         {
             "ticket_id": "infer-suite",
+            "configuration_mode": "select",
+            "length_calibration_helper_path": "/system/zevo_length_calibration.py",
+            "scoring_set": scoring.questions_path,
             "base_model": "owner/model",
             "generation_backend": "vllm",
             "inference_data_profile_path": scoring.profile_path,
             "suite_members": [{
                 "name": "qa",
+                "configuration_mode": "select",
+                "scoring_set": scoring.questions_path,
                 "test_set_name": "validation:qa",
                 "work_dir": str(member_dir),
                 "configuration_pins": {
@@ -191,3 +196,7 @@ def test_stub_inference_suite_keeps_member_outputs_separate(tmp_path: Path) -> N
     assert member_config.measurement.inference_config["inference_query"] == (
         "Answer {question}."
     )
+
+    from zevo.contracts.length_calibration import validate
+    validate(result.inference_config_path, scoring.questions_path)
+    validate(member.inference_config_path, scoring.questions_path)

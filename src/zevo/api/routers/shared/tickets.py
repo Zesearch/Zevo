@@ -143,6 +143,7 @@ class ExecutionEventDTO(BaseModel):
 
 
 class TicketDetail(TicketDTO):
+    mid_training_validation: dict[str, Any] | None = None
     messages: list[MessageDTO]
     notices: list[NoticeDTO]
     results: list[ResultDTO]
@@ -258,6 +259,8 @@ def _stamp_pipeline_payload(
         stamped[name] = value
 
     if agent_id == "train":
+        if (run.lifecycle or {}).get("adaptive_mid_training_evaluation") and stamped.get("first_validation_fraction") is None:
+            raise ValueError("Orchestrator must specify first_validation_fraction when mid-training evaluation is enabled")
         stamp_exact("base_model", pins.get("base_model"))
         stamp_exact("training_method_pin", pins.get("training_method"))
         stamp_exact("method_config_pins", dict(pins.get("method_config") or {}))
@@ -1388,8 +1391,12 @@ async def get_ticket(
         WorkloadExecution.ticket_id == ticket_id,
     ).order_by(WorkloadExecution.created_at))).scalars().all()
     registrations = {item.id: item for item in registered}
+    from zevo.engine.run.adaptive_training import validation_summary
+    owning_run = await db.get(Run, t.run_id) if t.agent_id == "train" else None
+    mid_training = validation_summary(t, (owning_run.lifecycle or {}) if owning_run else {}, events)
     base = _to_dto(t)
     return TicketDetail(
+        mid_training_validation=mid_training,
         **base.model_dump(),
         messages=[
             MessageDTO(id=m.id, author=m.author, body=_host_text(m.body),
@@ -1887,12 +1894,17 @@ async def post_progress(
 
 
 class CancelTicketBody(StrictBody):
+    user_requested_stop: bool = False
     instruction_id: str = ""
     replacement_ticket_id: str = ""
     reason: str = ""
 
     @model_validator(mode="after")
     def complete_replacement(self) -> "CancelTicketBody":
+        if self.user_requested_stop:
+            if not self.instruction_id.strip() or not self.reason.strip() or self.replacement_ticket_id:
+                raise ValueError("User-requested stop requires instruction_id and reason, without a replacement")
+            return self
         values = (self.instruction_id, self.replacement_ticket_id, self.reason)
         if any(values) and not all(value.strip() for value in values):
             raise ValueError("Provide instruction_id, replacement_ticket_id and reason together")
@@ -1909,7 +1921,24 @@ async def cancel_ticket(
     t = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
     if t is None:
         raise HTTPException(404, f"ticket {ticket_id} not found")
-    if body is not None and body.instruction_id:
+    if body is not None and body.user_requested_stop:
+        if t.status in TERMINAL_TICKET_STATUSES:
+            raise HTTPException(409, "User-requested stop must be recorded before the stage ends")
+        instruction = await db.get(RunInstruction, body.instruction_id)
+        if (instruction is None or instruction.run_id != t.run_id
+                or instruction.status == "declined"):
+            raise HTTPException(422, "User-requested stop requires a user instruction from this Run")
+        run = (await db.execute(select(Run).where(Run.id == t.run_id).with_for_update())).scalar_one()
+        lifecycle = dict(run.lifecycle or {})
+        cancellations = dict(lifecycle.get("user_requested_stage_cancellations") or {})
+        cancellations[t.id] = {
+            "instruction_id": instruction.id,
+            "reason": body.reason.strip(),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lifecycle["user_requested_stage_cancellations"] = cancellations
+        run.lifecycle = lifecycle
+    if body is not None and body.instruction_id and not body.user_requested_stop:
         if t.status in TERMINAL_TICKET_STATUSES and t.status != "cancelled":
             raise HTTPException(409, "Only cancelled tickets can record a replacement")
         instruction = await db.get(RunInstruction, body.instruction_id)
@@ -1958,6 +1987,32 @@ async def cancel_ticket(
     return {"status": "cancelled", "ticket_id": ticket_id,
             "remote_job": remote_job,
             "note": "scheduler will stop the local Agent and remote Ticket-owned task"}
+
+
+@router.post("/tickets/{ticket_id}/cancel-by-user")
+async def cancel_ticket_by_user(ticket_id: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """Dashboard action: atomically preserve explicit user intent with the cancellation."""
+    ticket = await db.get(Ticket, ticket_id)
+    if ticket is None:
+        raise HTTPException(404, "Ticket not found")
+    if ticket.status in TERMINAL_TICKET_STATUSES or not ticket.run_id:
+        return await cancel_ticket(ticket_id, db=db)
+    instruction = RunInstruction(
+        run_id=ticket.run_id, body=f"Cancel stage {ticket_id} at my request.",
+        status="queued", agent_response="",
+    )
+    db.add(instruction)
+    await db.flush()
+    result = await cancel_ticket(ticket_id, db=db, body=CancelTicketBody(
+        user_requested_stop=True, instruction_id=instruction.id,
+        reason="User explicitly cancelled this stage from the dashboard",
+    ))
+    run = await db.get(Run, ticket.run_id)
+    if run and run.supervisor_ticket_id:
+        from zevo.engine.run.wakeup import queue_wakeup
+        await queue_wakeup(db, agent_id="orchestrator", ticket_id=run.supervisor_ticket_id,
+                           source="on_demand", reason=f"run user instruction {instruction.id}")
+    return result
 
 
 # ───────────────────────── retry / rerun (J.2) ───────────────────────────────

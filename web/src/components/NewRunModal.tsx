@@ -1,4 +1,5 @@
-import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady } from "./ModelSaveFields";
+import { resourceSummaryValues } from "../lib/runSummary";
+import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady, modelSaveSummaryValues } from "./ModelSaveFields";
 import { useLaunchSetting } from "../lib/useLaunchSetting";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, Eraser } from "lucide-react";
@@ -157,6 +158,7 @@ function backendFromInputs(inputs: RunInputValues) {
     ...(["cluster", "instance"].includes(inputs.gpuProvider) && inputs.sshHostId ? { ssh_host_id: inputs.sshHostId } : {}),
     num_gpus: Number(inputs.numGpus) || 0,
         gpu_allocation_mode: inputs.gpuAllocationMode,
+        adaptive_mid_training_evaluation: inputs.adaptiveMidTrainingEvaluation,
     ...(inputs.generation_backend ? { generation_backend: inputs.generation_backend } : {}),
   };
 }
@@ -370,6 +372,7 @@ export function NewRunModal({
     !trimmedTask && "Task name",
     !(predefined?.task_objective || nl).trim() && "Objective",
     !effectiveComputeTarget && "GPU backend",
+    !modelSaveReady(modelSave) && "Final model destination",
     ...(!predefined?.test_sets?.length ? scoringSuiteMissing(inputs.testSets, "Test") : []),
     ...(inputs.validationSets.length
       ? scoringSuiteMissing(inputs.validationSets, "Validation") : []),
@@ -392,6 +395,7 @@ export function NewRunModal({
     autoNameClash && "Task name that is not a predefined task",
     !nl.trim() && "Objective",
     !effectiveComputeTarget && "GPU backend",
+    !modelSaveReady(modelSave) && "Final model destination",
     inputs.trainingMethod === "gkd" && !inputs.teacherModel.trim() && "Teacher model",
     inputs.trainingMethod === "online_dpo" && !inputs.rewardModel.trim() && "Reward model",
   ].filter(Boolean) as string[];
@@ -404,6 +408,7 @@ export function NewRunModal({
     !!inputs.dataset.trim(), !!inputs.baseModel.trim(), !!inputs.trainingMethod.trim(),
   ].join(",")] ?? "Custom";
   const autoRequiredValues = [
+    ...modelSaveSummaryValues(modelSave),
     { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
     {
       name: "Task name",
@@ -427,9 +432,11 @@ export function NewRunModal({
       complete: Boolean(inputs.rewardModel.trim()),
     }] : []),
   ];
-  const autoOptionalValues: Array<{ name: string; value: string; overridden: boolean }> = [
+  const autoOptionalValues = [
     { name: "Evaluation guidance", value: autoTestQuery.trim() || "not set", overridden: !!autoTestQuery.trim() },
     { name: "Training data", value: inputs.dataset.trim() || "Prepared by Zevo", overridden: !!inputs.dataset.trim() },
+    { name: "Training split", value: inputs.datasetSplit || "Default", overridden: !!inputs.datasetSplit },
+    { name: "Training config", value: inputs.datasetConfig || "Default", overridden: !!inputs.datasetConfig },
     { name: "Data query", value: inputs.dataQuery.trim() || "not set", overridden: !!inputs.dataQuery.trim() },
     { name: "Base model", value: inputs.baseModel.trim() || "Selected by Zevo", overridden: !!inputs.baseModel.trim() },
     { name: "Model query", value: inputs.modelQuery.trim() || "not set", overridden: !!inputs.modelQuery.trim() },
@@ -438,13 +445,7 @@ export function NewRunModal({
       ? [{ name: "Use LoRA", value: useLoraLabel(inputs.usePeft), overridden: Boolean(inputs.usePeft) }]
       : []),
     { name: "Method query", value: inputs.methodQuery.trim() || "not set", overridden: !!inputs.methodQuery.trim() },
-    { name: "Maximum GPUs", value: inputs.numGpus.trim() || "unlimited", overridden: !!inputs.numGpus.trim() },
-    { name: "Generation backend", value: (inputs.generation_backend || "vllm").toUpperCase(), overridden: !!inputs.generation_backend },
-    { name: "Iterations", value: inputs.iterations.trim() || "unlimited", overridden: !!inputs.iterations.trim() },
-    { name: "Budget", value: inputs.budget.trim() ? `$${inputs.budget.trim()}` : "unlimited", overridden: !!inputs.budget.trim() },
-    { name: "Time limit", value: inputs.timeLimitHours.trim() ? `${inputs.timeLimitHours.trim()} h` : "unlimited", overridden: !!inputs.timeLimitHours.trim() },
-    { name: "Queue limit", value: inputs.queueWaitHours.trim() ? `${inputs.queueWaitHours.trim()} h` : "48 h", overridden: !!inputs.queueWaitHours.trim() },
-    { name: "Stop threshold", value: inputs.stopThreshold.trim() || "not set", overridden: !!inputs.stopThreshold.trim() },
+    ...resourceSummaryValues(inputs),
   ];
   const selectedAgent = callableAgents.find((agent) => agent.id === agentId);
   const singleRequiredValues = [
@@ -934,7 +935,6 @@ export function NewRunModal({
   return (
     <Modal open={open} title="Start a new run" onClose={onClose} width="max-w-[78rem]" footer={footer}>
       <div className="space-y-5 pr-2">
-        {(mode === "auto" || mode === "full_pipeline") && <LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />}
         {/* Two columns: WHICH kind of run on the left, WHAT it is on the right.
             Stacked across the top, the three mode cards took a third of the
             dialog's height to answer a question asked once, and pushed the form
@@ -1038,6 +1038,7 @@ export function NewRunModal({
         </div>
 
         <div className="relative min-w-0 space-y-5">
+        {(mode === "auto" || mode === "full_pipeline") && <LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />}
         {mode === "auto" ? (
           <div className="space-y-6">
             <section className="space-y-3">
@@ -1169,7 +1170,13 @@ export function NewRunModal({
             hint="Entire run retains GPUs across stages. Per stage retains GPUs within a stage, including repair. Per submission (Slurm only) releases GPUs after each workload and requests a new allocation for retries."
           />
           <ChoiceField
-                      label="Generation backend" value={inputs.generation_backend}
+            label="Mid-training evaluation" value={inputs.adaptiveMidTrainingEvaluation ? "enabled" : "disabled"}
+            onChange={(v) => setInputs((s) => ({ ...s, adaptiveMidTrainingEvaluation: v === "enabled" }))}
+            options={[["disabled", "Off"], ["enabled", "Agent decides"]]}
+            hint="Let the agent evaluate Validation checkpoints during training and decide whether to stop early."
+          />
+          <ChoiceField
+                      label="Generation backend" value={inputs.generation_backend || "vllm"}
                       onChange={(v) => setInputs((s) => ({ ...s, generation_backend: v as GenerationBackend | "" }))}
                       options={[["vllm", "vllm"], ["hf", "hf"]]}
                       hint="Backend used to generate predictions; blank defaults to vLLM."
@@ -1185,7 +1192,7 @@ export function NewRunModal({
                     <LimitField label="Time limit (hours)" value={inputs.timeLimitHours}
                       onChange={(v) => setInputs((s) => ({ ...s, timeLimitHours: v }))}
                       hint="Active experiment time only; Slurm queue wait is excluded." />
-                    <LimitField label="Max queue wait (hours)" value={inputs.queueWaitHours}
+                    <LimitField label="Max queue wait (hours)" value={inputs.queueWaitHours || "48"}
                       onChange={(v) => setInputs((s) => ({ ...s, queueWaitHours: v }))}
                       hint="Maximum Slurm PENDING time; blank defaults to 48 hours (max 168)." />
                     <NumberField
@@ -1238,6 +1245,7 @@ export function NewRunModal({
         ) : mode === "full_pipeline" ? (
           <RunInputs
             extra={<ModelSaveFields value={modelSave} onChange={setModelSave} />}
+            extraRequiredValues={modelSaveSummaryValues(modelSave)}
             {...inputs}
             taskTestSuite={predefined?.test_sets}
             requiredMissing={fullMissing}
@@ -1264,7 +1272,7 @@ export function NewRunModal({
                 </Field>
                 {predefined ? (
                   <Field label="Objective">
-                    <p className="rounded-md border border-hair bg-canvas p-2.5 font-mono text-sm leading-relaxed text-slate-100">
+                    <p className={`rounded-md border bg-canvas p-2.5 font-mono text-sm leading-relaxed ${requiredFieldStateCls(true)}`}>
                       {predefined.task_objective}
                     </p>
                   </Field>

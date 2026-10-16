@@ -1096,6 +1096,7 @@ class TrainingConfig(BaseModel):
     data_selection: TrainingDataSelection
     num_epochs: int = Field(ge=1)
     early_stopping: TrainingEarlyStopping | None = None
+    adaptive_evaluation: bool = False
     max_seq_len: int = Field(ge=1)
     batch_size: int = Field(ge=1, description="Per-device training batch size")
     gradient_accumulation_steps: int = Field(ge=1)
@@ -1141,6 +1142,8 @@ class TrainingConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_realized_batch_and_peft(self) -> "TrainingConfig":
+        if self.adaptive_evaluation and self.early_stopping is not None:
+            raise ValueError("adaptive Validation decisions cannot be combined with loss early stopping")
         expected = self.batch_size * self.gradient_accumulation_steps * self.world_size
         if self.effective_batch_size != expected:
             raise ValueError(

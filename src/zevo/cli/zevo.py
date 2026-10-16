@@ -1534,6 +1534,7 @@ async def _ticket_show(ticket_id: str) -> None:
 @ticket_app.command("cancel")
 def ticket_cancel(
     ticket_id: str = typer.Argument(...),
+    user_requested_stop: bool = typer.Option(False, "--user-requested-stop"),
     instruction_id: str = typer.Option("", "--instruction-id"),
     replacement_ticket_id: str = typer.Option("", "--replacement-ticket-id"),
     reason: str = typer.Option("", "--reason"),
@@ -1542,12 +1543,14 @@ def ticket_cancel(
     ),
 ) -> None:
     """Cancel a running ticket: kills the agent driver subprocess and marks it cancelled."""
-    if any((instruction_id, replacement_ticket_id, reason)) and not all(
-        value.strip() for value in (instruction_id, replacement_ticket_id, reason)
-    ):
-        raise typer.BadParameter("Provide --instruction-id, --replacement-ticket-id and --reason together")
-    body = ({"instruction_id": instruction_id, "replacement_ticket_id": replacement_ticket_id,
-             "reason": reason} if instruction_id else None)
+    from zevo.api.routers.shared.tickets import CancelTicketBody
+    try:
+        body = CancelTicketBody(
+            user_requested_stop=user_requested_stop, instruction_id=instruction_id,
+            replacement_ticket_id=replacement_ticket_id, reason=reason,
+        ).model_dump() if any((user_requested_stop, instruction_id, replacement_ticket_id, reason)) else None
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     asyncio.run(_ticket_cancel(ticket_id, api_base, body))
 
 

@@ -166,6 +166,7 @@ type RunEnvelope = {
   max_cost_usd?: number;
   max_runtime_hours?: number;
   max_queue_wait_hours?: number;
+  adaptive_mid_training_evaluation?: boolean;
   generation_backend?: GenerationBackend;
   /** Maximum GPUs the Run may use at once; 0/omitted means unlimited. */
   num_gpus?: number;
@@ -538,7 +539,24 @@ export type ExecutionEventDTO = {
   ts: string;
 };
 
+export type MidTrainingValidation = {
+  planned_steps: number;
+  direction: "min" | "max";
+  best_step: number;
+  complete: boolean;
+  next_step: number | null;
+  awaiting_decision: boolean;
+  measurements: {
+    step: number;
+    score: number;
+    metrics: Record<string, number>;
+    plan_completed: boolean;
+    decision: { action: "continue" | "stop"; next_step?: number; reason: string } | null;
+  }[];
+};
+
 export type TicketDetail = TicketDTO & {
+  mid_training_validation?: MidTrainingValidation | null;
   messages: MessageDTO[];
   notices: NoticeDTO[];
   results: HeartbeatResultDTO[];

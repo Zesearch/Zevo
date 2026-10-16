@@ -42,6 +42,7 @@ def initial_supervisor_payload(
             "gpu_provider": run.gpu_provider,
             "num_gpus": run.num_gpus,
             "generation_backend": run.generation_backend,
+            "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
             "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),
         },
         "validation_rows": int(holdout.get("validation_rows", 0) or 0),

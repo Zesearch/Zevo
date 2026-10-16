@@ -1,3 +1,4 @@
+import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
 import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -399,6 +400,12 @@ export function TicketDetailPage() {
         </Section>
       )}
 
+      {tk.agent_id === "train" && tk.mid_training_validation && (
+        <Section title="Mid-training Validation" className="mt-4">
+          <MidTrainingValidationPanel data={tk.mid_training_validation} />
+        </Section>
+      )}
+
       {/* The Training monitor holds ONLY the loss/metric charts. */}
       {tk.agent_id === "train" &&
         tk.execution_events.some(
@@ -707,7 +714,7 @@ function CancelButton({
     if (!confirm("Cancel this ticket? Its local Agent process and exact remote task will be stopped.")) return;
     setBusy(true);
     try {
-      await api(`/tickets/${encodeURIComponent(ticketId)}/cancel`, { method: "POST" });
+      await api(`/tickets/${encodeURIComponent(ticketId)}/cancel-by-user`, { method: "POST" });
       onCancelled();
     } catch {
       /* the ticket keeps polling; a failed cancel shows as still running */

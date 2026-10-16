@@ -1344,6 +1344,7 @@ class CreateRunRequest(BaseModel):
     # Runtime execution choices live here exactly once. They are not part of
     # UserRequest, which defines the task/data/scoring problem.
     # None -> vllm.
+    adaptive_mid_training_evaluation: bool = False
     generation_backend: Literal["hf", "vllm"] | None = None
     # Maximum GPUs the Run may use at once. None/0 means no upper bound;
     # Infrastructure selects a concrete positive count for every provider.
@@ -2087,6 +2088,7 @@ async def _create_auto_run(
     run.num_gpus = max(0, int(body.num_gpus or 0))
     run.gpu_provider = resolved_gpu_provider
     run.gpu_allocation_mode = body.gpu_allocation_mode
+    run.lifecycle = {**(run.lifecycle or {}), "adaptive_mid_training_evaluation": body.adaptive_mid_training_evaluation}
     if body.model_save_policy is not None:
         run.lifecycle = {**(run.lifecycle or {}), "model_save_policy": body.model_save_policy.model_dump(mode="json")}
     run.ssh_host_id = (
@@ -2161,6 +2163,7 @@ async def _create_auto_run(
             "stop_threshold": run.stop_threshold,
             "gpu_provider": run.gpu_provider,
             "gpu_allocation_mode": run.gpu_allocation_mode,
+            "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
         },
     )
     return CreateRunResponse(run_id=run.id, status="running")
@@ -2670,6 +2673,7 @@ async def create_run(
     run.num_gpus = max(0, int(body.num_gpus or 0))
     run.gpu_provider = resolved_gpu_provider
     run.gpu_allocation_mode = body.gpu_allocation_mode
+    run.lifecycle = {**(run.lifecycle or {}), "adaptive_mid_training_evaluation": body.adaptive_mid_training_evaluation}
     if body.model_save_policy is not None:
         run.lifecycle = {**(run.lifecycle or {}), "model_save_policy": body.model_save_policy.model_dump(mode="json")}
     # NULL (not '') when no profile is selected: ssh_host_id is a real FK to
@@ -2829,6 +2833,7 @@ async def create_run(
             "stop_threshold": run.stop_threshold,
             "gpu_provider": run.gpu_provider,
             "gpu_allocation_mode": run.gpu_allocation_mode,
+            "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
         },
     )
 
@@ -3007,6 +3012,8 @@ class RunRequestDTO(BaseModel):
     gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_stage"
     num_gpus: int
     generation_backend: Literal["hf", "vllm"]
+    adaptive_mid_training_evaluation: bool = False
+    model_save_policy: dict[str, Any] | None = None
     # Each file, classified the same way the Tasks list classifies a task's
     # data: registered / huggingface / path / none.
     files: list[dict]
@@ -3038,8 +3045,6 @@ async def _agent_config_of_run(db: AsyncSession, run_id: str) -> list[dict]:
              "inference", "evaluation", "registry"]
     by_agent: dict[str, list[dict]] = {}
     for agent_id, driver, model, n in rows:
-        if agent_id == "evaluation":
-            continue  # deterministic runner, not an Agent configuration
         by_agent.setdefault(agent_id, []).append(
             {"driver": driver or "", "model": model or "", "heartbeats": int(n)})
 
@@ -3172,6 +3177,8 @@ async def get_run_request(
         gpu_allocation_mode=run.gpu_allocation_mode,
         num_gpus=max(0, int(run.num_gpus or 0)),
         generation_backend=run.generation_backend,
+        adaptive_mid_training_evaluation=bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
+        model_save_policy=(run.lifecycle or {}).get("model_save_policy"),
         files=files,
         agents=await _agent_config_of_run(db, run_id),
     )
@@ -4016,3 +4023,20 @@ async def should_stop(
             "can_finish_next_iteration_in_time": snap.can_finish_next_iteration_in_time,
         },
     )
+
+
+class AdaptiveTrainingDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=32, max_length=32)
+    action: Literal["continue", "stop"]
+    next_step: int | None = Field(None, gt=0)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/runs/{run_id}/adaptive-training/{ticket_id}/decision")
+async def decide_training_checkpoint(
+    run_id: str, ticket_id: str, body: AdaptiveTrainingDecision,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from zevo.engine.run.adaptive_training import decide_adaptive_training
+    return await decide_adaptive_training(db, run_id, ticket_id, body)

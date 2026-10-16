@@ -47,7 +47,8 @@ export function LaunchLimitsSummary({ inputs, modelSave }: { inputs: RunInputVal
   const DestinationIcon = isHf ? CloudUpload : HardDrive;
   const destination = (isHf ? modelSave.hf_repo_id : modelSave.remote_dir).trim();
   const ready = modelSaveReady(modelSave);
-  return <aside aria-label="Run summary" className="rounded-xl bg-gradient-to-br from-raised to-canvas px-5 py-4 ring-1 ring-inset ring-white/[0.06]">
+  return <div className="sticky top-0 z-30 -mx-2 bg-panel px-2 pb-4" data-launch-summary-bar>
+    <aside aria-label="Run summary" className="rounded-xl border border-hair bg-raised px-5 py-4 shadow-lg">
     <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-5">
       {limits.map(({ label, value, icon: Icon }) => <div key={label} className="min-w-0">
         <dt className="mb-2 flex items-center gap-2 text-sm font-medium text-brass-300"><Icon size={14} />{label}</dt>
@@ -60,12 +61,13 @@ export function LaunchLimitsSummary({ inputs, modelSave }: { inputs: RunInputVal
             {isHf ? "Hugging Face" : "GPU machine"}
             {isHf && <span className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-normal text-slate-400">{modelSave.hf_private ? "Private" : "Public"}</span>}
           </div>
-          {destination && <p title={destination} className={`mt-1 truncate font-mono text-[11px] ${ready ? "text-slate-400" : "text-brass-300"}`}>
-            {destination}
-          </p>}
+          <p title={destination || "Complete destination in Others"} className={`mt-1 truncate font-mono text-[11px] ${ready ? "text-slate-400" : "text-brass-300"}`}>
+            {destination || "Not set"}
+          </p>
           {destination && !ready && <p className="mt-1 text-[11px] text-brass-300">Complete destination in Others</p>}
         </dd>
       </div>
     </dl>
-  </aside>;
+    </aside>
+  </div>;
 }

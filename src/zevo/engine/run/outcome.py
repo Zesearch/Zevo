@@ -86,7 +86,9 @@ def unresolved_ticket_issues(tickets: Iterable[Any], *, run: Any = None) -> list
     """
     tickets = list(tickets)
     by_id = {str(ticket.id): ticket for ticket in tickets}
-    resolutions = (getattr(run, "lifecycle", None) or {}).get("cancelled_ticket_replacements", {})
+    lifecycle = getattr(run, "lifecycle", None) or {}
+    resolutions = lifecycle.get("cancelled_ticket_replacements", {})
+    user_cancellations = lifecycle.get("user_requested_stage_cancellations", {})
     slots: dict[tuple[str, str, int, str, str], list[Any]] = defaultdict(list)
     for ticket in tickets:
         if str(getattr(ticket, "agent_id", "") or "") == "orchestrator":
@@ -95,6 +97,17 @@ def unresolved_ticket_issues(tickets: Iterable[Any], *, run: Any = None) -> list
 
     issues: list[dict[str, Any]] = []
     for rows in slots.values():
+        # A deliberate stop of a retry does not resolve an earlier real failure.
+        rows = [
+            row for row in rows
+            if not (
+                str(getattr(row, "status", "")) == "cancelled"
+                and all(user_cancellations.get(str(row.id), {}).get(key)
+                        for key in ("instruction_id", "reason", "recorded_at"))
+            )
+        ]
+        if not rows:
+            continue
         latest = max(
             rows,
             key=lambda item: (
