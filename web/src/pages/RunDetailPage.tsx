@@ -1454,15 +1454,12 @@ export function RunDetailPage() {
   const preservationFailed = run.cancel_outcome.status === "preservation_failed";
   const hasRunIssues = !preservationFailed && !run.cancelling && run.status !== "success"
     && (terminalIssues.length > 0 || !!run.halted_reason);
-  const warningCount = (run.input_changes?.length ?? 0)
-    + (preservationFailed ? 1 : hasRunIssues ? Math.max(1, terminalIssues.length) : 0);
+  const warningCount = Number(!!run.input_changes?.length) + Number(preservationFailed || hasRunIssues);
   const warningsOpen = warningsRunId === run.id;
   const warningsToggle = warningCount > 0 && (
     <button type="button" aria-expanded={warningsOpen} aria-controls={`run-warnings-${run.id}`}
       onClick={() => setWarningsRunId(warningsOpen ? null : run.id)}
-      className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 font-mono text-xs font-normal transition ${preservationFailed || hasRunIssues
-        ? "border-coral-500/30 bg-coral-500/10 text-coral-300 hover:bg-coral-500/20"
-        : "border-brass-500/30 bg-brass-500/10 text-brass-300 hover:bg-brass-500/20"}`}>
+      className="inline-flex items-center gap-1 rounded px-2 py-1 font-mono text-xs font-normal text-slate-500 transition hover:bg-raised/40 hover:text-slate-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brass-500/50">
       <ChevronRight size={12} className={`transition-transform ${warningsOpen ? "rotate-90" : ""}`} />
       {warningCount} warning{warningCount === 1 ? "" : "s"}
     </button>
@@ -1486,10 +1483,9 @@ export function RunDetailPage() {
                 <span className="font-mono text-base font-normal text-slate-500" title={run.id}>
                   {run.id.slice(0, 8)}
                 </span>
-                {warningsToggle}
               </span>
             ) : (
-              <span className="flex flex-wrap items-baseline gap-3">{run.id.slice(0, 8)}{warningsToggle}</span>
+              run.id.slice(0, 8)
             )
           }
           // The problem, not the problem plus three sentences repeating the
@@ -1497,21 +1493,16 @@ export function RunDetailPage() {
           // orchestrator was handed, so it stays one hover away.
           subtitle={run.task_objective}
           subtitleTitle={run.agent_objective}
-          right={live ? <CancelRunButton run={run} onCancelled={() => void mutate()} /> : undefined}
         />
+        <div className="-mt-4 mb-5 flex flex-wrap items-center gap-2">
+          {warningsToggle}
+          {live && <CancelRunButton run={run} onCancelled={() => void mutate()} />}
+        </div>
       </div>
 
-      {/* ── Instrument header strip: identity + top-line telemetry ── */}
-      <Bezel className="mb-5 flex flex-wrap items-center gap-x-12 gap-y-4 px-6 py-4">
-        <StatusBadge status={run.status} />
-        {/* No rule between this and the telemetry: the strip reads as one row
-            of facts. The task name is the first of them — the id moved up into
-            the title, so what the run executes is what this position says. */}
-        <HeaderTelemetry run={run} runId={runId} />
-      </Bezel>
-
       {warningCount > 0 && (
-        <div id={`run-warnings-${run.id}`} hidden={!warningsOpen}>
+        <div id={`run-warnings-${run.id}`} hidden={!warningsOpen}
+          role="region" aria-label="Run warnings">
           <InputChangesNotice run={run} />
           {preservationFailed ? (
             <div role="alert" className="mb-5 rounded border border-coral-500/40 p-3 text-sm text-coral-300">
@@ -1545,6 +1536,15 @@ export function RunDetailPage() {
           ) : null}
         </div>
       )}
+
+      {/* ── Instrument header strip: identity + top-line telemetry ── */}
+      <Bezel className="mb-5 flex flex-wrap items-center gap-x-12 gap-y-4 px-6 py-4">
+        <StatusBadge status={run.status} />
+        {/* No rule between this and the telemetry: the strip reads as one row
+            of facts. The task name is the first of them — the id moved up into
+            the title, so what the run executes is what this position says. */}
+        <HeaderTelemetry run={run} runId={runId} />
+      </Bezel>
 
       {run.lifecycle?.finalization && !run.is_terminal && (
         <div role="status" className="mb-5 rounded border border-hair p-3 text-sm">Finalizing the result: new optimization work has stopped while evaluation and model preservation finish. {run.lifecycle.finalization.deadline_at && <>Deadline: {new Date(run.lifecycle.finalization.deadline_at).toLocaleString()}.</>}</div>
