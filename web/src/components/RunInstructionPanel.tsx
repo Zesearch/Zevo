@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import useSWR from "swr";
-import { MessageSquare } from "lucide-react";
+import { ChevronRight, MessageSquare } from "lucide-react";
 
 import { api, type RunInstructionDTO } from "../lib/api";
 import { fmtDate } from "../lib/format";
@@ -102,7 +102,12 @@ export function RunInstructionPanel({
       {postError && <p className="mt-2 text-sm text-coral-300">{postError}</p>}
       {error && <p className="mt-2 text-sm text-coral-300">Could not load instructions.</p>}
       {data.length > 0 && (
-        <div className="mt-4 space-y-4 border-t border-hair pt-4">
+        <details key={runId} className="group/history mt-4 border-t border-hair pt-4">
+          <summary className="flex w-fit cursor-pointer list-none items-center gap-2 text-sm text-slate-400 transition hover:text-brass-300 [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={14} className="transition-transform group-open/history:rotate-90" />
+            Conversation history ({data.length})
+          </summary>
+          <div className="mt-4 space-y-4">
           {data.map((item) => {
             const unresolvedAtEnd = closed && ["queued", "delivered", "scheduled", "needs_input"].includes(item.status);
             const actor = item.activity_agent
@@ -146,7 +151,8 @@ export function RunInstructionPanel({
               </div>
             );
           })}
-        </div>
+          </div>
+        </details>
       )}
     </Bezel>
   );
