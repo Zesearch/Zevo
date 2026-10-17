@@ -1362,6 +1362,7 @@ function CancelRunButton({ run, onCancelled }: { run: RunDetail; onCancelled: ()
 
 export function RunDetailPage() {
   const { runId = "" } = useParams();
+  const [warningsRunId, setWarningsRunId] = useState<string | null>(null);
   const { data: run, error, mutate } = useSWR<RunDetail>(`/api/runs/${runId}`, {
     refreshInterval: 3000,
   });
@@ -1450,6 +1451,22 @@ export function RunDetailPage() {
   const stations = stationsFrom(run, wakesByTicket);
   const terminalIssues = run.lifecycle?.terminal_outcome?.issues ?? [];
   const stopTrigger = run.lifecycle?.terminal_outcome?.stop_trigger;
+  const preservationFailed = run.cancel_outcome.status === "preservation_failed";
+  const hasRunIssues = !preservationFailed && !run.cancelling && run.status !== "success"
+    && (terminalIssues.length > 0 || !!run.halted_reason);
+  const warningCount = (run.input_changes?.length ?? 0)
+    + (preservationFailed ? 1 : hasRunIssues ? Math.max(1, terminalIssues.length) : 0);
+  const warningsOpen = warningsRunId === run.id;
+  const warningsToggle = warningCount > 0 && (
+    <button type="button" aria-expanded={warningsOpen} aria-controls={`run-warnings-${run.id}`}
+      onClick={() => setWarningsRunId(warningsOpen ? null : run.id)}
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 font-mono text-xs font-normal transition ${preservationFailed || hasRunIssues
+        ? "border-coral-500/30 bg-coral-500/10 text-coral-300 hover:bg-coral-500/20"
+        : "border-brass-500/30 bg-brass-500/10 text-brass-300 hover:bg-brass-500/20"}`}>
+      <ChevronRight size={12} className={`transition-transform ${warningsOpen ? "rotate-90" : ""}`} />
+      {warningCount} warning{warningCount === 1 ? "" : "s"}
+    </button>
+  );
 
   return (
     <div className="w-full px-[max(1.5rem,1.5vw)] py-8">
@@ -1469,9 +1486,10 @@ export function RunDetailPage() {
                 <span className="font-mono text-base font-normal text-slate-500" title={run.id}>
                   {run.id.slice(0, 8)}
                 </span>
+                {warningsToggle}
               </span>
             ) : (
-              run.id.slice(0, 8)
+              <span className="flex flex-wrap items-baseline gap-3">{run.id.slice(0, 8)}{warningsToggle}</span>
             )
           }
           // The problem, not the problem plus three sentences repeating the
@@ -1492,7 +1510,41 @@ export function RunDetailPage() {
         <HeaderTelemetry run={run} runId={runId} />
       </Bezel>
 
-      <InputChangesNotice run={run} />
+      {warningCount > 0 && (
+        <div id={`run-warnings-${run.id}`} hidden={!warningsOpen}>
+          <InputChangesNotice run={run} />
+          {preservationFailed ? (
+            <div role="alert" className="mb-5 rounded border border-coral-500/40 p-3 text-sm text-coral-300">
+              <strong>Checkpoint preservation needs attention.</strong> {run.cancel_outcome.error || run.cancel_outcome.note}
+              <p>The source is retained. Compute may continue to accrue charges. Open checkpoint recovery options to retry preservation, or explicitly discard the weights and release compute.</p>
+            </div>
+          ) : hasRunIssues ? (
+            <div className="mb-5 rounded-bezel border border-coral-500/30 bg-coral-500/10 p-3 text-sm text-coral-300">
+              {(() => {
+                const reason = runStopReason(run.status, run.halted_reason);
+                if (terminalIssues.length > 0) {
+                  const issueText = terminalIssues.map((issue) => issue.message).join(" ");
+                  return <>
+                    <strong>{reason.label}:</strong>
+                    <ul className="mt-1 list-disc space-y-1 pl-5">
+                      {terminalIssues.map((issue, index) => (
+                        <li key={`${issue.code}:${issue.ticket_id ?? index}`}>{issue.message}</li>
+                      ))}
+                    </ul>
+                    {reason.detail && !issueText.includes(reason.detail) && (
+                      <p className="mt-2">{reason.detail}</p>
+                    )}
+                  </>;
+                }
+                return <><strong>{reason.label}</strong>{reason.detail ? `: ${reason.detail}` : "."}</>;
+              })()}
+              {run.cancel_outcome.hf_url && (
+                <> · <a href={run.cancel_outcome.hf_url} target="_blank" rel="noreferrer" className="underline">open on the Hub</a></>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
 
       {run.lifecycle?.finalization && !run.is_terminal && (
         <div role="status" className="mb-5 rounded border border-hair p-3 text-sm">Finalizing the result: new optimization work has stopped while evaluation and model preservation finish. {run.lifecycle.finalization.deadline_at && <>Deadline: {new Date(run.lifecycle.finalization.deadline_at).toLocaleString()}.</>}</div>
@@ -1502,43 +1554,14 @@ export function RunDetailPage() {
           {stopTrigger.message}
         </div>
       )}
-      {run.cancel_outcome.status === "preservation_failed" ? (
-        <div role="alert" className="mb-5 rounded border border-coral-500/40 p-3 text-sm text-coral-300">
-          <strong>Checkpoint preservation needs attention.</strong> {run.cancel_outcome.error || run.cancel_outcome.note}
-          <p>The source is retained. Compute may continue to accrue charges. Open checkpoint recovery options to retry preservation, or explicitly discard the weights and release compute.</p>
-        </div>
-      ) : run.cancelling ? (
+      {run.cancelling && !preservationFailed && (
         <div className="mb-5 flex items-center gap-2 rounded-bezel border border-brass-500/30 bg-brass-500/10 p-3 text-sm text-brass-300">
           <span className="lamp lamp-running" />
           cancelling: {run.cancel_policy.weights === "hf"
             ? `pushing the champion checkpoint to ${run.cancel_policy.hf_repo_id}`
             : "copying the champion checkpoint off the box"} before the GPU is released…
         </div>
-      ) : run.status !== "success" && (terminalIssues.length > 0 || run.halted_reason) ? (
-        <div className="mb-5 rounded-bezel border border-coral-500/30 bg-coral-500/10 p-3 text-sm text-coral-300">
-          {(() => {
-            const reason = runStopReason(run.status, run.halted_reason);
-            if (terminalIssues.length > 0) {
-              const issueText = terminalIssues.map((issue) => issue.message).join(" ");
-              return <>
-                <strong>{reason.label}:</strong>
-                <ul className="mt-1 list-disc space-y-1 pl-5">
-                  {terminalIssues.map((issue, index) => (
-                    <li key={`${issue.code}:${issue.ticket_id ?? index}`}>{issue.message}</li>
-                  ))}
-                </ul>
-                {reason.detail && !issueText.includes(reason.detail) && (
-                  <p className="mt-2">{reason.detail}</p>
-                )}
-              </>;
-            }
-            return <><strong>{reason.label}</strong>{reason.detail ? `: ${reason.detail}` : "."}</>;
-          })()}
-          {run.cancel_outcome.hf_url && (
-            <> · <a href={run.cancel_outcome.hf_url} target="_blank" rel="noreferrer" className="underline">open on the Hub</a></>
-          )}
-        </div>
-      ) : null}
+      )}
 
       {/* ── Hero: what this run achieved (left) beside the loop that produced
           it (right). The numbers and the task-score trace take two thirds and
