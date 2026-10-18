@@ -3348,9 +3348,27 @@ def _distinctive_suffix(p: Path) -> str:
     if len(parts) <= 1:
         return p.name
     i = len(parts) - 2
-    while i > 0 and parts[i].isdigit():
+    while i > 0 and _is_layout_component(parts[i]):
         i -= 1
     return "/".join(parts[i:])
+
+
+# Directory names every lane's layout reuses. `suite/000/validation_questions.csv`
+# names a position inside a work dir, not which work dir: the held-out lane
+# writes `holdout-data-<run>/suite/000/...` and an optimization-lane Inference
+# stages its own Validation copy at `infer-<run>-002/suite/000/...`, and the
+# guard failed run 8996a7da's clean candidate Inference on that collision.
+# Climb until a component carries a lane or ticket identity.
+_LAYOUT_COMPONENTS = frozenset({
+    "suite", "validation-suite", "test-suite", "_splits", "_inputs", "files",
+    "public", "private", "test", "validation", "train", "holdout", "data",
+})
+_SUITE_INDEX_RE = re.compile(r"^(?:suite-)?\d+$")
+
+
+def _is_layout_component(part: str) -> bool:
+    lowered = part.lower()
+    return bool(_SUITE_INDEX_RE.match(lowered)) or lowered in _LAYOUT_COMPONENTS
 
 
 def _artifact_problem(path: str) -> str:
