@@ -34,21 +34,21 @@ const LEVELS = [
     name: "Constraint autonomy",
     chip: "border-[#55CE9166] bg-[#55CE911f] text-[#7DE8CE]",
     owners: [false, true, true],
-    blurb: "Choose training data; the user specifies model and method",
+    blurb: "Decide on training data; the user specifies model and method",
   },
   {
     id: "L3",
     name: "Partial autonomy",
     chip: "border-[#9BD06466] bg-[#9BD0641f] text-[#BFE08F]",
     owners: [false, true, false],
-    blurb: "Choose training data and method; the user specifies the model",
+    blurb: "Decide on training data and method; the user specifies the model",
   },
   {
     id: "L4",
     name: "Full autonomy",
     chip: "border-[#E6BB5B66] bg-[#E6BB5B1f] text-[#E6BB5B]",
     owners: [false, false, false],
-    blurb: "Choose training data, model and method",
+    blurb: "Decide on training data, model and method",
   },
 ] as const;
 
@@ -74,26 +74,26 @@ export function LevelsPage() {
         />
       </div>
 
-      <p className="mb-5 max-w-5xl text-sm leading-relaxed text-slate-400">
-        Autonomy depends on how many of three decisions the user specifies: training data,
-        base model, and training method. Any combination is valid. User-specified choices
-        stay pinned; Zevo chooses the remaining ones.
+      <p className="mb-5 text-sm leading-relaxed text-slate-400">
+        Autonomy depends on how many of the three decisions Zevo makes: training data,
+        base model, and training method. Zevo can decide any combination; the remaining
+        decisions stay fixed as specified by the user.
       </p>
       <div className="mb-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {LEVELS.map((lv, index) => (
           <div key={lv.id} id={lv.id} className="scroll-mt-24 rounded-lg border border-hair bg-raised p-4">
             <span className={`rounded border px-2.5 py-1 font-mono text-sm ${lv.chip}`}>{lv.id}</span>
             <p className="mt-3 text-sm text-slate-200">
-              {["User specifies all 3", "User specifies any 2", "User specifies any 1", "User specifies none"][index]}
+              {["Zevo decides none", "Zevo decides any 1", "Zevo decides any 2", "Zevo decides all 3"][index]}
             </p>
-            <p className="mt-1 text-sm text-slate-400">Zevo chooses {index} of the 3 decisions.</p>
           </div>
         ))}
       </div>
       <h2 className="mb-2 text-lg font-semibold text-slate-200">Common examples</h2>
       <p className="mb-4 text-sm text-slate-400">
-        These are example combinations, not required ones. For example, specifying data and
-        model is also L2; specifying only the method is also L3.
+        These are common examples of what Zevo decides. Any combination with the same number
+        of decisions belongs to the same level. For example, L2 also includes Zevo deciding
+        only the method; L3 also includes Zevo deciding data and model.
       </p>
       <Bezel className="overflow-x-auto">
         {/* Fixed widths on the first four columns so the meaning column absorbs the

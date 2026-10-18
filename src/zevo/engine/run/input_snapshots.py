@@ -7,6 +7,7 @@ object changes future Runs without rewriting an existing Run.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
 import json
@@ -407,9 +408,20 @@ def input_change_details(run: Any, task: Any | None) -> list[dict[str, Any]]:
             return differences({x["name"]: x for x in before}, {x["name"]: x for x in after}, path)
         return [{"field": path, "before": before, "after": after}]
 
+    def timestamp(value: Any) -> str | None:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()
+
     for change in detect_input_changes(run, task):
         group: dict[str, Any] = {**change, "fields": [], "note": ""}
         if change["kind"] == "task":
+            group["before_at"] = timestamp(getattr(run, "started_at", None))
+            group["after_at"] = timestamp(
+                getattr(task, "definition_updated_at", None) or getattr(task, "updated_at", None)
+            ) if task is not None else None
             saved = snapshot.get("task") or {}
             before = saved.get("definition")
             if before is None:

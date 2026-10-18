@@ -188,6 +188,10 @@ class Task(Base):
         DateTime(timezone=True), nullable=True,
         server_default=func.now(), default=_utcnow,
     )
+    # Null for legacy rows whose last edit time was not recorded.
+    definition_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=_utcnow, onupdate=_utcnow,
+    )
 
 
 class TaskSetting(Base):

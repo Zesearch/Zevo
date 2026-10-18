@@ -12,13 +12,17 @@ type ChangeDetails = {
   name: string;
   status: "modified" | "deleted";
   note: string;
+  before_at?: string | null;
+  after_at?: string | null;
   fields: Array<{ field: string; before: unknown; after: unknown; before_lines?: DiffLine[]; after_lines?: DiffLine[] }>;
 };
 
-function Value({ value, side, lines }: { value: unknown; side: "before" | "after"; lines?: DiffLine[] }) {
+function Value({ value, side, lines, timestamp }: { value: unknown; side: "before" | "after"; lines?: DiffLine[]; timestamp?: string | null }) {
   const text = value == null ? "Not present" : typeof value === "string" ? value || "(empty)" : JSON.stringify(value, null, 2);
   return <div className={`min-w-0 p-3 ${side === "before" ? "bg-coral-500/5" : "bg-emerald-500/5"}`}>
-    <div className="mb-2 text-xs font-semibold text-slate-400">{side === "before" ? "At Run launch" : "Current version"}</div>
+    <div className="mb-2 text-xs font-semibold text-slate-400">{side === "before" ? "At Run launch" : "Current version"}
+      {timestamp !== undefined && <span className="ml-2 font-normal">{timestamp ? <time dateTime={timestamp}>{new Date(timestamp).toLocaleString(undefined, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}</time> : "Time unavailable"}</span>}
+    </div>
     <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-slate-200">{lines?.length ? lines.map((line, index) => <span key={index} className={line.changed ? (side === "before" ? "bg-coral-500/20 text-coral-200" : "bg-emerald-500/20 text-emerald-200") : "text-slate-400"}>{line.text}</span>) : text}</pre>
   </div>;
 }
@@ -48,7 +52,7 @@ function ChangesDialog({ runId, onClose }: { runId: string; onClose: () => void 
           {change.fields.map((field) => <div key={field.field} className="mt-3 overflow-hidden rounded-bezel border border-hair">
             <h4 className="break-words border-b border-hair bg-raised px-3 py-2 text-sm font-medium">{field.field.replaceAll("task_objective", "Task objective").replaceAll("test_sets", "Test sets").replaceAll("inference_query", "Inference query").replaceAll("sample_submission", "Sample submission")}</h4>
             <div className="grid grid-cols-1 divide-y divide-hair md:grid-cols-2 md:divide-x md:divide-y-0">
-              <Value value={field.before} side="before" lines={field.before_lines} /><Value value={field.after} side="after" lines={field.after_lines} />
+              <Value value={field.before} side="before" lines={field.before_lines} timestamp={change.before_at} /><Value value={field.after} side="after" lines={field.after_lines} timestamp={change.after_at} />
             </div>
           </div>)}
         </section>)}
