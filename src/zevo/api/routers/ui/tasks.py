@@ -26,6 +26,7 @@ from zevo.engine.observe.run_metrics import was_measured_on_heldout
 from zevo.engine.method.score_direction import is_better
 from zevo.db import Task, TaskSetting
 from zevo.db.models import Run
+from zevo.contracts.autonomy import autonomy_level
 from zevo.contracts.orchestrator import (
     TaskTestSet,
     UserRequest,
@@ -189,30 +190,6 @@ def _with_source_rows(item: TaskTestSet, *, role: str) -> TaskTestSet:
     except (OSError, ValueError, TypeError, csv.Error):
         rows = 0
     return item.model_copy(update={"source_rows": rows}) if rows > 0 else item
-
-
-def autonomy_level(dataset: str, base_model: str, training_method: str) -> str:
-    """Return the canonical ownership rung for a Setting.
-
-    The ladder releases one specific decision at a time:
-
-        L1  user pins data + model + method
-        L2  Zevo decides data; user pins model + method
-        L3  Zevo decides data + method; user pins model
-        L4  Zevo decides data + model + method
-
-    The UI still permits an expert to pin a non-ladder combination. Calling
-    that L2 merely because two boxes are filled would misstate who owns which
-    decision, so those configurations are labelled Custom.
-    """
-    pins = tuple(bool((v or "").strip()) for v in (dataset, base_model, training_method))
-    return {
-        (True, True, True): "L1",
-        (False, True, True): "L2",
-        (False, True, False): "L3",
-        (False, False, False): "L4",
-    }.get(pins, "Custom")
-
 
 # ───────────────────────────── task vs. setting ──────────────────────────────
 #

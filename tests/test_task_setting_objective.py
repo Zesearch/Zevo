@@ -103,8 +103,22 @@ def test_level_follows_the_setting_not_the_task() -> None:
         assert autonomy_level(ds, model, method) == lvl
 
 
-def test_non_ladder_setting_is_not_given_a_misleading_level() -> None:
-    assert autonomy_level("/data/medqa", _MODEL, "") == "Custom"
+@pytest.mark.parametrize("dataset,model,method,expected", [
+    ("data", "model", "method", "L1"),
+    ("", "model", "method", "L2"),
+    ("data", "", "method", "L2"),
+    ("data", "model", "", "L2"),
+    ("data", "", "", "L3"),
+    ("", "model", "", "L3"),
+    ("", "", "method", "L3"),
+    ("", "", "", "L4"),
+    ("  ", " model ", "\t", "L3"),
+])
+def test_level_counts_any_combination_of_user_choices(dataset, model, method, expected) -> None:
+    from zevo.cli.zevo import _level_of
+
+    assert autonomy_level(dataset, model, method) == expected
+    assert _level_of(dataset, model, method) == expected
 
 
 def test_downgrade_restores_the_shipped_prose_sentences() -> None:

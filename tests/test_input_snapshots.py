@@ -255,3 +255,28 @@ async def test_comparison_inherits_run_detail_access_checks(monkeypatch):
         response = await client.get("/runs/other-users-run/input-changes", headers={"x-zevo-ui-access": "dashboard-token"})
     assert response.status_code == 404
     assert response.json()["detail"] == "run not visible"
+
+
+@pytest.mark.parametrize("known_time", [True, False])
+def test_comparison_version_timestamps(known_time):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from zevo.engine.run.input_snapshots import task_definition_snapshot
+
+    launched = datetime(2026, 10, 18, 10, tzinfo=timezone.utc)
+    edited = datetime(2026, 10, 18, 11, tzinfo=timezone.utc)
+    task = SimpleNamespace(name="task", task_objective="Original", test_sets=[{"name": "quality"}],
+                           definition_updated_at=None)
+    saved = task_definition_snapshot(task)
+    run = SimpleNamespace(task_name="task", started_at=launched,
+                          input_snapshot={"version": 1, "task": saved})
+    task.task_objective = "Updated"
+    task.definition_updated_at = edited if known_time else None
+    detail = input_change_details(run, task)[0]
+    assert detail["before_at"] == launched.isoformat()
+    assert detail["after_at"] == (edited.isoformat() if known_time else None)
+    assert input_change_details(run, None)[0]["after_at"] is None
+    # Edit metadata must not change the definition's content identity.
+    task.task_objective = "Original"
+    assert task_definition_snapshot(task)["sha256"] == saved["sha256"]
+    assert detect_input_changes(run, task) == []

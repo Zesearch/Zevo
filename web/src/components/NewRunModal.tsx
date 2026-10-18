@@ -1,3 +1,4 @@
+import { levelOf } from "../lib/autonomy";
 import { resourceSummaryValues } from "../lib/runSummary";
 import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady, modelSaveSummaryValues } from "./ModelSaveFields";
 import { useLaunchSetting } from "../lib/useLaunchSetting";
@@ -399,14 +400,7 @@ export function NewRunModal({
     inputs.trainingMethod === "gkd" && !inputs.teacherModel.trim() && "Teacher model",
     inputs.trainingMethod === "online_dpo" && !inputs.rewardModel.trim() && "Reward model",
   ].filter(Boolean) as string[];
-  const autoLevel = ({
-    "true,true,true": "L1",
-    "false,true,true": "L2",
-    "false,true,false": "L3",
-    "false,false,false": "L4",
-  } as Record<string, string>)[[
-    !!inputs.dataset.trim(), !!inputs.baseModel.trim(), !!inputs.trainingMethod.trim(),
-  ].join(",")] ?? "Custom";
+  const autoLevel = levelOf(inputs.dataset, inputs.baseModel, inputs.trainingMethod);
   const autoRequiredValues = [
     ...modelSaveSummaryValues(modelSave),
     { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },

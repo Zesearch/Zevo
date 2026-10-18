@@ -12,7 +12,7 @@ import { Bezel, PageHead } from "../components/zevo/primitives";
  * anchored at the level they carry.
  */
 
-const DIMS = ["Training data", "Training model", "Training method"] as const;
+const DIMS = ["Training data", "Base model", "Training method"] as const;
 
 const OWNER_TONE = {
   user: "border-skyx-500/30 bg-skyx-500/10 text-skyx-300",
@@ -34,21 +34,21 @@ const LEVELS = [
     name: "Constraint autonomy",
     chip: "border-[#55CE9166] bg-[#55CE911f] text-[#7DE8CE]",
     owners: [false, true, true],
-    blurb: "Exhaust the current Data branch before selecting the next Data",
+    blurb: "Decide on training data; the user specifies model and method",
   },
   {
     id: "L3",
     name: "Partial autonomy",
     chip: "border-[#9BD06466] bg-[#9BD0641f] text-[#BFE08F]",
     owners: [false, true, false],
-    blurb: "Search Data inside the current Method; exhaust it before changing Method",
+    blurb: "Decide on training data and method; the user specifies the model",
   },
   {
     id: "L4",
     name: "Full autonomy",
     chip: "border-[#E6BB5B66] bg-[#E6BB5B1f] text-[#E6BB5B]",
     owners: [false, false, false],
-    blurb: "Search Data, then Method, then Base model as each level is exhausted",
+    blurb: "Decide on training data, model and method",
   },
 ] as const;
 
@@ -74,16 +74,27 @@ export function LevelsPage() {
         />
       </div>
 
-      <p className="mb-5 max-w-5xl text-sm leading-relaxed text-slate-400">
-        Every task rests on three decisions: the training data, the model, and the method.
-        Each decision is either given by the user or made by Zevo. The more Zevo decides,
-        the higher the autonomy level. Zevo keeps the current branch until its inner search
-        is exhausted, then advances one level at a time.
+      <p className="mb-5 text-sm leading-relaxed text-slate-400">
+        Autonomy depends on how many of the three decisions Zevo makes: training data,
+        base model, and training method. Zevo can decide any combination; the remaining
+        decisions stay fixed as specified by the user.
       </p>
-
-      {/* The whole ladder as one table: four rows, three columns of who-decides.
-          It was four stacked cards, which made you hold L1 in your head to see
-          what L2 changed. Side by side, the column that flips is the answer. */}
+      <div className="mb-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {LEVELS.map((lv, index) => (
+          <div key={lv.id} id={lv.id} className="scroll-mt-24 rounded-lg border border-hair bg-raised p-4">
+            <span className={`rounded border px-2.5 py-1 font-mono text-sm ${lv.chip}`}>{lv.id}</span>
+            <p className="mt-3 text-sm text-slate-200">
+              {["Zevo decides none", "Zevo decides any 1", "Zevo decides any 2", "Zevo decides all 3"][index]}
+            </p>
+          </div>
+        ))}
+      </div>
+      <h2 className="mb-2 text-lg font-semibold text-slate-200">Common examples</h2>
+      <p className="mb-4 text-sm text-slate-400">
+        These are common examples of what Zevo decides. Any combination with the same number
+        of decisions belongs to the same level. For example, L2 also includes Zevo deciding
+        only the method; L3 also includes Zevo deciding data and model.
+      </p>
       <Bezel className="overflow-x-auto">
         {/* Fixed widths on the first four columns so the meaning column absorbs the
             slack. Left to auto layout the three one-word columns each took a
@@ -98,7 +109,7 @@ export function LevelsPage() {
           </thead>
           <tbody className="divide-y divide-hair">
             {LEVELS.map((lv) => (
-              <tr key={lv.id} id={lv.id} className="scroll-mt-24 target:bg-raised">
+              <tr key={lv.id}>
                 <td className="whitespace-nowrap px-4 py-4 align-top">
                   <span className="flex items-center gap-4">
                     <span className={`rounded border px-2.5 py-1 font-mono text-sm ${lv.chip}`}>{lv.id}</span>

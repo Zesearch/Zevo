@@ -35,6 +35,7 @@ from zevo.db import (  # noqa: E402
     WorkProduct,
     get_session_factory,
 )
+from zevo.contracts.autonomy import autonomy_level as _level_of  # noqa: E402
 from zevo.contracts.tickets import TERMINAL_RUN_STATUSES  # noqa: E402
 from sqlalchemy import select, desc  # noqa: E402
 
@@ -2376,17 +2377,6 @@ def _score_text(v, metric: str | None = None, *, signed: bool = False) -> str:
 # thing, and both are edited in the table.
 
 
-def _level_of(dataset: str, base_model: str, training_method: str) -> str:
-    """Same canonical ownership ladder the API applies."""
-    pins = tuple(bool((v or "").strip()) for v in (dataset, base_model, training_method))
-    return {
-        (True, True, True): "L1",
-        (False, True, True): "L2",
-        (False, True, False): "L3",
-        (False, False, False): "L4",
-    }.get(pins, "Custom")
-
-
 def _short_ref(path: str) -> str:
     """`/app/data/files/gsm8k/train.csv` -> `gsm8k/train.csv`."""
     v = (path or "").strip()
@@ -3073,10 +3063,10 @@ def levels() -> None:
     ):
         t.add_row(lvl, *[("User" if o else "[bold]Zevo[/bold]") for o in owners], blurb)
     console.print(
-        "Every task rests on three decisions: the training data, the model, and the method.\n"
-        "Each is either given by the user or made by Zevo. The more Zevo decides, the higher\n"
-        "the level. User values stay pinned for the Run. Zevo retains the active branch until\n"
-        "its inner search is exhausted, then advances Data -> Method -> Base model.\n"
+        "Autonomy counts user-specified choices among training data, base model and method.\n"
+        "L1: all 3; L2: any 2; L3: any 1; L4: none. Zevo chooses the remaining decisions.\n"
+        "User values stay pinned for the Run.\n\n"
+        "Common examples (not required combinations):"
     )
     console.print(t)
 
