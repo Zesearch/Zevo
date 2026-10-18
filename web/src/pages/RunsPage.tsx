@@ -38,8 +38,8 @@ function IterationRail({ r }: { r: RunSummary }) {
   const running = r.status === "running";
   const segs = Array.from({ length: Math.min(budget, 6) });
   return (
-    <div className={`flex min-w-0 gap-1.5 ${budget > 6 ? "flex-col" : "items-center"}`} title={`${done} of ${r.iteration_budget || "\u221e"} iterations`}>
-      <div className="flex h-1.5 min-w-0 max-w-[8.75rem] flex-wrap gap-1 overflow-hidden">
+    <div className="flex min-w-0 items-center gap-1.5" title={`${done} of ${r.iteration_budget || "\u221e"} iterations`}>
+      <div className="flex h-1.5 shrink-0 gap-1">
       {segs.map((_, i) => {
         const filled = i < done;
         const current = running && i === done;
@@ -54,7 +54,8 @@ function IterationRail({ r }: { r: RunSummary }) {
         );
       })}
       </div>
-      <span className="shrink-0 font-mono text-2xs text-slate-500">{done}/{r.iteration_budget || "\u221e"}</span>
+      {budget > 6 && <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center font-mono text-sm font-bold leading-none text-slate-300" title="More iterations; full count shown alongside" aria-label="More iterations">…</span>}
+      <span className="shrink-0 whitespace-nowrap font-mono text-2xs text-slate-500">{done}/{r.iteration_budget || "\u221e"}</span>
     </div>
   );
 }
@@ -349,10 +350,10 @@ export function RunsPage() {
       </div>
 
       <div className="overflow-x-auto">
-      <div className="lg:min-w-[70rem]">
+      <div className="lg:min-w-[94rem]">
       {/* Column legend. The four measured columns sort: clicking one orders by
           it, clicking it again flips the direction. The arrow states which. */}
-      <div className="mb-2 hidden grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)_minmax(12rem,1fr)_minmax(0,0.7fr)_minmax(9rem,0.7fr)_minmax(6rem,0.6fr)_minmax(4rem,0.6fr)_minmax(0,1fr)_9rem_2.75rem] gap-4 border border-transparent px-5 lg:grid">
+      <div className="mb-2 hidden items-center whitespace-nowrap grid-cols-[minmax(7rem,1fr)_minmax(7rem,0.85fr)_minmax(16rem,1fr)_minmax(7.5rem,0.7fr)_minmax(9rem,0.7fr)_minmax(6rem,0.6fr)_minmax(4rem,0.6fr)_minmax(9rem,1fr)_9rem_2.75rem] gap-4 border border-transparent px-5 lg:grid">
         {COLUMNS.map((c) => {
           const pad = c.label === "Run" || c.label === "Task name" ? "pl-2" : "";
           if (!c.sort) {
@@ -421,7 +422,7 @@ export function RunsPage() {
               </div>
             )}
             <Bezel
-              className="group grid cursor-pointer grid-cols-1 items-center gap-4 px-5 py-4 transition hover:border-brass-500/30 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)_minmax(12rem,1fr)_minmax(0,0.7fr)_minmax(9rem,0.7fr)_minmax(6rem,0.6fr)_minmax(4rem,0.6fr)_minmax(0,1fr)_9rem_2.75rem]"
+              className="group grid cursor-pointer grid-cols-1 items-center gap-4 px-5 py-4 transition hover:border-brass-500/30 lg:grid-cols-[minmax(7rem,1fr)_minmax(7rem,0.85fr)_minmax(16rem,1fr)_minmax(7.5rem,0.7fr)_minmax(9rem,0.7fr)_minmax(6rem,0.6fr)_minmax(4rem,0.6fr)_minmax(9rem,1fr)_9rem_2.75rem]"
             >
               {/* Name over id. A run launched without a name (CLI, API, or one
                   from before the field existed) shows the id alone rather than
