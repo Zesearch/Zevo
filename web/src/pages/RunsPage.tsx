@@ -36,9 +36,10 @@ function IterationRail({ r }: { r: RunSummary }) {
   const budget = Math.max(r.iteration_budget || 0, r.iterations_completed || 0, 1);
   const done = r.iterations_completed || 0;
   const running = r.status === "running";
-  const segs = Array.from({ length: Math.min(budget, 12) });
+  const segs = Array.from({ length: Math.min(budget, 6) });
   return (
-    <div className="flex items-center gap-1" title={`${done} of ${r.iteration_budget || "\u221e"} iterations`}>
+    <div className={`flex min-w-0 gap-1.5 ${budget > 6 ? "flex-col" : "items-center"}`} title={`${done} of ${r.iteration_budget || "\u221e"} iterations`}>
+      <div className="flex h-1.5 min-w-0 max-w-[8.75rem] flex-wrap gap-1 overflow-hidden">
       {segs.map((_, i) => {
         const filled = i < done;
         const current = running && i === done;
@@ -46,13 +47,14 @@ function IterationRail({ r }: { r: RunSummary }) {
           <span
             key={i}
             className={[
-              "h-1.5 w-5 rounded-full transition-all",
+              "h-1.5 w-5 shrink-0 rounded-full transition-all",
               filled ? "bg-phosphor-400 shadow-glow-phosphor" : current ? "bg-brass-400 animate-lamp-pulse" : "bg-hair",
             ].join(" ")}
           />
         );
       })}
-      <span className="ml-2 font-mono text-2xs text-slate-500">{done}/{r.iteration_budget || "\u221e"}</span>
+      </div>
+      <span className="shrink-0 font-mono text-2xs text-slate-500">{done}/{r.iteration_budget || "\u221e"}</span>
     </div>
   );
 }
@@ -346,9 +348,11 @@ export function RunsPage() {
 
       </div>
 
+      <div className="overflow-x-auto">
+      <div className="lg:min-w-[70rem]">
       {/* Column legend. The four measured columns sort: clicking one orders by
           it, clicking it again flips the direction. The arrow states which. */}
-      <div className="mb-2 hidden grid-cols-[1fr_0.85fr_1fr_0.7fr_0.7fr_0.6fr_0.6fr_1fr_minmax(6.75rem,0.65fr)_2.75rem] gap-4 border border-transparent px-5 lg:grid">
+      <div className="mb-2 hidden grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)_minmax(12rem,1fr)_minmax(0,0.7fr)_minmax(9rem,0.7fr)_minmax(6rem,0.6fr)_minmax(4rem,0.6fr)_minmax(0,1fr)_9rem_2.75rem] gap-4 border border-transparent px-5 lg:grid">
         {COLUMNS.map((c) => {
           const pad = c.label === "Run" || c.label === "Task name" ? "pl-2" : "";
           if (!c.sort) {
@@ -417,7 +421,7 @@ export function RunsPage() {
               </div>
             )}
             <Bezel
-              className="group grid cursor-pointer grid-cols-1 items-center gap-4 px-5 py-4 transition hover:border-brass-500/30 lg:grid-cols-[1fr_0.85fr_1fr_0.7fr_0.7fr_0.6fr_0.6fr_1fr_minmax(6.75rem,0.65fr)_2.75rem]"
+              className="group grid cursor-pointer grid-cols-1 items-center gap-4 px-5 py-4 transition hover:border-brass-500/30 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)_minmax(12rem,1fr)_minmax(0,0.7fr)_minmax(9rem,0.7fr)_minmax(6rem,0.6fr)_minmax(4rem,0.6fr)_minmax(0,1fr)_9rem_2.75rem]"
             >
               {/* Name over id. A run launched without a name (CLI, API, or one
                   from before the field existed) shows the id alone rather than
@@ -451,7 +455,7 @@ export function RunsPage() {
                 )}
               </div>
 
-              <div onClick={() => nav(`/runs/${r.id}`)}><IterationRail r={r} /></div>
+              <div className="min-w-0" onClick={() => nav(`/runs/${r.id}`)}><IterationRail r={r} /></div>
               <div onClick={() => nav(`/runs/${r.id}`)} className="readout text-sm text-phosphor-300">
                 {/* The held-out score, not the validation one the run tuned
                     on: this column ranks runs against each other, and each
@@ -494,6 +498,9 @@ export function RunsPage() {
           ))}
         </div>
       )}
+
+      </div>
+      </div>
 
       {/* What the run was given, without losing your place in the list.
           Same order the Tasks page uses: what it is, how it was set up, what it
