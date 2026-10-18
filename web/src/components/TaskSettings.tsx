@@ -1,3 +1,4 @@
+import { levelOf } from "../lib/autonomy";
 import { useFileDisplayPath } from "../lib/useFileDisplayPath";
 import { useEffect, useState } from "react";
 import useSWR from "swr";
@@ -26,8 +27,7 @@ import { ThemedSelect } from "./ThemedSelect";
  *
  * A task is the PROBLEM — an objective and the files that score it. A setting
  * is one way of attacking it: which base model, which training method, whether
- * the training data is handed over. The autonomy level follows the canonical
- * ownership ladder, which is why it belongs here and not on the task.
+ * the training data is handed over. The autonomy level counts user-pinned decisions, which is why it belongs here and not on the task.
  *
  * Settings are stored explicitly and run history is joined back onto each
  * matching configuration. A saved setting may therefore have run_count=0.
@@ -35,10 +35,9 @@ import { ThemedSelect } from "./ThemedSelect";
 
 export const LEVEL_BLURB: Record<string, string> = {
   L1: "Data, model and method are pinned; Zevo optimizes only inside that branch.",
-  L2: "Model and method are pinned; Zevo changes Data only after the active Data branch is exhausted.",
-  L3: "Model is pinned; Zevo exhausts Data branches before advancing to the next Method.",
-  L4: "Zevo exhausts Data, then Method, then Base-model branches in nested order.",
-  Custom: "This configuration uses a non-ladder combination of pinned decisions.",
+  L2: "Any two decisions are pinned by the user; Zevo chooses the remaining one.",
+  L3: "Any one decision is pinned by the user; Zevo chooses the remaining two.",
+  L4: "No decisions are pinned by the user; Zevo chooses data, model and method.",
 };
 
 export const LEVEL_TONE: Record<string, string> = {
@@ -46,17 +45,8 @@ export const LEVEL_TONE: Record<string, string> = {
   L2: "border-skyx-500/40 bg-skyx-500/10 text-skyx-300",
   L3: "border-brass-500/40 bg-brass-500/10 text-brass-300",
   L4: "border-lilac-500/40 bg-lilac-500/10 text-lilac-300",
-  Custom: "border-hair bg-raised text-slate-300",
 };
 
-function levelOf(dataset: string, baseModel: string, trainingMethod: string): string {
-  const pins = [dataset, baseModel, trainingMethod].map((value) => !!value.trim());
-  if (pins[0] && pins[1] && pins[2]) return "L1";
-  if (!pins[0] && pins[1] && pins[2]) return "L2";
-  if (!pins[0] && pins[1] && !pins[2]) return "L3";
-  if (!pins[0] && !pins[1] && !pins[2]) return "L4";
-  return "Custom";
-}
 
 export function LevelBadge({ level, title }: { level: string; title?: string }) {
   return (

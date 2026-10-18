@@ -88,6 +88,10 @@ Both dimensions describe how much control the user delegates to Zevo, but at dif
 
 **From L1 to L4, higher levels delegate more optimization-level control to Zevo.**
 
+The level counts user-specified choices among training data, base model, and training method: **L1 = all 3, L2 = any 2, L3 = any 1, L4 = none**. Zevo chooses the remaining decisions.
+
+The table below shows common examples, not required combinations.
+
 <table width="100%">
   <thead>
     <tr>
