@@ -54,8 +54,8 @@ function IterationRail({ r }: { r: RunSummary }) {
         );
       })}
       </div>
-      {budget > 6 && <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center font-mono text-sm font-bold leading-none text-slate-300" title="More iterations; full count shown alongside" aria-label="More iterations">…</span>}
-      <span className="shrink-0 whitespace-nowrap font-mono text-2xs text-slate-500">{done}/{r.iteration_budget || "\u221e"}</span>
+      {budget > 6 && <span className="mr-2 shrink-0 whitespace-nowrap rounded bg-slate-400/10 px-1.5 py-0.5 font-mono text-2xs leading-none text-phosphor-400" title={`${budget - 6} additional iterations not shown`} aria-label={`${budget - 6} additional iterations not shown`}>+{budget - 6}</span>}
+      <span className="shrink-0 whitespace-nowrap font-mono text-sm text-slate-300">{done}/{r.iteration_budget || "\u221e"}</span>
     </div>
   );
 }
