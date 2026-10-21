@@ -95,6 +95,8 @@ def test_only_token_allowance_changes_and_pin_is_respected(tmp_path):
     with pytest.raises(ValueError, match="user-pinned"):
         rm.enlarged_config(config, {"decoding_config": {"max_new_tokens": 256}})
     config.implementation_config["llm_kwargs"]["max_model_len"] = 256
+    assert rm.enlarged_config(config, {}).measurement.max_new_tokens == 256
+    config.implementation_config["llm_kwargs"] = {}
     with pytest.raises(ValueError, match="context headroom"):
         rm.enlarged_config(config, {})
 
@@ -183,13 +185,14 @@ async def test_complete_cohort_publishes_atomically_and_recovery_is_idempotent(s
         await rm.advance(session, run.id)
         inference = await session.get(Ticket, item["inference_id"])
         assert rm.configuration_override(run, inference, "math") == batch["configs"]["math"]
-        await finish_inference(session, inference, root)
+        await finish_inference(session, inference, root, limited=10 if index else 0)
         await rm.intercept_completion(session, inference)
+        assert len(rm.batches(run)) == 1  # Historical truncation cannot reopen expansion.
         active = rm.pending(run)
         evaluation = await session.get(Ticket, active["cohort"][index]["evaluation_id"])
         assert run.history == history
         assert len((await session.scalars(select(ScoreEvent))).all()) == 2
-        await finish_evaluation(session, evaluation, root, scores=(.5 + index * .1, .7))
+        await finish_evaluation(session, evaluation, root, scores=(.5 + inference.iteration * .1, .7))
         await rm.intercept_completion(session, evaluation)
     assert rm.pending(run) is None
     assert rm.batches(run)[0]["status"] == "published"
@@ -222,21 +225,58 @@ async def test_failure_keeps_all_old_scores_and_contracts(scenario):
 
 
 @pytest.mark.asyncio
-async def test_persistent_truncation_replays_whole_cohort_then_stops(scenario):
+@pytest.mark.parametrize("stalls", [False, True])
+async def test_current_reaches_ceiling_then_history_is_scored_without_expansion(scenario, monkeypatch, stalls):
     session, run, originals, root = scenario
+    async def handoff(session, run, batch):
+        batch["handoff_pending"] = False
+        rm._store(run, batch)
+        await session.commit()
+    monkeypatch.setattr(rm, "_handoff", handoff)
     await rm.intercept_completion(session, originals[-1])
-    for attempt in range(2):
+    caps = (512, 1024) if stalls else (512, 1024, 2048, 4096)
+    for attempt, cap in enumerate(caps):
         await rm.advance(session, run.id)
         batch = deepcopy(rm.pending(run))
-        ticket = await session.get(Ticket, batch["cohort"][0]["inference_id"])
-        await finish_inference(session, ticket, root, limited=5)
-        await rm.intercept_completion(session, ticket)
-        if attempt == 0:
-            new = rm.pending(run)
-            assert [c["source_id"] for c in new["cohort"]] == [t.id for t in originals]
-            assert load_inference_config(new["configs"]["math"]).measurement.max_new_tokens == 1024
-    assert run.status == "degraded"
-    assert len((await session.scalars(select(ScoreEvent))).all()) == 2
+        assert load_inference_config(batch['configs']['math']).measurement.max_new_tokens == cap
+        assert batch['cohort'][0]['source_id'] == originals[-1].id
+        for old in batch['cohort'][1:]:
+            assert await session.get(Ticket, old['inference_id']) is None
+        current = await session.get(Ticket, batch['cohort'][0]['inference_id'])
+        await finish_inference(session, current, root, limited=5 if stalls else 9-attempt)
+        await rm.advance(session, run.id)
+    batch = deepcopy(rm.pending(run))
+    assert batch['budget_finalized']
+    assert 'math' in batch['stalled_members' if stalls else 'ceiling_evidence']
+    assert len(batch['budget_progress']) == len(caps)
+    # Recovery callbacks cannot count one inference as multiple attempts.
+    await rm.advance(session, run.id)
+    assert len(rm.pending(run)['budget_progress']) == len(caps)
+    for index, item in enumerate(batch['cohort']):
+        await rm.advance(session, run.id)
+        if index:
+            inference = await session.get(Ticket, item['inference_id'])
+            # History must not reopen expansion, even with substantial truncation.
+            await finish_inference(session, inference, root, limited=10)
+            await rm.advance(session, run.id)
+        evaluation = await session.get(Ticket, rm.pending(run)['cohort'][index]['evaluation_id'])
+        await finish_evaluation(session, evaluation, root)
+        await rm.advance(session, run.id)
+    assert run.status == 'running'
+    assert rm.batches(run)[-1]['status'] == 'published'
+    assert len((await session.scalars(select(ScoreEvent))).all()) == 3
+
+
+@pytest.mark.asyncio
+async def test_current_already_at_ceiling_continues_normal_evaluation(scenario):
+    session, run, originals, root = scenario
+    path = Path((await rm._products(session, originals[0].id, 'inference_config'))[0].path)
+    config = load_inference_config(path)
+    config.measurement.max_new_tokens = 4096
+    path.write_text(config.model_dump_json())
+    assert not await rm.intercept_completion(session, originals[-1])
+    assert run.status == 'running'
+    assert not rm.batches(run)
 
 
 @pytest.mark.asyncio
@@ -327,7 +367,7 @@ async def test_input_builder_uses_revision_for_baseline_and_checkpoint(scenario,
     monkeypatch.setattr(runner, "_slurm_stage_job_contract", no_job)
     await rm.intercept_completion(session, originals[-1])
     batch = rm.pending(run)
-    baseline = await session.get(Ticket, batch["cohort"][0]["inference_id"])
+    baseline = await rm._new_inference(session, run, batch, batch["cohort"][1])
     kwargs = dict(payload=baseline.payload, work_dir=str(root), run=run, session=session, generation_backend="vllm",
                   inputs={"device_info": {"path": "/device.json"}})
     inp = await runner._build_inference_input(ticket=baseline, **kwargs)
@@ -415,13 +455,14 @@ async def test_iteration_two_retains_repetitive_baseline_but_replays_iteration_o
     await session.commit()
     assert await rm.intercept_completion(session, originals[-1])
     batch = rm.pending(run)
-    baseline, iteration_one, current = batch['cohort']
+    current, baseline, iteration_one = batch['cohort']
     assert baseline['retained_only']
     assert baseline['retained']['math']['evidence']['repetition']['dominated']
     assert not iteration_one['retained_only']
     assert not current['retained_only']
     assert await session.get(Ticket, baseline['inference_id']) is None
-    assert await session.get(Ticket, iteration_one['inference_id']) is not None
+    assert await session.get(Ticket, iteration_one['inference_id']) is None
+    assert await session.get(Ticket, current['inference_id']) is not None
 
 
 @pytest.mark.asyncio
@@ -444,9 +485,9 @@ async def test_partial_repetition_exemption_preserves_score_and_selects_other_pr
     monkeypatch.setattr(rm, '_handoff', handoff)
     await rm.intercept_completion(session, originals[-1])
     batch = deepcopy(rm.pending(run))
-    baseline = batch['cohort'][0]
+    baseline = batch['cohort'][1]
     assert baseline['active_members'] == ['qa']
-    replay = await session.get(Ticket, baseline['inference_id'])
+    replay = await rm._new_inference(session, run, batch, baseline)
     assert replay.payload['test_set_name'] == 'validation:qa'
     assert rm.configuration_override(run, replay, 'math') == baseline['retained']['math']['config_path']
     assert load_inference_config(rm.configuration_override(run, replay, 'qa')).measurement.max_new_tokens == 512
@@ -486,13 +527,13 @@ async def test_replay_input_builders_exclude_retained_primary(scenario):
         'validation_sets': [{**m, 'public': m['validation_set'], 'inference_data_profile': '/profile.json'} for m in run.holdout['validation_sets']]}
     await session.commit()
     await rm.intercept_completion(session, originals[-1])
-    item = rm.pending(run)['cohort'][0]
-    inference = await session.get(Ticket, item['inference_id'])
+    item = rm.pending(run)['cohort'][1]
+    inference = await rm._new_inference(session, run, rm.pending(run), item)
     members = await _build_validation_suite_members(ticket=inference, payload=inference.payload, work_dir=str(root), run=run, session=session)
     assert not members  # qa is primary; retained math must not be submitted again.
     evaluation = Ticket(id='test-eval', run_id=run.id, agent_id='evaluation', lane='optimization',
                         payload={'test_set_name': 'validation:qa'})
-    batch = deepcopy(rm.pending(run));batch['cohort'][0]['evaluation_id'] = evaluation.id
+    batch = deepcopy(rm.pending(run));batch['cohort'][1]['evaluation_id'] = evaluation.id
     rm._store(run, batch)
     members = await _build_evaluation_suite_members(evaluation, evaluation.payload,
         {'predictions': {'source_ticket_id': inference.id}}, run, session)
@@ -510,8 +551,8 @@ async def test_previous_iteration_can_be_exempt_too(scenario):
     await rm.intercept_completion(session, originals[2])
     batch = rm.pending(run)
     assert not batch['cohort'][0]['retained_only']
-    assert batch['cohort'][1]['retained_only']
-    assert not batch['cohort'][2]['retained_only']
+    assert not batch['cohort'][1]['retained_only']
+    assert batch['cohort'][2]['retained_only']
 
 
 @pytest.mark.asyncio
@@ -529,7 +570,9 @@ async def test_fully_exempt_baseline_score_survives_publish(scenario, monkeypatc
     monkeypatch.setattr(rm, '_handoff', handoff)
     await rm.intercept_completion(session, originals[2])
     batch = deepcopy(rm.pending(run))
-    for index, item in enumerate(batch['cohort'][1:], 1):
+    for index, item in enumerate(batch['cohort']):
+        if item.get('retained_only'):
+            continue
         await rm.advance(session, run.id)
         inference = await session.get(Ticket, item['inference_id'])
         await finish_inference(session, inference, root)
@@ -541,3 +584,35 @@ async def test_fully_exempt_baseline_score_survives_publish(scenario, monkeypatc
     scores = (await session.scalars(select(ScoreEvent).order_by(ScoreEvent.iteration))).all()
     assert [s.score for s in scores] == pytest.approx([.3, .8, .8])
     assert 'measurement_revision' not in (scores[0].extras or {})
+
+
+def test_budget_stagnation_is_per_member_and_decrease_resets_streak(tmp_path):
+    path = str(config_file(tmp_path))
+    batch = {'configs': {'math': path, 'qa': path},
+             'evidence': {'math': {'fraction': .3}, 'qa': {'fraction': .3}},
+             'expanded_members': ['math', 'qa']}
+    rm._record_budget_progress(batch, 'one', {'math': {'fraction': .3}, 'qa': {'fraction': .4}})
+    assert batch['no_improvement_streaks'] == {'math': 1, 'qa': 1}
+    batch['evidence'] = {'math': {'fraction': .3}, 'qa': {'fraction': .4}}
+    rm._record_budget_progress(batch, 'two', {'math': {'fraction': .2}, 'qa': {'fraction': .4}})
+    assert batch['no_improvement_streaks'] == {'math': 0, 'qa': 2}
+    assert set(batch['stalled_members']) == {'qa'}
+    batch['expanded_members'] = ['math']
+    batch['evidence'] = {'math': {'fraction': .2}, 'qa': {'fraction': .4}}
+    rm._record_budget_progress(batch, 'three', {'math': {'fraction': .2}, 'qa': {'fraction': .4}})
+    assert batch['no_improvement_streaks'] == {'math': 1, 'qa': 2}
+
+
+@pytest.mark.parametrize("previous,current,improved", [
+    (.20, .199, False), (.20, .181, False), (.20, .18, True),
+    (.30, .27, True), (.20, .15, True), (.20, .21, False),
+    (0.0, 0.0, False),
+])
+def test_budget_progress_requires_meaningful_relative_drop(tmp_path, previous, current, improved):
+    path = str(config_file(tmp_path))
+    batch = {'configs': {'math': path}, 'evidence': {'math': {'fraction': previous}},
+             'expanded_members': ['math'], 'no_improvement_streaks': {'math': 1}}
+    rm._record_budget_progress(batch, 'one', {'math': {'fraction': current}})
+    assert batch['no_improvement_streaks']['math'] == (0 if improved else 2)
+    assert ('math' in batch.get('stalled_members', {})) == (not improved)
+    assert batch['budget_progress'][0]['meaningful_improvement'] is improved

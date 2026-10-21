@@ -46,7 +46,7 @@ export function CancelRunDialog({ runId, modelSavePolicy, onClose, onCancelled }
   return createPortal(
     <DialogOwner.Provider value={id}><div className="fixed inset-0 z-[100] flex items-center justify-center px-4" onMouseDown={onClose}>
       <div className="absolute inset-0 bg-canvas/80 backdrop-blur-sm" />
-      <div ref={ref} role="dialog" aria-modal="true" aria-label="Checkpoint recovery options" tabIndex={-1} className="bezel relative max-h-[90vh] overflow-y-auto w-full max-w-lg p-6 animate-zevo-in" onMouseDown={(e) => e.stopPropagation()}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-label="Checkpoint recovery options" tabIndex={-1} className="bezel relative max-h-[90vh] overflow-y-auto w-full max-w-2xl p-6 animate-zevo-in" onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-base font-semibold text-ink">Cancel this run</h2>
