@@ -265,12 +265,12 @@ async def settle_splits(
                     raise SplitSettlementError(
                         f"cannot count Validation set {item.name!r}: {exc}"
                     ) from exc
+            if materialized_rows == 0:
+                raise SplitSettlementError(f"Validation set {item.name!r} is empty.")
             if materialized_rows < MIN_VALIDATION_ROWS:
-                raise SplitSettlementError(
-                    f"Validation set {item.name!r} has {materialized_rows} "
-                    f"row(s); each Validation set requires at least "
-                    f"{MIN_VALIDATION_ROWS}. Use the full split or choose a "
-                    "larger independent dataset."
+                notes.append(
+                    f"Validation set {item.name!r} has {materialized_rows} row(s); "
+                    "this independent Validation set is allowed, but scores may be noisy."
                 )
             validation_suite.append({
                 "name": item.name,
