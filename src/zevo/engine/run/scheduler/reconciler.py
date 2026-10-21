@@ -1661,6 +1661,9 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
     for r in open_runs:
         if r.cancel_requested_at is not None:
             continue  # closing is the cancel-rescue task's job, after the copy
+        from zevo.engine.run.remeasurement import pending
+        if pending(r):
+            continue
         tickets = (await session.execute(
             select(Ticket).where(Ticket.run_id == r.id)
         )).scalars().all()
@@ -2032,6 +2035,9 @@ async def reconcile_runs_and_tickets(
         # pass halts also gets its resources reaped by _cleanup_terminal_resources.
         async with Session() as s:
             report["runs_halted_over_budget"] = await _watchdog_halt_over_budget_runs(s)
+        async with Session() as s:
+            from zevo.engine.run.remeasurement import reconcile as reconcile_remeasurements
+            report["remeasurements_advanced"] = await reconcile_remeasurements(s)
         async with Session() as s:
             report["heartbeats_closed"] = await _close_stale_terminal_heartbeats(
                 s, stale_ticket_seconds

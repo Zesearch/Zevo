@@ -471,6 +471,26 @@ later candidates without recalibrating their budgets. A later budget change
 requires an explicit new measurement contract and reevaluation of the Baseline
 and compared candidates; scores across different budgets are not interchangeable.
 
+### Engine-owned token-budget revisions
+
+After checkpoint inference, the engine checks full-population diagnostics per
+benchmark. More than 5% truncated questions triggers a new measurement revision:
+it doubles only affected members' unpinned `max_new_tokens`, within the existing
+verified context allocation, and replays the baseline and every compared
+checkpoint in that lane. It changes neither prompts nor sampling/stopping rules.
+
+These work orders use `configuration_mode=reuse` even for the base model. Execute
+the supplied revision YAML exactly; do not select a new baseline configuration or
+reuse old predictions. The engine stages scores until the entire cohort succeeds,
+then replaces the comparison series atomically and retains the previous revision
+for audit. Subsequent inference receives the published revision automatically.
+
+Automatic increases are bounded to two revisions per model lineage and lane.
+Pinned allowances, exhausted context, missing checkpoints, failed evaluation, or
+persistent truncation leave the previous scores intact and stop optimization with
+a system notice. Increasing context/memory allocations requires an explicit new
+resource plan. Existing run cost/runtime limits still apply to replay work.
+
 ### vLLM GPU-memory sizing
 
 When the work order supplies `memory_planning_contract`,

@@ -409,9 +409,9 @@ export function CustomizedRunForm({
       }
       const queueWaitHours = inputs.queueWaitHours.trim()
         ? Number(inputs.queueWaitHours)
-        : 48;
-      if (!Number.isFinite(queueWaitHours) || queueWaitHours <= 0 || queueWaitHours > 168) {
-        throw new Error("Max queue wait must be greater than 0 and at most 168 hours.");
+        : 0;
+      if (!Number.isFinite(queueWaitHours) || queueWaitHours < 0 || queueWaitHours > 168) {
+        throw new Error("Max queue wait must be between 0 and 168 hours; blank or 0 means unlimited.");
       }
       if (!modelSaveReady(modelSave)) throw new Error("Choose a valid final model destination.");
       const body = {

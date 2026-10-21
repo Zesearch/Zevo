@@ -1081,7 +1081,7 @@ export const EMPTY_RUN_INPUTS: RunInputValues = {
   // Optimization rounds, spend and active runtime are uncapped unless the
   // operator enters a value. Queueing remains bounded by default so a Slurm
   // job cannot stay pending indefinitely.
-  iterations: "", budget: "", timeLimitHours: "", queueWaitHours: "48", stopThreshold: "",
+  iterations: "", budget: "", timeLimitHours: "", queueWaitHours: "", stopThreshold: "",
 };
 
 export const TRAINING_METHOD_OPTIONS = [
@@ -1950,8 +1950,7 @@ export function RunInputs({
             hint="Backend used to generate predictions; blank defaults to vLLM."
           />
         </div>
-        {/* User caps stay blank by default. Queue wait is the one bounded
-            operational default and begins at 48 hours. */}
+        {/* User caps stay blank by default; blank means unlimited. */}
         <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2 lg:grid-cols-[0.75fr_0.85fr_1.25fr_1.65fr_1.1fr]">
           <LimitField label="Iterations" value={iterations} onChange={(v) => onChange({ iterations: v })}
             hint="Maximum optimization rounds; blank means no iteration cap." />
@@ -1960,9 +1959,9 @@ export function RunInputs({
           <LimitField label="Time limit (hours)" value={timeLimitHours}
             onChange={(v) => onChange({ timeLimitHours: v })}
             hint="Active experiment time only; Slurm queue wait is excluded." />
-          <LimitField label="Max queue wait (hours)" value={queueWaitHours || "48"}
+          <LimitField label="Max queue wait (hours)" value={queueWaitHours}
             onChange={(v) => onChange({ queueWaitHours: v })}
-            hint="Maximum Slurm PENDING time; blank defaults to 48 hours (max 168)." />
+            hint="Maximum Slurm PENDING time; blank means unlimited (optional cap: max 168 hours)." />
           <NumberField
             label="Stop threshold" value={stopThreshold}
             onChange={(v) => onChange({ stopThreshold: v })}

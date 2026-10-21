@@ -492,10 +492,10 @@ class Run(Base):
     # about this launch, not a reusable experimental configuration.
     max_runtime_hours: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0")
     # Maximum time Zevo may leave an automatically submitted cluster job in
-    # queue. Queue wait is excluded from max_runtime_hours and every launch has
-    # an explicit, bounded allowance greater than 0 and at most 168 hours.
+    # queue. Queue wait is excluded from max_runtime_hours. Zero means unlimited;
+    # an explicit positive cap may be at most 168 hours.
     max_queue_wait_hours: Mapped[float] = mapped_column(
-        Float, default=48.0, server_default="48.0"
+        Float, default=0.0, server_default="0.0"
     )
     # #7 — Zevo model-improvement loop policy. min_delta_per_iter triggers
     # plateau stop when 2+ consecutive iterations move the score by

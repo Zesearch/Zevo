@@ -330,7 +330,7 @@ class SlurmStageJobContract(BaseModel):
             "rendezvous. num_gpus must be an exact multiple of nodes."
         ),
     )
-    max_queue_wait_hours: float = Field(48, gt=0, le=168)
+    max_queue_wait_hours: float = Field(0, ge=0, le=168)
     openapi_endpoint: Literal["/api/openapi.json"] = "/api/openapi.json"
 
     @property
@@ -1039,12 +1039,12 @@ class InfraTaskInput(AgentTaskInput):
     )
 
     max_queue_wait_hours: float = Field(
-        48,
-        gt=0,
+        0,
+        ge=0,
         le=168,
         description=(
             "Maximum Slurm PENDING time for an automatic cluster submission. "
-            "Cancel only the exact Zevo job when this expires. Queue time is "
+            "Zero means unlimited. Cancel only the exact Zevo job when a positive cap expires. Queue time is "
             "excluded from the Run runtime cap."
         ),
     )

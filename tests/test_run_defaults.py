@@ -500,6 +500,7 @@ async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_
         assert run.iteration_budget == 0
         assert run.max_cost_usd == 0
         assert run.max_runtime_hours == 0
+        assert run.max_queue_wait_hours == 0
         assert run.stop_threshold is None
         assert run.generation_backend == "vllm"
         assert run.gpu_provider == "cluster"
@@ -848,7 +849,8 @@ async def test_selected_multi_validation_setting_matches_suite_only_request(
 
 
 @pytest.mark.asyncio
-async def test_run_request_reports_the_persisted_runtime() -> None:
+@pytest.mark.parametrize("queue_hours", [0, 48])
+async def test_run_request_reports_the_persisted_runtime(queue_hours) -> None:
     from zevo.api.routers.shared.runs import get_run_request
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -862,7 +864,7 @@ async def test_run_request_reports_the_persisted_runtime() -> None:
             agent_objective="inspect runtime",
             status="running", gpu_provider="cluster", num_gpus=4,
             generation_backend="hf", holdout={}, history=[],
-            gpu_allocation_mode="per_run", max_queue_wait_hours=48,
+            gpu_allocation_mode="per_run", max_queue_wait_hours=queue_hours,
             lifecycle={"model_save_policy": {"weights": "remote", "remote_dir": "/models"}},
         ))
         await db.commit()
@@ -874,7 +876,7 @@ async def test_run_request_reports_the_persisted_runtime() -> None:
         assert response.num_gpus == 4
         assert response.generation_backend == "hf"
         assert response.gpu_allocation_mode == "per_run"
-        assert response.max_queue_wait_hours == 48
+        assert response.max_queue_wait_hours == queue_hours
         assert response.model_save_policy == {"weights": "remote", "remote_dir": "/models"}
 
     await engine.dispose()
