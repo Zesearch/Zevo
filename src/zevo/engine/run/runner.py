@@ -1277,7 +1277,9 @@ async def _build_validation_suite_members(
     Only the ordinary optimization Inference owns a suite. Engine-created
     legacy mirrors and held-out Test tickets remain single-member work orders.
     """
-    if ticket.lane != "optimization" or str(payload.get("test_set_name") or ""):
+    from zevo.engine.run.remeasurement import replay_item
+    replay = replay_item(run, ticket.id)
+    if ticket.lane != "optimization" or (str(payload.get("test_set_name") or "") and not replay):
         return []
     suite = _validation_sets(run)
     if len(suite) <= 1:
@@ -1287,8 +1289,11 @@ async def _build_validation_suite_members(
     base_model = str(payload.get("base_model") or "")
     source_pins = dict(payload.get("configuration_pins") or {})
     members: list[InferenceSuiteMemberInput] = []
-    for index, item in enumerate(suite[1:], start=1):
+    primary = (replay.get("active_members") or [suite[0]["name"]])[0]
+    for index, item in enumerate(suite):
         name = str(item.get("name") or f"Validation {index + 1}")
+        if name == primary or name in replay.get("retained", {}):
+            continue
         scoring_set = str(item.get("public") or "")
         sample_submission = str(item.get("sample_submission") or "")
         profile = str(item.get("inference_data_profile") or "")
@@ -1362,8 +1367,12 @@ async def _build_holdout_suite_members(
         (index, item) for index, item in enumerate(suite)
         if index != primary_index
     ]
+    from zevo.engine.run.remeasurement import replay_item
+    retained = replay_item(run, ticket.id).get("retained", {})
     for position, (index, item) in enumerate(ordered, start=1):
         name = str(item.get("name") or f"Test {index + 1}")
+        if name in retained:
+            continue
         scoring_set = resolve_asset(str(item.get("public") or ""))
         sample_submission = resolve_asset(
             str(item.get("sample_submission") or "")
@@ -1576,7 +1585,8 @@ async def _build_evaluation_suite_members(
             from zevo.holdout_storage import resolve_asset
         for index, item in enumerate(suite):
             name = str(item.get("name") or "")
-            if name == primary_name:
+            from zevo.engine.run.remeasurement import replay_item
+            if name == primary_name or name in replay_item(run, ticket.id).get("retained", {}):
                 continue
             product = next((
                 candidate for candidate in products
@@ -6407,6 +6417,12 @@ async def run_ticket(
                         "test_set_name": f"{_VALIDATION_MEMBER_PREFIX}{primary_name}",
                         "scoring_set": inp.scoring_set,
                         "suite_primary": True,
+                    })
+                elif tk.lane == "optimization" and _validation_member_name(tk):
+                    artifact_meta.update({
+                        "suite_member_name": _validation_member_name(tk),
+                        "test_set_name": str(tk.payload["test_set_name"]),
+                        "scoring_set": inp.scoring_set, "suite_primary": True,
                     })
                 elif tk.lane == "held_out_test":
                     primary_name = str(
