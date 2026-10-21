@@ -391,12 +391,14 @@ def _check_validation_sets(req: UserRequest, items: list[PreflightItem]) -> None
         except (OSError, ValueError, SplitError) as exc:
             _block(items, f"{code}_unreadable", f"Validation set {member.name!r} cannot be read: {exc}")
             continue
-        if len(rows) < MIN_VALIDATION_ROWS:
-            _block(
+        if not rows:
+            _block(items, f"{code}_empty", f"Validation set {member.name!r} is empty.")
+        elif len(rows) < MIN_VALIDATION_ROWS:
+            _risk(
                 items, f"{code}_too_small",
                 f"Validation set {member.name!r} has {len(rows)} row(s); "
-                f"each Validation set requires at least {MIN_VALIDATION_ROWS}.",
-                "Use the full split or choose a larger independent dataset.",
+                "this independent Validation set is allowed, but scores may be noisy.",
+                f"Consider at least {MIN_VALIDATION_ROWS} independent rows for a more stable signal.",
             )
 
 

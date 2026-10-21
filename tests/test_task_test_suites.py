@@ -362,8 +362,9 @@ async def test_validation_is_derived_per_eligible_suite_member(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("validation_rows", [0, 1, 80, 166, 199, 200])
 async def test_independent_validation_suite_keeps_all_test_rows(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, validation_rows,
 ) -> None:
     from zevo.contracts.orchestrator import TaskTestSet, UserRequest
     from zevo.engine.run.split_settlement import settle_splits
@@ -384,7 +385,7 @@ async def test_independent_validation_suite_keeps_all_test_rows(
 
     math, math_sample = write_set("test-math", 500)
     qa, qa_sample = write_set("test-qa", 500)
-    gsm, gsm_sample = write_set("validation-gsm", 200)
+    gsm, gsm_sample = write_set("validation-gsm", validation_rows)
     arc, arc_sample = write_set("validation-arc", 240)
     monkeypatch.chdir(tmp_path)
     tests = [
@@ -427,14 +428,20 @@ async def test_independent_validation_suite_keeps_all_test_rows(
         started_at=datetime.now(timezone.utc),
     )
 
+    if validation_rows == 0:
+        from zevo.engine.run.split_settlement import SplitSettlementError
+        with pytest.raises(SplitSettlementError, match="empty"):
+            await settle_splits(run, request, work_dir_root=str(tmp_path / "work"))
+        return
+
     agent_request, holdout, _note = await settle_splits(
         run, request, work_dir_root=str(tmp_path / "work"),
     )
-
+    assert ("scores may be noisy" in _note) == (validation_rows < 200)
     assert [item["name"] for item in holdout["validation_sets"]] == [
         "GSM8K", "ARC Challenge",
     ]
-    assert holdout["validation_rows"] == 440
+    assert holdout["validation_rows"] == validation_rows + 240
     assert holdout["validation_source"] == "independent_validation_suite"
     assert holdout["validation_suite_policy"] == "supplied"
     assert holdout["validation_sets"][0]["validation_set"] == gsm

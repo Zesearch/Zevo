@@ -3,7 +3,7 @@ import type { RunInputValues } from "../components/RunInputs";
 
 const RUN_ONLY_FIELDS = new Set<keyof RunInputValues>([
   "gpuProvider", "cloudBackend", "sshHostId", "numGpus", "gpuAllocationMode",
-  "generation_backend", "timeLimitHours", "queueWaitHours",
+  "generation_backend", "timeLimitHours", "queueWaitHours", "adaptiveMidTrainingEvaluation",
   // Customized execution preferences are not part of saved Setting identity.
   "promptFraming", "systemPrompt", "lossObjectiveConfig", "inferenceConfig",
   "decodingStrategy", "maxNewTokens", "temperature", "topP", "topK",
