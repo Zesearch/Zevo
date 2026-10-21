@@ -177,16 +177,12 @@ export function ModelsPage() {
                 {/* Header: tag + compare toggle */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    {/* The stable Registry tag is both the visible name and
-                        the exact key used by every API call. The model card
-                        opens from the name it describes, rather than a footer of its own.
-                        No "MODEL" label above it — the icon says what this is,
-                        the same way a dataset card and a task card do. */}
+                    {/* The model name opens its run; the document icon opens its model card. */}
                     <div className="flex min-w-0 items-center gap-1.5">
                       <Box size={14} className="shrink-0 text-brass-400/70" />
-                      <span className="readout truncate text-sm font-semibold text-ink" title={m.version_tag}>
+                      {m.run_id ? <Link to={`/runs/${m.run_id}`} className="readout truncate text-sm font-semibold text-ink hover:text-brass-300" title="Open producing run">
                         {modelName(m)}
-                      </span>
+                      </Link> : <span className="readout truncate text-sm font-semibold text-ink">{modelName(m)}</span>}
                       <button
                         onClick={() => setDrawer({ mode: "card", tag: m.version_tag })}
                         className="shrink-0 rounded p-0.5 text-slate-500 transition hover:text-brass-300"
@@ -273,8 +269,7 @@ export function ModelsPage() {
                 {/* The commands sit at the bottom of the card; nothing between
                     them and the fields now that the footer strip is gone. */}
                 <div className="mt-auto">
-                  <Commands tag={m.version_tag} modelPath={m.model_path}
-                            modelPathAbs={m.model_path_abs} />
+                  <Commands tag={m.version_tag} />
                 </div>
               </Bezel>
             );
@@ -300,103 +295,94 @@ export function ModelsPage() {
   );
 }
 
-/**
- * The two things you do with a finished model: find it, or publish it.
- *
- * "Download" used to offer `docker compose cp backend:<model_path> ./<tag>`,
- * which was wrong twice over. `model_path` is a HOST path (the container keeps
- * runs under `/app/data/runs`), so the command errored. And had it
- * worked it would have copied the file to itself: `./data` is bind-mounted into
- * the container, so the weights the registry pulled are already sitting on this
- * machine at exactly that path. There was nothing to download.
- *
- * So it says where the model IS. Publishing is still shown as a command rather
- * than performed, because it puts the model on the user's HuggingFace account
- * and that should not happen because a button was in reach.
- */
-function Commands({ tag, modelPath, modelPathAbs }: {
-  tag: string; modelPath: string; modelPathAbs: string;
-}) {
+type ModelStorage = {
+  location: { kind: "hf" | "remote" | "local" | "missing"; machine: string; path: string; url: string };
+  hf_url: string;
+  can_upload: boolean;
+  upload: { status?: string; error?: string; repo_id?: string };
+};
+
+function Commands({ tag }: { tag: string }) {
   const [open, setOpen] = useState<"locate" | "upload" | null>(null);
   const [copied, setCopied] = useState(false);
-  const [user, setUser] = useState("");
-
-  // The absolute host path, so it can be pasted anywhere. Falls back to the
-  // repo-relative one when the deployment did not say where the repo lives.
-  const where = modelPathAbs || modelPath;
-  const locate = where || `curl -sO http://localhost:8001/api/models/${tag}/card`;
-  // Self-contained, because nothing here ships it: `huggingface_hub` is not in
-  // the backend image and the CLI is not on the host either, so the two-line
-  // version this used to show failed on the first line with "command not found".
-  const upload = [
-    "pip install -U huggingface_hub",
-    "hf auth login",
-    `hf upload ${user.trim() || "<your-username>"}/${tag} ${where || `./${tag}`}`,
-  ].join("\n");
-  const cmd = open === "locate" ? locate : open === "upload" ? upload : "";
-  const note =
-    open === "locate" && where
-      ? "Already on this machine. Nothing to fetch. Copy it wherever you want it."
-      : open === "locate"
-      ? "This version kept no model: a later iteration beat it. The command fetches its model card instead."
-      : open === "upload" && !where
-      ? "This version kept no model, so there is nothing to push."
-      : open === "upload"
-      ? "Creates the repo on your own account if it does not exist."
-      : "";
-
-  return (
-    <div className="pt-1">
-      <div className="flex flex-wrap gap-1.5">
-        {(["locate", "upload"] as const).map((k) => (
-          <button
-            key={k}
-            onClick={() => { setOpen(open === k ? null : k); setCopied(false); }}
-            className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-2xs transition ${
-              open === k
-                ? "border-brass-500/40 bg-brass-500/10 text-brass-300"
-                : "border-hair text-slate-400 hover:text-brass-300"
-            }`}
-          >
-            {k === "locate" ? <FolderOpen size={12} /> : <UploadCloud size={12} />}
-            {k === "locate" ? "where it is" : "push to HuggingFace"}
-          </button>
-        ))}
-      </div>
-
-      {open === "upload" && where && (
-        <label className="mt-2 block">
-          <span className="field-label mb-1 block">
-            your HuggingFace username
-          </span>
-          <input
-            value={user}
-            onChange={(e) => { setUser(e.target.value); setCopied(false); }}
-            placeholder="your-username"
-            className="w-full rounded border border-hair bg-canvas px-2 py-1 font-mono text-2xs text-slate-200 placeholder:text-slate-600 focus:border-brass-500/50"
-          />
-        </label>
-      )}
-
-      {cmd && (
-        <div className="mt-2">
-          <div className="flex items-start gap-2 rounded-bezel border border-hair bg-canvas/60 px-2.5 py-2">
-            <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-2xs leading-relaxed text-slate-300">{cmd}</pre>
-            <button
-              onClick={() => { void navigator.clipboard.writeText(cmd); setCopied(true); }}
-              className="shrink-0 rounded p-1 text-slate-500 transition hover:text-brass-300"
-              title="Copy"
-            >
-              {copied ? <Check size={12} /> : <Copy size={12} />}
-            </button>
-          </div>
-          {note && <p className="mt-1.5 text-2xs leading-relaxed text-slate-500">{note}</p>}
-        </div>
-      )}
-    </div>
+  const [repo, setRepo] = useState("");
+  const [isPrivate, setPrivate] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [missingToken, setMissingToken] = useState(false);
+  const endpoint = `/api/models/${encodeURIComponent(tag)}`;
+  const { data, error: storageError, mutate } = useSWR<ModelStorage>(`${endpoint}/storage`, {
+    refreshInterval: (current) => current?.upload.status === "uploading" ? 3000 : 0,
+  });
+  const { data: settings, error: settingsError } = useSWR<{ entries: { name: string; present: boolean }[] }>(
+    open === "upload" ? "/api/settings" : null,
   );
-}
+  const hasToken = settings?.entries.some(e => e.name === "HF_TOKEN" && e.present);
+  const uploading = submitting || data?.upload.status === "uploading";
+  const needsToken = missingToken || (settings !== undefined && !hasToken);
+  const validRepo = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/.test(repo.trim());
 
+  async function upload() {
+    setSubmitting(true);
+    setError("");
+    setMissingToken(false);
+    try {
+      const response = await fetch(`${endpoint}/upload-hf`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ weights: "hf", hf_repo_id: repo.trim(), hf_private: isPrivate }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        if (body.detail?.code === "hf_token_missing") setMissingToken(true);
+        throw new Error(typeof body.detail === "string" ? body.detail : body.detail?.message || "Could not start upload.");
+      }
+      await mutate();
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not start upload."); }
+    finally { setSubmitting(false); }
+  }
+
+  return <div className="pt-1">
+    <div className="flex flex-wrap gap-1.5">
+      <button className="btn" onClick={() => { setOpen(open === "locate" ? null : "locate"); setCopied(false); }}>
+        <FolderOpen size={12} /> where it is
+      </button>
+      {data?.hf_url ? <a className="btn" href={data.hf_url} target="_blank" rel="noreferrer">View on Hugging Face</a>
+        : data?.can_upload && <button className="btn" onClick={() => { setOpen(open === "upload" ? null : "upload"); setMissingToken(false); }}>
+          <UploadCloud size={12} /> {uploading ? "Uploading…" : "Upload to Hugging Face"}
+        </button>}
+    </div>
+    {storageError && <p role="alert" className="mt-2 text-xs text-coral-300">Could not load model location. <button onClick={() => void mutate()}>Retry</button></p>}
+    {open === "locate" && !data && !storageError && <p role="status" className="mt-2 text-xs text-slate-400">Loading location…</p>}
+    {open === "locate" && data && <div className="mt-2 rounded-bezel border border-hair bg-canvas/60 p-2.5 text-xs">
+      <p className="text-slate-400">{data.location.machine || "No saved model location recorded."}</p>
+      <div className="mt-1 flex items-start gap-2">
+        {data.location.kind === "hf"
+          ? <a className="min-w-0 break-all text-brass-300" href={data.location.url} target="_blank" rel="noreferrer">{data.location.path}</a>
+          : <code className="min-w-0 flex-1 break-all text-slate-300">{data.location.path}</code>}
+        {data.location.path && <button title="Copy model location" onClick={() => {
+          const value = data.location.kind === "remote" ? `${data.location.machine}:${data.location.path}` : data.location.path;
+          void navigator.clipboard.writeText(value).then(() => setCopied(true)).catch(() => setError("Could not copy location."));
+        }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button>}
+      </div>
+      {data.hf_url && data.location.kind !== "hf" && <a className="mt-2 block break-all text-brass-300" href={data.hf_url} target="_blank" rel="noreferrer">Hugging Face: {data.hf_url}</a>}
+    </div>}
+    {open === "upload" && !data?.hf_url && <div className="mt-2 space-y-2 text-xs">
+      {needsToken ? <p>Set a Hugging Face write token in <Link className="text-brass-300 underline" to="/settings">Settings</Link> before uploading.</p>
+        : <>
+          <label className="block"><span className="field-label">Hugging Face repository</span>
+            <input aria-label="Hugging Face repository" value={repo} onChange={e => setRepo(e.target.value)} disabled={uploading}
+              placeholder={`owner/${tag}`} className="mt-1 w-full rounded border border-hair bg-canvas p-2 text-slate-200" />
+          </label>
+          <label className="flex items-center gap-2"><input type="checkbox" checked={isPrivate} disabled={uploading} onChange={e => setPrivate(e.target.checked)} />Private repository</label>
+          <p className="text-slate-500">Uses your Hugging Face write token from Settings. Keeps the original model.</p>
+          <button className="btn" disabled={uploading || !validRepo || !hasToken} onClick={() => void upload()}>{uploading ? "Uploading…" : "Upload"}</button>
+          {settingsError && <p role="alert">Could not check your token. Open <Link className="text-brass-300 underline" to="/settings">Settings</Link> to check it.</p>}
+        </>}
+    </div>}
+    {uploading && <p role="status" className="mt-2 text-xs text-slate-400">Upload in progress. You can leave this page.</p>}
+    {(error || data?.upload.error) && <p role="alert" className="mt-2 text-xs text-coral-300">{error || data?.upload.error}</p>}
+  </div>;
+}
 
 /** The Registry tag is both the stable key and the user-facing model name. */
 function modelName(m: ModelDTO): string {

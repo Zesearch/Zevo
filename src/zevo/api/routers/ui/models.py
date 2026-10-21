@@ -42,7 +42,10 @@ from zevo.engine.observe.run_metrics import baseline_and_best_test
 from zevo.engine.method.evaluation_identity import compatible_identities
 
 
+from zevo.api.routers.ui.model_storage import router as storage_router
+
 router = APIRouter()
+router.include_router(storage_router)
 
 
 # ─────────────────────────────── DTOs ────────────────────────────────────────
