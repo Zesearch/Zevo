@@ -376,3 +376,168 @@ async def test_staged_scores_cannot_change_headline_and_old_evaluations_are_supe
     evaluation.id = "old-eval"
     _apply_run_score_monitor(run, evaluation, result, {"score": .99})
     assert run.best_validation_score == .4
+
+
+async def add_looping_outputs(session, source, root, member='math'):
+    import csv
+    products = await rm._products(session, source.id, 'generation_diagnostics')
+    product = next(p for p in products if p.meta['suite_member_name'] == member)
+    Path(product.path).write_text(diagnostics(limited=10).model_dump_json())
+    path = root / f'{source.id}-{member}-pred.csv'
+    with path.open('w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=['id', 'complete_prediction'])
+        w.writeheader()
+        w.writerows({'id': i, 'complete_prediction': 'These exact words keep repeating without solving the problem. ' * 100 if i < 10 else 'done'} for i in range(20))
+    session.add(WorkProduct(ticket_id=source.id, role='predictions', path=str(path), meta={'suite_member_name': member}))
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_repetitive_current_checkpoint_does_not_expand(scenario):
+    session, run, originals, root = scenario
+    await add_looping_outputs(session, originals[-1], root)
+    evidence = await rm._evidence(session, run, originals[-1])
+    assert evidence['math']['repetition']['dominated']
+    assert not await rm.intercept_completion(session, originals[-1])
+    assert not rm.batches(run)
+    assert run.status == 'running'
+
+
+@pytest.mark.asyncio
+async def test_iteration_two_retains_repetitive_baseline_but_replays_iteration_one(scenario):
+    session, run, originals, root = scenario
+    await add_looping_outputs(session, originals[0], root)
+    run.holdout = {**run.holdout, 'validation_suite_results': {
+        f"baseline|0|{originals[0].payload['base_model']}": {
+            'math': {'score': .2, 'metric': 'accuracy', 'metric_direction': 'max'},
+            'qa': {'score': .4, 'metric': 'accuracy', 'metric_direction': 'max'},
+        }}}
+    await session.commit()
+    assert await rm.intercept_completion(session, originals[-1])
+    batch = rm.pending(run)
+    baseline, iteration_one, current = batch['cohort']
+    assert baseline['retained_only']
+    assert baseline['retained']['math']['evidence']['repetition']['dominated']
+    assert not iteration_one['retained_only']
+    assert not current['retained_only']
+    assert await session.get(Ticket, baseline['inference_id']) is None
+    assert await session.get(Ticket, iteration_one['inference_id']) is not None
+
+
+@pytest.mark.asyncio
+async def test_partial_repetition_exemption_preserves_score_and_selects_other_primary(scenario, monkeypatch):
+    session, run, originals, root = scenario
+    await add_looping_outputs(session, originals[0], root)
+    # Both benchmarks expand; only baseline math has repetition evidence.
+    qa_diag = next(p for p in await rm._products(session, originals[-1].id, 'generation_diagnostics') if p.meta['suite_member_name']=='qa')
+    Path(qa_diag.path).write_text(diagnostics(limited=3).model_dump_json())
+    run.holdout = {**run.holdout, 'validation_suite_results': {
+        f"baseline|0|{originals[0].payload['base_model']}": {
+            'math': {'score': .2, 'metric': 'accuracy', 'metric_direction': 'max'},
+            'qa': {'score': .4, 'metric': 'accuracy', 'metric_direction': 'max'},
+        }}, 'validation_sets': [{**m, 'public': m['validation_set'], 'inference_data_profile': '/profile.json'} for m in run.holdout['validation_sets']]}
+    await session.commit()
+    async def handoff(session, run, batch):
+        batch['handoff_pending'] = False
+        rm._store(run, batch)
+        await session.commit()
+    monkeypatch.setattr(rm, '_handoff', handoff)
+    await rm.intercept_completion(session, originals[-1])
+    batch = deepcopy(rm.pending(run))
+    baseline = batch['cohort'][0]
+    assert baseline['active_members'] == ['qa']
+    replay = await session.get(Ticket, baseline['inference_id'])
+    assert replay.payload['test_set_name'] == 'validation:qa'
+    assert rm.configuration_override(run, replay, 'math') == baseline['retained']['math']['config_path']
+    assert load_inference_config(rm.configuration_override(run, replay, 'qa')).measurement.max_new_tokens == 512
+    for i, item in enumerate(batch['cohort']):
+        await rm.advance(session, run.id)
+        replay = await session.get(Ticket, item['inference_id'])
+        replay.status = 'succeeded'
+        for name in item['active_members']:
+            path = root / f'{replay.id}-{name}.json'
+            path.write_text(diagnostics().model_dump_json())
+            for role in ['predictions', 'generation_diagnostics']:
+                session.add(WorkProduct(ticket_id=replay.id, role=role, path=str(path), meta={'suite_member_name': name}))
+        await session.commit()
+        await rm.intercept_completion(session, replay)
+        evaluation = await session.get(Ticket, rm.pending(run)['cohort'][i]['evaluation_id'])
+        evaluation.status = 'succeeded'
+        for name in item['active_members']:
+            session.add(WorkProduct(ticket_id=evaluation.id, role='metrics', path=str(root / f'{evaluation.id}-{name}-metrics.json'), meta={'suite_member_name': name, 'score': .8}))
+        await session.commit()
+        await rm.intercept_completion(session, evaluation)
+    assert rm.batches(run)[0]['status'] == 'published', rm.batches(run)[0].get('error')
+    scores = (await session.scalars(select(ScoreEvent).order_by(ScoreEvent.iteration))).all()
+    assert [s.score for s in scores] == pytest.approx([.5,.8,.8])
+    assert 'math' in scores[0].extras['repetition_exemptions']
+
+
+@pytest.mark.asyncio
+async def test_replay_input_builders_exclude_retained_primary(scenario):
+    from zevo.engine.run.runner import _build_validation_suite_members, _build_evaluation_suite_members
+    session, run, originals, root = scenario
+    await add_looping_outputs(session, originals[0], root)
+    for p in await rm._products(session, originals[-1].id, 'generation_diagnostics'):
+        Path(p.path).write_text(diagnostics(limited=4).model_dump_json())
+    run.holdout = {**run.holdout, 'validation_suite_results': {
+        f"baseline|0|{originals[0].payload['base_model']}": {
+            'math': {'score': .2}, 'qa': {'score': .4}}},
+        'validation_sets': [{**m, 'public': m['validation_set'], 'inference_data_profile': '/profile.json'} for m in run.holdout['validation_sets']]}
+    await session.commit()
+    await rm.intercept_completion(session, originals[-1])
+    item = rm.pending(run)['cohort'][0]
+    inference = await session.get(Ticket, item['inference_id'])
+    members = await _build_validation_suite_members(ticket=inference, payload=inference.payload, work_dir=str(root), run=run, session=session)
+    assert not members  # qa is primary; retained math must not be submitted again.
+    evaluation = Ticket(id='test-eval', run_id=run.id, agent_id='evaluation', lane='optimization',
+                        payload={'test_set_name': 'validation:qa'})
+    batch = deepcopy(rm.pending(run));batch['cohort'][0]['evaluation_id'] = evaluation.id
+    rm._store(run, batch)
+    members = await _build_evaluation_suite_members(evaluation, evaluation.payload,
+        {'predictions': {'source_ticket_id': inference.id}}, run, session)
+    assert not members  # Retained math must not be rescored either.
+
+
+@pytest.mark.asyncio
+async def test_previous_iteration_can_be_exempt_too(scenario):
+    session, run, originals, root = scenario
+    await add_looping_outputs(session, originals[1], root)
+    run.holdout = {**run.holdout, 'validation_suite_results': {
+        f"trained|1|{originals[1].payload['base_model']}": {
+            'math': {'score': .2}, 'qa': {'score': .6}}}}
+    await session.commit()
+    await rm.intercept_completion(session, originals[2])
+    batch = rm.pending(run)
+    assert not batch['cohort'][0]['retained_only']
+    assert batch['cohort'][1]['retained_only']
+    assert not batch['cohort'][2]['retained_only']
+
+
+@pytest.mark.asyncio
+async def test_fully_exempt_baseline_score_survives_publish(scenario, monkeypatch):
+    session, run, originals, root = scenario
+    await add_looping_outputs(session, originals[0], root)
+    run.holdout = {**run.holdout, 'validation_suite_results': {
+        f"baseline|0|{originals[0].payload['base_model']}": {
+            'math': {'score': .2}, 'qa': {'score': .4}}}}
+    await session.commit()
+    async def handoff(session, run, batch):
+        batch['handoff_pending'] = False
+        rm._store(run, batch)
+        await session.commit()
+    monkeypatch.setattr(rm, '_handoff', handoff)
+    await rm.intercept_completion(session, originals[2])
+    batch = deepcopy(rm.pending(run))
+    for index, item in enumerate(batch['cohort'][1:], 1):
+        await rm.advance(session, run.id)
+        inference = await session.get(Ticket, item['inference_id'])
+        await finish_inference(session, inference, root)
+        await rm.intercept_completion(session, inference)
+        evaluation = await session.get(Ticket, rm.pending(run)['cohort'][index]['evaluation_id'])
+        await finish_evaluation(session, evaluation, root)
+        await rm.intercept_completion(session, evaluation)
+    assert rm.batches(run)[0]['status'] == 'published'
+    scores = (await session.scalars(select(ScoreEvent).order_by(ScoreEvent.iteration))).all()
+    assert [s.score for s in scores] == pytest.approx([.3, .8, .8])
+    assert 'measurement_revision' not in (scores[0].extras or {})

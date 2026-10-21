@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.contracts.configuration import InferenceRunConfig, load_inference_config
 from zevo.contracts.inference import GenerationDiagnostics
+from zevo.contracts.length_calibration import prediction_outputs, repetition_evidence
 from zevo.db.models import Run, ScoreEvent, Ticket, TicketNotice, WorkProduct
 
 KEY = "token_budget_remeasurements"
@@ -52,12 +53,27 @@ def is_superseded_prediction(run: Run, ticket: Ticket) -> bool:
     return any(b["status"] == "published" and source_id in {c["source_id"] for c in b["cohort"]} for b in batches(run))
 
 
+def replay_item(run: Run, ticket_id: str) -> dict:
+    for batch in reversed(batches(run)):
+        for item in batch["cohort"]:
+            if ticket_id in (item.get("inference_id"), item.get("evaluation_id")):
+                return item
+    return {}
+
+
+def needs_expansion(item: dict) -> bool:
+    return item["fraction"] > THRESHOLD and not item.get("repetition", {}).get("dominated", False)
+
+
 def configuration_override(run: Run, ticket: Ticket, member_name: str) -> str:
     """Staged contracts are visible only to their own engine-created tickets."""
     for batch in reversed(batches(run)):
         if batch["lane"] != ticket.lane or batch["base_model"] != (ticket.payload or {}).get("base_model"):
             continue
-        if ticket.id in replay_ids(batch) or batch["status"] == "published":
+        if ticket.id in replay_ids(batch):
+            retained = replay_item(run, ticket.id).get("retained", {}).get(member_name)
+            return retained["config_path"] if retained else batch["configs"].get(member_name, "")
+        if batch["status"] == "published":
             return batch["configs"].get(member_name, "")
     return ""
 
@@ -109,8 +125,29 @@ async def _evidence(session: AsyncSession, run: Run, ticket: Ticket) -> dict[str
     for product in await _products(session, ticket.id, "generation_diagnostics"):
         name = str((product.meta or {}).get("suite_member_name") or primary)
         if name not in evidence:
-            evidence[name] = question_truncation(GenerationDiagnostics.model_validate_json(
-                Path(product.path).read_text(encoding="utf-8")))
+            diagnostics = GenerationDiagnostics.model_validate_json(Path(product.path).read_text(encoding="utf-8"))
+            evidence[name] = question_truncation(diagnostics)
+            records = [r.model_dump() for r in diagnostics.records]
+            predictions = await _products(session, ticket.id, "predictions")
+            configs = await _products(session, ticket.id, "inference_config")
+            pred = next((p for p in predictions if (p.meta or {}).get("suite_member_name", primary) == name), None)
+            cfg = next((p for p in configs if (p.meta or {}).get("suite_member_name", primary) == name), None)
+            if pred and cfg:
+                try:
+                    config = load_inference_config(cfg.path)
+                    column = config.implementation_config.get("raw_output_column", "complete_prediction")
+                    outputs = prediction_outputs(pred.path, records, column)
+                    evidence[name]["repetition"] = repetition_evidence(records, outputs)
+                    evidence[name]["max_new_tokens"] = config.measurement.max_new_tokens
+                    from hashlib import sha256
+                    digest = sha256()
+                    with open(pred.path, "rb") as handle:
+                        for chunk in iter(lambda: handle.read(1 << 20), b""):
+                            digest.update(chunk)
+                    evidence[name]["predictions_sha256"] = digest.hexdigest()
+                    product.meta = {**(product.meta or {}), "truncation_analysis": evidence[name]}
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass  # Missing/malformed raw outputs never justify an exemption.
     return evidence
 
 
@@ -133,11 +170,11 @@ async def _fail(session: AsyncSession, run: Run, batch: Batch, reason: str) -> N
 
 
 async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dict) -> bool:
-    affected = [name for name, item in evidence.items() if item["fraction"] > THRESHOLD]
+    affected = [name for name, item in evidence.items() if needs_expansion(item)]
     model = str((trigger.payload or {}).get("base_model") or "")
     revision = {"id": uuid4().hex[:16], "status": "running", "lane": trigger.lane,
                 "base_model": model, "trigger_id": trigger.id, "evidence": evidence,
-                "configs": {}, "cohort": []}
+                "configs": {}, "cohort": [], "affected": affected}
     try:
         previous = [b for b in batches(run) if b["lane"] == trigger.lane and b["base_model"] == model]
         if len(previous) >= MAX_REVISIONS:
@@ -156,7 +193,7 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
             if candidate.id in all_replays - published_replays:
                 continue
             # Legacy one-member mirrors cannot represent a complete suite.
-            if trigger.lane == "optimization" and payload.get("test_set_name"):
+            if trigger.lane == "optimization" and payload.get("test_set_name") and candidate.id not in published_replays:
                 continue
             latest[(payload.get("model_source"), candidate.iteration)] = candidate
         cohort = sorted(latest.values(), key=lambda t: ((t.payload or {}).get("model_source") != "base_model", t.iteration))
@@ -176,7 +213,10 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
                     raise ValueError("a previously compared checkpoint is missing from the replay cohort")
         products = await _products(session, baseline.id, "inference_config")
         for index, name in enumerate(names):
-            path = configuration_override(run, baseline, name)
+            # A retained baseline member may still use its old cap. New revisions
+            # must start from the latest published cohort budget, not that exemption.
+            path = next((b["configs"].get(name, "") for b in reversed(previous)
+                         if b["status"] == "published"), "")
             if not path:
                 product = next((p for p in products if (p.meta or {}).get("suite_member_name", names[0]) == name), None)
                 if product is None:
@@ -193,14 +233,47 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
             destination.write_text(config.model_dump_json(indent=2) + "\n", encoding="utf-8")
             revision["configs"][name] = str(destination)
         revision["cohort"] = [{"source_id": t.id, "inference_id": f"remeasure-{revision['id']}-{i:03d}"} for i, t in enumerate(cohort)]
+        await _plan_retention(session, run, revision, affected)
         _store(run, revision)
         session.add(TicketNotice(ticket_id=trigger.id, code="token_budget_remeasurement",
-                                 severity="info", body="High question-level truncation detected. Replaying baseline and all compared checkpoints under one revised token budget; scores remain unchanged until the cohort completes."))
+                                 severity="info", body="High question-level truncation detected. Replaying baseline and previous checkpoints under revised budgets, retaining benchmark scores with verified repetition exemptions; scores remain unchanged until the cohort completes."))
         await session.commit()
         return True
     except (ValueError, OSError) as exc:
         await _fail(session, run, revision, str(exc))
         return True
+
+
+async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affected: list[str]) -> None:
+    """Exempt only measured model/member pairs with actual repetition evidence."""
+    names = list(batch["configs"])
+    for item in batch["cohort"]:
+        source = await session.get(Ticket, item["source_id"])
+        evidence = await _evidence(session, run, source)
+        kind = "baseline" if source.payload.get("model_source") == "base_model" else "trained"
+        key = f"{kind}|{source.iteration}|{batch['base_model']}"
+        prefix = "suite" if batch["lane"] == "held_out_test" else "validation_suite"
+        scores = (run.holdout or {}).get(f"{prefix}_results", {}).get(key, {})
+        retained = {}
+        for name in affected:
+            ev = evidence.get(name, {})
+            if not ev.get("repetition", {}).get("dominated") or name not in scores:
+                continue
+            assets = {}
+            for role in ("predictions", "generation_diagnostics", "inference_config"):
+                product = next((p for p in await _products(session, source.id, role)
+                                if (p.meta or {}).get("suite_member_name", names[0]) == name), None)
+                if product is None or not Path(product.path).is_file():
+                    break
+                assets[role] = {"path": product.path, "meta": deepcopy(product.meta)}
+            if len(assets) == 3:
+                retained[name] = {"reason": "repetition_dominated_truncation", "evidence": ev,
+                                  "score": deepcopy(scores[name]), "assets": assets,
+                                  "config_path": assets["inference_config"]["path"]}
+        item["retained"] = retained
+        item["retained_only"] = set(affected) <= set(retained)
+        # If every changed member is exempt, preserve the entire existing point.
+        item["active_members"] = [] if item["retained_only"] else [n for n in names if n not in retained]
 
 
 async def _new_inference(session: AsyncSession, run: Run, batch: Batch, item: dict) -> Ticket:
@@ -210,7 +283,23 @@ async def _new_inference(session: AsyncSession, run: Run, batch: Batch, item: di
                     iteration=source.iteration, payload=deepcopy(source.payload),
                     customization=deepcopy(source.customization or {}), inputs=deepcopy(source.inputs or {}),
                     summary="Remeasure checkpoint with the cohort's revised token budget")
+    if item.get("retained") and item.get("active_members"):
+        primary = item["active_members"][0]
+        member = next(m for m in _suite(run, ticket.lane) if m["name"] == primary)
+        payload = deepcopy(ticket.payload)
+        payload.update(test_set_name=primary if ticket.lane == "held_out_test" else "validation:" + primary,
+                       scoring_set=member["public"], sample_submission=member["sample_submission"])
+        pins = deepcopy(payload.get("configuration_pins") or {})
+        pins["inference_config"] = {**pins.get("inference_config", {}),
+                                    "inference_query": member.get("inference_query", "")}
+        payload["configuration_pins"] = pins
+        ticket.payload = payload
+        ticket.inputs = {**ticket.inputs, "inference_data_profile": {"path": member.get("inference_data_profile", "")}}
     session.add(ticket)
+    await session.flush()
+    for retained in item.get("retained", {}).values():
+        for role, asset in retained["assets"].items():
+            session.add(WorkProduct(ticket_id=ticket.id, role=role, path=asset["path"], meta=asset["meta"]))
     await session.commit()
     return ticket
 
@@ -249,9 +338,13 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
     old_events = []
     batch["previous_history"] = deepcopy(run.history or [])
     for item in batch["cohort"]:
+        if item.get("retained_only"):
+            continue
         inference = await session.get(Ticket, item["inference_id"])
         evaluation = await session.get(Ticket, item["evaluation_id"])
-        components = await _scores(session, evaluation, suite)
+        retained = item.get("retained", {})
+        components = await _scores(session, evaluation, [m for m in suite if m["name"] not in retained])
+        components.update({name: deepcopy(value["score"]) for name, value in retained.items()})
         source = "baseline" if (inference.payload or {}).get("model_source") == "base_model" else "trained"
         # Archive superseded points outside the live ScoreEvent series. Every
         # existing consumer therefore sees exactly one coherent revision.
@@ -286,7 +379,8 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
             ScoreEvent.iteration == inference.iteration, ScoreEvent.source == source,
         ))).all()
         for event in current_events:
-            event.extras = {**(event.extras or {}), "measurement_revision": batch["id"]}
+            event.extras = {**(event.extras or {}), "measurement_revision": batch["id"],
+                            "repetition_exemptions": {n: {"reason": v["reason"], "evidence": v["evidence"]} for n, v in retained.items()}}
     batch["previous_score_events"] = old_events
     batch["status"] = "published"
     batch["handoff_pending"] = True
@@ -332,6 +426,8 @@ async def advance(session: AsyncSession, run_id: str) -> None:
         return
     try:
         for item in batch["cohort"]:
+            if item.get("retained_only"):
+                continue
             inference = await session.get(Ticket, item["inference_id"])
             if inference is None:
                 inference = await _new_inference(session, run, batch, item)
@@ -346,7 +442,7 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                 raise ValueError("checkpoint replay lacks complete question-level diagnostics")
             # Never publish a still-censored cohort. A second complete revision
             # may be attempted, but never unbounded doubling on one checkpoint.
-            if any(e["fraction"] > THRESHOLD for e in evidence.values()):
+            if any(needs_expansion(e) for n, e in evidence.items() if n not in item.get("retained", {})):
                 batch["status"] = "superseded"
                 _store(run, batch)
                 # The next plan must start from the attempted budgets while
@@ -354,7 +450,7 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                 return await _retry(session, run, batch, evidence)
             evaluation = await session.get(Ticket, item["evaluation_id"]) if item.get("evaluation_id") else None
             if evaluation is None:
-                name = str(_suite(run, batch["lane"])[0]["name"])
+                name = (item.get("active_members") or [str(_suite(run, batch["lane"])[0]["name"])])[0]
                 item["evaluation_id"] = f"{item['inference_id']}-eval"
                 _store(run, batch)
                 products = await _products(session, inference.id, "predictions")
@@ -397,13 +493,16 @@ async def _retry(session: AsyncSession, run: Run, batch: Batch, evidence: dict) 
     new.update(id=uuid4().hex[:16], status="running", evidence=evidence, configs={})
     for index, (name, path) in enumerate(batch["configs"].items()):
         config = load_inference_config(path)
-        if evidence[name]["fraction"] > THRESHOLD:
+        if needs_expansion(evidence[name]):
             config = enlarged_config(config, {})
         destination = Path(path).parent / new["id"] / f"{index:03d}.json"
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(config.model_dump_json(indent=2) + "\n", encoding="utf-8")
         new["configs"][name] = str(destination)
     new["cohort"] = [{"source_id": c["source_id"], "inference_id": f"remeasure-{new['id']}-{i:03d}"} for i, c in enumerate(batch["cohort"])]
+    affected = sorted(set(batch.get("affected", [])) | {n for n, e in evidence.items() if needs_expansion(e)})
+    new["affected"] = affected
+    await _plan_retention(session, run, new, affected)
     _store(run, new)
     await session.commit()
 
@@ -426,7 +525,8 @@ async def intercept_completion(session: AsyncSession, ticket: Ticket) -> bool:
     if ticket.agent_id != "inference" or ticket.status not in SUCCESS or (ticket.payload or {}).get("model_source") != "checkpoint":
         return False
     evidence = await _evidence(session, run, ticket)
-    if not any(item["fraction"] > THRESHOLD for item in evidence.values()):
+    if not any(needs_expansion(item) for item in evidence.values()):
+        await session.commit()  # Persist repetition evidence even when no replay is needed.
         return False
     await _start(session, run, ticket, evidence)
     await advance(session, run.id)

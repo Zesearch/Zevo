@@ -174,3 +174,36 @@ def test_retry_count_alone_cannot_waive_truncation(tmp_path, invalid):
     with pytest.raises(ValueError):
         check(c, q, d)
     assert not c.with_name(REPORT_NAME).exists()
+
+
+def test_repetition_accepts_without_budget_increase_and_revalidates(tmp_path):
+    c, q, d = inputs(tmp_path, truncated=8)
+    _, sample, _ = sample_rows(q)
+    pred = tmp_path / 'pred.csv'
+    with pred.open('w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=['id', 'complete_prediction'])
+        w.writeheader()
+        w.writerows({'id': r['id'], 'complete_prediction': ('same long sentence repeated again and again without answering the question. ' * 100) if i < 8 else 'Answer: 42'} for i, r in enumerate(sample))
+    report = check(c, q, d, pred)
+    body = json.loads(report.read_text())
+    assert body['acceptance'] == 'accepted_repetition'
+    assert body['repetition']['repetitive_questions'] == 8
+    validate(c, q)
+    body['repetition_outputs'] = {}
+    report.write_text(json.dumps(body))
+    with pytest.raises(ValueError, match='maximum is 5%'):
+        validate(c, q)
+
+
+def test_repetition_requires_coverage_and_does_not_exempt_normal_reasoning():
+    from zevo.contracts.length_calibration import repetition_evidence
+    records = [{'row_index': i, 'finish_reason': 'length'} for i in range(10)]
+    looping = 'This is a long repeated sentence with no new information. ' * 100
+    normal = ' '.join(f'unique{i}' for i in range(1000))
+    assert not repetition_evidence(records, {i: normal for i in range(10)})['dominated']
+    assert not repetition_evidence(records, {i: looping for i in range(9)})['dominated']
+    assert not repetition_evidence(records, {i: looping if i < 4 else normal for i in range(10)})['dominated']
+    assert repetition_evidence(records, {i: looping if i < 5 else normal for i in range(10)})['dominated']
+    # Final-turn text cannot certify an earlier truncated turn.
+    records.append({'row_index': 0, 'finish_reason': 'stop'})
+    assert not repetition_evidence(records, {i: looping for i in range(10)})['dominated']

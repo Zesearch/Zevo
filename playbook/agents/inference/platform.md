@@ -403,8 +403,17 @@ to the GPU runtime as `zevo_length_calibration.py`. For each member:
    only this sample with the real model, prompt, stop controls and serving backend.
    Write separate GenerationDiagnostics with sample-local row/request indices.
 3. Run `python zevo_length_calibration.py check --config <member-config.yaml>
-   --questions <member-questions.csv> --diagnostics <calibration-diagnostics.json>`.
-   A nonzero exit blocks measured generation. If too many questions truncate,
+   --questions <member-questions.csv> --diagnostics <calibration-diagnostics.json>
+   --predictions <calibration-predictions.csv>`.
+   Always preserve complete raw outputs in the configured raw_output_column (default
+   complete_prediction). Before increasing a budget, the helper checks whether at
+   least 50% of truncated questions show sustained repeated text (at least three
+   truncated questions, complete output coverage required). If accepted_repetition
+   is returned, keep the current cap: do not expand simply to prolong a loop.
+   This is a post-generation decision, not an early-stopping or decoding change.
+   Missing raw outputs or ambiguous multi-turn attribution cannot justify this
+   exemption. Preserve the report's evidence, counts and residual truncation.
+   A nonzero exit blocks measured generation. Otherwise, if too many questions truncate,
    increase the unpinned output budget, recompute context and memory settings,
    revalidate the YAML, and repeat on the SAME sample. Check stopping behavior
    too; more tokens do not fix a model that never terminates.

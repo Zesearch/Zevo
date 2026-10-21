@@ -14,6 +14,59 @@ MAX_TRUNCATION_PERCENT = 5
 REPORT_NAME = "length_calibration.json"
 
 
+REPETITION_RULE = "word8-v1"
+REPETITION_DOMINANCE = 0.5
+
+
+def repetitive_output(text: str) -> bool:
+    """Conservative post-generation signal; never changes or stops generation."""
+    words = text.split()
+    if len(words) < 200:
+        return False
+    grams = [tuple(words[i:i + 8]) for i in range(len(words) - 7)]
+    tail = words[-512:]
+    tail_grams = [tuple(tail[i:i + 8]) for i in range(len(tail) - 7)]
+    return (len(set(grams)) / len(grams) <= .3 or
+            (len(tail) >= 256 and len(set(tail_grams)) / len(tail_grams) <= .1))
+
+
+def repetition_evidence(records: list[dict], outputs: dict[int, str]) -> dict:
+    limited = {r["row_index"] for r in records if r["finish_reason"] == "length"}
+    # A row-level final reply cannot establish repetition in an earlier turn.
+    counts = {}
+    for record in records:
+        counts[record["row_index"]] = counts.get(record["row_index"], 0) + 1
+    covered = {i for i in limited if i in outputs and counts[i] == 1}
+    repeated = {i for i in covered if repetitive_output(outputs[i])}
+    complete = covered == limited
+    return {"rule": REPETITION_RULE, "truncated_questions": len(limited),
+            "covered_questions": len(covered), "repetitive_questions": len(repeated),
+            "repetitive_row_indices": sorted(repeated),
+            "repetitive_fraction_of_truncated": len(repeated) / len(limited) if limited else 0,
+            "dominated": complete and len(limited) >= 3 and
+                len(repeated) >= REPETITION_DOMINANCE * len(limited)}
+
+
+def prediction_outputs(path: str | Path, records: list[dict], column: str,
+                       expected_ids: list[str] | None = None) -> dict[int, str]:
+    csv.field_size_limit(1 << 30)
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if column not in (reader.fieldnames or []):
+            raise ValueError("repetition analysis requires the complete raw output column")
+        limited = {r["row_index"] for r in records if r["finish_reason"] == "length"}
+        outputs, ids = {}, []
+        for i, row in enumerate(reader):
+            ids.append(row.get("id"))
+            if i in limited:
+                outputs[i] = row[column]
+    if {r["row_index"] for r in records} != set(range(len(ids))):
+        raise ValueError("predictions and diagnostics row coverage differ")
+    if expected_ids is not None and ids != expected_ids:
+        raise ValueError("calibration prediction IDs/order differ from the sample")
+    return outputs
+
+
 def _sha256(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -67,6 +120,11 @@ def _accept(evidence: dict, size: int, indices: list[int], config_hash: str,
     count = _validate_records(evidence.get("records"), size)
     if count * 100 <= size * MAX_TRUNCATION_PERCENT:
         return "within_target"
+    outputs = evidence.get("repetition_outputs", {})
+    if isinstance(outputs, dict):
+        outputs = {int(k): v for k, v in outputs.items() if isinstance(v, str)}
+        if repetition_evidence(evidence["records"], outputs)["dominated"]:
+            return "accepted_repetition"
     waiver = evidence.get("output_behavior_waiver")
     if not isinstance(waiver, dict):
         raise ValueError(
@@ -110,15 +168,26 @@ def _accept(evidence: dict, size: int, indices: list[int], config_hash: str,
     return "accepted_output_behavior"
 
 
-def check(config: str | Path, questions: str | Path, diagnostics: str | Path) -> Path:
+def check(config: str | Path, questions: str | Path, diagnostics: str | Path,
+          predictions: str | Path | None = None) -> Path:
     """Gate measured generation; write evidence after meeting the target or a documented waiver."""
-    _, _, indices = sample_rows(questions)
+    _, sample, indices = sample_rows(questions)
     report = Path(config).with_name(REPORT_NAME)
     report.unlink(missing_ok=True)  # A failed recheck must invalidate prior evidence.
     evidence = json.loads(Path(diagnostics).read_text(encoding="utf-8"))
     if not isinstance(evidence, dict):
         raise ValueError("calibration diagnostics must be an object")
     records = evidence.get("records")
+    _validate_records(records, len(indices))
+    # Only the helper reads prediction bytes; do not accept caller-authored statistics.
+    evidence.pop("repetition_outputs", None)
+    if predictions is not None:
+        import yaml
+        cfg = yaml.safe_load(Path(config).read_text())
+        column = cfg.get("implementation_config", {}).get("raw_output_column", "complete_prediction")
+        outputs = prediction_outputs(predictions, records, column, [str(r["id"]) for r in sample])
+        limited = {r["row_index"] for r in records if r["finish_reason"] == "length"}
+        evidence["repetition_outputs"] = {str(i): outputs[i] for i in limited}
     config_hash, questions_hash = _sha256(config), _sha256(questions)
     acceptance = _accept(evidence, len(indices), indices, config_hash, questions_hash)
     report.write_text(json.dumps({
@@ -131,6 +200,10 @@ def check(config: str | Path, questions: str | Path, diagnostics: str | Path) ->
         "truncated_questions": _validate_records(records, len(indices)),
         "sample_size": len(indices),
         "output_behavior_waiver": evidence.get("output_behavior_waiver"),
+        "repetition_outputs": evidence.get("repetition_outputs", {}),
+        "repetition": repetition_evidence(records, {
+            int(k): v for k, v in evidence.get("repetition_outputs", {}).items()
+        }),
     }, indent=2) + "\n", encoding="utf-8")
     return report
 
@@ -180,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     gate.add_argument("--config", required=True)
     gate.add_argument("--questions", required=True)
     gate.add_argument("--diagnostics", required=True)
+    gate.add_argument("--predictions")
     run = sub.add_parser("run")
     run.add_argument("--suite", required=True)
     run.add_argument("workload", nargs=argparse.REMAINDER)
@@ -193,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             writer.writeheader()
             writer.writerows(rows)
     elif args.command == "check":
-        check(args.config, args.questions, args.diagnostics)
+        check(args.config, args.questions, args.diagnostics, args.predictions)
     else:
         command = args.workload[1:] if args.workload[:1] == ["--"] else args.workload
         return run_measured(args.suite, command)
