@@ -485,8 +485,9 @@ and compared candidates; scores across different budgets are not interchangeable
 After checkpoint inference, the engine checks full-population diagnostics per
 benchmark. More than 5% truncated questions triggers a new measurement revision:
 it doubles only affected members' unpinned `max_new_tokens`, within the existing
-verified context allocation, and replays the baseline and every compared
-checkpoint in that lane. It changes neither prompts nor sampling/stopping rules.
+verified context allocation. The triggering checkpoint settles its final budget
+first; only then does the engine replay the baseline and previously compared
+checkpoints at that budget. Historical truncation does not increase the budget. It changes neither prompts nor sampling/stopping rules.
 
 These work orders use `configuration_mode=reuse` even for the base model. Execute
 the supplied revision YAML exactly; do not select a new baseline configuration or
@@ -494,10 +495,15 @@ reuse old predictions. The engine stages scores until the entire cohort succeeds
 then replaces the comparison series atomically and retains the previous revision
 for audit. Subsequent inference receives the published revision automatically.
 
-Automatic increases are bounded to two revisions per model lineage and lane.
-Pinned allowances, exhausted context, missing checkpoints, failed evaluation, or
-persistent truncation leave the previous scores intact and stop optimization with
-a system notice. Increasing context/memory allocations requires an explicit new
+Automatic increases stop at the verified context ceiling. Additionally,
+two consecutive increases without at least a 10% relative decrease in a
+benchmark's truncation rate (for example, 20% to 18%)
+also stop further increases for that benchmark at its highest attempted budget.
+Remaining truncation is recorded and evaluation continues with the existing
+outputs; it does not degrade the Run. Verified repetition-dominated truncation
+also stops expansion. Missing context information, conflicting pinned allowances,
+missing checkpoints, or failed evaluation still preserve previous scores and
+stop optimization with a system notice. Increasing context/memory allocations requires an explicit new
 resource plan. Existing run cost/runtime limits still apply to replay work.
 
 ### vLLM GPU-memory sizing

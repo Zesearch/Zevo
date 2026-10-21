@@ -21,7 +21,8 @@ from zevo.db.models import Run, ScoreEvent, Ticket, TicketNotice, WorkProduct
 
 KEY = "token_budget_remeasurements"
 THRESHOLD = 0.05
-MAX_REVISIONS = 2
+NO_IMPROVEMENT_LIMIT = 2
+MIN_RELATIVE_TRUNCATION_DROP = 0.10
 Batch = dict[str, Any]
 SUCCESS = {"succeeded", "degraded"}
 TERMINAL = SUCCESS | {"failed", "cancelled", "skipped"}
@@ -93,8 +94,10 @@ def enlarged_config(config: InferenceRunConfig, pins: dict) -> InferenceRunConfi
     # Keep the already planned context/KV memory allocation unchanged. Raising
     # the context itself needs a new resource plan, not a guessed memory budget.
     context = (body["implementation_config"].get("llm_kwargs") or {}).get("max_model_len")
-    if not isinstance(context, int) or isinstance(context, bool) or context <= old:
+    if not isinstance(context, int) or isinstance(context, bool) or context <= 0:
         raise ValueError("no verified context headroom; a new context/resource plan is required")
+    if old >= context:
+        return config
     body["measurement"]["max_new_tokens"] = min(old * 2, context)
     return InferenceRunConfig.model_validate(body)
 
@@ -177,8 +180,6 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
                 "configs": {}, "cohort": [], "affected": affected}
     try:
         previous = [b for b in batches(run) if b["lane"] == trigger.lane and b["base_model"] == model]
-        if len(previous) >= MAX_REVISIONS:
-            raise ValueError("automatic token-budget revisions exhausted; inspect EOS/stopping or context limits")
         all_replays = set().union(*(replay_ids(b) for b in previous)) if previous else set()
         published_replays = set().union(*(replay_ids(b) for b in previous if b["status"] == "published")) if previous else set()
         candidates = list((await session.scalars(select(Ticket).where(
@@ -212,6 +213,7 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
                 if (int(row["iteration"]), row["source"]) not in identities:
                     raise ValueError("a previously compared checkpoint is missing from the replay cohort")
         products = await _products(session, baseline.id, "inference_config")
+        changed = []
         for index, name in enumerate(names):
             # A retained baseline member may still use its old cap. New revisions
             # must start from the latest published cohort budget, not that exemption.
@@ -227,11 +229,23 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
                 for candidate in cohort:
                     if "max_new_tokens" in ((candidate.payload or {}).get("configuration_pins", {}).get("decoding_config") or {}):
                         raise ValueError("max_new_tokens is user-pinned; update the pin before remeasurement")
-                config = enlarged_config(config, {})
+                expanded = enlarged_config(config, {})
+                if expanded.measurement.max_new_tokens > config.measurement.max_new_tokens:
+                    changed.append(name)
+                config = expanded
             destination = Path(path).parent / "budget-revisions" / revision["id"] / f"{index:03d}.json"
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(config.model_dump_json(indent=2) + "\n", encoding="utf-8")
             revision["configs"][name] = str(destination)
+        if not changed:
+            session.add(TicketNotice(ticket_id=trigger.id, code="token_budget_ceiling", severity="info",
+                                     body="Available token ceiling reached; continuing evaluation with the existing outputs."))
+            await session.commit()
+            return False
+        affected = changed
+        revision["affected"] = changed
+        revision["expanded_members"] = changed
+        cohort.sort(key=lambda t: t.id != trigger.id)
         revision["cohort"] = [{"source_id": t.id, "inference_id": f"remeasure-{revision['id']}-{i:03d}"} for i, t in enumerate(cohort)]
         await _plan_retention(session, run, revision, affected)
         _store(run, revision)
@@ -440,14 +454,31 @@ async def advance(session: AsyncSession, run_id: str) -> None:
             evidence = await _evidence(session, run, inference)
             if set(evidence) != set(batch["configs"]):
                 raise ValueError("checkpoint replay lacks complete question-level diagnostics")
-            # Never publish a still-censored cohort. A second complete revision
-            # may be attempted, but never unbounded doubling on one checkpoint.
-            if any(needs_expansion(e) for n, e in evidence.items() if n not in item.get("retained", {})):
+            # Settle the triggering checkpoint's budget before historical replay.
+            # History is measured at that frozen budget, even when still truncated.
+            expandable = []
+            if item["source_id"] == batch["trigger_id"]:
+                _record_budget_progress(batch, inference.id, evidence)
+                for name, ev in evidence.items():
+                    if name in batch.get("stalled_members", {}):
+                        continue
+                    if name in item.get("retained", {}) or not needs_expansion(ev):
+                        continue
+                    config = load_inference_config(batch["configs"][name])
+                    if enlarged_config(config, {}).measurement.max_new_tokens > config.measurement.max_new_tokens:
+                        expandable.append(name)
+                    else:
+                        batch.setdefault("ceiling_evidence", {})[name] = ev
+                if not expandable:
+                    batch["budget_finalized"] = True
+                    _store(run, batch)
+                    await session.commit()
+            if expandable:
                 batch["status"] = "superseded"
                 _store(run, batch)
                 # The next plan must start from the attempted budgets while
                 # selecting the same original cohort, not partial replay rows.
-                return await _retry(session, run, batch, evidence)
+                return await _retry(session, run, batch, evidence, expandable)
             evaluation = await session.get(Ticket, item["evaluation_id"]) if item.get("evaluation_id") else None
             if evaluation is None:
                 name = (item.get("active_members") or [str(_suite(run, batch["lane"])[0]["name"])])[0]
@@ -483,17 +514,40 @@ async def advance(session: AsyncSession, run_id: str) -> None:
         await _fail(session, run, batch, str(exc))
 
 
-async def _retry(session: AsyncSession, run: Run, batch: Batch, evidence: dict) -> None:
-    # Keep the original cohort and all settings, changing only newly limited
-    # members. The bounded revision count includes superseded attempts.
-    if len([b for b in batches(run) if b["lane"] == batch["lane"] and b["base_model"] == batch["base_model"]]) >= MAX_REVISIONS:
-        await _fail(session, run, batch, "Truncation persists after bounded budget increases; inspect stopping behavior/context. Previous scores retained.")
+def _record_budget_progress(batch: Batch, inference_id: str, evidence: dict) -> None:
+    """Count actual budget increases once, independently for each benchmark."""
+    if batch.get("progress_inference_id") == inference_id:
         return
+    streaks = batch.setdefault("no_improvement_streaks", {})
+    history = batch.setdefault("budget_progress", [])
+    for name in batch.get("expanded_members", []):
+        previous = batch["evidence"][name]["fraction"]
+        current = evidence[name]["fraction"]
+        relative_drop = (previous - current) / previous if previous > 0 else 0.0
+        improved = relative_drop >= MIN_RELATIVE_TRUNCATION_DROP or math.isclose(
+            relative_drop, MIN_RELATIVE_TRUNCATION_DROP, rel_tol=1e-9, abs_tol=1e-12)
+        streaks[name] = 0 if improved else streaks.get(name, 0) + 1
+        config = load_inference_config(batch["configs"][name])
+        record = {"member": name, "inference_id": inference_id,
+                  "max_new_tokens": config.measurement.max_new_tokens,
+                  "previous_fraction": previous, "fraction": current,
+                  "relative_drop": relative_drop, "meaningful_improvement": improved,
+                  "no_improvement_streak": streaks[name]}
+        history.append(record)
+        if streaks[name] >= NO_IMPROVEMENT_LIMIT:
+            batch.setdefault("stalled_members", {})[name] = record
+    batch["progress_inference_id"] = inference_id
+
+
+async def _retry(session: AsyncSession, run: Run, batch: Batch, evidence: dict, expandable: list[str]) -> None:
+    # Each retry strictly increases a budget within its verified context ceiling.
+    # Historical checkpoints are not launched until the current budget settles.
     new = deepcopy(batch)
-    new.update(id=uuid4().hex[:16], status="running", evidence=evidence, configs={})
+    new.update(id=uuid4().hex[:16], status="running", evidence=evidence, configs={},
+               expanded_members=expandable, budget_finalized=False)
     for index, (name, path) in enumerate(batch["configs"].items()):
         config = load_inference_config(path)
-        if needs_expansion(evidence[name]):
+        if name in expandable:
             config = enlarged_config(config, {})
         destination = Path(path).parent / new["id"] / f"{index:03d}.json"
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -528,7 +582,8 @@ async def intercept_completion(session: AsyncSession, ticket: Ticket) -> bool:
     if not any(needs_expansion(item) for item in evidence.values()):
         await session.commit()  # Persist repetition evidence even when no replay is needed.
         return False
-    await _start(session, run, ticket, evidence)
+    if not await _start(session, run, ticket, evidence):
+        return False
     await advance(session, run.id)
     await session.refresh(ticket)
     return True
