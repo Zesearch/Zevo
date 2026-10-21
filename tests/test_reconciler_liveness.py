@@ -1169,3 +1169,32 @@ async def test_exit_75_after_monitor_recovery_queues_collection_once(session, mo
     wakes = (await session.execute(select(AgentWakeupRequest).where(
         AgentWakeupRequest.ticket_id == ticket.id))).scalars().all()
     assert len(wakes) == 1
+
+
+@pytest.mark.asyncio
+async def test_unlimited_queue_wait_does_not_cancel_old_pending_job(session, monkeypatch):
+    import zevo.engine.run.scheduler.reconciler as reconciler
+    run = await session.get(Run, "r1")
+    run.max_queue_wait_hours = 0
+    ticket = Ticket(id="data-unlimited", run_id="r1", agent_id="data",
+                    status="waiting_external", payload={})
+    job = InfraInstance(instance_id="208375", provider="cluster", status="provisioning",
+        run_id="r1", ticket_id=ticket.id, created_at=_ago(10 * 24 * 3600),
+        meta={"stage_job": True, "scheduler_state": "PENDING", "submission_committed": True,
+              "controller_outcome_path": "/allocation/outcome.json"})
+    session.add_all([ticket, job])
+    await session.commit()
+    async def connection(*args, **kwargs):
+        return {"host": "cluster", "user": "u", "port": 22}
+    async def query(**kwargs):
+        return "PENDING", "", "Priority", None
+    async def no_cancel(*args, **kwargs):
+        raise AssertionError("Unlimited queue wait must not issue scancel")
+    monkeypatch.setattr(reconciler, "_slurm_connection", connection)
+    monkeypatch.setattr(reconciler, "_query_slurm_job", query)
+    monkeypatch.setattr(reconciler.asyncio, "create_subprocess_exec", no_cancel)
+    await _reconcile_slurm_stage_jobs(session)
+    await session.refresh(job)
+    assert "queue_timeout_requested_at" not in job.meta
+    assert job.released_at is None
+    assert ticket.status == "waiting_external"

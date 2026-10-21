@@ -565,7 +565,7 @@ export function RunsPage() {
                   ["GPU allocation", gpuAllocationLabel(peeked.gpu_allocation_mode)],
                   ["generation backend", peeked.generation_backend],
                   ["Mid-training evaluation", peeked.adaptive_mid_training_evaluation ? "Agent decides" : "Off"],
-                  ["queue limit", peeked.max_queue_wait_hours ? `${peeked.max_queue_wait_hours} h` : "Not recorded"],
+                  ["queue limit", peeked.max_queue_wait_hours ? `${peeked.max_queue_wait_hours} h` : "Unlimited"],
                   ["final model destination", peeked.model_save_policy ? (peeked.model_save_policy.weights === "hf" ? "Hugging Face" : "GPU machine") : "Not recorded"],
                   ["model save path", peeked.model_save_policy ? (peeked.model_save_policy.weights === "hf" ? peeked.model_save_policy.hf_repo_id : peeked.model_save_policy.remote_dir) || "Not set" : "Not recorded"],
                   ...(peeked.model_save_policy?.weights === "hf" ? [["repository visibility", peeked.model_save_policy.hf_private ? "Private" : "Public"]] : []),

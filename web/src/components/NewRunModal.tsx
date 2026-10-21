@@ -135,8 +135,8 @@ function limitsFromInputs(inputs: RunInputValues): Record<string, number> {
   }
   if (inputs.queueWaitHours.trim()) {
     const hours = Number(inputs.queueWaitHours);
-    if (!Number.isFinite(hours) || hours <= 0 || hours > 168) {
-      throw new Error("Max queue wait must be greater than 0 and at most 168 hours.");
+    if (!Number.isFinite(hours) || hours < 0 || hours > 168) {
+      throw new Error("Max queue wait must be between 0 and 168 hours; blank or 0 means unlimited.");
     }
     limits.max_queue_wait_hours = hours;
   }
@@ -1186,9 +1186,9 @@ export function NewRunModal({
                     <LimitField label="Time limit (hours)" value={inputs.timeLimitHours}
                       onChange={(v) => setInputs((s) => ({ ...s, timeLimitHours: v }))}
                       hint="Active experiment time only; Slurm queue wait is excluded." />
-                    <LimitField label="Max queue wait (hours)" value={inputs.queueWaitHours || "48"}
+                    <LimitField label="Max queue wait (hours)" value={inputs.queueWaitHours}
                       onChange={(v) => setInputs((s) => ({ ...s, queueWaitHours: v }))}
-                      hint="Maximum Slurm PENDING time; blank defaults to 48 hours (max 168)." />
+                      hint="Maximum Slurm PENDING time; blank means unlimited (optional cap: max 168 hours)." />
                     <NumberField
                       label="Stop threshold" value={inputs.stopThreshold}
                       onChange={(v) => setInputs((s) => ({ ...s, stopThreshold: v }))}

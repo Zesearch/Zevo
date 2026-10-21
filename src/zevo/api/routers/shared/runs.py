@@ -208,7 +208,7 @@ class RunSummary(BaseModel):
     # Run-only wall-clock cap in hours. 0.0 = unlimited.
     max_runtime_hours: float = 0.0
     # Slurm PENDING time has its own cap and is excluded from duration_s.
-    max_queue_wait_hours: float = 48.0
+    max_queue_wait_hours: float = 0.0
     queue_wait_seconds: int = 0
     queue_waiting: bool = False
     # Actual spend (LLM + GPU) and elapsed wall-clock (finished-started, or
@@ -682,6 +682,8 @@ def _summary(
     # migration runs. Publicly it has the same meaning as failed.
     public_status = "failed" if r.status == "halted" else r.status
     public_lifecycle = dict(r.lifecycle or {})
+    if not holdout:
+        public_lifecycle.pop("token_budget_remeasurements", None)
     if public_lifecycle.get("rescue_terminal_status") == "halted":
         public_lifecycle["rescue_terminal_status"] = "failed"
     baseline, best_trained = _baseline_and_best(r)
@@ -1226,6 +1228,8 @@ async def get_run(
         # a data backfill.
         from zevo.engine.run.outcome import lifecycle_with_terminal_outcome
         base_payload["lifecycle"] = lifecycle_with_terminal_outcome(r, tickets)
+        if not reveal_holdout:
+            base_payload["lifecycle"].pop("token_budget_remeasurements", None)
     from zevo.engine.run.runner import _agent_history
     history = (
         list(r.history or []) if reveal_holdout
@@ -1335,10 +1339,11 @@ class CreateRunRequest(BaseModel):
         description="Maximum wall-clock hours for this Run; None or 0 means unlimited.",
     )
     max_queue_wait_hours: float | None = Field(
-        None, gt=0.0, le=168.0,
+        None, ge=0.0, le=168.0,
         description=(
             "Maximum hours an automatically submitted cluster job may remain "
-            "queued (up to seven days). Queue time does not consume max_runtime_hours."
+            "queued. None or 0 means unlimited; a positive cap is at most seven days. "
+            "Queue time does not consume max_runtime_hours."
         ),
     )
     # Runtime execution choices live here exactly once. They are not part of
@@ -2082,7 +2087,7 @@ async def _create_auto_run(
     run.max_cost_usd = float(body.max_cost_usd or 0.0)
     run.max_runtime_hours = float(body.max_runtime_hours or 0.0)
     run.max_queue_wait_hours = (
-        48.0 if body.max_queue_wait_hours is None else float(body.max_queue_wait_hours)
+        0.0 if body.max_queue_wait_hours is None else float(body.max_queue_wait_hours)
     )
     run.generation_backend = body.generation_backend or "vllm"
     run.num_gpus = max(0, int(body.num_gpus or 0))
@@ -2541,7 +2546,7 @@ async def create_run(
     # may have a different amount of time available.
     resolved_max_runtime_hours = float(body.max_runtime_hours or 0.0)
     resolved_max_queue_wait_hours = (
-        48.0 if body.max_queue_wait_hours is None
+        0.0 if body.max_queue_wait_hours is None
         else float(body.max_queue_wait_hours)
     )
     resolved_generation_backend = body.generation_backend or "vllm"
@@ -3898,7 +3903,7 @@ class PolicyPatchBody(BaseModel):
     stop_threshold: float | None = Field(None, allow_inf_nan=False)
     max_cost_usd: float | None = Field(None, ge=0.0)
     max_runtime_hours: float | None = Field(None, ge=0.0)
-    max_queue_wait_hours: float | None = Field(None, gt=0.0, le=168.0)
+    max_queue_wait_hours: float | None = Field(None, ge=0.0, le=168.0)
     min_delta_per_iter: float | None = Field(None, ge=0.0)
     regression_tolerance: float | None = Field(None, ge=0.0)
 

@@ -759,3 +759,13 @@ they remain inside the current Train iteration, which returns the best
 measured checkpoint and then enters the ordinary final evaluation chain.
 A decision timeout retains full state for repair; resolve the same request
 rather than recreating the experiment.
+
+### Engine-owned remeasurement after truncation
+
+The engine may suspend the optimization handoff to replay baseline and all
+compared checkpoints with a common increased output allowance. Do not independently
+increase one candidate's token budget, duplicate these replay tickets, or compare
+staged metrics against the published history. After the complete revision is
+published, use the updated Run history and the completing Evaluation's artifacts.
+Earlier predictions and scores remain audit evidence, not current comparison
+points. Held-out remeasurement stays private to the engine.

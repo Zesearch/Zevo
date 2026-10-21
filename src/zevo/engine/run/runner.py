@@ -1065,7 +1065,7 @@ async def _slurm_stage_job_contract(
         ),
         num_gpus=(selection.num_gpus if selection is not None else selected_gpus),
         nodes=(selection.nodes if selection is not None else int(info.resource_plan.nodes)),
-        max_queue_wait_hours=float(run.max_queue_wait_hours or 48.0),
+        max_queue_wait_hours=float(run.max_queue_wait_hours or 0.0),
     )
     if repair_submission:
         previous_status_path = str(meta.get("status_path") or "")
@@ -1254,7 +1254,10 @@ async def _baseline_suite_config_path(
         )
         .order_by(WorkProduct.created_at.desc())
     )).all()
+    from zevo.engine.run.remeasurement import is_unpublished_replay
     for product, ticket in rows:
+        if is_unpublished_replay(run, ticket):
+            continue
         meta = dict(product.meta or {})
         if (
             str(meta.get("suite_member_name") or "") == member_name
@@ -1443,6 +1446,16 @@ async def _build_inference_input(
     primary_name = str(payload.get("test_set_name") or "")
     if primary_name.startswith(_VALIDATION_MEMBER_PREFIX):
         primary_name = primary_name[len(_VALIDATION_MEMBER_PREFIX):]
+    from zevo.engine.run.remeasurement import configuration_override
+    primary_member = primary_name or (str(frozen_suite[0]["name"]) if frozen_suite else "")
+    inference_config_path = (
+        configuration_override(run, ticket, primary_member) or inference_config_path
+    )
+    for member in suite_members:
+        revised = configuration_override(run, ticket, member.name)
+        if revised:
+            member.inference_config_path = revised
+            member.configuration_mode = "reuse"
     primary_index = next((
         index for index, item in enumerate(frozen_suite)
         if str(item.get("name") or "") == primary_name
@@ -3220,7 +3233,8 @@ def _apply_run_score_monitor(
     tickets skip this entirely; their numbers go through `_record_holdout_score`
     so that a test result can never be mistaken for a tuning result.
     """
-    if ticket.lane == "held_out_test":
+    from zevo.engine.run.remeasurement import is_replay, is_superseded_prediction
+    if ticket.lane == "held_out_test" or is_replay(run, ticket) or is_superseded_prediction(run, ticket):
         return
 
     # A component score is not the Run's model-selection score. Multi-benchmark
@@ -4501,6 +4515,9 @@ async def run_ticket(
     from zevo.engine.run.lifecycle import finalization, finalization_allows
     if run.cancel_requested_at is not None:
         return tk
+    from zevo.engine.run.remeasurement import pending
+    if pending(run) and tk.agent_id == "orchestrator":
+        return tk  # the complete cohort, not a partial score, releases the loop
     if finalization(run) and not finalization_allows(tk.agent_id, tk.lane):
         tk.status = "cancelled"
         tk.error_message = "Run is finalizing; new optimization work is disabled"
@@ -7067,6 +7084,9 @@ async def run_ticket(
             except Exception as e:  # noqa: BLE001
                 _warn("scoping_settlement", e)
             return tk
+        from zevo.engine.run.remeasurement import intercept_completion
+        if await intercept_completion(session, tk):
+            return tk
         # Both score series are written here. The held-out mirror is deliberately
         # not raised from ordinary Inference completion: Orchestrator first
         # creates Validation Evaluation, and only its completion starts the
@@ -7367,6 +7387,7 @@ async def _spawn_validation_eval(
     member_name: str = "",
     predictions_product: WorkProduct | None = None,
     enqueue: bool = True,
+    ticket_id: str = "",
 ) -> Ticket | None:
     """Score one engine-created Validation-suite inference."""
     from zevo.contracts.tickets import validate_stored_payload
@@ -7430,7 +7451,7 @@ async def _spawn_validation_eval(
         }
     )
     ticket = Ticket(
-        id=f"validation-eval-{run.id[:8]}-{count:03d}",
+        id=ticket_id or f"validation-eval-{run.id[:8]}-{count:03d}",
         run_id=run.id,
         agent_id="evaluation",
         status="queued",
@@ -7597,9 +7618,11 @@ async def _spawn_holdout_infer(
     )
 
     if payload.get("model_source") == "checkpoint":
+        from zevo.engine.run.remeasurement import is_unpublished_replay
         baseline = next((
             ticket for ticket in reversed(already)
-            if (ticket.payload or {}).get("model_source") == "base_model"
+            if not is_unpublished_replay(run, ticket)
+            and (ticket.payload or {}).get("model_source") == "base_model"
             and (ticket.payload or {}).get("base_model") == payload.get("base_model")
             and (ticket.payload or {}).get("test_set_name") == primary["name"]
             and ticket.status in ("succeeded", "degraded")
@@ -7637,6 +7660,7 @@ async def _spawn_holdout_eval(
     test_set_name: str = "",
     predictions_product: WorkProduct | None = None,
     enqueue: bool = True,
+    ticket_id: str = "",
 ) -> Ticket | None:
     """Score held-out predictions with the Task's custom or built-in metric."""
     from zevo.engine.run.wakeup import queue_wakeup
@@ -7668,7 +7692,7 @@ async def _spawn_holdout_eval(
     if existing is not None:
         return existing
 
-    tid = f"holdout-eval-{run.id[:8]}-{len(existing_rows) + 1:03d}"
+    tid = ticket_id or f"holdout-eval-{run.id[:8]}-{len(existing_rows) + 1:03d}"
     payload = validate_stored_payload(
         agent_id="evaluation",
         input_format="typed",
@@ -7752,7 +7776,7 @@ async def _spawn_holdout_suite_evals(
 
 async def _record_holdout_score(
     session: AsyncSession, run: Run, ticket: Ticket, score: float,
-    *, member_name: str = "",
+    *, member_name: str = "", commit: bool = True,
 ) -> None:
     """File one Test member, then publish the suite average once complete.
 
@@ -7824,10 +7848,12 @@ async def _record_holdout_score(
     recorded = list(holdout.get("suite_recorded") or [])
     run.holdout = holdout
     if result_key in recorded:
-        await session.commit()
+        if commit:
+            await session.commit()
         return
     if any(name not in candidate_results for name in suite_names):
-        await session.commit()
+        if commit:
+            await session.commit()
         return
 
     component_scores = {
@@ -7909,7 +7935,8 @@ async def _record_holdout_score(
         # No validation score has been paired with a test score yet — the
         # baseline, usually. Show the one number we have rather than nothing.
         run.champion_test_score = float(score)
-    await session.commit()
+    if commit:
+        await session.commit()
 
 
 async def _record_validation_score(
@@ -8545,6 +8572,9 @@ async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
     # run kept going: the stage was killed, the guard below read a stale
     # "running", and the supervisor was woken to plan the next step.
     await session.refresh(run)
+    from zevo.engine.run.remeasurement import pending
+    if pending(run):
+        return
     if run.status in TERMINAL_RUN_STATUSES:
         return  # run is terminal (incl. user-cancelled) — don't keep poking
     # Same for the child: a ticket the user cancelled is not a completion to

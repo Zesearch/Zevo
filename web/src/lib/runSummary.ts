@@ -13,7 +13,7 @@ export function resourceSummaryValues(inputs: Pick<RunInputValues, "adaptiveMidT
     { name: "Iterations", value: inputs.iterations.trim() || "Unlimited", overridden: !!inputs.iterations.trim() },
     { name: "Budget", value: inputs.budget.trim() ? `$${inputs.budget.trim()}` : "Unlimited", overridden: !!inputs.budget.trim() },
     { name: "Time limit", value: inputs.timeLimitHours.trim() ? `${inputs.timeLimitHours.trim()} h` : "Unlimited", overridden: !!inputs.timeLimitHours.trim() },
-    { name: "Queue limit", value: `${inputs.queueWaitHours.trim() || "48"} h`, overridden: !!inputs.queueWaitHours.trim() },
+    { name: "Queue limit", value: Number(inputs.queueWaitHours) > 0 ? `${inputs.queueWaitHours.trim()} h` : "Unlimited", overridden: !!inputs.queueWaitHours.trim() },
     { name: "Stop threshold", value: inputs.stopThreshold.trim() || "Not set", overridden: !!inputs.stopThreshold.trim() },
   ];
 }

@@ -93,7 +93,7 @@ resolved values for every acquisition/probe check and write the plan once in
 provision; it does not repeat the plan or measured device facts.
 
 `max_queue_wait_hours` is Run-owned and separate from allocation walltime. It
-limits cluster PENDING time. Register the exact JOBID before waiting so
+limits cluster PENDING time when positive; zero means unlimited (the default). Register the exact JOBID before waiting so
 cancellation remains possible. PENDING time does not
 consume the Run runtime budget.
 

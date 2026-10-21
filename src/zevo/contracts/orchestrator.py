@@ -259,7 +259,7 @@ class RuntimeSpec(BaseModel):
     adaptive_training_requests: list[dict[str, Any]] = Field(default_factory=list)
     generation_backend: Literal["hf", "vllm"]
     gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_stage"
-    max_queue_wait_hours: float = Field(48, gt=0, le=168)
+    max_queue_wait_hours: float = Field(0, ge=0, le=168)
 
 
 class BudgetSnapshot(BaseModel):
@@ -271,7 +271,7 @@ class BudgetSnapshot(BaseModel):
     can_afford_next_iteration: bool | None = None
     projection_basis: str = ""
     max_runtime_hours: float = Field(0, ge=0)
-    max_queue_wait_hours: float = Field(48, gt=0, le=168)
+    max_queue_wait_hours: float = Field(0, ge=0, le=168)
     queue_wait_hours: float = Field(0, ge=0)
     elapsed_runtime_hours: float = Field(0, ge=0)
     remaining_runtime_hours: float = 0
