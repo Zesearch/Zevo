@@ -458,7 +458,8 @@ async def advance(session: AsyncSession, run_id: str) -> None:
             # History is measured at that frozen budget, even when still truncated.
             expandable = []
             if item["source_id"] == batch["trigger_id"]:
-                _record_budget_progress(batch, inference.id, evidence)
+                _record_budget_progress(batch, inference.id, evidence,
+                                        floor=settled_budget_floor(run, batch))
                 for name, ev in evidence.items():
                     if name in batch.get("stalled_members", {}):
                         continue
@@ -514,8 +515,32 @@ async def advance(session: AsyncSession, run_id: str) -> None:
         await _fail(session, run, batch, str(exc))
 
 
-def _record_budget_progress(batch: Batch, inference_id: str, evidence: dict) -> None:
-    """Count actual budget increases once, independently for each benchmark."""
+def settled_budget_floor(run: Run, batch: Batch) -> int:
+    """Largest token allowance already published for this model in any lane.
+
+    Output length is a property of the model, not of the lane measuring it. A
+    checkpoint whose Validation cohort settled at 512 tokens cannot be scored
+    on Test at 128 just because the Test lane's smaller starting budget showed
+    a flat truncation curve: below the settled floor the stall rule says
+    nothing about futility, only that the doublings have not yet reached the
+    answer length the other lane already measured.
+    """
+    floor = 0
+    for other in batches(run):
+        if other["status"] != "published" or other["base_model"] != batch["base_model"]:
+            continue
+        for record in other.get("budget_progress", []):
+            floor = max(floor, int(record.get("max_new_tokens") or 0))
+    return floor
+
+
+def _record_budget_progress(batch: Batch, inference_id: str, evidence: dict, *, floor: int = 0) -> None:
+    """Count actual budget increases once, independently for each benchmark.
+
+    A member stalls after NO_IMPROVEMENT_LIMIT doublings without a meaningful
+    truncation drop, but never while its allowance is still below `floor`, the
+    budget another lane already settled for the same model.
+    """
     if batch.get("progress_inference_id") == inference_id:
         return
     streaks = batch.setdefault("no_improvement_streaks", {})
@@ -528,13 +553,15 @@ def _record_budget_progress(batch: Batch, inference_id: str, evidence: dict) -> 
             relative_drop, MIN_RELATIVE_TRUNCATION_DROP, rel_tol=1e-9, abs_tol=1e-12)
         streaks[name] = 0 if improved else streaks.get(name, 0) + 1
         config = load_inference_config(batch["configs"][name])
+        below_floor = config.measurement.max_new_tokens < floor
         record = {"member": name, "inference_id": inference_id,
                   "max_new_tokens": config.measurement.max_new_tokens,
                   "previous_fraction": previous, "fraction": current,
                   "relative_drop": relative_drop, "meaningful_improvement": improved,
-                  "no_improvement_streak": streaks[name]}
+                  "no_improvement_streak": streaks[name],
+                  "settled_budget_floor": floor, "below_settled_floor": below_floor}
         history.append(record)
-        if streaks[name] >= NO_IMPROVEMENT_LIMIT:
+        if streaks[name] >= NO_IMPROVEMENT_LIMIT and not below_floor:
             batch.setdefault("stalled_members", {})[name] = record
     batch["progress_inference_id"] = inference_id
 
