@@ -14,8 +14,9 @@ import json
 import math
 import sys
 from dataclasses import dataclass
+from itertools import chain, islice
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from zevo.contracts.data import InferenceDataProfile
 
@@ -90,7 +91,49 @@ def _allow_large_csv_fields() -> None:
             limit //= 10
 
 
-def _read_records(value: str | Path, *, label: str) -> tuple[list[str], list[dict[str, Any]]]:
+class _CsvRecords(Sequence[dict[str, Any]]):
+    """Replayable on-disk rows; retain counts, never the answer/test payloads.
+
+    Multiple validation passes deliberately reopen the immutable artifact. Peak
+    memory depends on the largest CSV record rather than the population size.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._count: int | None = None
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        _allow_large_csv_fields()
+        count = 0
+        with self.path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                count += 1
+                yield dict(row)
+        self._count = count
+
+    def __len__(self) -> int:
+        if self._count is None:
+            for _ in self:
+                pass
+        assert self._count is not None
+        return self._count
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            if step < 0:
+                return [self[i] for i in range(start, stop, step)]
+            return list(islice(self, start, stop, step))
+        if index < 0:
+            index += len(self)
+        if index < 0:
+            raise IndexError(index)
+        for row in islice(self, index, index + 1):
+            return row
+        raise IndexError(index)
+
+
+def _read_records(value: str | Path, *, label: str) -> tuple[list[str], Sequence[dict[str, Any]]]:
     path = _absolute_file(value, label=label)
     suffix = path.suffix.lower()
     if suffix == ".csv":
@@ -98,7 +141,7 @@ def _read_records(value: str | Path, *, label: str) -> tuple[list[str], list[dic
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             columns = list(reader.fieldnames or [])
-            rows = [dict(row) for row in reader]
+        rows = _CsvRecords(path)
     elif suffix in {".jsonl", ".ndjson"}:
         rows = []
         with path.open("r", encoding="utf-8") as handle:
@@ -161,7 +204,7 @@ def _ordered_union(rows: Sequence[dict[str, Any]]) -> list[str]:
 
 
 def _write_records(
-    path: Path, *, columns: Sequence[str], rows: Sequence[dict[str, Any]],
+    path: Path, *, columns: Sequence[str], rows: Iterable[dict[str, Any]],
 ) -> None:
     """Write records without changing their order or nested JSON values."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,16 +294,18 @@ def materialize_system_scoring_artifacts(
     question_columns = [column for column in columns if column not in answers]
     if not question_columns:
         raise ValueError("Validation has no input fields after answer removal")
-    question_rows = [
+    question_rows = (
         {column: row.get(column) for column in question_columns}
         for row in rows
-    ]
+    )
 
     suffix = source.suffix.lower()
     if suffix not in {".csv", ".json", ".jsonl", ".ndjson", ".parquet", ".pq"}:
         suffix = ".jsonl"
     questions = Path(out_dir) / f"validation_questions{suffix}"
     _write_records(questions, columns=question_columns, rows=question_rows)
+    # Reopen the answer-free output for profile inference, not the full source.
+    _, question_rows = _read_records(questions, label="questions-only data")
 
     submission_columns = _csv_columns(
         sample_submission, label="Validation sample submission",
@@ -396,7 +441,7 @@ def sanitize_training_against_scoring(
 
 def _validate_questions_only(
     *, scoring_source: str, questions: str, answer_fields: Sequence[str],
-) -> tuple[list[str], list[dict[str, Any]]]:
+) -> tuple[list[str], Sequence[dict[str, Any]]]:
     source_columns, source_rows = _read_records(
         scoring_source, label="scoring source",
     )
@@ -535,7 +580,7 @@ def validate_data_artifacts(
     # Check disjointness only when both artifacts explicitly carry that field;
     # never guess a task-specific identity key.
     if remote_training_rows is None and all(
-        "id" in row for row in training_rows + validation_rows
+        "id" in row for row in chain(training_rows, validation_rows)
     ):
         training_ids = {str(row["id"]) for row in training_rows}
         validation_ids = {str(row["id"]) for row in validation_rows}

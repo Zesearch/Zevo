@@ -273,3 +273,85 @@ def test_prediction_validation_uses_exact_paths_and_template_columns(
 
     assert report.rows == 2
     assert report.columns == ("id", "prediction")
+
+
+@pytest.mark.parametrize("stage", ["prepare", "validate_data", "evaluate"])
+def test_large_csv_answers_are_not_retained_in_memory(tmp_path: Path, stage: str) -> None:
+    """Exercise public paths with a 24 MiB scoring set and a bounded heap."""
+    import tracemalloc
+    from zevo.engine.artifact_validation import validate_scoring_prediction_artifacts
+
+    source = tmp_path / "large.csv"
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["id", "prompt", "answer"])
+        for index in range(96):
+            writer.writerow([str(index), f"Question {index}", "x" * 262144])
+    sample = _csv(tmp_path / "sample.csv", ["id", "prediction"],
+                  [{"id": "example", "prediction": ""}])
+    predictions = _csv(tmp_path / "predictions.csv", ["id", "prediction"],
+                       [{"id": str(i), "prediction": "answer"} for i in range(96)])
+    prepared = materialize_system_scoring_artifacts(
+        scoring_source=str(source), answer_fields=["answer"],
+        sample_submission=sample, out_dir=str(tmp_path / "prepared"),
+    )
+    tracemalloc.start()
+    try:
+        if stage == "prepare":
+            materialize_system_scoring_artifacts(
+                scoring_source=str(source), answer_fields=["answer"],
+                sample_submission=sample, out_dir=str(tmp_path / "second"),
+            )
+        elif stage == "validate_data":
+            report = validate_data_artifacts(
+                operation="prepare_holdout_data", scoring_source=str(source),
+                questions=prepared.questions_path, answer_fields=["answer"],
+                sample_submission=sample, profile_path=prepared.profile_path,
+            )
+            assert report.question_rows == 96
+        else:
+            report = validate_scoring_prediction_artifacts(
+                predictions=predictions, scoring_set=str(source),
+                sample_submission=sample, answer_fields=["answer"],
+            )
+            assert report.rows == 96
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 12 * 1024 * 1024, f"retained scoring population: peak={peak}"
+
+
+@pytest.mark.parametrize("defect", ["order", "count", "value"])
+def test_streamed_csv_data_still_rejects_changed_questions(tmp_path: Path, defect: str) -> None:
+    rows = [{"id": "1", "prompt": "one", "answer": "A"},
+            {"id": "2", "prompt": "two", "answer": "B"}]
+    source = _csv(tmp_path / "source.csv", ["id", "prompt", "answer"], rows)
+    questions = [{"id": r["id"], "prompt": r["prompt"]} for r in rows]
+    if defect == "order":
+        questions.reverse()
+    elif defect == "count":
+        questions.pop()
+    else:
+        questions[1]["prompt"] = "changed"
+    path = _csv(tmp_path / "questions.csv", ["id", "prompt"], questions)
+    with pytest.raises(ValueError, match="row count|non-answer value"):
+        validate_data_artifacts(
+            operation="prepare_holdout_data", scoring_source=source, questions=path,
+            answer_fields=["answer"], sample_submission="unused",
+        )
+
+
+@pytest.mark.parametrize("ids", [["2", "1"], ["1"], ["1", "2", "3"]])
+def test_streamed_scoring_still_rejects_shifted_predictions(tmp_path: Path, ids: list[str]) -> None:
+    from zevo.engine.artifact_validation import validate_scoring_prediction_artifacts
+    source = _csv(tmp_path / "source.csv", ["id", "answer"],
+                  [{"id": "1", "answer": "A"}, {"id": "2", "answer": "B"}])
+    sample = _csv(tmp_path / "sample.csv", ["id", "prediction"],
+                  [{"id": "example", "prediction": ""}])
+    predictions = _csv(tmp_path / "predictions.csv", ["id", "prediction"],
+                       [{"id": i, "prediction": "A"} for i in ids])
+    with pytest.raises(ValueError, match="row count|scoring set/order"):
+        validate_scoring_prediction_artifacts(
+            predictions=predictions, scoring_set=source,
+            sample_submission=sample, answer_fields=["answer"],
+        )
