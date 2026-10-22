@@ -616,3 +616,37 @@ def test_budget_progress_requires_meaningful_relative_drop(tmp_path, previous, c
     assert batch['no_improvement_streaks']['math'] == (0 if improved else 2)
     assert ('math' in batch.get('stalled_members', {})) == (not improved)
     assert batch['budget_progress'][0]['meaningful_improvement'] is improved
+
+
+def test_stall_waits_until_the_budget_reaches_the_floor_another_lane_settled(tmp_path):
+    # Test lane started at 32 tokens and doubled twice with a flat ~44% truncation
+    # curve while Validation had already settled the same model at 512.
+    path = str(config_file(tmp_path))
+    batch = {'configs': {'test': path}, 'evidence': {'test': {'fraction': .4378}},
+             'expanded_members': ['test'], 'no_improvement_streaks': {'test': 1}}
+    rm._record_budget_progress(batch, 'one', {'test': {'fraction': .4360}}, floor=1024)
+    assert batch['no_improvement_streaks']['test'] == 2
+    assert 'stalled_members' not in batch
+    assert batch['budget_progress'][0]['below_settled_floor'] is True
+    assert batch['budget_progress'][0]['settled_budget_floor'] == 1024
+    # The same flat curve at or above the floor is a real stall.
+    batch = {'configs': {'test': path}, 'evidence': {'test': {'fraction': .4378}},
+             'expanded_members': ['test'], 'no_improvement_streaks': {'test': 1}}
+    cap = load_inference_config(path).measurement.max_new_tokens
+    rm._record_budget_progress(batch, 'two', {'test': {'fraction': .4360}}, floor=cap)
+    assert 'test' in batch['stalled_members']
+    assert batch['budget_progress'][0]['below_settled_floor'] is False
+
+
+def test_settled_budget_floor_reads_published_batches_of_the_same_model_only():
+    run = Run(id='r', task_name='t', run_name='r', status='running', lifecycle={rm.KEY: [
+        {'id': 'a', 'status': 'published', 'lane': 'optimization', 'base_model': 'm',
+         'budget_progress': [{'max_new_tokens': 256}, {'max_new_tokens': 512}]},
+        {'id': 'b', 'status': 'superseded', 'lane': 'optimization', 'base_model': 'm',
+         'budget_progress': [{'max_new_tokens': 4096}]},
+        {'id': 'c', 'status': 'published', 'lane': 'held_out_test', 'base_model': 'other',
+         'budget_progress': [{'max_new_tokens': 2048}]},
+    ]})
+    assert rm.settled_budget_floor(run, {'base_model': 'm'}) == 512
+    assert rm.settled_budget_floor(run, {'base_model': 'other'}) == 2048
+    assert rm.settled_budget_floor(run, {'base_model': 'none'}) == 0
