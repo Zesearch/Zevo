@@ -205,6 +205,55 @@ def run_walltime_plan(plan, user_limit_hours=0):
                 platform_limit_evidence=getattr(plan, "platform_runtime_limit_evidence", ""))
 
 
+_TERMINAL_ALLOCATION_STATES = frozenset({
+    "BOOT_FAIL", "CANCELLED", "COMPLETED", "DEADLINE", "FAILED", "NODE_FAIL",
+    "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "TIMEOUT",
+})
+
+
+async def _retained_allocation_state(info, job_id: str) -> str:
+    """Require positive scheduler evidence before replacing an allocation.
+
+    Slurm removes finished jobs from slurmctld after MinJobAge. An exact
+    squeue lookup then fails rather than returning an empty queue; accounting
+    still records the terminal allocation. Transport failures are not absence.
+    """
+    from zevo.engine.run.remote_jobs import (
+        _ssh, _slurm_cli_bootstrap_command, _slurm_login_command,
+    )
+
+    if not re.fullmatch(r"[0-9]+", job_id):
+        raise ValueError("cannot verify the retained allocation: invalid stored job ID")
+    bootstrap = _slurm_cli_bootstrap_command(
+        info.cluster.env_setup, required=("squeue", "sacct"),
+    )
+    queued = await _ssh(info, _slurm_login_command(
+        bootstrap + f"squeue -h -j {shlex.quote(job_id)} -o '%T'"))
+    if not queued.get("ok"):
+        # Match the Slurm diagnostic, not a generic SSH/permission error.
+        missing = any(line.strip() == "slurm_load_jobs error: Invalid job id specified"
+                      for line in str(queued.get("error", "")).splitlines())
+        if not missing:
+            raise ValueError("cannot verify the retained allocation: " + str(queued.get("error", "")))
+    elif queued.get("stdout", "").strip():
+        return queued["stdout"].strip().upper()
+
+    accounting = await _ssh(info, _slurm_login_command(
+        bootstrap + f"sacct -n -X -j {shlex.quote(job_id)} --format=JobIDRaw,State%40 -P"))
+    if not accounting.get("ok"):
+        raise ValueError("cannot verify the retained allocation: accounting lookup failed: "
+                         + str(accounting.get("error", "")))
+    states = set()
+    for line in accounting.get("stdout", "").splitlines():
+        columns = line.strip().split("|")
+        if len(columns) >= 2 and columns[0].strip() == job_id and columns[1].strip():
+            # CANCELLED may include 'by UID'. Ignore step rows and other jobs.
+            states.add(columns[1].strip().split()[0].upper())
+    if len(states) != 1:
+        raise ValueError("cannot verify the retained allocation: accounting has no unambiguous job state")
+    return states.pop()
+
+
 async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id, sha256):
     """Reuse a healthy owned allocation or submit one finite controller job."""
     from sqlalchemy import select
@@ -231,19 +280,18 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             continue
         if run.gpu_allocation_mode != "per_run" and row.ticket_id != ticket.id:
             continue
-        checked = await _ssh(info, _slurm_login_command(_slurm_cli_bootstrap_command(info.cluster.env_setup, required=("sbatch", "squeue", "sacct", "scancel")) +
-                             f"squeue -h -j {shlex.quote(row.instance_id)} -o '%T'"))
-        if not checked.get("ok"):
-            raise ValueError("cannot verify the retained allocation: " + checked.get("error", ""))
-        if run.gpu_allocation_mode == "per_submission" and checked.get("stdout", "").strip():
+        state = await _retained_allocation_state(info, row.instance_id)
+        if run.gpu_allocation_mode == "per_submission" and state not in _TERMINAL_ALLOCATION_STATES:
             raise ValueError("previous submission allocation is still active or terminating; retry after Slurm releases it")
-        if checked.get("stdout", "").strip() not in {"RUNNING", "PENDING", "CONFIGURING"}:
+        if state in _TERMINAL_ALLOCATION_STATES:
             # The provider no longer owns the allocation. It is safe to replace it.
             from datetime import datetime, timezone
             row.released_at = datetime.now(timezone.utc)
             row.release_reason = "retained allocation no longer live in Slurm"
             row.status = "released"
             continue
+        if state not in {"RUNNING", "PENDING", "CONFIGURING"}:
+            raise ValueError("cannot verify the retained allocation: allocation is not reusable or terminal: " + state)
         if row.gpu_count < contract.num_gpus or int(meta.get("nodes", 1)) != contract.nodes:
             raise ValueError("stage does not fit the retained run allocation; resource plan must cover all stages")
         # No concurrent commands on one set of GPUs. The orchestrator can retry

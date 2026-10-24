@@ -90,6 +90,9 @@ def test_release_boundary(mode, state, expected):
 @pytest.mark.parametrize('mode,next_ticket,reuses,live', [
     ('per_stage', 'train-1', True, True), ('per_run', 'infer-1', True, True),
     ('per_stage', 'infer-1', False, True),
+    ('per_run', 'infer-1', False, 'missing'),
+    ('per_run', 'infer-1', False, 'COMPLETING'),
+    ('per_run', 'infer-1', False, 'UNKNOWN'),
     ('per_submission', 'train-1', False, False),
     ('per_submission', 'train-1', False, 'RUNNING'),
     ('per_submission', 'train-1', False, 'COMPLETING'), ('per_run', 'infer-1', False, False),
@@ -106,7 +109,11 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
         if 'squeue -h' in command or 'sbatch --parsable' in command:
             assert 'export SITE_SLURM=1' in command
         if "squeue -h" in command:
+            if live == 'missing':
+                return dict(ok=False, error='Login banner\nslurm_load_jobs error: Invalid job id specified\n')
             return dict(ok=True, stdout=(live if isinstance(live, str) else 'RUNNING') + '\n' if live else '')
+        if 'sacct -n -X' in command:
+            return dict(ok=True, stdout='123|TIMEOUT\n')
         return dict(ok=True, stdout='456\n' if 'sbatch --parsable' in command else '123\n')
     monkeypatch.setattr(remote_jobs, '_ssh', ssh)
     script = tmp_path / 'train.sbatch'
@@ -125,12 +132,21 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
         kwargs = dict(run=run, ticket=ticket, contract=contract,
             info=SimpleNamespace(cluster=SimpleNamespace(workdir='/remote', env_setup='export SITE_SLURM=1'), resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=4)),
             heartbeat_id='h2', sha256='digest')
-        if mode == 'per_submission' and live:
+        if mode == 'per_run' and live in ('COMPLETING', 'UNKNOWN'):
+            with pytest.raises(ValueError, match='not reusable or terminal'):
+                await submit_workload(session, **kwargs)
+            assert owner.released_at is None
+            assert not any('sbatch --parsable' in c for c in commands)
+        elif mode == 'per_submission' and live:
             with pytest.raises(ValueError, match='still active or terminating'):
                 await submit_workload(session, **kwargs)
             assert not any('sbatch --parsable' in c for c in commands)
         else:
             await assert_submission(session, kwargs, reuses, commands, tmp_path, mode)
+            if live == 'missing' or not live:
+                assert owner.released_at is not None
+                assert owner.status == 'released'
+                assert sum('sbatch --parsable' in c for c in commands) == 1
     await engine.dispose()
 
 
@@ -296,3 +312,42 @@ async def test_outcome_does_not_release_allocation_before_slurm(monkeypatch, sta
     result = await reconciler._query_slurm_job(connection={"host": "host", "user": "user", "key": "/test/key"}, job_id="123", outcome_path="/shared/outcome.json")
     assert result[0] == "COMPLETED"
     assert result[2].startswith("[workload-released]" if released else "[workload-retained]")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queue,accounting,expected", [
+    ({"ok": True, "stdout": "RUNNING\n"}, None, "RUNNING"),
+    ({"ok": True, "stdout": "COMPLETING\n"}, None, "COMPLETING"),
+    ({"ok": True, "stdout": "TIMEOUT\n"}, None, "TIMEOUT"),
+    ({"ok": True, "stdout": ""}, {"ok": True, "stdout": "123|TIMEOUT\n123.batch|COMPLETED\n"}, "TIMEOUT"),
+    ({"ok": False, "error": "slurm_load_jobs error: Invalid job id specified"},
+     {"ok": True, "stdout": "123|CANCELLED by 42\n"}, "CANCELLED"),
+    ({"ok": False, "error": "Connection timed out"}, None, None),
+    ({"ok": False, "error": "Permission denied (publickey)"}, None, None),
+    ({"ok": True, "stdout": ""}, {"ok": False, "error": "accounting unavailable"}, None),
+    ({"ok": True, "stdout": ""}, {"ok": True, "stdout": ""}, None),
+    ({"ok": True, "stdout": ""}, {"ok": True, "stdout": "124|COMPLETED\n123.batch|COMPLETED\n"}, None),
+    ({"ok": True, "stdout": ""}, {"ok": True, "stdout": "123|RUNNING\n123|TIMEOUT\n"}, None),
+])
+async def test_retained_allocation_accounting_fallback(monkeypatch, queue, accounting, expected):
+    from zevo.engine.run import remote_jobs
+    from zevo.engine.run.gpu_controller import _retained_allocation_state
+    calls = []
+
+    async def ssh(info, command, **kwargs):
+        calls.append(command)
+        assert 'export SITE_SLURM=1' in command
+        if 'squeue -h' in command:
+            return queue
+        assert accounting is not None
+        assert 'sacct -n -X -j 123 --format=JobIDRaw,State%40 -P' in command
+        return accounting
+
+    monkeypatch.setattr(remote_jobs, '_ssh', ssh)
+    info = SimpleNamespace(cluster=SimpleNamespace(env_setup='export SITE_SLURM=1'))
+    if expected is None:
+        with pytest.raises(ValueError, match='cannot verify the retained allocation'):
+            await _retained_allocation_state(info, '123')
+    else:
+        assert await _retained_allocation_state(info, '123') == expected
+    assert len(calls) == (1 if accounting is None else 2)
