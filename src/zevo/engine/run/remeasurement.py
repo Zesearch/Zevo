@@ -29,7 +29,7 @@ TERMINAL = SUCCESS | {"failed", "cancelled", "skipped"}
 
 
 def batches(run: Run) -> list[Batch]:
-    return (run.lifecycle or {}).get(KEY, [])
+    return (getattr(run, "lifecycle", None) or {}).get(KEY, [])
 
 
 def pending(run: Run) -> Batch | None:
@@ -46,7 +46,8 @@ def is_replay(run: Run, ticket: Ticket) -> bool:
 
 
 def is_unpublished_replay(run: Run, ticket: Ticket) -> bool:
-    return any(ticket.id in replay_ids(b) and b["status"] != "published" for b in batches(run))
+    latest = next((b for b in reversed(batches(run)) if ticket.id in replay_ids(b)), None)
+    return latest is not None and latest["status"] != "published"
 
 
 def is_superseded_prediction(run: Run, ticket: Ticket) -> bool:
@@ -66,13 +67,49 @@ def needs_expansion(item: dict) -> bool:
     return item["fraction"] > THRESHOLD and not item.get("repetition", {}).get("dominated", False)
 
 
+def active_attempt(run: Run, ticket_id: str) -> dict:
+    batch = pending(run)
+    if not batch or not batch.get("reuse_tickets"):
+        return {}
+    for item in batch["cohort"]:
+        for key in ("inference", "evaluation"):
+            if item.get(f"{key}_id") == ticket_id:
+                return item.get(f"{key}_attempt", {})
+    return {}
+
+
+def restarts_workload(run: Run, ticket_id: str, resource_id: str) -> bool:
+    attempt = active_attempt(run, ticket_id)
+    return bool(resource_id and attempt.get("previous_resource_id") == resource_id)
+
+
+def attempt_work_dir(run: Run, ticket_id: str, work_dir: str) -> str:
+    attempt = active_attempt(run, ticket_id)
+    return str(Path(work_dir) / "measurement-attempts" / attempt["revision"]) if attempt else work_dir
+
+
+def _original_ticket_id(run: Run, ticket_id: str) -> str:
+    # Follow legacy remeasure-* provenance without rewriting existing history.
+    seen = set()
+    while ticket_id not in seen:
+        seen.add(ticket_id)
+        source = next((c["source_id"] for b in reversed(batches(run)) if not b.get("reuse_tickets") for c in b["cohort"]
+                       if c["inference_id"] == ticket_id and c["source_id"] != ticket_id), None)
+        if not source:
+            break
+        ticket_id = source
+    return ticket_id
+
+
 def configuration_override(run: Run, ticket: Ticket, member_name: str) -> str:
     """Staged contracts are visible only to their own engine-created tickets."""
     for batch in reversed(batches(run)):
         if batch["lane"] != ticket.lane or batch["base_model"] != (ticket.payload or {}).get("base_model"):
             continue
-        if ticket.id in replay_ids(batch):
-            retained = replay_item(run, ticket.id).get("retained", {}).get(member_name)
+        if ticket.id in replay_ids(batch) and (batch["status"] == "published" or
+                (batch["status"] == "running" and (not batch.get("reuse_tickets") or active_attempt(run, ticket.id)))):
+            item = next(c for c in batch["cohort"] if ticket.id in (c.get("inference_id"), c.get("evaluation_id")))
+            retained = item.get("retained", {}).get(member_name)
             return retained["config_path"] if retained else batch["configs"].get(member_name, "")
         if batch["status"] == "published":
             return batch["configs"].get(member_name, "")
@@ -110,10 +147,12 @@ def _store(run: Run, batch: Batch) -> None:
     run.lifecycle = {**(run.lifecycle or {}), KEY: items}
 
 
-async def _products(session: AsyncSession, ticket_id: str, role: str) -> list[WorkProduct]:
-    return list((await session.scalars(select(WorkProduct).where(
+async def _products(session: AsyncSession, ticket_id: str, role: str, run: Run | None = None) -> list[WorkProduct]:
+    rows = list((await session.scalars(select(WorkProduct).where(
         WorkProduct.ticket_id == ticket_id, WorkProduct.role == role,
     ).order_by(WorkProduct.created_at.desc()))).all())
+    previous = set(active_attempt(run, ticket_id).get("previous_product_ids", [])) if run else set()
+    return [p for p in rows if p.id not in previous]
 
 
 def _suite(run: Run, lane: str) -> list[dict]:
@@ -125,14 +164,14 @@ async def _evidence(session: AsyncSession, run: Run, ticket: Ticket) -> dict[str
     suite = _suite(run, ticket.lane)
     primary = str(suite[0]["name"]) if suite else ""
     evidence = {}
-    for product in await _products(session, ticket.id, "generation_diagnostics"):
+    for product in await _products(session, ticket.id, "generation_diagnostics", run):
         name = str((product.meta or {}).get("suite_member_name") or primary)
         if name not in evidence:
             diagnostics = GenerationDiagnostics.model_validate_json(Path(product.path).read_text(encoding="utf-8"))
             evidence[name] = question_truncation(diagnostics)
             records = [r.model_dump() for r in diagnostics.records]
-            predictions = await _products(session, ticket.id, "predictions")
-            configs = await _products(session, ticket.id, "inference_config")
+            predictions = await _products(session, ticket.id, "predictions", run)
+            configs = await _products(session, ticket.id, "inference_config", run)
             pred = next((p for p in predictions if (p.meta or {}).get("suite_member_name", primary) == name), None)
             cfg = next((p for p in configs if (p.meta or {}).get("suite_member_name", primary) == name), None)
             if pred and cfg:
@@ -177,7 +216,7 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
     model = str((trigger.payload or {}).get("base_model") or "")
     revision = {"id": uuid4().hex[:16], "status": "running", "lane": trigger.lane,
                 "base_model": model, "trigger_id": trigger.id, "evidence": evidence,
-                "configs": {}, "cohort": [], "affected": affected}
+                "configs": {}, "cohort": [], "affected": affected, "reuse_tickets": True}
     try:
         previous = [b for b in batches(run) if b["lane"] == trigger.lane and b["base_model"] == model]
         all_replays = set().union(*(replay_ids(b) for b in previous)) if previous else set()
@@ -185,7 +224,7 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
         candidates = list((await session.scalars(select(Ticket).where(
             Ticket.run_id == run.id, Ticket.agent_id == "inference",
             Ticket.lane == trigger.lane, Ticket.status.in_(SUCCESS),
-        ).order_by(Ticket.created_at))).all())
+        ).order_by(Ticket.updated_at, Ticket.created_at))).all())
         latest = {}
         for candidate in candidates:
             payload = candidate.payload or {}
@@ -194,7 +233,7 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
             if candidate.id in all_replays - published_replays:
                 continue
             # Legacy one-member mirrors cannot represent a complete suite.
-            if trigger.lane == "optimization" and payload.get("test_set_name") and candidate.id not in published_replays:
+            if trigger.lane == "optimization" and payload.get("test_set_name") and candidate.id not in all_replays:
                 continue
             latest[(payload.get("model_source"), candidate.iteration)] = candidate
         cohort = sorted(latest.values(), key=lambda t: ((t.payload or {}).get("model_source") != "base_model", t.iteration))
@@ -246,7 +285,8 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
         revision["affected"] = changed
         revision["expanded_members"] = changed
         cohort.sort(key=lambda t: t.id != trigger.id)
-        revision["cohort"] = [{"source_id": t.id, "inference_id": f"remeasure-{revision['id']}-{i:03d}"} for i, t in enumerate(cohort)]
+        revision["cohort"] = [{"source_id": t.id, "inference_id": _original_ticket_id(run, t.id),
+                               "request_payload": deepcopy(t.payload), "request_inputs": deepcopy(t.inputs)} for t in cohort]
         await _plan_retention(session, run, revision, affected)
         _store(run, revision)
         session.add(TicketNotice(ticket_id=trigger.id, code="token_budget_remeasurement",
@@ -290,26 +330,59 @@ async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affecte
         item["active_members"] = [] if item["retained_only"] else [n for n in names if n not in retained]
 
 
+async def _begin_attempt(session: AsyncSession, run: Run, batch: Batch, item: dict,
+                         ticket: Ticket, kind: str) -> None:
+    from zevo.engine.run.runner import _latest_slurm_resource_request
+    products = list((await session.scalars(select(WorkProduct).where(WorkProduct.ticket_id == ticket.id))).all())
+    resource = await _latest_slurm_resource_request(session, ticket) if kind == "inference" else None
+    item[f"{kind}_attempt"] = {
+        "revision": batch["id"], "previous_status": ticket.status,
+        "previous_summary": ticket.summary, "previous_payload": deepcopy(ticket.payload),
+        "previous_inputs": deepcopy(ticket.inputs),
+        "previous_product_ids": [p.id for p in products],
+        "previous_resource_id": resource.id if resource else "",
+    }
+    ticket.status = "queued"
+    ticket.error_message = ""
+    ticket.summary = f"Remeasurement attempt {batch['id']}"
+    ticket.repair_attempts = 0
+    ticket.repair_route = ""
+    session.add(TicketNotice(ticket_id=ticket.id, code="token_budget_attempt", severity="info",
+                             body=f"Starting measurement attempt {batch['id']}; previous artifacts and scores are retained."))
+    _store(run, batch)
+
+
 async def _new_inference(session: AsyncSession, run: Run, batch: Batch, item: dict) -> Ticket:
     source = await session.get(Ticket, item["source_id"])
-    ticket = Ticket(id=item["inference_id"], run_id=run.id, agent_id="inference",
+    payload = deepcopy(item.get("request_payload", source.payload))
+    inputs = deepcopy(item.get("request_inputs", source.inputs) or {})
+    ticket = await session.get(Ticket, item["inference_id"]) if batch.get("reuse_tickets") else None
+    if ticket is not None:
+        if item.get("inference_attempt"):
+            return ticket
+        await _begin_attempt(session, run, batch, item, ticket, "inference")
+        ticket.payload, ticket.inputs = payload, inputs
+    else:
+        ticket = Ticket(id=item["inference_id"], run_id=run.id, agent_id="inference",
                     lane=batch["lane"], status="queued", input_format="typed",
                     iteration=source.iteration, payload=deepcopy(source.payload),
                     customization=deepcopy(source.customization or {}), inputs=deepcopy(source.inputs or {}),
                     summary="Remeasure checkpoint with the cohort's revised token budget")
-    if item.get("retained") and item.get("active_members"):
+        session.add(ticket)
+    if item.get("active_members") and (item.get("retained") or batch.get("reuse_tickets")):
         primary = item["active_members"][0]
         member = next(m for m in _suite(run, ticket.lane) if m["name"] == primary)
         payload = deepcopy(ticket.payload)
         payload.update(test_set_name=primary if ticket.lane == "held_out_test" else "validation:" + primary,
-                       scoring_set=member["public"], sample_submission=member["sample_submission"])
+                       scoring_set=member.get("public") or payload.get("scoring_set", ""), sample_submission=member["sample_submission"])
         pins = deepcopy(payload.get("configuration_pins") or {})
-        pins["inference_config"] = {**pins.get("inference_config", {}),
-                                    "inference_query": member.get("inference_query", "")}
+        if member.get("inference_query"):
+            pins["inference_config"] = {**pins.get("inference_config", {}),
+                                        "inference_query": member["inference_query"]}
         payload["configuration_pins"] = pins
         ticket.payload = payload
-        ticket.inputs = {**ticket.inputs, "inference_data_profile": {"path": member.get("inference_data_profile", "")}}
-    session.add(ticket)
+        if member.get("inference_data_profile"):
+            ticket.inputs = {**ticket.inputs, "inference_data_profile": {"path": member["inference_data_profile"]}}
     await session.flush()
     for retained in item.get("retained", {}).values():
         for role, asset in retained["assets"].items():
@@ -324,8 +397,8 @@ async def _enqueue(session: AsyncSession, ticket: Ticket) -> None:
                        source="handoff", reason="token budget cohort remeasurement")
 
 
-async def _scores(session: AsyncSession, ticket: Ticket, suite: list[dict]) -> dict[str, dict]:
-    products = await _products(session, ticket.id, "metrics")
+async def _scores(session: AsyncSession, ticket: Ticket, suite: list[dict], run: Run | None = None) -> dict[str, dict]:
+    products = await _products(session, ticket.id, "metrics", run)
     components = {}
     for product in products:
         meta = product.meta or {}
@@ -357,7 +430,7 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
         inference = await session.get(Ticket, item["inference_id"])
         evaluation = await session.get(Ticket, item["evaluation_id"])
         retained = item.get("retained", {})
-        components = await _scores(session, evaluation, [m for m in suite if m["name"] not in retained])
+        components = await _scores(session, evaluation, [m for m in suite if m["name"] not in retained], run)
         components.update({name: deepcopy(value["score"]) for name, value in retained.items()})
         source = "baseline" if (inference.payload or {}).get("model_source") == "base_model" else "trained"
         # Archive superseded points outside the live ScoreEvent series. Every
@@ -443,7 +516,7 @@ async def advance(session: AsyncSession, run_id: str) -> None:
             if item.get("retained_only"):
                 continue
             inference = await session.get(Ticket, item["inference_id"])
-            if inference is None:
+            if inference is None or (batch.get("reuse_tickets") and not item.get("inference_attempt")):
                 inference = await _new_inference(session, run, batch, item)
             if inference.status not in TERMINAL:
                 if inference.status == "queued":
@@ -481,11 +554,11 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                 # selecting the same original cohort, not partial replay rows.
                 return await _retry(session, run, batch, evidence, expandable)
             evaluation = await session.get(Ticket, item["evaluation_id"]) if item.get("evaluation_id") else None
-            if evaluation is None:
+            if evaluation is None or (batch.get("reuse_tickets") and not item.get("evaluation_attempt")):
                 name = (item.get("active_members") or [str(_suite(run, batch["lane"])[0]["name"])])[0]
                 item["evaluation_id"] = f"{item['inference_id']}-eval"
                 _store(run, batch)
-                products = await _products(session, inference.id, "predictions")
+                products = await _products(session, inference.id, "predictions", run)
                 primary = next((p for p in products if (p.meta or {}).get("suite_member_name", name) == name), None)
                 if primary is None:
                     raise ValueError("checkpoint replay lacks primary predictions")
@@ -497,6 +570,12 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                 if evaluation is None:
                     raise ValueError("could not create deterministic cohort evaluation")
                 item["evaluation_id"] = evaluation.id
+                if batch.get("reuse_tickets"):
+                    await _begin_attempt(session, run, batch, item, evaluation, "evaluation")
+                    evaluation.inputs = {**(evaluation.inputs or {}), "predictions": {
+                        "source_ticket_id": inference.id, "artifact_role": "predictions",
+                        "work_product_id": primary.id, "path": primary.path,
+                    }}
                 _store(run, batch)
                 await session.commit()
             if evaluation.status not in TERMINAL:
@@ -554,7 +633,7 @@ def _record_budget_progress(batch: Batch, inference_id: str, evidence: dict, *, 
         streaks[name] = 0 if improved else streaks.get(name, 0) + 1
         config = load_inference_config(batch["configs"][name])
         below_floor = config.measurement.max_new_tokens < floor
-        record = {"member": name, "inference_id": inference_id,
+        record = {"member": name, "inference_id": inference_id, "revision": batch.get("id", ""),
                   "max_new_tokens": config.measurement.max_new_tokens,
                   "previous_fraction": previous, "fraction": current,
                   "relative_drop": relative_drop, "meaningful_improvement": improved,
@@ -572,6 +651,7 @@ async def _retry(session: AsyncSession, run: Run, batch: Batch, evidence: dict, 
     new = deepcopy(batch)
     new.update(id=uuid4().hex[:16], status="running", evidence=evidence, configs={},
                expanded_members=expandable, budget_finalized=False)
+    new.pop("progress_inference_id", None)
     for index, (name, path) in enumerate(batch["configs"].items()):
         config = load_inference_config(path)
         if name in expandable:
@@ -580,7 +660,10 @@ async def _retry(session: AsyncSession, run: Run, batch: Batch, evidence: dict, 
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(config.model_dump_json(indent=2) + "\n", encoding="utf-8")
         new["configs"][name] = str(destination)
-    new["cohort"] = [{"source_id": c["source_id"], "inference_id": f"remeasure-{new['id']}-{i:03d}"} for i, c in enumerate(batch["cohort"])]
+    new["cohort"] = [{**{k: deepcopy(c[k]) for k in ("request_payload", "request_inputs") if k in c},
+        "source_id": c["source_id"], "inference_id": (
+        c["inference_id"] if new.get("reuse_tickets") else f"remeasure-{new['id']}-{i:03d}"
+    )} for i, c in enumerate(batch["cohort"])]
     affected = sorted(set(batch.get("affected", [])) | {n for n, e in evidence.items() if needs_expansion(e)})
     new["affected"] = affected
     await _plan_retention(session, run, new, affected)

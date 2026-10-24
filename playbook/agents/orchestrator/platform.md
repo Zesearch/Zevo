@@ -764,8 +764,16 @@ rather than recreating the experiment.
 
 The engine may suspend the optimization handoff to replay baseline and all
 compared checkpoints with a common increased output allowance. Do not independently
-increase one candidate's token budget, duplicate these replay tickets, or compare
+increase one candidate's token budget, create duplicate replay tickets, or compare
 staged metrics against the published history. After the complete revision is
 published, use the updated Run history and the completing Evaluation's artifacts.
 Earlier predictions and scores remain audit evidence, not current comparison
 points. Held-out remeasurement stays private to the engine.
+
+New measurement revisions reopen each model's existing Inference ticket, with
+separate attempts and artifact directories; baseline and each trained iteration
+keep their own ticket, separately for Validation and Test. The engine reuses the
+matching Evaluation ticket when one exists. Truncation thresholds, repetition
+exemptions, budget ceilings, and stagnation rules are unchanged. Published scores
+remain in place until the entire revision completes. Existing legacy replay
+tickets remain audit history; do not delete or merge them manually.

@@ -21,7 +21,8 @@ from zevo.engine.run.runner import (
 
 
 @pytest.mark.asyncio
-async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize('remeasure', [False, True])
+async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, remeasure) -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -128,7 +129,7 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
 
         row.status = "released"
         row.released_at = datetime.now(timezone.utc)
-        row.meta = {**row.meta, "scheduler_state": "FAILED"}
+        row.meta = {**row.meta, "scheduler_state": "COMPLETED" if remeasure else "FAILED"}
         await session.flush()
         retry = contract.model_copy(update={
             "attempt": 2,
@@ -140,14 +141,24 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
             "device_info_path": str(device_path),
         })()
         with pytest.raises(
-            ValueError, match="only after its generated stage implementation changes",
+            ValueError, match="requires the prior workload to be terminal" if remeasure else "only after its generated stage implementation changes",
         ):
             await _submit_validated_slurm_stage(
                 session, run=run, ticket=ticket, inp=retry_input,
                 heartbeat_id="heartbeat-2",
             )
 
-        train_program.write_text("print('repaired')\n", encoding="utf-8")
+        if remeasure:
+            # A deliberate budget replay can reuse a successful implementation;
+            # it must be authorized by the engine's exact pending attempt.
+            run.lifecycle = {'token_budget_remeasurements': [{
+                'id': 'revision', 'status': 'running', 'reuse_tickets': True,
+                'cohort': [{'inference_id': ticket.id, 'inference_attempt': {
+                    'revision': 'revision', 'previous_resource_id': row.id,
+                }}],
+            }]}
+        else:
+            train_program.write_text("print('repaired')\n", encoding="utf-8")
         replacement = await _submit_validated_slurm_stage(
             session, run=run, ticket=ticket, inp=retry_input,
             heartbeat_id="heartbeat-2",
