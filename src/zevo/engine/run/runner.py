@@ -909,6 +909,8 @@ async def _slurm_stage_job_contract(
     prior_state = prior_state.split()[0].rstrip("+") if prior_state else ""
     prior_attempt = max(1, int(meta.get("execution_attempt") or 1))
     restart_instruction_id = str(getattr(ticket, "_restart_instruction_id", "") or meta.get("superseded_by_instruction_id") or "")
+    from zevo.engine.run.remeasurement import restarts_workload
+    measurement_restart = restarts_workload(run, ticket.id, job_row.id if job_row is not None else "")
     from zevo.engine.run.steering import requested_slurm_gpus
     requested_gpus = await requested_slurm_gpus(session, ticket.id) if cluster and session is not None else 0
     repair_submission = bool(
@@ -916,7 +918,7 @@ async def _slurm_stage_job_contract(
         and job_row is not None
         and prior_state in _SLURM_TERMINAL_STATES
         and (
-            restart_instruction_id
+            restart_instruction_id or measurement_restart
             or (
                 str(getattr(ticket, "status", "")) == "repairing"
                 and (prior_state != "COMPLETED" or (stage == "train" and meta.get("training_completion_repair")))
@@ -1575,12 +1577,8 @@ async def _build_evaluation_suite_members(
     source_id = str(pred_binding.get("source_ticket_id") or "")
     members: list[EvaluationSuiteMemberInput] = []
     if len(suite) > 1 and source_id:
-        products = (await session.execute(
-            select(WorkProduct).where(
-                WorkProduct.ticket_id == source_id,
-                WorkProduct.role == "predictions",
-            )
-        )).scalars().all()
+        from zevo.engine.run.remeasurement import _products
+        products = await _products(session, source_id, "predictions", run)
         if ticket.lane == "held_out_test":
             from zevo.holdout_storage import resolve_asset
         for index, item in enumerate(suite):
@@ -3243,8 +3241,8 @@ def _apply_run_score_monitor(
     tickets skip this entirely; their numbers go through `_record_holdout_score`
     so that a test result can never be mistaken for a tuning result.
     """
-    from zevo.engine.run.remeasurement import is_replay, is_superseded_prediction
-    if ticket.lane == "held_out_test" or is_replay(run, ticket) or is_superseded_prediction(run, ticket):
+    from zevo.engine.run.remeasurement import is_replay, is_superseded_prediction, pending
+    if ticket.lane == "held_out_test" or pending(run) or is_replay(run, ticket) or is_superseded_prediction(run, ticket):
         return
 
     # A component score is not the Run's model-selection score. Multi-benchmark
@@ -4150,6 +4148,8 @@ async def _submit_validated_slurm_stage(
             raise ValueError("a Slurm resource request already exists for this Ticket")
     else:
         previous_meta = dict(previous.meta or {}) if previous is not None else {}
+        from zevo.engine.run.remeasurement import restarts_workload
+        measurement_restart = restarts_workload(run, ticket.id, previous.id if previous is not None else "")
         previous_state = str(previous_meta.get("scheduler_state") or "").upper()
         previous_state = previous_state.split()[0].rstrip("+") if previous_state else ""
         if (
@@ -4163,7 +4163,7 @@ async def _submit_validated_slurm_stage(
             if instruction is None or instruction.run_id != run.id:
                 raise ValueError("replacement instruction does not belong to this Run")
         if (previous_state not in _SLURM_TERMINAL_STATES
-            or (previous_state == "COMPLETED" and not contract.restart_instruction_id
+            or (previous_state == "COMPLETED" and not contract.restart_instruction_id and not measurement_restart
                 and not (ticket.agent_id == "train" and previous_meta.get("training_completion_repair")))):
             raise ValueError("Slurm replacement requires the prior workload to be terminal")
         if int(previous_meta.get("execution_attempt") or 1) + 1 != contract.attempt:
@@ -4190,6 +4190,7 @@ async def _submit_validated_slurm_stage(
         if (
             previous_implementation_sha256
             and previous_implementation_sha256 == implementation_sha256
+            and not measurement_restart
         ):
             raise ValueError(
                 "a failed Slurm job may be re-executed only after its generated "
@@ -4540,6 +4541,10 @@ async def run_ticket(
         if activation_payload.get("instruction_action") == "restart_activation" else ""
     )
     if activation_source == "slurm_watcher":
+        from zevo.engine.run.remeasurement import restarts_workload
+        previous_job = await _latest_slurm_resource_request(session, tk)
+        if previous_job is not None and restarts_workload(run, tk.id, previous_job.id):
+            return tk  # A delayed collect for the prior measurement is not this attempt.
         if not await _slurm_watcher_job_is_current(
             session, tk, activation_payload,
         ):
@@ -4591,7 +4596,8 @@ async def run_ticket(
     # exists (see zevo.paths).
     work_dir_root = work_dir_root or paths_work_dir_root()
     run_dir = Path(work_dir_root) / (tk.run_id or "standalone")
-    work_dir = str(run_dir / tk.id)
+    from zevo.engine.run.remeasurement import attempt_work_dir
+    work_dir = attempt_work_dir(run, tk.id, str(run_dir / tk.id))
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     if tk.agent_id in {"infrastructure", "inference", "train"}:
         env_source = REPO_ROOT / "playbook" / "runners" / "remote_env.sh"

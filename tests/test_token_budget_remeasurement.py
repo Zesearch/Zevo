@@ -147,6 +147,9 @@ async def scenario(tmp_path, monkeypatch):
 
 async def finish_inference(session, ticket, tmp_path, limited=0):
     ticket.status = "succeeded"
+    run = await session.get(Run, ticket.run_id)
+    tmp_path = Path(rm.attempt_work_dir(run, ticket.id, str(tmp_path / ticket.id)))
+    tmp_path.mkdir(parents=True, exist_ok=True)
     for name in ("math", "qa"):
         path = tmp_path / f"{ticket.id}-{name}.json"
         path.write_text(diagnostics(limited=limited if name == "math" else 0).model_dump_json())
@@ -175,6 +178,7 @@ async def test_complete_cohort_publishes_atomically_and_recovery_is_idempotent(s
     assert await rm.intercept_completion(session, originals[-1])
     batch = deepcopy(rm.pending(run))
     assert len(batch["cohort"]) == 3
+    assert {c['inference_id'] for c in batch['cohort']} == {t.id for t in originals}
     math = load_inference_config(batch["configs"]["math"])
     qa = load_inference_config(batch["configs"]["qa"])
     assert math.measurement.max_new_tokens == 512
@@ -205,6 +209,7 @@ async def test_complete_cohort_publishes_atomically_and_recovery_is_idempotent(s
     await rm.advance(session, run.id)
     assert await rm.intercept_completion(session, originals[-1])
     assert len((await session.scalars(select(ScoreEvent))).all()) == 3
+    assert len((await session.scalars(select(Ticket).where(Ticket.agent_id == 'inference'))).all()) == 3
 
 
 @pytest.mark.asyncio
@@ -241,7 +246,8 @@ async def test_current_reaches_ceiling_then_history_is_scored_without_expansion(
         assert load_inference_config(batch['configs']['math']).measurement.max_new_tokens == cap
         assert batch['cohort'][0]['source_id'] == originals[-1].id
         for old in batch['cohort'][1:]:
-            assert await session.get(Ticket, old['inference_id']) is None
+            assert (await session.get(Ticket, old['inference_id'])).status == 'succeeded'
+            assert not old.get('inference_attempt')
         current = await session.get(Ticket, batch['cohort'][0]['inference_id'])
         await finish_inference(session, current, root, limited=5 if stalls else 9-attempt)
         await rm.advance(session, run.id)
@@ -249,6 +255,13 @@ async def test_current_reaches_ceiling_then_history_is_scored_without_expansion(
     assert batch['budget_finalized']
     assert 'math' in batch['stalled_members' if stalls else 'ceiling_evidence']
     assert len(batch['budget_progress']) == len(caps)
+    assert len({p['revision'] for p in batch['budget_progress']}) == len(caps)
+    assert len({p['inference_id'] for p in batch['budget_progress']}) == 1
+    assert len((await session.scalars(select(Ticket).where(Ticket.agent_id == 'inference'))).all()) == 3
+    products = await rm._products(session, originals[-1].id, 'generation_diagnostics')
+    # Original and every measurement attempt remain independently readable.
+    assert len({p.path for p in products}) == 2 * (len(caps) + 1)
+    assert all(Path(p.path).is_file() for p in products)
     # Recovery callbacks cannot count one inference as multiple attempts.
     await rm.advance(session, run.id)
     assert len(rm.pending(run)['budget_progress']) == len(caps)
@@ -395,6 +408,119 @@ async def test_reconciler_resumes_without_a_completion_callback(scenario):
 
 
 @pytest.mark.asyncio
+async def test_existing_evaluation_is_requeued_without_reusing_old_metrics(scenario):
+    session, run, originals, root = scenario
+    evaluation = Ticket(id='existing-eval', run_id=run.id, agent_id='evaluation',
+                        lane='optimization', iteration=2, status='succeeded',
+                        payload={'test_set_name': 'validation:math'},
+                        inputs={'predictions': {'source_ticket_id': originals[-1].id, 'path': '/old.csv'}})
+    session.add(evaluation)
+    await session.flush()
+    await finish_evaluation(session, evaluation, root, scores=(.99, .99))
+    old_products = {p.id for p in await rm._products(session, evaluation.id, 'metrics')}
+    await rm.intercept_completion(session, originals[-1])
+    await finish_inference(session, originals[-1], root)
+    await rm.advance(session, run.id)
+    item = rm.pending(run)['cohort'][0]
+    assert item['evaluation_id'] == evaluation.id
+    assert evaluation.status == 'queued'
+    assert evaluation.inputs['predictions']['path'] != '/old.csv'
+    assert old_products <= set(item['evaluation_attempt']['previous_product_ids'])
+    assert await rm._products(session, evaluation.id, 'metrics', run) == []
+    assert await rm._products(session, evaluation.id, 'metrics')  # Audit is retained.
+    # A stale success with no new metrics must never publish the old .99 score.
+    evaluation.status = 'succeeded'
+    await session.commit()
+    with pytest.raises(ValueError, match='complete evaluation suite'):
+        await rm._scores(session, evaluation, rm._suite(run, 'optimization'), run)
+
+
+@pytest.mark.asyncio
+async def test_evaluation_suite_binds_only_current_attempt_predictions(scenario):
+    from zevo.engine.run.runner import _build_evaluation_suite_members
+    session, run, originals, root = scenario
+    source = originals[-1]
+    session.add(WorkProduct(ticket_id=source.id, role='predictions', path='/stale-qa.csv',
+                            meta={'suite_member_name': 'qa'}))
+    await session.commit()
+    await rm.intercept_completion(session, source)
+    await finish_inference(session, source, root)
+    await rm.advance(session, run.id)
+    evaluation = await session.get(Ticket, rm.pending(run)['cohort'][0]['evaluation_id'])
+    members = await _build_evaluation_suite_members(evaluation, evaluation.payload,
+                                                    evaluation.inputs, run, session)
+    assert len(members) == 1
+    assert members[0].name == 'qa'
+    assert 'measurement-attempts' in members[0].predictions_path
+    assert members[0].predictions_path != '/stale-qa.csv'
+
+
+def test_legacy_ticket_provenance_does_not_cycle_after_reuse():
+    run = Run(lifecycle={rm.KEY: [
+        {'cohort': [{'source_id': 'original', 'inference_id': 'remeasure-old'}]},
+        {'reuse_tickets': True, 'cohort': [{'source_id': 'remeasure-old', 'inference_id': 'original'}]},
+    ]})
+    assert rm._original_ticket_id(run, 'remeasure-old') == 'original'
+    assert rm._original_ticket_id(run, 'original') == 'original'
+
+
+@pytest.mark.asyncio
+async def test_reopened_inference_cannot_complete_with_previous_diagnostics(scenario):
+    session, run, originals, root = scenario
+    old_history = deepcopy(run.history)
+    await rm.intercept_completion(session, originals[-1])
+    assert originals[-1].status == 'queued'
+    assert await rm._products(session, originals[-1].id, 'generation_diagnostics', run) == []
+    originals[-1].status = 'succeeded'
+    await session.commit()
+    await rm.advance(session, run.id)
+    assert run.status == 'degraded'
+    assert run.history == old_history
+    assert 'complete question-level diagnostics' in rm.batches(run)[-1]['error']
+
+
+@pytest.mark.asyncio
+async def test_later_iteration_reuses_previously_published_model_tickets(scenario, monkeypatch):
+    session, run, originals, root = scenario
+    async def handoff(session, run, batch):
+        batch['handoff_pending'] = False
+        rm._store(run, batch)
+        await session.commit()
+    monkeypatch.setattr(rm, '_handoff', handoff)
+
+    async def complete():
+        cohort = deepcopy(rm.pending(run)['cohort'])
+        for item in cohort:
+            await rm.advance(session, run.id)
+            inference = await session.get(Ticket, item['inference_id'])
+            await finish_inference(session, inference, root)
+            await rm.advance(session, run.id)
+            active = next(c for c in rm.pending(run)['cohort'] if c['inference_id'] == inference.id)
+            evaluation = await session.get(Ticket, active['evaluation_id'])
+            await finish_evaluation(session, evaluation, root)
+            await rm.advance(session, run.id)
+
+    await rm.intercept_completion(session, originals[-1])
+    await complete()
+    published = deepcopy(rm.batches(run)[-1])
+    new = Ticket(id='original-3', run_id=run.id, agent_id='inference', status='succeeded',
+                 lane='optimization', iteration=3,
+                 payload={**deepcopy(originals[-1].payload), 'test_set_name': ''}, inputs={})
+    session.add(new)
+    await session.flush()
+    for name, path in published['configs'].items():
+        session.add(WorkProduct(ticket_id=new.id, role='inference_config', path=path, meta={'suite_member_name': name}))
+    await finish_inference(session, new, root, limited=4)
+    await rm.intercept_completion(session, new)
+    assert {c['inference_id'] for c in rm.pending(run)['cohort']} == {t.id for t in originals} | {new.id}
+    await complete()
+    assert rm.batches(run)[-1]['status'] == 'published'
+    assert not rm.is_unpublished_replay(run, originals[0])
+    assert len((await session.scalars(select(Ticket).where(Ticket.agent_id == 'inference'))).all()) == 4
+    assert len((await session.scalars(select(Ticket).where(Ticket.agent_id == 'evaluation'))).all()) == 4
+
+
+@pytest.mark.asyncio
 async def test_staged_scores_cannot_change_headline_and_old_evaluations_are_superseded(scenario):
     session, run, originals, root = scenario
     from zevo.contracts.evaluation import EvaluationResult
@@ -410,6 +536,9 @@ async def test_staged_scores_cannot_change_headline_and_old_evaluations_are_supe
     result = EvaluationResult(ticket_id=evaluation.id, status="succeeded", metrics_path="/metrics.json", error_message="", notes="")
     _apply_run_score_monitor(run, evaluation, result, {"score": .99})
     assert run.best_validation_score == .4
+    evaluation.id = "old-eval"
+    _apply_run_score_monitor(run, evaluation, result, {"score": .99})
+    assert run.best_validation_score == .4  # Delayed prior evaluation before its new attempt.
     state = deepcopy(run.lifecycle)
     state[rm.KEY][0]["status"] = "published"
     run.lifecycle = state
@@ -460,8 +589,10 @@ async def test_iteration_two_retains_repetitive_baseline_but_replays_iteration_o
     assert baseline['retained']['math']['evidence']['repetition']['dominated']
     assert not iteration_one['retained_only']
     assert not current['retained_only']
-    assert await session.get(Ticket, baseline['inference_id']) is None
-    assert await session.get(Ticket, iteration_one['inference_id']) is None
+    assert (await session.get(Ticket, baseline['inference_id'])).status == 'succeeded'
+    assert (await session.get(Ticket, iteration_one['inference_id'])).status == 'succeeded'
+    assert not baseline.get('inference_attempt')
+    assert not iteration_one.get('inference_attempt')
     assert await session.get(Ticket, current['inference_id']) is not None
 
 

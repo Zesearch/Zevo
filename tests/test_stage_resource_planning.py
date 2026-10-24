@@ -479,6 +479,43 @@ def test_explicit_gpu_request_is_not_shrunk_by_capacity(capacity):
     assert selection.estimated_gpus == 1
 
 
+def test_measurement_attempt_submits_again_then_collects_only_the_new_job(tmp_path, monkeypatch):
+    from zevo.db import Run
+    info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
+    path = tmp_path / 'device_info.json'
+    path.write_text(info.model_dump_json())
+    row = SimpleNamespace(id='previous', instance_id='123', gpu_count=4, status='released',
+                          meta={'nodes': 1, 'scheduler_state': 'COMPLETED', 'execution_attempt': 7})
+    async def latest(*args):
+        return row
+    monkeypatch.setattr(runner, '_latest_slurm_resource_request', latest)
+    ticket = SimpleNamespace(id='infer-1', run_id='run-1', lane='optimization', status='running',
+                             payload={'base_model': 'org/7B'})
+    run = Run(gpu_provider='cluster', num_gpus=4, holdout={}, lifecycle={
+        'token_budget_remeasurements': [{'id': 'revision', 'status': 'running', 'reuse_tickets': True,
+            'cohort': [{'inference_id': ticket.id, 'inference_attempt': {
+                'revision': 'revision', 'previous_resource_id': row.id}}]}]})
+    async def contract():
+        return await runner._slurm_stage_job_contract(
+            run=run, ticket=ticket, work_dir=str(tmp_path), filename='predict.sbatch',
+            device_info_path=str(path), session=None, stage='inference')
+    submit = asyncio.run(contract())
+    assert submit.phase == 'submit'
+    assert submit.attempt == 8
+    assert submit.retry_of_bookkeeping_row_id == 'previous'
+    assert '/attempt-8/' in submit.remote_script_path
+    # Once committed, this same revision collects attempt 8 rather than
+    # repeatedly resubmitting the already completed attempt 7 or 8.
+    row.id = 'new'
+    row.instance_id = '124'
+    row.meta = {**row.meta, 'execution_attempt': 8,
+                'retry_of_bookkeeping_row_id': 'previous', 'retry_of_job_id': '123'}
+    collect = asyncio.run(contract())
+    assert collect.phase == 'collect'
+    assert collect.attempt == 8
+    assert collect.job_id == '124'
+
+
 def test_explicit_gpu_request_rejects_limits():
     with pytest.raises(ValueError, match="Run maximum"):
         plan_stage_resources(
