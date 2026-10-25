@@ -308,3 +308,31 @@ def test_generated_code_cannot_read_host_files(tmp_path: Path) -> None:
     assert metrics["score"] == 0.0
     assert metrics["outcomes"] == {"runtime_error": 1}
     assert "must-not-appear" not in json.dumps(metrics)
+
+
+@pytest.mark.parametrize(('body', 'outcome'), [
+    ('print(int(input()) + 1)', 'passed'),
+    ('print(99)', 'wrong_answer'),
+    ('raise ValueError("candidate failed")', 'runtime_error'),
+    ('time.sleep(5); print(99)', 'timeout'),
+])
+def test_threaded_stdio_candidate_keeps_output_inside_case(tmp_path, monkeypatch, body, outcome):
+    monkeypatch.setenv('ZEVO_CODE_CASE_TIMEOUT_SECONDS', '0.2')
+    code = (
+        'import threading, time\n'
+        'def solve():\n'
+        '    time.sleep(0.03)\n'
+        f'    {body}\n'
+        'threading.Thread(target=solve).start()\n'
+    )
+    metrics = _score(
+        tmp_path, adapter='code_contests',
+        scoring={
+            'id': 'threaded',
+            'public_tests': json.dumps({'input': ['1\n', '3\n'], 'output': ['2\n', '4\n']}),
+            'private_tests': '', 'generated_tests': '',
+        },
+        prediction=code,
+    )
+    assert metrics['outcomes'] == {outcome: 1}
+    assert metrics['score'] == (1.0 if outcome == 'passed' else 0.0)
