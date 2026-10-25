@@ -78,3 +78,17 @@ def test_evaluation_summary_rejects_missing_file_headline(tmp_path) -> None:
 
     assert status == "failed"
     assert "no finite numeric `score`" in summary
+
+
+def test_evaluation_failure_preserves_reason_and_ignores_old_metrics(tmp_path) -> None:
+    metrics = tmp_path / "metrics.json"
+    metrics.write_text('{"score": 1.0}')
+    message = "Coding: pass_at_1 requires a registered code execution adapter"
+    result = EvaluationResult(
+        status="failed", ticket_id="eval-003", metrics_path=str(metrics),
+        error_message=message, notes="",
+    )
+    status, summary, artifact, meta = _extract_summary_artifact_meta(
+        result, inp=_input("eval-003"), agent_id="evaluation", work_dir=str(tmp_path),
+    )
+    assert (status, summary, artifact, meta) == ("failed", message, "", {})

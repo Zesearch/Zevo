@@ -30,7 +30,8 @@ def _run(inp: EvaluationTaskInput, work_dir: Path):
     return result, events
 
 
-def test_custom_evaluator_runs_through_bash_without_llm(tmp_path: Path) -> None:
+@pytest.mark.parametrize("metric", ["token_f1", "pass_at_1"])
+def test_custom_evaluator_runs_through_bash_without_llm(tmp_path: Path, metric: str) -> None:
     predictions = tmp_path / "predictions.csv"
     gold = tmp_path / "gold.csv"
     _write_csv(predictions, [{"id": "1", "prediction": "A"}])
@@ -50,7 +51,7 @@ def test_custom_evaluator_runs_through_bash_without_llm(tmp_path: Path) -> None:
         evaluation_script=str(evaluator),
         evaluator_sha256=file_sha256(evaluator),
         answer_fields=["answer"],
-        metric="token_f1",
+        metric=metric,
     ), work_dir)
 
     assert result.driver == "evaluation_runner"
@@ -150,7 +151,8 @@ def test_builtin_evaluator_is_deterministic_and_writes_metrics(tmp_path: Path) -
     assert json.loads(Path(result.output.metrics_path).read_text())["score"] == 0.5
 
 
-def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -> None:
+@pytest.mark.parametrize("custom_pass_at_one", [False, True])
+def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path, custom_pass_at_one: bool) -> None:
     first_prediction = tmp_path / "first_predictions.csv"
     first_gold = tmp_path / "first_gold.csv"
     second_prediction = tmp_path / "second_predictions.csv"
@@ -159,6 +161,8 @@ def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -
     _write_csv(first_gold, [{"id": "1", "answer": "A"}])
     _write_csv(second_prediction, [{"id": "2", "prediction": "B"}])
     _write_csv(second_gold, [{"id": "2", "answer": "C"}])
+    evaluator = tmp_path / "coding_evaluator.py"
+    evaluator.write_text("import json, sys\njson.dump({'score': 0.0}, open(sys.argv[3], 'w'))\n")
     result, events = _run(EvaluationTaskInput(
         ticket_id="eval-suite-001",
         test_set_name="first",
@@ -175,7 +179,9 @@ def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path) -
             predictions_path=str(second_prediction),
             scoring_set=str(second_gold),
             sample_submission=str(second_prediction),
-            metric="accuracy",
+            metric="pass_at_1" if custom_pass_at_one else "accuracy",
+            evaluation_script=str(evaluator) if custom_pass_at_one else "",
+            evaluator_sha256=file_sha256(evaluator) if custom_pass_at_one else "",
             answer_fields=["answer"],
         )],
     ), tmp_path / "suite_work")
@@ -243,6 +249,14 @@ def test_pass_at_one_uses_shared_code_execution_route(tmp_path: Path) -> None:
     _write_csv(sample, [{
         "task_id": "fake", "benchmark": "humanevalplus", "prediction": "<code>",
     }])
+
+    missing, _ = _run(EvaluationTaskInput(
+        ticket_id="eval-code-missing", predictions_path=str(predictions),
+        scoring_set=str(gold), sample_submission=str(sample),
+        answer_fields=["test"], metric="pass_at_1", evaluation_script="",
+    ), tmp_path / "missing-adapter")
+    assert missing.output.status == "failed"
+    assert "requires a registered code execution adapter" in missing.output.error_message
 
     result, events = _run(EvaluationTaskInput(
         ticket_id="eval-code-001",
