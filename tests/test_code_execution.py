@@ -317,6 +317,10 @@ def test_generated_code_cannot_read_host_files(tmp_path: Path) -> None:
     ('time.sleep(5); print(99)', 'timeout'),
 ])
 def test_threaded_stdio_candidate_keeps_output_inside_case(tmp_path, monkeypatch, body, outcome):
+    # Exercise thread/capture lifecycle independently of the shared CI user's
+    # process quota (RLIMIT_NPROC counts all tasks owned by that Unix user).
+    # Existing scorer integration tests retain the production OS limits.
+    monkeypatch.setattr('zevo.engine.code_execution.scorer._limits', lambda *_args: None)
     monkeypatch.setenv('ZEVO_CODE_CASE_TIMEOUT_SECONDS', '0.2')
     code = (
         'import threading, time\n'
@@ -334,5 +338,5 @@ def test_threaded_stdio_candidate_keeps_output_inside_case(tmp_path, monkeypatch
         },
         prediction=code,
     )
-    assert metrics['outcomes'] == {outcome: 1}
+    assert metrics['outcomes'] == {outcome: 1}, metrics
     assert metrics['score'] == (1.0 if outcome == 'passed' else 0.0)

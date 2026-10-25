@@ -7,6 +7,7 @@ import useSWR from "swr";
 import { StopCircle, ChevronRight, ChevronDown, Clock, ListChecks, Package, ArrowLeft, Layers3, ScrollText } from "lucide-react";
 import { InputChangesNotice } from "../components/InputChangesNotice";
 import { TrainingMonitor } from "../components/TrainingMonitor";
+import { EvaluationProgress, evaluationAttemptLabel } from "../components/EvaluationProgress";
 import { RunInstructionPanel } from "../components/RunInstructionPanel";
 import { StepTimeline } from "../components/StepTimeline";
 import type { EventEnvelope } from "../components/LiveTranscript";
@@ -1104,10 +1105,12 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
       </div>
       {activations.length > 1 && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
-          <span className="font-mono text-[11px] uppercase tracking-wider text-dim">Activations</span>
+          <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation attempts" : "Activations"}</span>
           {activations.map((heartbeat, index) => {
             const active = heartbeat.id === picked?.id;
-            const label = t.agent_id === "orchestrator"
+            const label = t.agent_id === "evaluation"
+              ? evaluationAttemptLabel(heartbeat.activation_phase, index + 1, t.lane)
+              : t.agent_id === "orchestrator"
               ? index === 0 ? "Initial" : `Repair ${index}`
               : heartbeat.operation
               ? operationCaption(t, heartbeat.operation, heartbeat.activation_phase)
@@ -1145,6 +1148,9 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
             activeBenchmarks={activeBenchmarks} parallelWorkers={parallelWorkers}
             lastBenchmarkName={String(lastInferenceBenchmark?.extras?.benchmark_name || "")}
           />
+          {t.agent_id === "evaluation" && (
+            <EvaluationProgress events={t.execution_events} heartbeat={picked} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
+          )}
           {latestJudgeProgress && (
             <div className="rounded-bezel border border-brass-500/25 bg-brass-500/[0.05] px-3 py-2.5 text-xs">
               <div className="font-mono uppercase tracking-wider text-brass-300">Model judge</div>
