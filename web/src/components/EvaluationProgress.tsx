@@ -19,13 +19,16 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
   const completed = new Set<string>();
   let total = 0;
   let current = "";
-  let index = 0;
+  let judge: ExecutionEventDTO | undefined;
   for (const event of scoped) {
     const scoring = /^scoring (\d+)\/(\d+): (.+)$/.exec(event.phase);
     if (scoring) {
-      index = Number(scoring[1]);
+      judge = undefined;
       total = Math.max(total, Number(scoring[2]));
       current = scoring[3];
+    }
+    if (event.event_type === "progress" && event.extras?.phase === "model_judge") {
+      judge = event;
     }
     const count = Number(event.extras?.benchmark_total || 0);
     if (Number.isFinite(count)) total = Math.max(total, count);
@@ -36,15 +39,13 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
   }
   if (total === 0 && scoped.some((event) => event.phase === "scoring" || event.phase === "completed")) {
     total = 1;
-    index = 1;
     current = benchmarkName || (lane === "held_out_test" ? "Final Test" : "Validation");
     if (scoped.some((event) => event.phase === "completed")) completed.add("single");
   }
   if (!heartbeat || total < 1) return null;
   const done = Math.min(completed.size, total);
-  const finished = !!heartbeat.finished_at;
-  const state = finished ? (heartbeat.exit_code === 0 ? "Completed" : "Stopped")
-    : paused ? "Paused" : "Scoring";
+  const judgeModel = typeof judge?.extras?.model === "string" ? judge.extras.model : "";
+  const judgeCached = Number(judge?.extras?.cached || 0);
   const suite = lane === "held_out_test" ? "Final Test" : "Validation";
   return (
     <div className="mb-3 rounded-bezel border border-brass-500/25 bg-brass-500/[0.05] px-3 py-2.5">
@@ -52,6 +53,13 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
         <span className="min-w-0 text-slate-200">
           <span className="text-brass-300">Evaluation</span>
           {current && <span> · {current}</span>}
+          {judge && (
+            <span className="ml-3 text-brass-300" title={judgeModel || undefined}>
+              Model Judge · {judge.current_step.toLocaleString()} / {judge.total_steps.toLocaleString()} responses judged
+              {judgeCached > 0 && <span className="text-dim"> · {judgeCached.toLocaleString()} cached</span>}
+            </span>
+          )}
+          {paused && !heartbeat.finished_at && <span className="ml-3 text-dim">Paused</span>}
         </span>
         <span className="tabular-nums text-brass-300">{suite} {done} / {total} <span className="text-dim">evaluated</span></span>
       </div>
@@ -59,7 +67,6 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
         aria-label={`${suite} evaluation benchmarks`} aria-valuemin={0} aria-valuemax={total} aria-valuenow={done}>
         <div className="h-full rounded-full bg-brass-400 transition-[width] duration-500" style={{ width: `${done / total * 100}%` }} />
       </div>
-      <div className="mt-1.5 text-xs text-dim">{state}{index > 0 && done < total ? ` · Benchmark ${index} of ${total}` : ""}</div>
     </div>
   );
 }
