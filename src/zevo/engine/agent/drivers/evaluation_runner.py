@@ -319,7 +319,7 @@ class EvaluationRunnerDriver:
                 "a code execution adapter requires the pass_at_1 metric",
             )
             return DriverRunResult(output=output, exit_code=1, driver=self.name)
-        if inp.metric == "pass_at_1" and not inp.code_execution_adapter:
+        if script_path is None and inp.metric == "pass_at_1" and not inp.code_execution_adapter:
             output = _failed(
                 inp.ticket_id,
                 "pass_at_1 requires a registered code execution adapter",

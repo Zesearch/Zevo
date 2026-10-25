@@ -2878,6 +2878,10 @@ def _extract_summary_artifact_meta(
         })
 
     if isinstance(result, EvaluationResult):
+        if status == "failed":
+            # A deterministic scorer's typed failure is authoritative. Do not
+            # replace it with empty notes or metrics from an earlier attempt.
+            return status, result.error_message or result.notes or "evaluation failed", "", {}
         artifact, metrics = materialize_metrics_artifact(result.metrics_path, work_dir)
         # The durable file is the only score authority.
         score = extract_score({"score": metrics.get("score")})
@@ -5906,6 +5910,9 @@ async def run_ticket(
             output, inp=inp, agent_id=tk.agent_id, work_dir=work_dir,
             run_id=tk.run_id,
         )
+        if status == "failed" and isinstance(output, EvaluationResult):
+            error_message = output.error_message or summary
+            hb.error_message = error_message[:2000]
         if (
             hb.activation_phase == "collect"
             and tk.agent_id == "train"

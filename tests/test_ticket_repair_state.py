@@ -39,6 +39,28 @@ def test_failure_ownership_is_deterministic() -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_code_adapter_does_not_schedule_a_repair(session: AsyncSession) -> None:
+    session.add(Run(
+        id="r", task_name="t", agent_objective="t", metric="score", status="running",
+    ))
+    ticket = Ticket(
+        id="eval-r-001", run_id="r", agent_id="evaluation", status="running",
+        input_format="typed", lane="optimization", iteration=0,
+    )
+    session.add(ticket)
+    await session.flush()
+    retry = await _apply_ticket_failure_policy(
+        session, ticket,
+        error_message="Coding: pass_at_1 requires a registered code execution adapter",
+    )
+    assert not retry
+    assert ticket.status == "failed"
+    assert ticket.repair_route == "terminal"
+    assert not ticket.repair_attempts
+    assert not (await session.execute(select(TicketMessage))).scalars().all()
+
+
+@pytest.mark.asyncio
 async def test_twenty_repairs_stay_on_one_ticket_then_escalate(session: AsyncSession) -> None:
     session.add(Run(
         id="r", task_name="t", agent_objective="t", metric="score", status="running",
