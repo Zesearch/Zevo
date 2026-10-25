@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import { TrainingMonitor } from "../components/TrainingMonitor";
+import { EvaluationProgress, evaluationAttemptLabel } from "../components/EvaluationProgress";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { StepTimeline } from "../components/StepTimeline";
 import type { EventEnvelope } from "../components/LiveTranscript";
@@ -16,7 +17,8 @@ import { LiveTranscript } from "../components/LiveTranscript";
 import { relPath, scrubPaths } from "../lib/format";
 import { assignIterations, iterationOrder } from "../lib/iterations";
 import { api } from "../lib/api";
-import type { HeartbeatDTO, TicketDetail, RunDetail } from "../lib/api";
+import type { HeartbeatDTO, TicketDetail, RunDetail, RunInstructionDTO } from "../lib/api";
+import { instructionBlocks } from "../lib/stageStatus";
 import { Bezel, Kicker } from "../components/zevo/primitives";
 
 export function TicketDetailPage() {
@@ -36,6 +38,11 @@ export function TicketDetailPage() {
   const { data: heartbeats = [] } = useSWR<HeartbeatDTO[]>(
     ticketId ? `/api/heartbeats?ticket_id=${encodeURIComponent(ticketId)}&limit=200` : null,
     { refreshInterval: 3000 }
+  );
+  const { data: evaluationInstructions = [] } = useSWR<RunInstructionDTO[]>(
+    tk?.agent_id === "evaluation" && tk.lane === "optimization" && tk.run_id
+      ? `/api/runs/${encodeURIComponent(tk.run_id)}/instructions` : null,
+    { refreshInterval: 3000 },
   );
   // For an orchestrate ticket, label each heartbeat tab with the child ticket
   // that wake emitted (so the transcript tabs line up with the "Emitted by
@@ -157,7 +164,9 @@ export function TicketDetailPage() {
         : "Candidate Inference";
     let activationLabel = operationLabel[h.operation]
       || `Activation ${hbSeq.get(h.id) ?? "?"}`;
-    if (h.operation === "run_inference" && phase === "submit") {
+    if (tk?.agent_id === "evaluation") {
+      activationLabel = evaluationAttemptLabel(phase, hbSeq.get(h.id) ?? 1, tk.lane);
+    } else if (h.operation === "run_inference" && phase === "submit") {
       activationLabel = `Submit ${inferenceName}`;
     } else if (h.operation === "run_inference" && phase === "collect") {
       activationLabel = `Collect ${inferenceName} Results`;
@@ -417,7 +426,7 @@ export function TicketDetailPage() {
         )}
 
       <Section
-        title={`Transcript · ${heartbeats.length} heartbeat(s)${
+        title={`Transcript · ${heartbeats.length} ${tk.agent_id === "evaluation" ? "evaluation attempt(s)" : "heartbeat(s)"}${
           tk.agent_id === "orchestrator"
             ? orchTicketCount > 1
               ? " · this supervisor ticket only"
@@ -426,6 +435,10 @@ export function TicketDetailPage() {
         }`}
         className="mt-4"
       >
+        {tk.agent_id === "evaluation" && (
+          <EvaluationProgress events={tk.execution_events} heartbeat={heartbeats.find((h) => h.id === curHbId)} lane={tk.lane}
+            paused={evaluationInstructions.some((item) => instructionBlocks(item.status))} benchmarkName={String(tk.payload.test_set_name || "")} />
+        )}
         {heartbeats.length === 0 ? (
           <WaitingPanel ticketId={tk.id} agentId={tk.agent_id} />
         ) : (

@@ -20,6 +20,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import traceback
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
@@ -27,6 +28,27 @@ from typing import Any, Callable
 
 class CaseTimeout(Exception):
     pass
+
+
+@contextlib.contextmanager
+def _candidate_threads():
+    """Keep candidate threads inside the case's I/O capture and time limit."""
+    existing = set(threading.enumerate())
+    errors: list[BaseException] = []
+    old_hook = threading.excepthook
+    threading.excepthook = lambda args: errors.append(args.exc_value)
+    try:
+        yield
+        while True:
+            pending = [t for t in threading.enumerate() if t not in existing]
+            if not pending:
+                break
+            for thread in pending:
+                thread.join()
+        if errors:
+            raise errors[0]
+    finally:
+        threading.excepthook = old_hook
 
 
 def _alarm(_signum: int, _frame: Any) -> None:
@@ -98,7 +120,7 @@ def _namespace() -> dict[str, Any]:
 
 def _python_harness(job: dict[str, Any], timeout: float) -> None:
     namespace = _namespace()
-    with _time_limit(timeout), contextlib.redirect_stdout(io.StringIO()):
+    with _time_limit(timeout), contextlib.redirect_stdout(io.StringIO()), _candidate_threads():
         exec(compile(str(job["code"]), "<candidate>", "exec"), namespace)
         exec(compile(str(job["harness"]), "<benchmark-tests>", "exec"), namespace)
         if job.get("invoke_check"):
@@ -204,7 +226,7 @@ def _livecodebench(job: dict[str, Any], timeout: float) -> None:
         with _time_limit(timeout):
             namespace = _namespace()
             if functional:
-                with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()), _candidate_threads():
                     exec(compile(str(job["code"]), "<candidate>", "exec"), namespace)
                     actual = _functional(namespace, function_name)(
                         *_functional_args(test.get("input", ""))
@@ -230,7 +252,7 @@ def _livecodebench(job: dict[str, Any], timeout: float) -> None:
                         return old_open(file, mode, *args, **kwargs)
 
                     builtins.open = input_open
-                    with contextlib.redirect_stdout(output):
+                    with contextlib.redirect_stdout(output), _candidate_threads():
                         try:
                             exec(
                                 compile(str(job["code"]), "<candidate>", "exec"),
@@ -275,9 +297,15 @@ def main() -> int:
             "reason": "runtime_error",
             "detail": "".join(traceback.format_exception_only(type(exc), exc))[-500:],
         }
+    # A timed-out thread must not append output to the JSON protocol while
+    # the worker exits. Normal candidate threads were joined inside capture.
+    sys.stdout = io.StringIO()
     sys.__stdout__.write(json.dumps(result, ensure_ascii=False))
+    sys.__stdout__.flush()
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Python's normal shutdown waits indefinitely for non-daemon threads,
+    # including candidates that exceeded the case deadline.
+    os._exit(main())
