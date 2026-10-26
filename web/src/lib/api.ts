@@ -645,6 +645,7 @@ export type RunDetail = RunSummary & {
     lane: TicketLane;
     iteration: number;
     operation: string;
+    mid_training_enabled?: boolean;
     model_source: "" | "base_model" | "checkpoint";
     test_set_name: string;
     status: TicketStatus;
