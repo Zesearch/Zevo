@@ -6748,7 +6748,9 @@ async def run_ticket(
                         items[item_index] = (
                             item_path,
                             item_role,
-                            {**item_meta, "suite_primary": True},
+                            {**item_meta, "suite_primary": True,
+                             **{key: artifact_meta[key] for key in ("suite_member_name", "test_set_name")
+                                if key in artifact_meta}},
                         )
                     assigned_members = {
                         member.name: member for member in inp.suite_members

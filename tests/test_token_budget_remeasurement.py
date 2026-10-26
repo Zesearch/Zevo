@@ -957,3 +957,41 @@ async def test_cohort_blocks_next_iteration_between_successful_tickets(scenario,
         await rm.advance(session, run.id)
         assert rm.pending(run)['status'] == 'paused'
         assert run.status == 'running'
+
+
+@pytest.mark.asyncio
+async def test_legacy_primary_retention_ignores_database_config_key_order(scenario):
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, 'held_out_test', True)
+    for role in ['generation_diagnostics', 'inference_config']:
+        for product in await rm._products(session, originals[0].id, role):
+            if product.meta['suite_member_name'] == 'math':
+                product.meta = {'suite_primary': True}
+    await session.commit()
+    path = str(config_file(root))
+    revised = root / 'larger-qa.json'
+    revised.write_text(rm.enlarged_config(load_inference_config(path), {}).model_dump_json())
+    item = {'source_id': originals[0].id, 'inference_id': originals[0].id}
+    # PostgreSQL JSONB does not retain suite order in this map.
+    batch = {'id': 'order', 'lane': 'held_out_test', 'base_model': originals[0].payload['base_model'],
+             'configs': {'qa': str(revised), 'math': path}, 'cohort': [item]}
+    await rm._plan_retention(session, run, batch, ['qa'])
+    assert item['active_members'] == ['qa']
+    assert item['retained']['math']['score']['score'] == .2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('lane', ['optimization', 'held_out_test'])
+async def test_replay_primary_diagnostics_follow_ticket_not_original_suite_order(scenario, lane):
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, lane, False)
+    ticket = originals[-1]
+    ticket.payload = {**ticket.payload, 'test_set_name': 'qa' if lane == 'held_out_test' else 'validation:qa'}
+    for product in await rm._products(session, ticket.id, 'generation_diagnostics'):
+        if product.meta['suite_member_name'] == 'qa':
+            product.meta = {'suite_primary': True}
+            Path(product.path).write_text(diagnostics(limited=3).model_dump_json())
+    await session.commit()
+    evidence = await rm._evidence(session, run, ticket)
+    assert evidence['qa']['truncated_questions'] == 3
+    assert evidence['math']['truncated_questions'] == 2
