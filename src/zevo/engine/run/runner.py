@@ -1279,7 +1279,7 @@ async def _build_validation_suite_members(
     Only the ordinary optimization Inference owns a suite. Engine-created
     legacy mirrors and held-out Test tickets remain single-member work orders.
     """
-    from zevo.engine.run.remeasurement import replay_item
+    from zevo.engine.run.remeasurement import configuration_override, replay_item
     replay = replay_item(run, ticket.id)
     if ticket.lane != "optimization" or (str(payload.get("test_set_name") or "") and not replay):
         return []
@@ -1307,9 +1307,9 @@ async def _build_validation_suite_members(
         mapping = dict(member_pins.get("inference_config") or {})
         mapping["inference_query"] = str(item.get("inference_query") or "")
         member_pins["inference_config"] = mapping
-        config_path = ""
-        mode = "select"
-        if model_source == "checkpoint":
+        config_path = configuration_override(run, ticket, name)
+        mode = "reuse" if config_path else "select"
+        if model_source == "checkpoint" and not config_path:
             config_path = await _baseline_suite_config_path(
                 session, run=run, base_model=base_model, member_name=name,
             )
@@ -1369,7 +1369,7 @@ async def _build_holdout_suite_members(
         (index, item) for index, item in enumerate(suite)
         if index != primary_index
     ]
-    from zevo.engine.run.remeasurement import replay_item
+    from zevo.engine.run.remeasurement import configuration_override, replay_item
     retained = replay_item(run, ticket.id).get("retained", {})
     for position, (index, item) in enumerate(ordered, start=1):
         name = str(item.get("name") or f"Test {index + 1}")
@@ -1388,9 +1388,9 @@ async def _build_holdout_suite_members(
         mapping = dict(member_pins.get("inference_config") or {})
         mapping["inference_query"] = str(item.get("inference_query") or "")
         member_pins["inference_config"] = mapping
-        config_path = ""
-        mode = "select"
-        if model_source == "checkpoint":
+        config_path = configuration_override(run, ticket, name)
+        mode = "reuse" if config_path else "select"
+        if model_source == "checkpoint" and not config_path:
             config_path = await _baseline_suite_config_path(
                 session, run=run, base_model=base_model, member_name=name,
                 lane="held_out_test",
@@ -1401,7 +1401,7 @@ async def _build_holdout_suite_members(
                     "configuration for this model lineage"
                 )
             mode = "reuse"
-        elif not profile:
+        elif not profile and not config_path:
             raise ValueError(
                 f"Test suite member {name!r} has no inference data profile"
             )
