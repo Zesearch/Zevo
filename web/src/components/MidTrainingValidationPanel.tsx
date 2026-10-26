@@ -87,13 +87,9 @@ export function MidTrainingValidationPanel({ data, events = [], activity, showEx
   const progress = [...events].filter((event) => event.extras?.execution_purpose === "workload"
     && event.extras?.benchmark_name).sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
   const generating = activity === "Mid-training Validation · Inference";
-  const status = activity && activity !== "Training" ? activity.replace("Mid-training Validation · ", "")
-    : data?.complete ? "Validation complete" : !data ? "Waiting for the first validation checkpoint" : null;
   return <div>
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-      <div className="flex flex-wrap items-center gap-3"><h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300">Mid-training Validation</h3>
-        {status && status !== "Mid-training Validation" && <span className="text-xs text-sky-300">{status}</span>}
-      </div>
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300">Mid-training Validation</h3>
       {!!data?.measurements.length && <button type="button" className="text-xs text-sky-300 hover:underline"
         onClick={() => { setStep(undefined); setOpen(true); }}>See more details</button>}
     </div>
@@ -104,7 +100,7 @@ export function MidTrainingValidationPanel({ data, events = [], activity, showEx
         {data.next_step != null && <span>Next validation: step {data.next_step.toLocaleString()}</span>}
         <span>{data.direction === "max" ? "Higher" : "Lower"} is better</span>
       </div>
-      <div ref={scrollRef} className="max-h-40 overflow-auto" role="region" aria-label="Validation history; scroll up for earlier checks" tabIndex={0}><table className="w-full text-left text-xs">
+      <div ref={scrollRef} className="max-h-[27.5rem] overflow-auto" role="region" aria-label="Validation history; scroll up for earlier checks" tabIndex={0}><table className="w-full text-left text-xs">
         <thead className="sticky top-0 z-10 h-10 border-b border-slate-700 bg-panel text-slate-400"><tr>
           {["Step", "Progress", "Suite average", "Decision"].map((title) => <th key={title} className="px-3 py-2 font-medium whitespace-nowrap">{title}</th>)}
         </tr></thead><tbody>{data.measurements.map((row) => <tr key={row.step} className="h-10 border-b border-slate-800 hover:bg-sky-500/5 cursor-pointer"
