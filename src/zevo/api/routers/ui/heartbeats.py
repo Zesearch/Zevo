@@ -42,6 +42,14 @@ async def _by_id_prefix(db: AsyncSession, heartbeat_id: str) -> HeartbeatRun | N
     )).scalars().first()
 
 
+class MidTrainingActivationDTO(BaseModel):
+    request_id: str
+    train_ticket_id: str
+    step: int
+    action: str = ""
+    next_step: int | None = None
+
+
 class HeartbeatDTO(BaseModel):
     id: str
     ticket_id: str
@@ -70,9 +78,10 @@ class HeartbeatDTO(BaseModel):
     action: str = ""
     action_summary: str = ""
     child_ticket_id: str = ""
+    mid_training: MidTrainingActivationDTO | None = None
 
 
-def _dto(h: HeartbeatRun, result_output: dict | None = None) -> HeartbeatDTO:
+def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict | None = None) -> HeartbeatDTO:
     size = 0
     is_live = h.finished_at is None
     if h.stdout_path:
@@ -85,6 +94,7 @@ def _dto(h: HeartbeatRun, result_output: dict | None = None) -> HeartbeatDTO:
     output = result_output if isinstance(result_output, dict) else {}
     child_id = str(output.get("child_ticket_id") or "")
     return HeartbeatDTO(
+        mid_training=mid_training,
         id=h.id, ticket_id=h.ticket_id, agent_id=h.agent_id,
         driver=h.driver, model=h.model,
         started_at=h.started_at.isoformat() if h.started_at else "",
@@ -121,6 +131,31 @@ async def _result_outputs(
         for heartbeat_id, output in rows
         if isinstance(output, dict)
     }
+
+
+async def _mid_training_contexts(db: AsyncSession, rows: list[HeartbeatRun]) -> dict[str, dict]:
+    ids = {row.ticket_id for row in rows if row.agent_id == "orchestrator"}
+    if not ids:
+        return {}
+    lifecycles = dict((await db.execute(select(Ticket.id, Run.lifecycle)
+        .join(Run, Run.id == Ticket.run_id).where(Ticket.id.in_(ids)))).all())
+    contexts = {}
+    for row in rows:
+        requests = (lifecycles.get(row.ticket_id) or {}).get("adaptive_training_requests", {})
+        context = (row.resolved_config or {}).get("mid_training")
+        if not isinstance(context, dict):
+            accepted = [(key, value) for key, value in requests.items() if value.get("decision_heartbeat_id") == row.id]
+            if len(accepted) != 1:
+                continue
+            key, value = accepted[0]
+            context = {"request_id": key, "train_ticket_id": value["ticket_id"], "step": value["step"]}
+        request = requests.get(context.get("request_id"))
+        if not request or request.get("ticket_id") != context.get("train_ticket_id") or request.get("step") != context.get("step"):
+            continue
+        decision = (request.get("decision") or {}) if request.get("decision_heartbeat_id") == row.id else {}
+        contexts[row.id] = {"request_id": context["request_id"], "train_ticket_id": request["ticket_id"],
+                            "step": request["step"], "action": decision.get("action", ""), "next_step": decision.get("next_step")}
+    return contexts
 
 
 async def _heartbeat_is_visible(
@@ -178,7 +213,8 @@ async def list_heartbeats(
         ))
     rows = (await db.execute(q)).scalars().all()
     outputs = await _result_outputs(db, [row.id for row in rows])
-    return [_dto(row, outputs.get(row.id)) for row in rows]
+    contexts = await _mid_training_contexts(db, rows)
+    return [_dto(row, outputs.get(row.id), contexts.get(row.id)) for row in rows]
 
 
 @router.get("/heartbeats/{heartbeat_id}", response_model=HeartbeatDTO)
@@ -192,7 +228,8 @@ async def get_heartbeat(
     if not await _heartbeat_is_visible(db, r, request):
         raise HTTPException(404, f"heartbeat {heartbeat_id} not found")
     outputs = await _result_outputs(db, [r.id])
-    return _dto(r, outputs.get(r.id))
+    contexts = await _mid_training_contexts(db, [r])
+    return _dto(r, outputs.get(r.id), contexts.get(r.id))
 
 
 @router.post("/heartbeats/{heartbeat_id}/cancel")

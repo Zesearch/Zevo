@@ -13,6 +13,20 @@ from sqlalchemy import select
 from zevo.db import Run, Ticket, ExecutionEvent, WorkProduct
 
 
+def activation_validation_context(lifecycle, reason, payload, previous=None):
+    """Identify a checkpoint by its request ID, never by activation timing."""
+    request_id = (payload or {}).get("adaptive_training_request_id")
+    prefix = "mid-training Validation decision "
+    if not request_id and reason.startswith(prefix):
+        request_id = reason[len(prefix):].strip()
+    if not request_id and previous:
+        request_id = previous.get("request_id")
+    request = lifecycle.get("adaptive_training_requests", {}).get(request_id)
+    if not request or (request.get("status") != "pending" and not previous):
+        return None
+    return {"request_id": request_id, "train_ticket_id": request["ticket_id"], "step": request["step"]}
+
+
 async def build_validation_contract(session, run, ticket, work_dir):
     if not (run.lifecycle or {}).get("adaptive_mid_training_evaluation"):
         return {}
@@ -155,7 +169,8 @@ async def reconcile_adaptive_training(session):
         if run.supervisor_ticket_id:
             from zevo.engine.run.wakeup import queue_wakeup
             await queue_wakeup(session, agent_id="orchestrator", ticket_id=run.supervisor_ticket_id,
-                               source="on_demand", reason=f"mid-training Validation decision {key}")
+                               source="on_demand", reason=f"mid-training Validation decision {key}",
+                               payload={"adaptive_training_request_id": key})
         else:
             await session.commit()
         count += 1
@@ -212,7 +227,18 @@ async def decide_adaptive_training(session, run_id, ticket_id, body):
     response = await _ssh(info, "python3 -c " + shlex.quote(code), timeout_seconds=40)
     if not response.get("ok"):
         raise HTTPException(503, "could not deliver decision; checkpoint remains resumable")
-    requests[body.request_id] = {**request, "status": "decided", "decision": decision}
+    # Attribute the accepted decision to the actual live activation. Manual
+    # submissions without an unambiguous activation stay unattributed.
+    from zevo.db import HeartbeatRun
+    live = (await session.execute(select(HeartbeatRun).where(
+        HeartbeatRun.ticket_id == run.supervisor_ticket_id,
+        HeartbeatRun.finished_at.is_(None),
+    ))).scalars().all()
+    matches = [h for h in live if (h.resolved_config or {}).get("mid_training", {}).get("request_id") == body.request_id]
+    if not matches and len(live) == 1 and live[0].activation_phase != "instruction":
+        matches = live
+    requests[body.request_id] = {**request, "status": "decided", "decision": decision,
+                               "decision_heartbeat_id": matches[0].id if len(matches) == 1 else ""}
     run.lifecycle = {**(run.lifecycle or {}), "adaptive_training_requests": requests}
     await session.commit()
     return {"status": "decided", "decision": decision}

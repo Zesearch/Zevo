@@ -275,3 +275,12 @@ h1, h2, h3, .font-display {
 @media (prefers-reduced-motion: reduce) {
   .bar-grow { animation: none; }
 }
+
+@keyframes validation-drawer-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.animate-validation-drawer { animation: validation-drawer-in 180ms ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .animate-validation-drawer { animation: none; }
+}

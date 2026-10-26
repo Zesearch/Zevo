@@ -4852,6 +4852,21 @@ async def run_ticket(
     elif isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled:
         hb.activation_phase = str(slurm_contract.phase or "")
 
+    if tk.agent_id == "orchestrator" and hb.activation_phase != "instruction":
+        from zevo.engine.run.adaptive_training import activation_validation_context
+        previous_context = None
+        if status_at_pickup == "repairing":
+            previous_heartbeat = (await session.execute(
+                select(HeartbeatRun).where(HeartbeatRun.ticket_id == tk.id)
+                .order_by(HeartbeatRun.started_at.desc()).limit(1)
+            )).scalar_one_or_none()
+            if previous_heartbeat:
+                previous_context = (previous_heartbeat.resolved_config or {}).get("mid_training")
+        context = activation_validation_context(run.lifecycle or {}, activation_reason,
+                                                activation_payload, previous_context)
+        if context:
+            hb.resolved_config = {"mid_training": context}
+
     session.add(hb)
     await session.flush()  # populates hb.id without committing
     stdout_path = str(Path(log_dir) / f"{tk.id}__{hb.id}.stdout.log")
@@ -5479,7 +5494,8 @@ async def run_ticket(
                         select(HeartbeatRun).where(HeartbeatRun.id == heartbeat_id)
                     )).scalar_one_or_none()
                     if live_hb is not None:
-                        live_hb.resolved_config = config
+                        live_hb.resolved_config = {**config, **({"mid_training": live_hb.resolved_config["mid_training"]}
+                            if (live_hb.resolved_config or {}).get("mid_training") else {})}
                 await live_session.commit()
             for row in rows:
                 row.pop("_live_inflight", None)
@@ -5659,7 +5675,8 @@ async def run_ticket(
             continue
         session.add(ExecutionEvent(ticket_id=tk.id, heartbeat_id=heartbeat_id, **values))
     if config_rows:
-        hb.resolved_config = dict(config_rows[-1]["extras"])
+        hb.resolved_config = {**dict(config_rows[-1]["extras"]), **({"mid_training": hb.resolved_config["mid_training"]}
+            if (hb.resolved_config or {}).get("mid_training") else {})}
 
     # Did the measured stage go looking at its grader?
     #

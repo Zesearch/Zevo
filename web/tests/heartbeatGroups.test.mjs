@@ -30,3 +30,13 @@ test('unrecovered failures and orphan repairs remain visible', () => {
   assert.equal(groups.length, 2);
   assert.equal(settledHeartbeat(groups[0]).exit_code, 1);
 });
+
+
+test('checkpoint repair activations never merge into an unrelated supervisor action', () => {
+  const ordinary = hb('1');
+  const checkpoint = { ...hb('2', 'repair', 1), mid_training: { request_id: 'checkpoint-1' } };
+  const retry = { ...hb('3', 'repair'), mid_training: { request_id: 'checkpoint-1' } };
+  const next = { ...hb('4', 'repair'), mid_training: { request_id: 'checkpoint-2' } };
+  assert.deepEqual(heartbeatGroups([ordinary, checkpoint, retry, next]).map(group => group.map(h => h.id)),
+    [['1'], ['2', '3'], ['4']]);
+});
