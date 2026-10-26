@@ -1,3 +1,4 @@
+import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
 import { isMidTrainingActivation, midTrainingActivationLabel } from "../lib/midTrainingActivations";
 import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
 import { trainingActivity } from "../lib/trainingTelemetry";
@@ -832,16 +833,24 @@ function PipelineTimeline({
                       </li>,
                     );
                     const checkpoints = midTrainingWakes.filter((heartbeat) => heartbeat.mid_training?.train_ticket_id === t.id);
-                    if (checkpoints.length) {
-                      const selection = `${supervisorId}#mid:${t.id}`;
-                      const latest = checkpoints.at(-1)!;
-                      rows.push(<li key={`mid-training-${t.id}`} className="ml-5 border-l border-lilac-500/30 py-1 pl-4">
-                        <button type="button" onClick={() => setSel(selection)}
-                          className={`w-full rounded-lg p-2 text-left ${selectedId === selection ? "bg-lilac-500/10" : "hover:bg-raised/40"}`}>
-                          <span className="block text-xs font-medium text-lilac-300">Mid-training Orchestrator</span>
-                          <span className="mt-1 block text-xs text-dim">{midTrainingActivationLabel(latest, checkpoints)}</span>
-                          <span className="block text-[11px] text-dim">{checkpoints.length} activations</span>
-                        </button>
+                    if (t.mid_training_enabled || checkpoints.length) {
+                      const latest = checkpoints.at(-1);
+                      const children = [
+                        { label: "Inference", selection: `${t.id}#validation:inference` },
+                        { label: "Scoring", selection: `${t.id}#validation:scoring` },
+                        { label: "Orchestrator", selection: `${supervisorId}#mid:${t.id}` },
+                      ];
+                      rows.push(<li key={`mid-training-${t.id}`} className="ml-5 border-l border-sky-500/30 py-2 pl-4">
+                        <span className="block text-xs font-medium text-sky-300">Mid-training Validation</span>
+                        <ul className="mt-2 space-y-1">{children.map((child) => <li key={child.label}>
+                          <button type="button" onClick={() => setSel(child.selection)}
+                            className={`w-full rounded-lg px-2 py-1.5 text-left text-xs ${selectedId === child.selection ? "bg-sky-500/10 text-sky-300" : "text-slate-300 hover:bg-raised/40"}`}>
+                            {child.label}
+                            {child.label === "Orchestrator" && <span className="mt-1 block text-[11px] text-dim">
+                              {latest ? midTrainingActivationLabel(latest, checkpoints) : "Waiting for checkpoint decision"}
+                            </span>}
+                          </button>
+                        </li>)}</ul>
                       </li>);
                     }
                   });
@@ -938,7 +947,11 @@ function PipelineTimeline({
 
       {/* Right: blown-up live detail of the selected / running stage. The id
           may carry a wake suffix (see planRow) — split it back apart here. */}
-      <StageDetail
+      <div className="min-w-0 space-y-4">
+      {selectedId.includes("#validation:") ? <MidTrainingPhaseDetail
+        key={selectedId} ticketId={selectedId.split("#")[0]}
+        phase={selectedId.endsWith(":inference") ? "inference" : "scoring"}
+        paused={pausedTicketIds.has(selectedId.split("#")[0]) || needsInstructionInput} /> : <StageDetail
         ticketId={selectedId.split("#")[0]}
         wake={selectedId.includes("#") && !selectedId.endsWith("#failed") && !selectedId.includes("#mid:")
           ? Number(selectedId.split("#")[1]) : undefined}
@@ -948,7 +961,8 @@ function PipelineTimeline({
         paused={pausedTicketIds.has(selectedId.split("#")[0])}
         needsInput={needsInstructionInput && pausedTicketIds.has(selectedId.split("#")[0])}
         applying={activeInstructions.some((i) => i.target_ticket_id === selectedId.split("#")[0] && i.activity_status === "applying")}
-      />
+      />}
+      </div>
     </div>
   );
 }
@@ -1036,7 +1050,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
   // scope them to the picked wake's window; the summary has no per-wake
   // equivalent, so it is shown only when you are looking at the latest wake.
   const executionEvents = (() => {
-    if (showUnrecordedFailure) return [];
+    if (showUnrecordedFailure || (midTrainingTicketId && !picked)) return [];
     // Scope to `picked` whenever there IS one -- NOT only when a wake index was
     // passed. Clicking a stage on the timeline gives no wake, and `picked` then
     // falls back to the newest heartbeat, which is the one the transcript below
@@ -1107,7 +1121,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
     <Bezel className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
-          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? "Mid-training Orchestrator" : t.id}</Link>
+          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? "Orchestrator decisions" : t.id}</Link>
           <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />
           {currentTrainingActivity && <span className="text-xs text-sky-300">{currentTrainingActivity}</span>}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
@@ -1209,7 +1223,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
             />
           </div>
         ) : (
-          <div className="text-xs text-dim">No activity yet for this stage.</div>
+          <div className="text-xs text-dim">{midTrainingTicketId ? "No checkpoint decision activation recorded yet." : "No activity yet for this stage."}</div>
         )}
       </div>
     </Bezel>

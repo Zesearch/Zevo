@@ -1262,6 +1262,10 @@ async def get_run(
                 "lane": t.lane,
                 "iteration": t.iteration,
                 "operation": str((t.payload or {}).get("operation") or ""),
+                "mid_training_enabled": t.agent_id == "train" and t.lane == "optimization" and (
+                    (t.payload or {}).get("first_validation_fraction") is not None
+                    or bool((r.lifecycle or {}).get("adaptive_validation_contracts", {}).get(t.id))
+                ),
                 "model_source": str((t.payload or {}).get("model_source") or ""),
                 "test_set_name": str((t.payload or {}).get("test_set_name") or ""),
                 "status": t.status,

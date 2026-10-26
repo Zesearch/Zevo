@@ -155,6 +155,9 @@ async def _mid_training_contexts(db: AsyncSession, rows: list[HeartbeatRun]) -> 
         decision = (request.get("decision") or {}) if request.get("decision_heartbeat_id") == row.id else {}
         contexts[row.id] = {"request_id": context["request_id"], "train_ticket_id": request["ticket_id"],
                             "step": request["step"], "action": decision.get("action", ""), "next_step": decision.get("next_step")}
+    from zevo.engine.run.adaptive_history import legacy_contexts
+    legacy = await legacy_contexts(db, [row for row in rows if row.id not in contexts], lifecycles)
+    contexts.update(legacy)
     return contexts
 
 
