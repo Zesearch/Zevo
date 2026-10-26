@@ -1583,8 +1583,8 @@ async def _build_evaluation_suite_members(
             from zevo.holdout_storage import resolve_asset
         for index, item in enumerate(suite):
             name = str(item.get("name") or "")
-            from zevo.engine.run.remeasurement import replay_item
-            if name == primary_name or name in replay_item(run, ticket.id).get("retained", {}):
+            from zevo.engine.run.remeasurement import replay_item, retained_scores
+            if name == primary_name or name in retained_scores(replay_item(run, ticket.id)):
                 continue
             product = next((
                 candidate for candidate in products

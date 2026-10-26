@@ -299,7 +299,7 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
 
 
 async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affected: list[str]) -> None:
-    """Exempt only measured model/member pairs with actual repetition evidence."""
+    """Reuse unchanged predictions; reuse scores separately when available."""
     names = list(batch["configs"])
     for item in batch["cohort"]:
         source = await session.get(Ticket, item["source_id"])
@@ -308,11 +308,18 @@ async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affecte
         key = f"{kind}|{source.iteration}|{batch['base_model']}"
         prefix = "suite" if batch["lane"] == "held_out_test" else "validation_suite"
         scores = (run.holdout or {}).get(f"{prefix}_results", {}).get(key, {})
+        previous = next((b for b in reversed(batches(run)) if source.id in replay_ids(b)), None)
+        if previous and previous["status"] == "superseded" and any(
+            c.get("inference_id") == source.id and c.get("inference_attempt") for c in previous["cohort"]
+        ):
+            # The previous budget trial produced new predictions but never
+            # published scores. Existing affected-member scores describe the
+            # old predictions, even when this member's budget now stays fixed.
+            scores = {name: score for name, score in scores.items() if name not in affected}
         retained = {}
-        for name in affected:
+        for name in names:
             ev = evidence.get(name, {})
-            if not ev.get("repetition", {}).get("dominated") or name not in scores:
-                continue
+            exempt = name in affected and ev.get("repetition", {}).get("dominated") and name in scores
             assets = {}
             for role in ("predictions", "generation_diagnostics", "inference_config"):
                 product = next((p for p in await _products(session, source.id, role)
@@ -320,14 +327,32 @@ async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affecte
                 if product is None or not Path(product.path).is_file():
                     break
                 assets[role] = {"path": product.path, "meta": deepcopy(product.meta)}
-            if len(assets) == 3:
-                retained[name] = {"reason": "repetition_dominated_truncation", "evidence": ev,
-                                  "score": deepcopy(scores[name]), "assets": assets,
+            if len(assets) != 3:
+                continue
+            try:
+                unchanged = (load_inference_config(assets["inference_config"]["path"]).model_dump()
+                             == load_inference_config(batch["configs"][name]).model_dump())
+            except (OSError, ValueError):
+                unchanged = False
+            if unchanged or exempt:
+                retained[name] = {"reason": "unchanged_configuration" if unchanged else "repetition_dominated_truncation",
+                                  "evidence": ev, "assets": assets,
                                   "config_path": assets["inference_config"]["path"]}
+                if name in scores:
+                    retained[name]["score"] = deepcopy(scores[name])
         item["retained"] = retained
-        item["retained_only"] = set(affected) <= set(retained)
+        item["retained_only"] = (set(names) <= set(scores) and
+                                 set(affected) <= {n for n, v in retained.items() if "score" in v})
         # If every changed member is exempt, preserve the entire existing point.
         item["active_members"] = [] if item["retained_only"] else [n for n in names if n not in retained]
+
+
+def retained_scores(item: dict) -> dict:
+    return {name: value for name, value in item.get("retained", {}).items() if "score" in value}
+
+
+def evaluation_members(batch: Batch, item: dict) -> list[str]:
+    return [name for name in batch["configs"] if name not in retained_scores(item)]
 
 
 async def _begin_attempt(session: AsyncSession, run: Run, batch: Batch, item: dict,
@@ -369,8 +394,8 @@ async def _new_inference(session: AsyncSession, run: Run, batch: Batch, item: di
                     customization=deepcopy(source.customization or {}), inputs=deepcopy(source.inputs or {}),
                     summary="Remeasure checkpoint with the cohort's revised token budget")
         session.add(ticket)
-    if item.get("active_members") and (item.get("retained") or batch.get("reuse_tickets")):
-        primary = item["active_members"][0]
+    if item.get("retained") or (item.get("active_members") and batch.get("reuse_tickets")):
+        primary = (item.get("active_members") or evaluation_members(batch, item))[0]
         member = next(m for m in _suite(run, ticket.lane) if m["name"] == primary)
         payload = deepcopy(ticket.payload)
         payload.update(test_set_name=primary if ticket.lane == "held_out_test" else "validation:" + primary,
@@ -386,9 +411,13 @@ async def _new_inference(session: AsyncSession, run: Run, batch: Batch, item: di
                 "artifact_role": "inference_data_profile", "path": member["inference_data_profile"],
             }}
     await session.flush()
-    for retained in item.get("retained", {}).values():
+    for name, retained in item.get("retained", {}).items():
         for role, asset in retained["assets"].items():
-            session.add(WorkProduct(ticket_id=ticket.id, role=role, path=asset["path"], meta=asset["meta"]))
+            session.add(WorkProduct(ticket_id=ticket.id, role=role, path=asset["path"],
+                meta={**asset["meta"], "suite_member_name": name, "suite_primary": name == primary}))
+    if item.get("retained") and not item.get("active_members"):
+        ticket.status = "succeeded"  # Only missing scores need work; no GPU replay.
+
     await session.commit()
     return ticket
 
@@ -431,7 +460,7 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
             continue
         inference = await session.get(Ticket, item["inference_id"])
         evaluation = await session.get(Ticket, item["evaluation_id"])
-        retained = item.get("retained", {})
+        retained = retained_scores(item)
         components = await _scores(session, evaluation, [m for m in suite if m["name"] not in retained], run)
         components.update({name: deepcopy(value["score"]) for name, value in retained.items()})
         source = "baseline" if (inference.payload or {}).get("model_source") == "base_model" else "trained"
@@ -469,7 +498,9 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
         ))).all()
         for event in current_events:
             event.extras = {**(event.extras or {}), "measurement_revision": batch["id"],
-                            "repetition_exemptions": {n: {"reason": v["reason"], "evidence": v["evidence"]} for n, v in retained.items()}}
+                            "repetition_exemptions": {n: {"reason": v["reason"], "evidence": v["evidence"]}
+                                for n, v in retained.items() if v["reason"] == "repetition_dominated_truncation"},
+                            "reused_members": {n: v["reason"] for n, v in item.get("retained", {}).items()}}
     batch["previous_score_events"] = old_events
     batch["status"] = "published"
     batch["handoff_pending"] = True
@@ -557,7 +588,7 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                 return await _retry(session, run, batch, evidence, expandable)
             evaluation = await session.get(Ticket, item["evaluation_id"]) if item.get("evaluation_id") else None
             if evaluation is None or (batch.get("reuse_tickets") and not item.get("evaluation_attempt")):
-                name = (item.get("active_members") or [str(_suite(run, batch["lane"])[0]["name"])])[0]
+                name = evaluation_members(batch, item)[0]
                 item["evaluation_id"] = f"{item['inference_id']}-eval"
                 _store(run, batch)
                 products = await _products(session, inference.id, "predictions", run)
