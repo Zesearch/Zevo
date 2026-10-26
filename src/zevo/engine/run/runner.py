@@ -1577,8 +1577,7 @@ async def _build_evaluation_suite_members(
     source_id = str(pred_binding.get("source_ticket_id") or "")
     members: list[EvaluationSuiteMemberInput] = []
     if len(suite) > 1 and source_id:
-        from zevo.engine.run.remeasurement import _products
-        products = await _products(session, source_id, "predictions", run)
+        from zevo.engine.run.remeasurement import evaluation_prediction
         if ticket.lane == "held_out_test":
             from zevo.holdout_storage import resolve_asset
         for index, item in enumerate(suite):
@@ -1586,10 +1585,7 @@ async def _build_evaluation_suite_members(
             from zevo.engine.run.remeasurement import replay_item, retained_scores
             if name == primary_name or name in retained_scores(replay_item(run, ticket.id)):
                 continue
-            product = next((
-                candidate for candidate in products
-                if str((candidate.meta or {}).get("suite_member_name") or "") == name
-            ), None)
+            product = await evaluation_prediction(session, run, ticket, name, inputs=inputs)
             if product is None:
                 raise ValueError(f"Evaluation suite has no predictions for {name!r}")
             member_scoring = str(item.get(
@@ -7808,6 +7804,7 @@ async def _spawn_holdout_suite_evals(
 async def _record_holdout_score(
     session: AsyncSession, run: Run, ticket: Ticket, score: float,
     *, member_name: str = "", commit: bool = True,
+    retained_component: dict[str, Any] | None = None,
 ) -> None:
     """File one Test member, then publish the suite average once complete.
 
@@ -7852,15 +7849,9 @@ async def _record_holdout_score(
     current_contract = snapshot_test_contract(suite) if contract else None
     if current_contract != contract:
         current_contract = None
-    products = (await session.execute(select(WorkProduct).where(
-        WorkProduct.ticket_id == infer_id, WorkProduct.role == "predictions",
-    ))).scalars().all() if infer_id else []
-    product = next((item for item in products
-                    if (item.meta or {}).get("suite_member_name") == test_set_name), None)
-    if product is None and test_set_name == suite_names[0]:
-        product = next((item for item in products if (item.meta or {}).get("suite_primary")), None)
-        if product is None and len(suite) == 1 and len(products) == 1:
-            product = products[0]
+    from zevo.engine.run.remeasurement import evaluation_prediction
+    product = (await evaluation_prediction(session, run, ticket, test_set_name)
+               if retained_component is None and infer_id else None)
     realized = inference_identity((product.meta or {}).get("configuration")) if product else None
     candidate_results[test_set_name] = {
         "score": float(score),
@@ -7873,7 +7864,17 @@ async def _record_holdout_score(
         "evaluation_ticket_id": ticket.id,
         "test_contract": current_contract,
         "inference_identity": realized,
+        **({"prediction_work_product_id": product.id} if product else {}),
     }
+    if retained_component is not None:
+        from copy import deepcopy
+        # Reused scores still describe the original evaluation/configuration.
+        # In particular, missing legacy evidence must remain unknown rather
+        # than being attributed to the new evaluation or today's contract.
+        for field in ("evaluation_ticket_id", "prediction_work_product_id", "test_contract", "inference_identity"):
+            candidate_results[test_set_name].pop(field, None)
+            if field in retained_component:
+                candidate_results[test_set_name][field] = deepcopy(retained_component[field])
     all_results[result_key] = candidate_results
     holdout["suite_results"] = all_results
     recorded = list(holdout.get("suite_recorded") or [])

@@ -155,6 +155,41 @@ async def _products(session: AsyncSession, ticket_id: str, role: str, run: Run |
     return [p for p in rows if p.id not in previous]
 
 
+async def evaluation_prediction(
+    session: AsyncSession, run: Run, evaluation: Ticket, name: str,
+    *, inputs: dict | None = None,
+) -> WorkProduct | None:
+    """Resolve the prediction actually bound to this evaluation, not an old attempt."""
+    binding = ((evaluation.inputs if inputs is None else inputs) or {}).get("predictions") or {}
+    source_id = str(binding.get("source_ticket_id") or "")
+    source = await session.get(Ticket, source_id) if source_id else None
+    if source is None:
+        raise ValueError("evaluation prediction source is missing")
+    item = replay_item(run, evaluation.id)
+    frozen = item.get("evaluation_predictions", {})
+    primary = _primary_member(run, evaluation)
+    product_id = frozen.get(name)
+    if name == primary and binding.get("work_product_id"):
+        if product_id and product_id != binding["work_product_id"]:
+            raise ValueError("evaluation prediction binding changed after scheduling")
+        product_id = binding["work_product_id"]
+    products = await _products(session, source_id, "predictions", run)
+    if product_id:
+        product = next((p for p in products if p.id == product_id), None)
+        if product is None or (product.meta or {}).get("suite_member_name", _primary_member(run, source)) != name:
+            raise ValueError(f"evaluation prediction binding is invalid for {name!r}")
+        return product
+    if frozen:
+        raise ValueError(f"evaluation has no frozen prediction binding for {name!r}")
+    # Legacy evaluations have no per-member snapshot. Never guess between
+    # multiple attempts; primary work_product_id above remains authoritative.
+    candidates = [p for p in products
+                  if (p.meta or {}).get("suite_member_name", _primary_member(run, source)) == name]
+    if len(candidates) > 1:
+        raise ValueError(f"evaluation prediction provenance is ambiguous for {name!r}")
+    return candidates[0] if candidates else None
+
+
 def _suite(run: Run, lane: str) -> list[dict]:
     from zevo.engine.run.runner import _heldout_test_sets, _validation_sets
     return _heldout_test_sets(run) if lane == "held_out_test" else _validation_sets(run)
@@ -463,6 +498,7 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
     split = "test" if batch["lane"] == "held_out_test" else "validation"
     old_events = []
     batch["previous_history"] = deepcopy(run.history or [])
+    prepared = []
     for item in batch["cohort"]:
         if item.get("retained_only"):
             continue
@@ -470,7 +506,19 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
         evaluation = await session.get(Ticket, item["evaluation_id"])
         retained = retained_scores(item)
         components = await _scores(session, evaluation, [m for m in suite if m["name"] not in retained], run)
+        for name, component in components.items():
+            product = await evaluation_prediction(session, run, evaluation, name)
+            if product is None or not Path(product.path).is_file():
+                raise ValueError(f"remeasurement prediction is missing for {name!r}")
+            actual = InferenceRunConfig.model_validate((product.meta or {}).get("configuration"))
+            config_path = item.get("retained", {}).get(name, {}).get("config_path") or batch["configs"][name]
+            if actual.model_dump() != load_inference_config(config_path).model_dump():
+                raise ValueError(f"remeasurement prediction configuration mismatch for {name!r}")
+            component["prediction_work_product_id"] = product.id
         components.update({name: deepcopy(value["score"]) for name, value in retained.items()})
+        prepared.append((item, inference, evaluation, retained, components))
+    # Validate the entire cohort before changing any live scores or artifacts.
+    for item, inference, evaluation, retained, components in prepared:
         source = "baseline" if (inference.payload or {}).get("model_source") == "base_model" else "trained"
         # Archive superseded points outside the live ScoreEvent series. Every
         # existing consumer therefore sees exactly one coherent revision.
@@ -499,7 +547,8 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
             run.holdout = holdout
         else:
             for name, component in components.items():
-                await _record_holdout_score(session, run, evaluation, component["score"], member_name=name, commit=False)
+                await _record_holdout_score(session, run, evaluation, component["score"], member_name=name,
+                                            retained_component=component if name in retained else None, commit=False)
         current_events = (await session.scalars(select(ScoreEvent).where(
             ScoreEvent.run_id == run.id, ScoreEvent.split == split,
             ScoreEvent.iteration == inference.iteration, ScoreEvent.source == source,
@@ -602,9 +651,15 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                 item["evaluation_id"] = f"{item['inference_id']}-eval"
                 _store(run, batch)
                 products = await _products(session, inference.id, "predictions", run)
-                primary = next((p for p in products if (p.meta or {}).get("suite_member_name", name) == name), None)
-                if primary is None:
-                    raise ValueError("checkpoint replay lacks primary predictions")
+                bindings = {}
+                for member in evaluation_members(batch, item):
+                    candidates = [p for p in products if (p.meta or {}).get(
+                        "suite_member_name", _primary_member(run, inference)) == member]
+                    if len(candidates) != 1:
+                        raise ValueError(f"checkpoint replay lacks unambiguous predictions for {member!r}")
+                    bindings[member] = candidates[0].id
+                item["evaluation_predictions"] = bindings
+                primary = next(p for p in products if p.id == bindings[name])
                 kwargs = dict(enqueue=False, predictions_product=primary, ticket_id=item["evaluation_id"])
                 if batch["lane"] == "held_out_test":
                     evaluation = await _spawn_holdout_eval(session, run, inference, test_set_name=name, **kwargs)
