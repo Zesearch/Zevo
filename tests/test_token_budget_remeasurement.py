@@ -150,11 +150,16 @@ async def finish_inference(session, ticket, tmp_path, limited=0):
     run = await session.get(Run, ticket.run_id)
     tmp_path = Path(rm.attempt_work_dir(run, ticket.id, str(tmp_path / ticket.id)))
     tmp_path.mkdir(parents=True, exist_ok=True)
+    retained = rm.replay_item(run, ticket.id).get("retained", {}) if rm.active_attempt(run, ticket.id) else {}
     for name in ("math", "qa"):
+        if name in retained:
+            continue
         path = tmp_path / f"{ticket.id}-{name}.json"
         path.write_text(diagnostics(limited=limited if name == "math" else 0).model_dump_json())
         session.add(WorkProduct(ticket_id=ticket.id, role="generation_diagnostics", path=str(path), meta={"suite_member_name": name}))
-        session.add(WorkProduct(ticket_id=ticket.id, role="predictions", path=str(path), meta={"suite_member_name": name}))
+        session.add(WorkProduct(ticket_id=ticket.id, role="predictions", path=str(path), meta={
+            "suite_member_name": name, "configuration": load_inference_config(
+                rm.configuration_override(run, ticket, name)).model_dump(mode="json")}))
     await session.commit()
 
 
@@ -252,6 +257,7 @@ async def test_current_reaches_ceiling_then_history_is_scored_without_expansion(
         await finish_inference(session, current, root, limited=5 if stalls else 9-attempt)
         await rm.advance(session, run.id)
     batch = deepcopy(rm.pending(run))
+    assert batch is not None, rm.batches(run)[-1].get('error')
     assert batch['budget_finalized']
     assert 'math' in batch['stalled_members' if stalls else 'ceiling_evidence']
     assert len(batch['budget_progress']) == len(caps)
@@ -259,8 +265,8 @@ async def test_current_reaches_ceiling_then_history_is_scored_without_expansion(
     assert len({p['inference_id'] for p in batch['budget_progress']}) == 1
     assert len((await session.scalars(select(Ticket).where(Ticket.agent_id == 'inference'))).all()) == 3
     products = await rm._products(session, originals[-1].id, 'generation_diagnostics')
-    # Original and every measurement attempt remain independently readable.
-    assert len({p.path for p in products}) == 2 * (len(caps) + 1)
+    # Original and every changed-member attempt remain readable; unchanged qa is reused.
+    assert len({p.path for p in products}) == len(caps) + 3
     assert all(Path(p.path).is_file() for p in products)
     # Recovery callbacks cannot count one inference as multiple attempts.
     await rm.advance(session, run.id)
@@ -495,6 +501,7 @@ async def test_later_iteration_reuses_previously_published_model_tickets(scenari
             inference = await session.get(Ticket, item['inference_id'])
             await finish_inference(session, inference, root)
             await rm.advance(session, run.id)
+            assert rm.pending(run), rm.batches(run)[-1].get('error')
             active = next(c for c in rm.pending(run)['cohort'] if c['inference_id'] == inference.id)
             evaluation = await session.get(Ticket, active['evaluation_id'])
             await finish_evaluation(session, evaluation, root)
@@ -634,7 +641,8 @@ async def test_partial_repetition_exemption_preserves_score_and_selects_other_pr
             path = root / f'{replay.id}-{name}.json'
             path.write_text(diagnostics().model_dump_json())
             for role in ['predictions', 'generation_diagnostics']:
-                session.add(WorkProduct(ticket_id=replay.id, role=role, path=str(path), meta={'suite_member_name': name}))
+                session.add(WorkProduct(ticket_id=replay.id, role=role, path=str(path), meta={'suite_member_name': name,
+                    'configuration': load_inference_config(batch['configs'][name]).model_dump(mode='json')}))
         await session.commit()
         await rm.intercept_completion(session, replay)
         evaluation = await session.get(Ticket, rm.pending(run)['cohort'][i]['evaluation_id'])
@@ -826,11 +834,19 @@ async def add_reusable_suite(session, run, originals, root, lane, scored):
                 writer.writeheader()
                 writer.writerows({'id': i, 'complete_prediction': 'answer'} for i in range(20))
             session.add(WorkProduct(ticket_id=ticket.id, role='predictions', path=str(path),
-                                    meta={'suite_member_name': name}))
+                                    meta={'suite_member_name': name,
+                                          'configuration': load_inference_config(root / 'inference_config.yaml').model_dump(mode='json')}))
         if scored:
             source = 'baseline' if ticket.iteration == 0 else 'trained'
             results[f"{source}|{ticket.iteration}|{ticket.payload['base_model']}"] = {
-                'math': {'score': .2}, 'qa': {'score': .4}}
+                'math': {'score': .2, 'evaluation_ticket_id': 'old-math-eval',
+                         'prediction_work_product_id': 'old-math-pred',
+                         'test_contract': {'legacy': 'math'},
+                         'inference_identity': {'measurement': {'max_new_tokens': 256}}},
+                'qa': {'score': .4, 'evaluation_ticket_id': 'old-qa-eval',
+                       'prediction_work_product_id': 'old-qa-pred',
+                       'test_contract': {'legacy': 'qa'},
+                       'inference_identity': {'measurement': {'max_new_tokens': 256}}}}
     prefix = 'suite' if lane == 'held_out_test' else 'validation_suite'
     run.holdout = {**run.holdout, 'validation_sets': suite, 'test_sets': suite,
                    f'{prefix}_results': results}
@@ -869,7 +885,8 @@ async def test_unchanged_member_reuses_predictions_and_only_missing_scores(scena
         path = root / f'{replay.id}-revised-math.json'
         path.write_text(diagnostics().model_dump_json())
         for role in ['predictions', 'generation_diagnostics']:
-            session.add(WorkProduct(ticket_id=replay.id, role=role, path=str(path), meta={'suite_member_name': changed}))
+            session.add(WorkProduct(ticket_id=replay.id, role=role, path=str(path), meta={'suite_member_name': changed,
+                'configuration': load_inference_config(batch['configs'][changed]).model_dump(mode='json')}))
         await session.commit()
         products = await rm._products(session, replay.id, 'predictions', run)
         assert next(p for p in products if p.meta['suite_member_name'] == reused).path == item['retained'][reused]['assets']['predictions']['path']
@@ -888,6 +905,16 @@ async def test_unchanged_member_reuses_predictions_and_only_missing_scores(scena
     assert len(events) == 3
     assert [e.score for e in events] == pytest.approx([.6 if changed == 'math' else .5] * 3)
     assert all(e.extras['reused_members'] == {reused: 'unchanged_configuration'} for e in events)
+    if lane == 'held_out_test':
+        for result in run.holdout['suite_results'].values():
+            assert result[changed]['inference_identity']['measurement']['max_new_tokens'] == 512
+            assert result[changed]['prediction_work_product_id']
+            if scored:
+                assert result[reused]['evaluation_ticket_id'] == f'old-{reused}-eval'
+                assert result[reused]['prediction_work_product_id'] == f'old-{reused}-pred'
+                assert result[reused]['test_contract'] == {'legacy': reused}
+                assert result[reused]['inference_identity']['measurement']['max_new_tokens'] == 256
+
 
 
 @pytest.mark.asyncio
@@ -995,3 +1022,92 @@ async def test_replay_primary_diagnostics_follow_ticket_not_original_suite_order
     evidence = await rm._evidence(session, run, ticket)
     assert evidence['qa']['truncated_questions'] == 3
     assert evidence['math']['truncated_questions'] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cap', [1024, 2048])
+async def test_holdout_score_uses_bound_prediction_not_old_or_newest_attempt(scenario, cap):
+    from zevo.engine.run.runner import _record_holdout_score
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, 'held_out_test', False)
+    inference = originals[-1]
+    config = load_inference_config(config_file(root))
+    config.measurement.max_new_tokens = cap
+    bound = WorkProduct(ticket_id=inference.id, role='predictions', path=str(root / 'bound.csv'),
+                        meta={'suite_member_name': 'math', 'configuration': config.model_dump(mode='json')})
+    session.add(bound)
+    await session.flush()
+    config.measurement.max_new_tokens = cap * 2
+    session.add(WorkProduct(ticket_id=inference.id, role='predictions', path=str(root / 'later.csv'),
+                           meta={'suite_member_name': 'math', 'configuration': config.model_dump(mode='json')}))
+    evaluation = Ticket(id='bound-eval', run_id=run.id, agent_id='evaluation', lane='held_out_test',
+                        status='succeeded', iteration=inference.iteration, payload={'test_set_name': 'math'},
+                        inputs={'predictions': {'source_ticket_id': inference.id, 'work_product_id': bound.id}})
+    session.add(evaluation)
+    await session.commit()
+    await _record_holdout_score(session, run, evaluation, .9, member_name='math')
+    result = run.holdout['suite_results'][f"trained|2|{inference.payload['base_model']}"]['math']
+    assert result['inference_identity']['measurement']['max_new_tokens'] == cap
+    assert result['prediction_work_product_id'] == bound.id
+
+
+@pytest.mark.asyncio
+async def test_secondary_evaluation_uses_frozen_prediction_and_rejects_wrong_binding(scenario):
+    from zevo.engine.run.runner import _build_evaluation_suite_members
+    session, run, originals, root = scenario
+    await rm.intercept_completion(session, originals[-1])
+    await finish_inference(session, originals[-1], root)
+    await rm.advance(session, run.id)
+    batch = deepcopy(rm.pending(run))
+    item = batch['cohort'][0]
+    evaluation = await session.get(Ticket, item['evaluation_id'])
+    bound = await session.get(WorkProduct, item['evaluation_predictions']['qa'])
+    session.add(WorkProduct(ticket_id=originals[-1].id, role='predictions', path=str(root / 'later-qa.csv'),
+                           meta={'suite_member_name': 'qa'}))
+    await session.commit()
+    members = await _build_evaluation_suite_members(evaluation, evaluation.payload, evaluation.inputs, run, session)
+    assert members[0].predictions_path == bound.path
+    assert (await rm.evaluation_prediction(session, run, evaluation, 'qa')).id == bound.id
+    item['evaluation_predictions']['qa'] = item['evaluation_predictions']['math']
+    rm._store(run, batch)
+    with pytest.raises(ValueError, match='binding is invalid'):
+        await rm.evaluation_prediction(session, run, evaluation, 'qa')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('damage', ['missing_configuration', 'wrong_configuration', 'missing_prediction'])
+async def test_invalid_replay_provenance_keeps_entire_old_cohort(scenario, monkeypatch, damage):
+    session, run, originals, root = scenario
+    handoffs = []
+    async def handoff(*args):
+        handoffs.append(True)
+    monkeypatch.setattr(rm, '_handoff', handoff)
+    original_history = deepcopy(run.history)
+    original_scores = [(e.id, e.score) for e in (await session.scalars(select(ScoreEvent))).all()]
+    await rm.intercept_completion(session, originals[-1])
+    cohort = deepcopy(rm.pending(run)['cohort'])
+    for index, item in enumerate(cohort):
+        inference = await session.get(Ticket, item['inference_id'])
+        await finish_inference(session, inference, root)
+        await rm.advance(session, run.id)
+        active = rm.pending(run)['cohort'][index]
+        evaluation = await session.get(Ticket, active['evaluation_id'])
+        await finish_evaluation(session, evaluation, root)
+        if index == len(cohort) - 1:
+            product = await session.get(WorkProduct, active['evaluation_predictions']['math'])
+            if damage == 'missing_prediction':
+                Path(product.path).unlink()
+            else:
+                meta = deepcopy(product.meta)
+                if damage == 'missing_configuration':
+                    meta.pop('configuration')
+                else:
+                    meta['configuration']['measurement']['max_new_tokens'] = 256
+                product.meta = meta
+            await session.commit()
+        await rm.advance(session, run.id)
+    assert run.status == 'degraded'
+    assert rm.batches(run)[-1]['status'] == 'failed'
+    assert run.history == original_history
+    assert [(e.id, e.score) for e in (await session.scalars(select(ScoreEvent))).all()] == original_scores
+    assert not handoffs
