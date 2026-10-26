@@ -28,3 +28,24 @@ export function trainingActivity(
       || Number(latest.extras?.loss ?? latest.loss) >= 0) return "Training";
   return null;
 }
+
+/** Keep checkpoint resumes on one global-step timeline. A replay or rollback
+ * replaces the old suffix, so abandoned steps cannot survive a restart. */
+export function continuousTrainingEvents(events: ExecutionEventDTO[]): ExecutionEventDTO[] {
+  let result: ExecutionEventDTO[] = [];
+  const seenAttempts = new Set<string>();
+  for (const event of [...events].sort((a, b) => a.ts.localeCompare(b.ts))) {
+    if (isMidTrainingValidationEvent(event)) continue;
+    const loss = event.extras?.loss ?? event.loss;
+    const isTrainingReading = event.event_type === "progress" && event.current_step > 0
+      && typeof loss === "number" && loss >= 0
+      && event.extras?.eval_loss == null && event.extras?.validation_loss == null;
+    if (isTrainingReading && event.attempt_id && !seenAttempts.has(event.attempt_id)) {
+      seenAttempts.add(event.attempt_id);
+      result = result.filter((prior) => prior.event_type !== "progress"
+        || prior.current_step < event.current_step);
+    }
+    result.push(event);
+  }
+  return result;
+}

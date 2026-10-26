@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { transformWithEsbuild } from 'vite';
 const source = readFileSync(new URL('../src/lib/trainingTelemetry.ts', import.meta.url), 'utf8');
 const { code } = await transformWithEsbuild(source, 'trainingTelemetry.ts', { loader: 'ts' });
-const { isMidTrainingValidationEvent, trainingActivity } = await import(
+const { continuousTrainingEvents, isMidTrainingValidationEvent, trainingActivity } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`,
 );
 
@@ -38,4 +38,16 @@ test('unverified logs cannot replace the current workload status', () => {
   const training = event('training', { loss: .4 });
   const stale = event('scoring', { execution_purpose: 'unverified' }, '2026-10-26T09:02:00Z');
   assert.equal(trainingActivity([training, stale], null, 'running'), 'Training');
+});
+
+test('checkpoint resumes retain earlier steps and replace a rolled-back suffix', () => {
+  const reading = (step, attempt, ts) => ({ ...event('training', { loss: .4 }, ts), current_step: step, attempt_id: attempt });
+  const first = reading(100, 'first', '01');
+  const checkpoint = reading(552, 'first', '02');
+  const abandoned = reading(600, 'first', '03');
+  const resumed = reading(560, 'resume', '04');
+  const validation = { ...event('generate:member', { benchmark_name: 'CareQA' }, '05'), attempt_id: 'validation' };
+  assert.deepEqual(continuousTrainingEvents([resumed, first, validation, checkpoint, abandoned]), [first, checkpoint, resumed]);
+  const restart = reading(1, 'restart', '06');
+  assert.deepEqual(continuousTrainingEvents([first, checkpoint, resumed, restart]), [restart]);
 });
