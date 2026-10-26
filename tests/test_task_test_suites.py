@@ -1099,6 +1099,9 @@ async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
             db, run, source, enqueue=False,
         )
         assert ticket is not None
+        assert ticket.inputs["shared_inference_config"] == {
+            "artifact_role": "inference_config", "source_ticket_id": source.id,
+        }
         members = await _build_holdout_suite_members(
             ticket=ticket,
             payload=dict(ticket.payload or {}),
@@ -1277,3 +1280,31 @@ async def test_heldout_suite_publishes_one_unweighted_average() -> None:
         }
 
     await engine.dispose()
+
+
+def test_length_revision_progress_resets_and_uses_only_retested_members():
+    from zevo.api.routers.shared.runs import _benchmark_progress
+    from zevo.engine.run.remeasurement import KEY
+    now = datetime(2026, 10, 26, 10, tzinfo=timezone.utc)
+    inference = Ticket(id='retry-infer', run_id='retry-run', agent_id='inference',
+                       status='queued', lane='optimization', iteration=1,
+                       payload={'model_source': 'checkpoint', 'base_model': 'model'},
+                       created_at=now, summary='')
+    run = Run(id='retry-run', holdout={'validation_sets': [{'name': 'A'}, {'name': 'B'}]},
+              lifecycle={KEY: [{'id': 'revision', 'status': 'running', 'reuse_tickets': True,
+                  'cohort': [{'source_id': inference.id, 'inference_id': inference.id,
+                    'active_members': ['B'], 'inference_attempt': {
+                      'revision': 'revision', 'started_at': now.isoformat()}}]}]})
+    def event(hour, name):
+        return ExecutionEvent(ticket_id=inference.id, ts=now.replace(hour=hour), phase='generate',
+            extras={'execution_purpose': 'workload', 'execution_id': 'work',
+                    'benchmark_name': name, 'benchmark_complete': True})
+    old = event(9, 'B')
+    irrelevant = event(11, 'A')
+    progress = _benchmark_progress(run, [inference], reveal_holdout=False,
+                                  completion_events=[old, irrelevant])['validation']
+    assert progress['total'] == 1
+    assert progress['inference_completed'] == 0
+    progress = _benchmark_progress(run, [inference], reveal_holdout=False,
+                                  completion_events=[old, irrelevant, event(11, 'B')])['validation']
+    assert progress['inference_completed'] == 1

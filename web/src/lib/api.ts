@@ -557,6 +557,8 @@ export type MidTrainingValidation = {
 };
 
 export type TicketDetail = TicketDTO & {
+  measurement_attempt?: { revision?: string; started_at?: string; active_members?: string[] };
+  generation_report?: Record<string, unknown>;
   mid_training_validation?: MidTrainingValidation | null;
   messages: MessageDTO[];
   notices: NoticeDTO[];

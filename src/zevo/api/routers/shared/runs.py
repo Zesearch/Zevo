@@ -499,6 +499,12 @@ def _benchmark_progress(
         if suite == "test" and not focused:
             focused = [ticket for ticket in relevant if ticket.agent_id == "data"]
 
+        from zevo.engine.run.remeasurement import active_attempt, replay_item
+        attempt_boundaries = {t.id: active_attempt(run, t.id).get("started_at", "") for t in focused}
+        active_names = next((replay_item(run, t.id).get("active_members", []) for t in focused
+                             if t.agent_id == "inference" and attempt_boundaries.get(t.id)), None)
+        active_identities = ({benchmark_id(suite, names.index(name)) for name in active_names if name in names}
+                             if active_names is not None else identities)
         latest_by_name: dict[str, Ticket] = {}
         for ticket in focused:
             name = benchmark_name(ticket, suite, names) or "__suite__"
@@ -553,6 +559,9 @@ def _benchmark_progress(
         }
         unmatched_progress: set[tuple[str, str, str]] = set()
         for event in completion_events or []:
+            boundary = attempt_boundaries.get(event.ticket_id)
+            if boundary and (not event.ts or event.ts.replace(tzinfo=timezone.utc) < datetime.fromisoformat(boundary)):
+                continue
             marker = (classify_event(event, executions) if executions is not None
                       else dict(event.extras or {}))
             source_ticket = by_id.get(event.ticket_id)
@@ -582,6 +591,9 @@ def _benchmark_progress(
                     str(marker.get("benchmark_id") or ""),
                     str(marker.get("benchmark_name") or ""),
                 ))
+        if active_names is not None:
+            inference_done &= active_identities
+            evaluation_done &= active_identities
         completed = len(evaluation_done)
         failed = sum(
             ticket.status == "failed" for ticket in latest_by_name.values()
@@ -627,7 +639,7 @@ def _benchmark_progress(
         return {
             "completed": int(completed),
             "inference_completed": len(inference_done),
-            "total": len(names),
+            "total": len(active_identities),
             "failed": int(failed),
             "unmatched_progress": len(unmatched_progress),
             "iteration": int(focus_key[0]) if focus_key is not None else 0,
@@ -1263,7 +1275,8 @@ async def get_run(
                 "iteration": t.iteration,
                 "operation": str((t.payload or {}).get("operation") or ""),
                 "mid_training_enabled": t.agent_id == "train" and t.lane == "optimization" and (
-                    (t.payload or {}).get("first_validation_fraction") is not None
+                    (bool((r.lifecycle or {}).get("adaptive_mid_training_evaluation"))
+                     and (t.payload or {}).get("first_validation_fraction") is not None)
                     or bool((r.lifecycle or {}).get("adaptive_validation_contracts", {}).get(t.id))
                 ),
                 "model_source": str((t.payload or {}).get("model_source") or ""),

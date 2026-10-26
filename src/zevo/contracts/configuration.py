@@ -1607,6 +1607,7 @@ def _main(argv: list[str] | None = None) -> int:
         type=int,
         help="require Train distributed nodes to match the stage request",
     )
+    validate_parser.add_argument("--shared-core", help="enforce the engine-owned Validation core JSON")
     args = parser.parse_args(argv)
     model = _CONFIG_MODELS[args.kind]
     if args.command == "schema":
@@ -1614,6 +1615,14 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
     try:
         config = load_yaml_config(args.path, model)
+        if args.shared_core:
+            if args.kind != "inference":
+                raise ValueError("--shared-core is supported only for Inference")
+            from zevo.contracts.inference_core import validate_inference_core
+            expected = json.loads(Path(args.shared_core).read_text(encoding="utf-8"))
+            if not isinstance(expected, dict) or not expected:
+                raise ValueError("shared core must be a nonempty object")
+            validate_inference_core(config, expected)
         if args.source_rows is not None:
             if args.kind != "train":
                 raise ValueError("--source-rows is supported only for Train configuration")

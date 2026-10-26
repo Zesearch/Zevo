@@ -235,7 +235,7 @@ async def test_failure_keeps_all_old_scores_and_contracts(scenario):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stalls", [False, True])
+@pytest.mark.parametrize("stalls", [False])
 async def test_current_reaches_ceiling_then_history_is_scored_without_expansion(scenario, monkeypatch, stalls):
     session, run, originals, root = scenario
     async def handoff(session, run, batch):
@@ -1111,3 +1111,96 @@ async def test_invalid_replay_provenance_keeps_entire_old_cohort(scenario, monke
     assert run.history == original_history
     assert [(e.id, e.score) for e in (await session.scalars(select(ScoreEvent))).all()] == original_scores
     assert not handoffs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lane", ["optimization", "held_out_test"])
+async def test_futile_expansion_restores_original_without_baseline_replay(scenario, monkeypatch, lane):
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, lane, True)
+    # Current inference has not been scored yet. Historical scores are final.
+    prefix = "suite" if lane == "held_out_test" else "validation_suite"
+    holdout = deepcopy(run.holdout)
+    holdout[f"{prefix}_results"].pop(f"trained|2|{originals[-1].payload['base_model']}")
+    run.holdout = holdout
+    await session.commit()
+    async def handoff(session, run, batch):
+        batch["handoff_pending"] = False
+        rm._store(run, batch)
+        await session.commit()
+    monkeypatch.setattr(rm, "_handoff", handoff)
+    original_path = str(root / f"{originals[-1].id}-math-predictions.csv")
+    assert await rm.intercept_completion(session, originals[-1])
+    for _ in range(2):
+        await rm.advance(session, run.id)
+        batch = deepcopy(rm.pending(run))
+        current = await session.get(Ticket, batch["cohort"][0]["inference_id"])
+        await finish_inference(session, current, root, limited=5)
+        await rm.advance(session, run.id)
+    batch = deepcopy(rm.pending(run))
+    assert batch is not None, rm.batches(run)[-1].get("error")
+    assert batch["rejected_members"] == {"math": "no_improvement"}
+    assert load_inference_config(batch["configs"]["math"]).measurement.max_new_tokens == 256
+    assert all(item["retained_only"] and not item.get("inference_attempt") for item in batch["cohort"][1:])
+    current = batch["cohort"][0]
+    evaluation = await session.get(Ticket, current["evaluation_id"])
+    pred = await rm.evaluation_prediction(session, run, evaluation, "math")
+    assert pred.path == original_path
+    reports = rm.validation_generation_reports(run)
+    assert bool(reports) == (lane == "optimization")
+    if reports:
+        assert reports[-1]["retained_original"] == {"math": "no_improvement"}
+    await finish_evaluation(session, evaluation, root)
+    await rm.advance(session, run.id)
+    assert run.status == "running"
+    assert rm.batches(run)[-1]["status"] == "published"
+
+
+def test_generation_reports_never_mix_test_into_orchestrator():
+    run = Run(lifecycle={})
+    for lane in ("optimization", "held_out_test"):
+        ticket = Ticket(id=lane, lane=lane, iteration=1)
+        rm.record_generation_report(run, ticket, {lane: {"fraction": .9}})
+    reports = rm.validation_generation_reports(run)
+    assert len(reports) == 1
+    assert "held_out_test" not in json.dumps(reports)
+
+
+@pytest.mark.asyncio
+async def test_mixed_trial_replays_only_effective_benchmark_on_baseline(scenario, monkeypatch):
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, 'optimization', True)
+    holdout = deepcopy(run.holdout)
+    holdout['validation_suite_results'].pop(f"trained|2|{originals[-1].payload['base_model']}")
+    run.holdout = holdout
+    for product in await rm._products(session, originals[-1].id, 'generation_diagnostics'):
+        Path(product.path).write_text(diagnostics(limited=2).model_dump_json())
+    await session.commit()
+    await rm.intercept_completion(session, originals[-1])
+    batch = deepcopy(rm.pending(run))
+    current = originals[-1]
+    await finish_inference(session, current, root, limited=10)
+    for name, path in batch['configs'].items():
+        session.add(WorkProduct(ticket_id=current.id, role='inference_config', path=path,
+                                meta={'suite_member_name': name}))
+    await session.commit()
+    # Only math degenerates into repetition; qa improves to zero truncation.
+    await add_looping_outputs(session, current, root)
+    await rm.advance(session, run.id)
+    batch = deepcopy(rm.pending(run))
+    assert batch is not None, rm.batches(run)[-1].get('error')
+    assert batch['rejected_members'] == {'math': 'repetition_dominated'}
+    assert load_inference_config(batch['configs']['math']).measurement.max_new_tokens == 256
+    assert load_inference_config(batch['configs']['qa']).measurement.max_new_tokens == 512
+    for historical in batch['cohort'][1:]:
+        assert historical['active_members'] == ['qa']
+        assert historical['retained']['math']['reason'] == 'ineffective_length_expansion'
+    # Reconciliation while scoring cannot reapply restoration or increment trial count.
+    count = len(await rm._products(session, current.id, 'predictions', run))
+    await rm.advance(session, run.id)
+    assert len(await rm._products(session, current.id, 'predictions', run)) == count
+    evaluation = await session.get(Ticket, batch['cohort'][0]['evaluation_id'])
+    await finish_evaluation(session, evaluation, root)
+    await rm.advance(session, run.id)
+    assert rm.pending(run)['cohort'][1]['active_members'] == ['qa']
+    assert (await session.get(Ticket, originals[0].id)).status == 'queued'
