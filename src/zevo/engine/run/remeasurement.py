@@ -33,7 +33,7 @@ def batches(run: Run) -> list[Batch]:
 
 
 def pending(run: Run) -> Batch | None:
-    return next((b for b in batches(run) if b["status"] == "running"), None)
+    return next((b for b in batches(run) if b["status"] in {"running", "paused"}), None)
 
 
 def replay_ids(batch: Batch) -> set[str]:
@@ -539,6 +539,8 @@ async def advance(session: AsyncSession, run_id: str) -> None:
     if run is None or run.status not in {"planning", "running"} or run.cancel_requested_at is not None:
         return
     batch = deepcopy(pending(run))
+    if batch and batch["status"] == "paused":
+        return  # Maintenance pauses advancement, not the cohort's loop barrier.
     if not batch:
         for completed in batches(run):
             if completed.get("handoff_pending"):

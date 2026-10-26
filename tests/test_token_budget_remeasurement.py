@@ -941,3 +941,19 @@ async def test_retry_reuses_settled_member_predictions_without_stale_score(scena
     assert 'score' not in new['cohort'][0]['retained']['qa']
     # Baseline has never run either new budget, so both still need replay.
     assert new['cohort'][1]['active_members'] == ['math', 'qa']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['running', 'paused', 'published'])
+async def test_cohort_blocks_next_iteration_between_successful_tickets(scenario, status):
+    from zevo.engine.run.runner import _holdout_settled
+    session, run, originals, root = scenario
+    batch = {'id': 'barrier', 'status': status, 'lane': 'held_out_test', 'cohort': []}
+    rm._store(run, batch)
+    await session.commit()
+    assert all(t.status == 'succeeded' for t in originals)
+    assert await _holdout_settled(session, run.id) is (status == 'published')
+    if status == 'paused':
+        await rm.advance(session, run.id)
+        assert rm.pending(run)['status'] == 'paused'
+        assert run.status == 'running'
