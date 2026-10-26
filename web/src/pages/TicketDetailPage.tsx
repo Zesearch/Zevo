@@ -1,3 +1,4 @@
+import { trainingActivity } from "../lib/trainingTelemetry";
 import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
 import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
@@ -39,8 +40,8 @@ export function TicketDetailPage() {
     ticketId ? `/api/heartbeats?ticket_id=${encodeURIComponent(ticketId)}&limit=200` : null,
     { refreshInterval: 3000 }
   );
-  const { data: evaluationInstructions = [] } = useSWR<RunInstructionDTO[]>(
-    tk?.agent_id === "evaluation" && tk.lane === "optimization" && tk.run_id
+  const { data: runInstructions = [] } = useSWR<RunInstructionDTO[]>(
+    tk && ["evaluation", "train"].includes(tk.agent_id) && tk.lane === "optimization" && tk.run_id
       ? `/api/runs/${encodeURIComponent(tk.run_id)}/instructions` : null,
     { refreshInterval: 3000 },
   );
@@ -189,9 +190,14 @@ export function TicketDetailPage() {
     } else if (phase === "continue") {
       activationLabel = `Continue ${tk?.agent_id || "Stage"}`;
     }
+    if (tk?.agent_id === "train" && h.id === heartbeats[0]?.id) {
+      activationLabel = trainingActivity(tk.execution_events, tk.mid_training_validation, tk.status,
+        runInstructions.some((item) => instructionBlocks(item.status))) || activationLabel;
+    }
     return (
       <button
         key={h.id}
+        title={h.started_at ? new Date(h.started_at).toLocaleString() : undefined}
         onClick={() => setSelectedHbId(h.id)}
         className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-2xs transition ${
           active
@@ -409,9 +415,11 @@ export function TicketDetailPage() {
         </Section>
       )}
 
-      {tk.agent_id === "train" && tk.mid_training_validation && (
+      {tk.agent_id === "train" && (tk.mid_training_validation || tk.payload.first_validation_fraction != null) && (
         <Section title="Mid-training Validation" className="mt-4">
-          <MidTrainingValidationPanel data={tk.mid_training_validation} />
+          <MidTrainingValidationPanel data={tk.mid_training_validation} events={tk.execution_events}
+            activity={trainingActivity(tk.execution_events, tk.mid_training_validation, tk.status,
+              runInstructions.some((item) => instructionBlocks(item.status)))} />
         </Section>
       )}
 
@@ -426,7 +434,7 @@ export function TicketDetailPage() {
         )}
 
       <Section
-        title={`Transcript · ${heartbeats.length} ${tk.agent_id === "evaluation" ? "evaluation attempt(s)" : "heartbeat(s)"}${
+        title={`Transcript${tk.agent_id === "evaluation" ? " · Evaluation" : ` · ${heartbeats.length} heartbeat(s)`}${
           tk.agent_id === "orchestrator"
             ? orchTicketCount > 1
               ? " · this supervisor ticket only"
@@ -437,7 +445,7 @@ export function TicketDetailPage() {
       >
         {tk.agent_id === "evaluation" && (
           <EvaluationProgress events={tk.execution_events} heartbeat={heartbeats.find((h) => h.id === curHbId)} lane={tk.lane}
-            paused={evaluationInstructions.some((item) => instructionBlocks(item.status))} benchmarkName={String(tk.payload.test_set_name || "")} />
+            paused={runInstructions.some((item) => instructionBlocks(item.status))} benchmarkName={String(tk.payload.test_set_name || "")} />
         )}
         {heartbeats.length === 0 ? (
           <WaitingPanel ticketId={tk.id} agentId={tk.agent_id} />

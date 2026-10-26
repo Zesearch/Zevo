@@ -1,13 +1,24 @@
-import type { MidTrainingValidation } from "../lib/api";
+import type { ExecutionEventDTO, MidTrainingValidation } from "../lib/api";
 
-export function MidTrainingValidationPanel({ data }: { data: MidTrainingValidation }) {
+export function MidTrainingValidationPanel({ data, events = [], activity }: {
+  data?: MidTrainingValidation | null; events?: ExecutionEventDTO[]; activity?: string | null;
+}) {
+  const progress = [...events].filter((event) => event.extras?.execution_purpose === "workload"
+    && event.extras?.benchmark_name).sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
+  const generating = activity === "Mid-training Validation · Inference";
+  const progressNote = <div className="mb-3 text-xs text-sky-300">
+    {activity || (data?.complete ? "Validation complete" : data ? "Validation results" : "Waiting for the first validation checkpoint")}
+    {generating && progress && <span> · {String(progress.extras?.benchmark_name)} · {progress.current_step.toLocaleString()} / {progress.total_steps.toLocaleString()} responses</span>}
+  </div>;
+  if (!data) return progressNote;
   const members = [...new Set(data.measurements.flatMap((row) => Object.keys(row.metrics)))];
   return (
     <div>
+      {progressNote}
       <div className="mb-3 flex flex-wrap gap-4 text-xs text-slate-300">
         <span>{data.complete ? "Selected checkpoint" : "Best checkpoint so far"}: step {data.best_step.toLocaleString()}</span>
         {data.next_step != null && <span>Next evaluation: step {data.next_step.toLocaleString()}</span>}
-        {data.awaiting_decision && <span>Awaiting Orchestrator decision</span>}
+        {data.awaiting_decision && activity !== "Training paused" && <span>Awaiting Orchestrator decision</span>}
         <span>Validation only · {data.direction === "max" ? "Higher" : "Lower"} is better</span>
       </div>
       <div className="overflow-x-auto">
@@ -21,7 +32,7 @@ export function MidTrainingValidationPanel({ data }: { data: MidTrainingValidati
             {data.measurements.map((row) => (
               <tr key={row.step} className="border-b border-slate-800 align-top">
                 <td className="px-3 py-2 whitespace-nowrap">{row.step.toLocaleString()}
-                  {row.step === data.best_step && <span className="ml-2 text-brass-300">Best</span>}
+                  {row.step === data.best_step && <span className="ml-2 text-sky-300">Best</span>}
                 </td>
                 <td className="px-3 py-2">{(100 * row.step / data.planned_steps).toFixed(1)}%</td>
                 {members.map((name) => <td key={name} className="px-3 py-2 font-mono">{row.metrics[name]?.toFixed(4) ?? "—"}</td>)}

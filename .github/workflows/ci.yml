@@ -63,5 +63,7 @@ jobs:
       - run: corepack enable
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+      - name: Test frontend telemetry
+        run: pnpm test
       - name: Type-check and build frontend
         run: pnpm build
