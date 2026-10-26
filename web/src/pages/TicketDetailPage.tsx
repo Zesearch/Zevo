@@ -1,5 +1,5 @@
+import { GenerationReport } from "../components/GenerationReport";
 import { trainingActivity } from "../lib/trainingTelemetry";
-import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
 import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -167,6 +167,10 @@ export function TicketDetailPage() {
       || `Activation ${hbSeq.get(h.id) ?? "?"}`;
     if (tk?.agent_id === "evaluation") {
       activationLabel = evaluationAttemptLabel(phase, hbSeq.get(h.id) ?? 1, tk.lane);
+    } else if (phase === "remeasure") {
+      activationLabel = "Length Remeasurement";
+    } else if (phase === "remeasure_collect") {
+      activationLabel = "Collect Length Remeasurement Results";
     } else if (h.operation === "run_inference" && phase === "submit") {
       activationLabel = `Submit ${inferenceName}`;
     } else if (h.operation === "run_inference" && phase === "collect") {
@@ -339,6 +343,7 @@ export function TicketDetailPage() {
       {/* Overview: what it reached, then what it did to get there — the steps
           are read off the transcript below, so they cannot disagree with it. */}
       <Section title="Overview" className="mt-6">
+        <GenerationReport report={tk.generation_report} />
         <StepTimeline
           events={events}
           executionEvents={tk.execution_events || []}
@@ -413,14 +418,6 @@ export function TicketDetailPage() {
         <Section title="Resolved settings" className="mt-4">
           <SettingsPanel config={resolvedConfig} />
         </Section>
-      )}
-
-      {tk.agent_id === "train" && (tk.mid_training_validation || tk.payload.first_validation_fraction != null) && (
-        <div className="mt-4 rounded-bezel border border-hair bg-panel/40 p-4">
-          <MidTrainingValidationPanel data={tk.mid_training_validation} events={tk.execution_events}
-            activity={trainingActivity(tk.execution_events, tk.mid_training_validation, tk.status,
-              runInstructions.some((item) => instructionBlocks(item.status)))} />
-        </div>
       )}
 
       {/* The Training monitor holds ONLY the loss/metric charts. */}

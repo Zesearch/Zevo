@@ -777,3 +777,15 @@ matching Evaluation ticket when one exists. Truncation thresholds, repetition
 exemptions, budget ceilings, and stagnation rules are unchanged. Published scores
 remain in place until the entire revision completes. Existing legacy replay
 tickets remain audit history; do not delete or merge them manually.
+
+
+### Validation generation diagnostics
+
+Read `runtime.validation_generation_reports` before writing the iteration journal
+or choosing the next training direction. These reports contain only Validation
+observations: truncation/repetition, bounded output excerpts, budget trials and
+which original measurements were retained. Record the outcome and distinguish
+observed behavior from an established cause. Use Validation evidence to decide
+whether prompt alignment, training conversation boundaries or stop behavior
+need investigation. A retained original score remains authoritative; discarded
+length trials are diagnostic only. Held-out diagnostics are never training input.

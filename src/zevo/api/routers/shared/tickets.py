@@ -143,6 +143,8 @@ class ExecutionEventDTO(BaseModel):
 
 
 class TicketDetail(TicketDTO):
+    measurement_attempt: dict[str, Any] = Field(default_factory=dict)
+    generation_report: dict[str, Any] = Field(default_factory=dict)
     mid_training_validation: dict[str, Any] | None = None
     messages: list[MessageDTO]
     notices: list[NoticeDTO]
@@ -1392,10 +1394,18 @@ async def get_ticket(
     ).order_by(WorkloadExecution.created_at))).scalars().all()
     registrations = {item.id: item for item in registered}
     from zevo.engine.run.adaptive_training import validation_summary
-    owning_run = await db.get(Run, t.run_id) if t.agent_id == "train" else None
+    owning_run = await db.get(Run, t.run_id) if t.run_id else None
     mid_training = validation_summary(t, (owning_run.lifecycle or {}) if owning_run else {}, events)
+    from zevo.engine.run.remeasurement import active_attempt, replay_item
+    attempt = active_attempt(owning_run, t.id) if owning_run else {}
+    item = replay_item(owning_run, t.id) if attempt else {}
+    report = next((v for v in (owning_run.lifecycle or {}).get("generation_reports", [])
+                   if v["ticket_id"] == t.id), {}) if owning_run else {}
     base = _to_dto(t)
     return TicketDetail(
+        measurement_attempt={"revision": attempt.get("revision"), "started_at": attempt.get("started_at"),
+                             "active_members": item.get("active_members", [])} if attempt else {},
+        generation_report=report,
         mid_training_validation=mid_training,
         **base.model_dump(),
         messages=[

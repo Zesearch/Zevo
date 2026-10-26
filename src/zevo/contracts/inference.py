@@ -110,6 +110,18 @@ class InferenceTaskInput(AgentTaskInput):
             "and must execute it without modification."
         ),
     )
+    shared_inference_core: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Engine-owned Validation model-interface configuration. When supplied, "
+            "every primary and suite-member config MUST copy this core exactly: "
+            "prompt, tokenizer/template, special/stop tokens, decoding, string stops "
+            "and sampling controls. Benchmark input mapping, answer extraction, "
+            "length budget and hardware sizing remain benchmark-specific. "
+            "This applies in both select and reuse mode; conflicting frozen configs "
+            "are invalid. No Validation questions, answers or scores are supplied."
+        ),
+    )
     length_calibration_helper_path: str = Field(
         "",
         description=(

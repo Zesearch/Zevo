@@ -72,7 +72,8 @@ function ValidationDetails({ data, step, onStep, onClose }: {
   </DialogOwner.Provider>, document.body);
 }
 
-export function MidTrainingValidationPanel({ data, events = [], activity }: {
+export function MidTrainingValidationPanel({ data, events = [], activity, showExecutionProgress = true }: {
+  showExecutionProgress?: boolean;
   data?: MidTrainingValidation | null; events?: ExecutionEventDTO[]; activity?: string | null;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -96,7 +97,7 @@ export function MidTrainingValidationPanel({ data, events = [], activity }: {
       {!!data?.measurements.length && <button type="button" className="text-xs text-sky-300 hover:underline"
         onClick={() => { setStep(undefined); setOpen(true); }}>See more details</button>}
     </div>
-    {generating && progress && <div className="mb-3 text-xs text-sky-300">{String(progress.extras?.benchmark_name)} · {progress.current_step.toLocaleString()} / {progress.total_steps.toLocaleString()} responses</div>}
+    {showExecutionProgress && generating && progress && <div className="mb-3 text-xs text-sky-300">{String(progress.extras?.benchmark_name)} · {progress.current_step.toLocaleString()} / {progress.total_steps.toLocaleString()} responses</div>}
     {data && <>
       <div className="mb-3 flex flex-wrap gap-4 text-xs text-slate-300">
         <span>{data.complete ? "Selected checkpoint" : "Best checkpoint so far"}: step {data.best_step.toLocaleString()}</span>

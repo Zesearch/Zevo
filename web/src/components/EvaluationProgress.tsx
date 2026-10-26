@@ -1,3 +1,4 @@
+import { StageProgress } from "./StageProgress";
 import type { ExecutionEventDTO, HeartbeatDTO } from "../lib/api";
 
 export function evaluationAttemptLabel(phase: string, sequence: number, lane: string): string {
@@ -6,8 +7,9 @@ export function evaluationAttemptLabel(phase: string, sequence: number, lane: st
   return sequence > 1 ? `Re-evaluate ${suite}` : `Evaluate ${suite}`;
 }
 
-export function EvaluationProgress({ events, heartbeat, lane, paused = false, benchmarkName = "" }: {
+export function EvaluationProgress({ events, heartbeat, lane, paused = false, benchmarkName = "", scopedEvents }: {
   events: ExecutionEventDTO[];
+  scopedEvents?: ExecutionEventDTO[];
   heartbeat?: HeartbeatDTO;
   lane: string;
   paused?: boolean;
@@ -15,7 +17,7 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
 }) {
   // Progress belongs to the selected execution, never a previous retry or
   // the Run's aggregate scores. A new execution starts its own progress.
-  const scoped = heartbeat ? events.filter((event) => event.heartbeat_id === heartbeat.id) : [];
+  const scoped = scopedEvents ?? (heartbeat ? events.filter((event) => event.heartbeat_id === heartbeat.id) : []);
   const completed = new Set<string>();
   let total = 0;
   let current = "";
@@ -42,13 +44,13 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
     current = benchmarkName || (lane === "held_out_test" ? "Final Test" : "Validation");
     if (scoped.some((event) => event.phase === "completed")) completed.add("single");
   }
-  if (!heartbeat || total < 1) return null;
+  if ((!heartbeat && !scopedEvents) || total < 1) return null;
   const done = Math.min(completed.size, total);
   const judgeModel = typeof judge?.extras?.model === "string" ? judge.extras.model : "";
   const judgeCached = Number(judge?.extras?.cached || 0);
   const suite = lane === "held_out_test" ? "Final Test" : "Validation";
   return (
-    <div className="mb-3 rounded-bezel border border-brass-500/25 bg-brass-500/[0.05] px-3 py-2.5">
+    <StageProgress completed={done} total={total} label={`${suite} evaluation benchmarks`}>
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 font-mono text-xs">
         <span className="min-w-0 text-slate-200">
           <span className="text-brass-300">Evaluation</span>
@@ -59,14 +61,10 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
               {judgeCached > 0 && <span className="text-dim"> · {judgeCached.toLocaleString()} cached</span>}
             </span>
           )}
-          {paused && !heartbeat.finished_at && <span className="ml-3 text-dim">Paused</span>}
+          {paused && !heartbeat?.finished_at && <span className="ml-3 text-dim">Paused</span>}
         </span>
         <span className="tabular-nums text-brass-300">{suite} {done} / {total} <span className="text-dim">evaluated</span></span>
       </div>
-      <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-800" role="progressbar"
-        aria-label={`${suite} evaluation benchmarks`} aria-valuemin={0} aria-valuemax={total} aria-valuenow={done}>
-        <div className="h-full rounded-full bg-brass-400 transition-[width] duration-500" style={{ width: `${done / total * 100}%` }} />
-      </div>
-    </div>
+    </StageProgress>
   );
 }

@@ -657,3 +657,26 @@ the exact evidence (device index, Xid lines, ECC counters, instance id). The
 engine routes that failure to the Orchestrator for a replacement device; a
 workaround on the same card is not a repair and spends the Run's budget on
 hardware nobody will keep.
+
+
+### Shared Validation and held-out model interface
+
+When `shared_inference_core` is supplied, it is an engine-owned hard constraint
+for every benchmark, in both select and reuse mode. Copy its prompt, tokenizer,
+chat template and kwargs, special token IDs, stop token IDs, decoding values,
+string stops, generation-prefix setting and sampling controls into each config.
+`decoding` belongs under `measurement`; `stop` belongs under
+`measurement.inference_config`; `sampling` belongs in the backend sampling
+settings. Do not select a generic system prompt or drop a stop token. Pass these
+values unchanged to the actual prompt renderer and generation backend.
+Only task input mapping, answer parsing, max-new-token calibration and hardware
+sizing remain benchmark-specific. Rebuild the synthetic prompt example from
+the inherited core plus that benchmark's mapping. A conflicting reused config
+is an error, not permission to rewrite it or use a separate held-out core.
+The core contains no Validation examples, labels, scores or predictions.
+
+For a baseline Validation suite, select the common model interface once for
+the primary member and use the same core for every additional member. On
+held-out submit handoff, make every member config available at its assigned
+`work_dir/inference_config.yaml` (or report its exact path in `suite_members`);
+the engine checks all members before GPU submission, not just the primary.

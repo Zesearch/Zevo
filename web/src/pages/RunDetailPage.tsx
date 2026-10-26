@@ -1,6 +1,10 @@
+import { GenerationReport } from "../components/GenerationReport";
+import { measurementProgress } from "../lib/measurementProgress";
 import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
 import { isMidTrainingActivation, midTrainingActivationLabel } from "../lib/midTrainingActivations";
-import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
+import { MidTrainingTimelineBranch } from "../components/MidTrainingTimelineBranch";
+import { decisionStatus } from "../lib/midTrainingStatus";
+import { StageProgress } from "../components/StageProgress";
 import { trainingActivity } from "../lib/trainingTelemetry";
 import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
 import { instructionBlocks, stageStatus } from "../lib/stageStatus";
@@ -236,6 +240,8 @@ function operationCaption(t: {
   } as Record<string, string>)[t.agent_id || ""] || t.agent_id || "Stage";
 
   if (op === "run_inference") {
+    if (phase === "remeasure") return "Length Remeasurement";
+    if (phase === "remeasure_collect") return "Collect Length Remeasurement Results";
     if (phase === "submit") return `Submit ${inferenceName}`;
     if (phase === "collect") return `Collect ${inferenceName} Results`;
     if (phase === "repair") return `Repair ${inferenceName}`;
@@ -834,24 +840,9 @@ function PipelineTimeline({
                     );
                     const checkpoints = midTrainingWakes.filter((heartbeat) => heartbeat.mid_training?.train_ticket_id === t.id);
                     if (t.mid_training_enabled || checkpoints.length) {
-                      const latest = checkpoints.at(-1);
-                      const children = [
-                        { label: "Inference", selection: `${t.id}#validation:inference` },
-                        { label: "Scoring", selection: `${t.id}#validation:scoring` },
-                        { label: "Orchestrator", selection: `${supervisorId}#mid:${t.id}` },
-                      ];
-                      rows.push(<li key={`mid-training-${t.id}`} className="ml-5 border-l border-sky-500/30 py-2 pl-4">
-                        <span className="block text-xs font-medium text-sky-300">Mid-training Validation</span>
-                        <ul className="mt-2 space-y-1">{children.map((child) => <li key={child.label}>
-                          <button type="button" onClick={() => setSel(child.selection)}
-                            className={`w-full rounded-lg px-2 py-1.5 text-left text-xs ${selectedId === child.selection ? "bg-sky-500/10 text-sky-300" : "text-slate-300 hover:bg-raised/40"}`}>
-                            {child.label}
-                            {child.label === "Orchestrator" && <span className="mt-1 block text-[11px] text-dim">
-                              {latest ? midTrainingActivationLabel(latest, checkpoints) : "Waiting for checkpoint decision"}
-                            </span>}
-                          </button>
-                        </li>)}</ul>
-                      </li>);
+                      rows.push(<MidTrainingTimelineBranch key={`mid-training-${t.id}`} ticketId={t.id}
+                        supervisorId={supervisorId} activations={checkpoints} selectedId={selectedId} onSelect={setSel}
+                        paused={pausedTicketIds.has(t.id) || needsInstructionInput} />);
                     }
                   });
                   // The held-out lane hangs OFF the round, it is not a step in
@@ -950,7 +941,6 @@ function PipelineTimeline({
       <div className="min-w-0 space-y-4">
       {selectedId.includes("#validation:") ? <MidTrainingPhaseDetail
         key={selectedId} ticketId={selectedId.split("#")[0]}
-        phase={selectedId.endsWith(":inference") ? "inference" : "scoring"}
         paused={pausedTicketIds.has(selectedId.split("#")[0]) || needsInstructionInput} /> : <StageDetail
         ticketId={selectedId.split("#")[0]}
         wake={selectedId.includes("#") && !selectedId.endsWith("#failed") && !selectedId.includes("#mid:")
@@ -958,8 +948,8 @@ function PipelineTimeline({
         midTrainingTicketId={selectedId.includes("#mid:") ? selectedId.split("#mid:")[1] : undefined}
         showUnrecordedFailure={selectedId.endsWith("#failed")}
         benchmarkProgress={run.benchmark_progress}
-        paused={pausedTicketIds.has(selectedId.split("#")[0])}
-        needsInput={needsInstructionInput && pausedTicketIds.has(selectedId.split("#")[0])}
+        paused={pausedTicketIds.has(selectedId.includes("#mid:") ? selectedId.split("#mid:")[1] : selectedId.split("#")[0])}
+        needsInput={needsInstructionInput && (selectedId.includes("#mid:") || pausedTicketIds.has(selectedId.split("#")[0]))}
         applying={activeInstructions.some((i) => i.target_ticket_id === selectedId.split("#")[0] && i.activity_status === "applying")}
       />}
       </div>
@@ -982,6 +972,9 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
     refreshInterval: (latest) =>
       latest && ["succeeded", "failed", "cancelled", "skipped", "degraded"].includes(latest.status) ? 0 : 3000,
   });
+  const { data: midTrain } = useSWR<TicketDetail>(
+    midTrainingTicketId ? `/api/tickets/${midTrainingTicketId}` : null, { refreshInterval: 3000 },
+  );
   // EVERY wake of this stage, not just the latest. A ticket gets one heartbeat
   // per wake, and the orchestrator is re-woken after each child ticket
   // finishes — so `limit=1` showed one wake's tokens and cost while the run
@@ -1104,6 +1097,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
   // ticket usually opens on its later collect activation. Keep the ticket's
   // final benchmark name when the active progress window is empty.
   const lastInferenceBenchmark = [...t.execution_events].reverse().find((event) =>
+    (!t.measurement_attempt?.started_at || Date.parse(event.ts) >= Date.parse(t.measurement_attempt.started_at)) &&
     event.event_type === "progress"
     && event.extras?.execution_purpose === "workload"
     && typeof event.extras?.benchmark_name === "string"
@@ -1122,7 +1116,9 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
           <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? "Orchestrator decisions" : t.id}</Link>
-          <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />
+          <StatusBadge status={midTrainingTicketId
+            ? decisionStatus(midActivations, paused || needsInput, midTrain?.mid_training_validation?.awaiting_decision)
+            : stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />
           {currentTrainingActivity && <span className="text-xs text-sky-300">{currentTrainingActivity}</span>}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
         </div>
@@ -1175,6 +1171,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
               </p>
             </div>
           )}
+          <GenerationReport report={t.generation_report} />
           <BenchmarkStageProgress
             ticket={t} progress={benchmarkProgress} started={benchmarkWorkStarted}
             activeBenchmarks={activeBenchmarks} parallelWorkers={parallelWorkers}
@@ -1206,11 +1203,6 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
             </div>
           )}
         </div>
-        {t.agent_id === "train" && (t.mid_training_validation || t.payload.first_validation_fraction != null) && (
-          <div className="rounded-bezel border border-sky-500/25 bg-sky-500/[0.04] p-3">
-            <MidTrainingValidationPanel data={t.mid_training_validation} events={t.execution_events} activity={currentTrainingActivity} />
-          </div>
-        )}
         {hbId ? (
           <div>
             <div className="mb-1.5"><Kicker strong>Live activity</Kicker></div>
@@ -1247,7 +1239,8 @@ function BenchmarkStageProgress({
   parallelWorkers: number;
   lastBenchmarkName: string;
 }) {
-  if (!started || !progress || ticket.agent_id !== "inference") return null;
+  const attemptProgress = measurementProgress(ticket);
+  if ((!started && !attemptProgress) || !progress || ticket.agent_id !== "inference") return null;
 
   const rawName = String(ticket.payload.test_set_name || "");
   const validation = ticket.lane === "optimization";
@@ -1273,11 +1266,11 @@ function BenchmarkStageProgress({
     )
     : (current?.name || lastBenchmarkName || name
       || (validation ? "Validation" : "Final Test"));
-  const completed = suite.inference_completed ?? 0;
-  const ratio = Math.min(100, (completed / suite.total) * 100);
+  const completed = attemptProgress?.completed ?? suite.inference_completed ?? 0;
+  const total = attemptProgress?.total ?? suite.total;
 
   return (
-    <div className="mb-3 rounded-bezel border border-brass-500/25 bg-brass-500/[0.05] px-3 py-2.5">
+    <StageProgress completed={completed} total={total} label={`${validation ? "Validation" : "Final Test"} inference benchmarks`}>
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
         <span className="min-w-0 font-mono text-xs text-slate-200">
           <span className="text-brass-300">Inference</span>
@@ -1288,7 +1281,7 @@ function BenchmarkStageProgress({
           )}
         </span>
         <span className="font-mono text-xs tabular-nums text-brass-300">
-          {validation ? "Validation" : "Final Test"} {completed} / {suite.total}
+          {validation ? "Validation" : "Final Test"} {completed} / {total}
           <span className="ml-1.5 text-dim">inferred</span>
           {suite.failed > 0 && (
             <span className="ml-2 text-coral-300">· {suite.failed} failed</span>
@@ -1300,13 +1293,7 @@ function BenchmarkStageProgress({
           )}
         </span>
       </div>
-      <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-800">
-        <div
-          className="h-full rounded-full bg-brass-400 transition-[width] duration-500"
-          style={{ width: `${ratio}%` }}
-        />
-      </div>
-    </div>
+    </StageProgress>
   );
 }
 

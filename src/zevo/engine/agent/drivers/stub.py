@@ -655,6 +655,11 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
             inference_values["decoding_strategy"] = (
                 "sampling" if float(inference_values["temperature"]) > 0 else "greedy"
             )
+        shared = dict(payload.get("shared_inference_core") or {})
+        if shared:
+            prompt_values = shared["prompt"]
+            inference_values.update(shared["decoding"])
+            inference_values["inference_config"]["stop"] = shared["stop"]
         prompt = PromptContract.model_validate(prompt_values)
         measurement = InferenceContract.model_validate(inference_values)
         realized_values = {
@@ -728,6 +733,13 @@ def _stub_infer(payload: dict, work_dir: Path) -> BaseModel:
             ),
             suggestion_decisions=decisions,
         )
+        if shared:
+            for key in ("base_model", "generation_backend", "tokenizer_source",
+                        "chat_template_source", "chat_template_hash", "template_kwargs",
+                        "special_token_ids", "stop_token_ids"):
+                setattr(config, key, shared[key])
+            config.implementation_config["sampling_params"] = shared["sampling"]
+            config.implementation_config["add_generation_prompt"] = shared["add_generation_prompt"]
         config_path = primary_dir / "inference_config.yaml"
         config_path.write_text(
             yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False),

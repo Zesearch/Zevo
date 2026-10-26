@@ -87,6 +87,8 @@ from zevo.engine.agent.drivers import Driver, get_driver
 from zevo.engine.observe.live_markers import LiveMarkerReader
 from zevo.engine.observe.markers import scan_text
 from zevo.engine.cost.live_usage import LiveUsage, persist_usage
+from zevo.contracts.inference_core import inference_core, validate_inference_core
+from zevo.engine.run.remeasurement import validation_generation_reports
 from zevo.engine.run.scheduler.bindings import input_path, resolve_input_bindings
 from zevo.engine.remote_transfer import (
     build_download_command,
@@ -1262,7 +1264,8 @@ async def _baseline_suite_config_path(
             continue
         meta = dict(product.meta or {})
         if (
-            str(meta.get("suite_member_name") or "") == member_name
+            (str(meta.get("suite_member_name") or "") == member_name
+             or (not member_name and meta.get("suite_primary")))
             and str((ticket.payload or {}).get("model_source") or "") == "base_model"
             and str((ticket.payload or {}).get("base_model") or "") == base_model
         ):
@@ -1440,6 +1443,17 @@ async def _build_inference_input(
     inference_config_path = input_path(
         inputs, "inference_config", required=False,
     )
+    shared_core = {}
+    if ticket.lane == "held_out_test":
+        core_path = input_path(inputs, "shared_inference_config", required=False)
+        if not core_path:
+            core_path = await _baseline_suite_config_path(
+                session, run=run, base_model=_require(payload, "base_model", ticket),
+                member_name="", lane="optimization",
+            )
+        if not core_path:
+            raise ValueError("held-out inference requires the Validation baseline core")
+        shared_core = inference_core(load_inference_config(core_path))
     suite_members = (
         await _build_validation_suite_members(
             ticket=ticket, payload=payload, work_dir=work_dir, run=run,
@@ -1467,6 +1481,16 @@ async def _build_inference_input(
         if revised:
             member.inference_config_path = revised
             member.configuration_mode = "reuse"
+    if shared_core:
+        # Reject incompatible reuse before allocating/submitting GPU work.
+        for config_path in [inference_config_path, *[
+            member.inference_config_path for member in suite_members
+        ]]:
+            if config_path:
+                validate_inference_core(load_inference_config(config_path), shared_core)
+        core_file = Path(work_dir) / "shared_inference_core.json"
+        core_file.parent.mkdir(parents=True, exist_ok=True)
+        core_file.write_text(json.dumps(shared_core, indent=2), encoding="utf-8")
     primary_index = next((
         index for index, item in enumerate(frozen_suite)
         if str(item.get("name") or "") == primary_name
@@ -1506,6 +1530,7 @@ async def _build_inference_input(
             inputs, "inference_data_profile", required=False,
         ),
         inference_config_path=inference_config_path,
+        shared_inference_core=shared_core,
         inference_config_schema=InferenceRunConfig.model_json_schema(),
         inference_mapping_contract=inference_mapping_contract(),
         config_validation_command=(
@@ -1515,6 +1540,7 @@ async def _build_inference_input(
                 " --adaptive-vllm-memory"
                 if generation_backend == "vllm" else ""
             )
+            + (f" --shared-core {shlex.quote(str(core_file))}" if shared_core else "")
         ),
         memory_helper_path=(
             str(Path(work_dir) / "zevo_inference_memory.py")
@@ -1819,6 +1845,7 @@ async def _build_input(
     if agent_id == "orchestrator":
         payload = {**payload, "runtime": {**payload.get("runtime", {}),
             "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
+            "validation_generation_reports": validation_generation_reports(run),
             "adaptive_training_requests": list((run.lifecycle or {}).get("adaptive_training_requests", {}).values())}}
         return _build_orchestrate_input(ticket, payload)
     if agent_id == "data":
@@ -1951,6 +1978,7 @@ async def _build_specialist_context(
         "prior_train_result": prior_outputs.get("train", {}),
         "prior_validation_result": prior_outputs.get("evaluation", {}),
         "validation_history": validation_history,
+        "validation_generation_reports": validation_generation_reports(run),
         "used_training_methods": [
             str(row.get("training_method"))
             for row in validation_history
@@ -2171,6 +2199,7 @@ def _validate_specialist_yaml(
         config = load_inference_config(result.inference_config_path)
         if not isinstance(inp, InferenceTaskInput):
             raise ValueError("InferenceResult received a non-Inference input")
+        validate_inference_core(config, inp.shared_inference_core)
         diagnostics = load_generation_diagnostics(
             result.generation_diagnostics_path
         )
@@ -2263,6 +2292,7 @@ def _validate_specialist_yaml(
             member_config = load_inference_config(
                 member_result.inference_config_path
             )
+            validate_inference_core(member_config, inp.shared_inference_core or inference_core(config))
             member_diagnostics = load_generation_diagnostics(
                 member_result.generation_diagnostics_path
             )
@@ -2796,6 +2826,8 @@ def _slurm_stage_result_problem(
         try:
             inference_config = load_inference_config(configuration_path)
             validate_adaptive_vllm_memory_config(inference_config)
+            if isinstance(inp, InferenceTaskInput):
+                validate_inference_core(inference_config, inp.shared_inference_core)
         except (OSError, ValueError) as exc:
             return f"cluster Inference memory configuration is invalid: {exc}"
         predict_problem = _python_memory_helper_problem(
@@ -3023,6 +3055,18 @@ def _extract_summary_artifact_meta(
             "tracking_url": result.tracking_url,
         }
     elif isinstance(result, InferenceResult):
+        if status in {"succeeded", "deferred"} and isinstance(inp, InferenceTaskInput) and inp.shared_inference_core:
+            try:
+                reported = {member.name: member.inference_config_path for member in result.suite_members}
+                paths = [result.inference_config_path, *[
+                    reported.get(member.name) or member.inference_config_path
+                    or str(Path(member.work_dir) / "inference_config.yaml")
+                    for member in inp.suite_members
+                ]]
+                for config_path in paths:
+                    validate_inference_core(load_inference_config(config_path), inp.shared_inference_core)
+            except (OSError, ValueError) as exc:
+                return "failed", f"shared inference core validation failed: {exc}", result.predictions_path, {}
         slurm_problem = _slurm_stage_result_problem(
             inp, result.slurm_script_path, "predict.py",
             configuration_path=result.inference_config_path,
@@ -4851,6 +4895,14 @@ async def run_ticket(
         hb.activation_phase = "repair"
     elif isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled:
         hb.activation_phase = str(slurm_contract.phase or "")
+
+    if tk.agent_id == "inference" and status_at_pickup != "repairing":
+        from zevo.engine.run.remeasurement import active_attempt
+        attempt = active_attempt(run, tk.id)
+        if attempt:
+            hb.activation_phase = ("remeasure_collect" if getattr(slurm_contract, "phase", "") == "collect"
+                                   else "remeasure")
+            hb.resolved_config = {"measurement_revision": attempt["revision"]}
 
     if tk.agent_id == "orchestrator" and hb.activation_phase != "instruction":
         from zevo.engine.run.adaptive_training import activation_validation_context
@@ -7639,6 +7691,7 @@ async def _spawn_holdout_infer(
     )
     inputs = dict(source.inputs or {})
     inputs.pop("inference_config", None)
+    inputs["shared_inference_config"] = _artifact_binding("inference_config", source)
     inputs.pop("predict_script", None)
     inputs.pop("inference_data_profile", None)
     data_rows = (await session.execute(
@@ -8661,6 +8714,7 @@ async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
         "num_gpus": _num_gpus(run),
         "generation_backend": run.generation_backend,
         "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
+        "validation_generation_reports": validation_generation_reports(run),
         "adaptive_training_requests": list((run.lifecycle or {}).get("adaptive_training_requests", {}).values()),
         "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),
     }

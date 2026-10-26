@@ -6,6 +6,7 @@ stay frozen. Results remain private until every checkpoint has been rescored.
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import math
 from pathlib import Path
 from uuid import uuid4
@@ -152,7 +153,7 @@ async def _products(session: AsyncSession, ticket_id: str, role: str, run: Run |
         WorkProduct.ticket_id == ticket_id, WorkProduct.role == role,
     ).order_by(WorkProduct.created_at.desc()))).all())
     previous = set(active_attempt(run, ticket_id).get("previous_product_ids", [])) if run else set()
-    return [p for p in rows if p.id not in previous]
+    return [p for p in rows if p.id not in previous and not (p.meta or {}).get("diagnostic_only")]
 
 
 async def evaluation_prediction(
@@ -224,6 +225,11 @@ async def _evidence(session: AsyncSession, run: Run, ticket: Ticket) -> dict[str
                     outputs = prediction_outputs(pred.path, records, column)
                     evidence[name]["repetition"] = repetition_evidence(records, outputs)
                     evidence[name]["max_new_tokens"] = config.measurement.max_new_tokens
+                    repeated = evidence[name]["repetition"].get("repetitive_row_indices", [])
+                    evidence[name]["examples"] = [
+                        {"row_index": index, "beginning": outputs[index][:300], "ending": outputs[index][-700:]}
+                        for index in repeated[:3] if index in outputs
+                    ]
                     from hashlib import sha256
                     digest = sha256()
                     with open(pred.path, "rb") as handle:
@@ -377,6 +383,15 @@ async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affecte
                              == load_inference_config(batch["configs"][name]).model_dump())
             except (OSError, ValueError):
                 unchanged = False
+            original = {"reason": "original_measurement", "evidence": deepcopy(ev),
+                        "assets": deepcopy(assets), "config_path": assets["inference_config"]["path"]}
+            if name in scores:
+                original["score"] = deepcopy(scores[name])
+            item.setdefault("originals", {}).setdefault(name, original)
+            if name in batch.get("rejected_members", {}):
+                retained[name] = deepcopy(item["originals"][name])
+                retained[name]["reason"] = "ineffective_length_expansion"
+                continue
             if unchanged or exempt:
                 retained[name] = {"reason": "unchanged_configuration" if unchanged else "repetition_dominated_truncation",
                                   "evidence": ev, "assets": assets,
@@ -404,7 +419,8 @@ async def _begin_attempt(session: AsyncSession, run: Run, batch: Batch, item: di
     products = list((await session.scalars(select(WorkProduct).where(WorkProduct.ticket_id == ticket.id))).all())
     resource = await _latest_slurm_resource_request(session, ticket) if kind == "inference" else None
     item[f"{kind}_attempt"] = {
-        "revision": batch["id"], "previous_status": ticket.status,
+        "revision": batch["id"], "started_at": datetime.now(timezone.utc).isoformat(),
+        "previous_status": ticket.status,
         "previous_summary": ticket.summary, "previous_payload": deepcopy(ticket.payload),
         "previous_inputs": deepcopy(ticket.inputs),
         "previous_product_ids": [p.id for p in products],
@@ -569,11 +585,14 @@ async def _handoff(session: AsyncSession, run: Run, batch: Batch) -> None:
     from zevo.engine.run.runner import _spawn_holdout_infer, _maybe_wake_supervisor, _release_deferred_wake, _holdout_settled
     item = next(c for c in batch["cohort"] if c["source_id"] == batch["trigger_id"])
     inference = await session.get(Ticket, item["inference_id"])
-    evaluation = await session.get(Ticket, item["evaluation_id"])
+    evaluation = await session.get(Ticket, item["evaluation_id"]) if item.get("evaluation_id") else None
+    if evaluation is None:
+        ids = [v.get("score", {}).get("evaluation_ticket_id") for v in item.get("retained", {}).values()]
+        evaluation = await session.get(Ticket, next((v for v in ids if v), ""))
     if batch["lane"] == "held_out_test":
         if await _holdout_settled(session, run.id):
             await _release_deferred_wake(session, run.id)
-    else:
+    elif evaluation is not None:
         evaluation.supervisor_wake_deferred = True
         await session.commit()
         await _spawn_holdout_infer(session, run, inference)
@@ -622,11 +641,11 @@ async def advance(session: AsyncSession, run_id: str) -> None:
             # Settle the triggering checkpoint's budget before historical replay.
             # History is measured at that frozen budget, even when still truncated.
             expandable = []
-            if item["source_id"] == batch["trigger_id"]:
+            if item["source_id"] == batch["trigger_id"] and not batch.get("budget_finalized"):
                 _record_budget_progress(batch, inference.id, evidence,
                                         floor=settled_budget_floor(run, batch))
                 for name, ev in evidence.items():
-                    if name in batch.get("stalled_members", {}):
+                    if name in batch.get("stalled_members", {}) or name in batch.get("rejected_members", {}):
                         continue
                     if name in item.get("retained", {}) or not needs_expansion(ev):
                         continue
@@ -635,8 +654,25 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                         expandable.append(name)
                     else:
                         batch.setdefault("ceiling_evidence", {})[name] = ev
+                rejected = {
+                    name: ("repetition_dominated" if ev.get("repetition", {}).get("dominated")
+                           else "no_improvement" if name in batch.get("stalled_members", {})
+                           else "token_ceiling")
+                    for name, ev in evidence.items()
+                    if name in batch.get("affected", []) and name not in batch.get("rejected_members", {})
+                    and ev["fraction"] > THRESHOLD
+                    and (ev.get("repetition", {}).get("dominated")
+                         or name in batch.get("stalled_members", {})
+                         or (name in batch.get("ceiling_evidence", {}) and not any(
+                             p["member"] == name and p["meaningful_improvement"]
+                             for p in batch.get("budget_progress", []))))
+                }
+                if rejected:
+                    await _restore_ineffective(session, run, batch, item, rejected, evidence)
+                    expandable = [name for name in expandable if name not in rejected]
                 if not expandable:
                     batch["budget_finalized"] = True
+                    record_generation_report(run, inference, evidence, batch=batch)
                     _store(run, batch)
                     await session.commit()
             if expandable:
@@ -645,6 +681,8 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                 # The next plan must start from the attempted budgets while
                 # selecting the same original cohort, not partial replay rows.
                 return await _retry(session, run, batch, evidence, expandable)
+            if item.get("retained_only"):
+                continue
             evaluation = await session.get(Ticket, item["evaluation_id"]) if item.get("evaluation_id") else None
             if evaluation is None or (batch.get("reuse_tickets") and not item.get("evaluation_attempt")):
                 name = evaluation_members(batch, item)[0]
@@ -758,7 +796,7 @@ async def _retry(session: AsyncSession, run: Run, batch: Batch, evidence: dict, 
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(config.model_dump_json(indent=2) + "\n", encoding="utf-8")
         new["configs"][name] = str(destination)
-    new["cohort"] = [{**{k: deepcopy(c[k]) for k in ("request_payload", "request_inputs") if k in c},
+    new["cohort"] = [{**{k: deepcopy(c[k]) for k in ("request_payload", "request_inputs", "originals") if k in c},
         "source_id": c["source_id"], "inference_id": (
         c["inference_id"] if new.get("reuse_tickets") else f"remeasure-{new['id']}-{i:03d}"
     )} for i, c in enumerate(batch["cohort"])]
@@ -787,6 +825,7 @@ async def intercept_completion(session: AsyncSession, ticket: Ticket) -> bool:
     if ticket.agent_id != "inference" or ticket.status not in SUCCESS or (ticket.payload or {}).get("model_source") != "checkpoint":
         return False
     evidence = await _evidence(session, run, ticket)
+    record_generation_report(run, ticket, evidence)
     if not any(needs_expansion(item) for item in evidence.values()):
         await session.commit()  # Persist repetition evidence even when no replay is needed.
         return False
@@ -805,3 +844,59 @@ async def reconcile(session: AsyncSession) -> int:
             await advance(session, run.id)
             count += 1
     return count
+
+
+def validation_generation_reports(run: Run) -> list[dict]:
+    """Explicit one-way boundary: held-out observations never reach training."""
+    return deepcopy([report for report in (run.lifecycle or {}).get("generation_reports", [])
+                     if report.get("lane") == "optimization"])
+
+
+def record_generation_report(run: Run, ticket: Ticket, evidence: dict, *, batch: dict | None = None) -> None:
+    problematic = {name: deepcopy(ev) for name, ev in evidence.items()
+                   if ev.get("fraction", 0) > THRESHOLD}
+    problematic.update(deepcopy((batch or {}).get("rejected_evidence", {})))
+    if not problematic and not batch:
+        return
+    report = {"ticket_id": ticket.id, "iteration": ticket.iteration, "lane": ticket.lane,
+              "benchmarks": problematic, "revision": (batch or {}).get("id", ""),
+              "budget_trials": deepcopy((batch or {}).get("budget_progress", [])),
+              "retained_original": deepcopy((batch or {}).get("rejected_members", {})),
+              "diagnosis": "Observed generation truncation/repetition; not proof of a training defect.",
+              "next_step": "Check prompt alignment, training conversation boundaries and stop behavior using Validation evidence."}
+    reports = deepcopy((run.lifecycle or {}).get("generation_reports", []))
+    reports = [v for v in reports if v["ticket_id"] != ticket.id]
+    reports.append(report)
+    run.lifecycle = {**(run.lifecycle or {}), "generation_reports": reports}
+
+
+async def _restore_ineffective(session: AsyncSession, run: Run, batch: Batch, trigger_item: dict,
+                               rejected: dict, evidence: dict) -> None:
+    """Restore original predictions per member; never replay history for a futile trial."""
+    for name in rejected:
+        for item in batch["cohort"]:
+            original = item.get("originals", {}).get(name)
+            if not original or len(original.get("assets", {})) != 3:
+                raise ValueError(f"cannot restore original measurement for {name!r}")
+        batch["configs"][name] = trigger_item["originals"][name]["config_path"]
+    batch.setdefault("rejected_members", {}).update(rejected)
+    batch.setdefault("rejected_evidence", {}).update({name: deepcopy(evidence[name]) for name in rejected})
+    for item in batch["cohort"]:
+        for name, reason in rejected.items():
+            original = deepcopy(item["originals"][name])
+            original["reason"] = "ineffective_length_expansion"
+            item.setdefault("retained", {})[name] = original
+            item["active_members"] = [n for n in item.get("active_members", []) if n != name]
+            if item is trigger_item:
+                # Archive trials, then expose new references to the original files
+                # inside this attempt so all downstream provenance stays exact.
+                for role, asset in original["assets"].items():
+                    for product in await _products(session, item["inference_id"], role, run):
+                        if (product.meta or {}).get("suite_member_name") == name:
+                            product.meta = {**(product.meta or {}), "diagnostic_only": True}
+                    session.add(WorkProduct(ticket_id=item["inference_id"], role=role,
+                        path=asset["path"], meta={**asset["meta"], "suite_member_name": name,
+                            "restored_original": True, "measurement_revision": batch["id"]}))
+        item["retained_only"] = set(batch["configs"]) <= set(retained_scores(item))
+    await session.flush()
+    _store(run, batch)
