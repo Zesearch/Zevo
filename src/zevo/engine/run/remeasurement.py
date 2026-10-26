@@ -382,7 +382,9 @@ async def _new_inference(session: AsyncSession, run: Run, batch: Batch, item: di
         payload["configuration_pins"] = pins
         ticket.payload = payload
         if member.get("inference_data_profile"):
-            ticket.inputs = {**ticket.inputs, "inference_data_profile": {"path": member["inference_data_profile"]}}
+            ticket.inputs = {**ticket.inputs, "inference_data_profile": {
+                "artifact_role": "inference_data_profile", "path": member["inference_data_profile"],
+            }}
     await session.flush()
     for retained in item.get("retained", {}).values():
         for role, asset in retained["assets"].items():
