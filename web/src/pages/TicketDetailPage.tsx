@@ -441,7 +441,7 @@ export function TicketDetailPage() {
         className="mt-4"
       >
         {tk.agent_id === "evaluation" && (
-          <EvaluationProgress events={tk.execution_events} heartbeat={heartbeats.find((h) => h.id === curHbId)} lane={tk.lane}
+          <EvaluationProgress events={tk.execution_events} activations={heartbeats} heartbeat={heartbeats.find((h) => h.id === curHbId)} lane={tk.lane}
             paused={runInstructions.some((item) => instructionBlocks(item.status))} benchmarkName={String(tk.payload.test_set_name || "")} />
         )}
         {heartbeats.length === 0 ? (

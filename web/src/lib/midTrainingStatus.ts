@@ -1,9 +1,9 @@
+import { latestExecution } from "./executionProgress";
 import type { ExecutionEventDTO, HeartbeatDTO, TicketDetail } from "./api";
 import { trainingActivity, isMidTrainingValidationEvent } from "./trainingTelemetry";
 
 export function midTrainingExecution(ticket: TicketDetail) {
-  const events = [...ticket.execution_events].filter((event) => event.extras?.execution_purpose === "workload")
-    .sort((a, b) => a.ts.localeCompare(b.ts));
+  const events = latestExecution(ticket.execution_events.filter((event) => event.extras?.execution_purpose === "workload"));
   let start = 0;
   events.forEach((event, index) => {
     if (["train", "training", "adaptive_training"].includes(event.phase)) start = index + 1;

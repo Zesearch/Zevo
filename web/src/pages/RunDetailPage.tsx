@@ -1,4 +1,5 @@
 import { GenerationReport } from "../components/GenerationReport";
+import { activationExecution } from "../lib/executionProgress";
 import { measurementProgress } from "../lib/measurementProgress";
 import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
 import { isMidTrainingActivation, midTrainingActivationLabel } from "../lib/midTrainingActivations";
@@ -20,7 +21,7 @@ import { RunInstructionPanel } from "../components/RunInstructionPanel";
 import { StepTimeline } from "../components/StepTimeline";
 import type { EventEnvelope } from "../components/LiveTranscript";
 
-import type { BenchmarkProgress, CostBreakdown, HeartbeatDTO, InfraInstanceDTO, RunDetail, RunInstructionDTO, TicketDetail } from "../lib/api";
+import type { ExecutionEventDTO, CostBreakdown, HeartbeatDTO, InfraInstanceDTO, RunDetail, RunInstructionDTO, TicketDetail } from "../lib/api";
 import { StatusBadge, statusToneFor } from "../components/StatusBadge";
 import { LiveTranscript } from "../components/LiveTranscript";
 import { IterationChart, RunJournal } from "../components/IterationHistoryPanel";
@@ -947,7 +948,6 @@ function PipelineTimeline({
           ? Number(selectedId.split("#")[1]) : undefined}
         midTrainingTicketId={selectedId.includes("#mid:") ? selectedId.split("#mid:")[1] : undefined}
         showUnrecordedFailure={selectedId.endsWith("#failed")}
-        benchmarkProgress={run.benchmark_progress}
         paused={pausedTicketIds.has(selectedId.includes("#mid:") ? selectedId.split("#mid:")[1] : selectedId.split("#")[0])}
         needsInput={needsInstructionInput && (selectedId.includes("#mid:") || pausedTicketIds.has(selectedId.split("#")[0]))}
         applying={activeInstructions.some((i) => i.target_ticket_id === selectedId.split("#")[0] && i.activity_status === "applying")}
@@ -957,12 +957,11 @@ function PipelineTimeline({
   );
 }
 
-function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailure = false, benchmarkProgress, paused = false, needsInput = false, applying = false }: {
+function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailure = false, paused = false, needsInput = false, applying = false }: {
   ticketId: string;
   wake?: number;
   midTrainingTicketId?: string;
   showUnrecordedFailure?: boolean;
-  benchmarkProgress?: BenchmarkProgress;
   paused?: boolean;
   needsInput?: boolean;
   applying?: boolean;
@@ -1081,33 +1080,15 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
     && !!instance.instance_id
     && !!instance.meta?.resource_request,
   );
-  const benchmarkWorkStarted = t.agent_id === "inference" && (
-    t.status === "succeeded"
-    || t.execution_events.some((event) => !!event.extras?.benchmark_name)
-    || (submittedResourceRequest !== undefined
-      && (slurmState(submittedResourceRequest) === "RUNNING"
-        || isTerminalResourceRequest(submittedResourceRequest)))
-  );
-  const latestInferenceProgress = [...executionEvents].reverse().find((event) =>
-    event.event_type === "progress"
-    && event.extras?.execution_purpose === "workload"
-    && typeof event.extras?.benchmark_name === "string"
-  );
-  // Remote progress belongs to the submit activation, while a successful
-  // ticket usually opens on its later collect activation. Keep the ticket's
-  // final benchmark name when the active progress window is empty.
-  const lastInferenceBenchmark = [...t.execution_events].reverse().find((event) =>
-    (!t.measurement_attempt?.started_at || Date.parse(event.ts) >= Date.parse(t.measurement_attempt.started_at)) &&
-    event.event_type === "progress"
-    && event.extras?.execution_purpose === "workload"
-    && typeof event.extras?.benchmark_name === "string"
-  );
-  const activeBenchmarks = Array.isArray(latestInferenceProgress?.extras?.active_benchmarks)
-    ? latestInferenceProgress.extras.active_benchmarks.filter(
-      (name): name is string => typeof name === "string",
-    )
-    : [];
-  const parallelWorkers = Number(latestInferenceProgress?.extras?.parallel_workers || 0);
+  const inferenceEvents = activationExecution(t.execution_events.filter(
+    (event) => event.extras?.execution_purpose === "workload"), picked, chronological);
+  const nextActivation = chronological.find((item) => picked && item.started_at > picked.started_at);
+  const attemptStart = t.measurement_attempt?.started_at;
+  const useCurrentAttempt = !!picked && !!attemptStart
+    && (!nextActivation || Date.parse(attemptStart) < Date.parse(nextActivation.started_at))
+    && (inferenceEvents.length > 0
+      ? inferenceEvents.every((event) => Date.parse(event.ts) >= Date.parse(attemptStart))
+      : Date.parse(attemptStart) >= Date.parse(picked.started_at));
   const currentTrainingActivity = t.agent_id === "train"
     ? trainingActivity(t.execution_events, t.mid_training_validation, t.status, paused || needsInput) : null;
   const activations = midTrainingTicketId ? midActivations : t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : chronological;
@@ -1172,13 +1153,9 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
             </div>
           )}
           <GenerationReport report={t.generation_report} />
-          <BenchmarkStageProgress
-            ticket={t} progress={benchmarkProgress} started={benchmarkWorkStarted}
-            activeBenchmarks={activeBenchmarks} parallelWorkers={parallelWorkers}
-            lastBenchmarkName={String(lastInferenceBenchmark?.extras?.benchmark_name || "")}
-          />
+          <BenchmarkStageProgress ticket={t} events={inferenceEvents} useCurrentAttempt={useCurrentAttempt} />
           {t.agent_id === "evaluation" && (
-            <EvaluationProgress events={t.execution_events} heartbeat={picked} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
+            <EvaluationProgress events={t.execution_events} heartbeat={picked} activations={chronological} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
           )}
           {activeResourceRequest && (
             <ResourceRequestStatus instance={activeResourceRequest} />
@@ -1224,77 +1201,27 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
 
 /** Show benchmark progress only while viewing Inference. Evaluation keeps its
  * ordinary status and results, without a second progress bar. */
-function BenchmarkStageProgress({
-  ticket,
-  progress,
-  started,
-  activeBenchmarks,
-  parallelWorkers,
-  lastBenchmarkName,
-}: {
+function BenchmarkStageProgress({ ticket, events, useCurrentAttempt }: {
   ticket: TicketDetail;
-  progress?: BenchmarkProgress;
-  started: boolean;
-  activeBenchmarks: string[];
-  parallelWorkers: number;
-  lastBenchmarkName: string;
+  events: ExecutionEventDTO[];
+  useCurrentAttempt: boolean;
 }) {
-  const attemptProgress = measurementProgress(ticket);
-  if ((!started && !attemptProgress) || !progress || ticket.agent_id !== "inference") return null;
-
-  const rawName = String(ticket.payload.test_set_name || "");
-  const validation = ticket.lane === "optimization";
-  const heldOut = ticket.lane === "held_out_test";
-  if (!validation && !heldOut) return null;
-
-  const suite = validation ? progress.validation : progress.test;
-  if (suite.total < 1) return null;
-  const name = validation && rawName.startsWith("validation:")
-    ? rawName.slice("validation:".length)
-    : rawName;
-  const isSuiteTicket = /^Inference suite · /.test(ticket.summary || "");
-  const current = progress.current.find((item) => (
-    item.suite === (validation ? "validation" : "test")
-    && item.stage === "inference"
-    && (isSuiteTicket || !name || item.name === name)
-    && item.iteration === ticket.iteration
-  ));
-  const displayName = activeBenchmarks.length > 0
-    ? (
-      activeBenchmarks.slice(0, 2).map(shortBenchmarkName).join(" · ")
-      + (activeBenchmarks.length > 2 ? ` +${activeBenchmarks.length - 2}` : "")
-    )
-    : (current?.name || lastBenchmarkName || name
-      || (validation ? "Validation" : "Final Test"));
-  const completed = attemptProgress?.completed ?? suite.inference_completed ?? 0;
-  const total = attemptProgress?.total ?? suite.total;
-
-  return (
-    <StageProgress completed={completed} total={total} label={`${validation ? "Validation" : "Final Test"} inference benchmarks`}>
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
-        <span className="min-w-0 font-mono text-xs text-slate-200">
-          <span className="text-brass-300">Inference</span>
-          <span className="text-dim"> · </span>
-          <span>{activeBenchmarks.length > 0 ? displayName : shortBenchmarkName(displayName)}</span>
-          {parallelWorkers > 1 && (
-            <span className="ml-2 text-dim">· {parallelWorkers} replicas</span>
-          )}
-        </span>
-        <span className="font-mono text-xs tabular-nums text-brass-300">
-          {validation ? "Validation" : "Final Test"} {completed} / {total}
-          <span className="ml-1.5 text-dim">inferred</span>
-          {suite.failed > 0 && (
-            <span className="ml-2 text-coral-300">· {suite.failed} failed</span>
-          )}
-          {suite.unmatched_progress > 0 && (
-            <span className="ml-2 text-coral-300">
-              · {suite.unmatched_progress} unmapped progress marker{suite.unmatched_progress === 1 ? "" : "s"}
-            </span>
-          )}
-        </span>
-      </div>
-    </StageProgress>
-  );
+  const count = measurementProgress(ticket, events, useCurrentAttempt);
+  if (!count || ticket.agent_id !== "inference") return null;
+  const latest = events.at(-1);
+  const names = Array.isArray(latest?.extras?.active_benchmarks)
+    ? latest.extras.active_benchmarks.filter((name): name is string => typeof name === "string") : [];
+  const name = names.length ? names.map(shortBenchmarkName).join(" · ")
+    : shortBenchmarkName(String(latest?.extras?.benchmark_name || ticket.payload.test_set_name || ""));
+  const suite = ticket.lane === "optimization" ? "Validation" : "Final Test";
+  const workers = Number(latest?.extras?.parallel_workers || 0);
+  return <StageProgress completed={count.completed} total={count.total} label={`${suite} inference benchmarks`}>
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 font-mono text-xs">
+      <span className="text-slate-200"><span className="text-brass-300">Inference</span> · {name}
+        {workers > 1 && <span className="ml-2 text-dim">· {workers} replicas</span>}</span>
+      <span className="tabular-nums text-brass-300">{suite} {count.completed} / {count.total} <span className="text-dim">inferred</span></span>
+    </div>
+  </StageProgress>;
 }
 
 function ResourceRequestStatus({ instance }: { instance: InfraInstanceDTO }) {

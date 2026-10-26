@@ -1,3 +1,4 @@
+import { activationExecution, benchmarkCounts } from "../lib/executionProgress";
 import { StageProgress } from "./StageProgress";
 import type { ExecutionEventDTO, HeartbeatDTO } from "../lib/api";
 
@@ -7,8 +8,9 @@ export function evaluationAttemptLabel(phase: string, sequence: number, lane: st
   return sequence > 1 ? `Re-evaluate ${suite}` : `Evaluate ${suite}`;
 }
 
-export function EvaluationProgress({ events, heartbeat, lane, paused = false, benchmarkName = "", scopedEvents }: {
+export function EvaluationProgress({ events, heartbeat, lane, paused = false, benchmarkName = "", scopedEvents, activations }: {
   events: ExecutionEventDTO[];
+  activations?: HeartbeatDTO[];
   scopedEvents?: ExecutionEventDTO[];
   heartbeat?: HeartbeatDTO;
   lane: string;
@@ -17,35 +19,23 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
 }) {
   // Progress belongs to the selected execution, never a previous retry or
   // the Run's aggregate scores. A new execution starts its own progress.
-  const scoped = scopedEvents ?? (heartbeat ? events.filter((event) => event.heartbeat_id === heartbeat.id) : []);
-  const completed = new Set<string>();
-  let total = 0;
+  const scoped = scopedEvents ?? activationExecution(events, heartbeat, activations);
+  const count = benchmarkCounts(scoped, undefined, "evaluation");
   let current = "";
   let judge: ExecutionEventDTO | undefined;
   for (const event of scoped) {
     const scoring = /^scoring (\d+)\/(\d+): (.+)$/.exec(event.phase);
     if (scoring) {
       judge = undefined;
-      total = Math.max(total, Number(scoring[2]));
       current = scoring[3];
     }
     if (event.event_type === "progress" && event.extras?.phase === "model_judge") {
       judge = event;
     }
-    const count = Number(event.extras?.benchmark_total || 0);
-    if (Number.isFinite(count)) total = Math.max(total, count);
-    if (event.event_type === "progress" && event.extras?.phase === "benchmark_complete") {
-      const identity = String(event.extras.benchmark_id || event.extras.benchmark_name || "");
-      if (identity) completed.add(identity);
-    }
   }
-  if (total === 0 && scoped.some((event) => event.phase === "scoring" || event.phase === "completed")) {
-    total = 1;
-    current = benchmarkName || (lane === "held_out_test" ? "Final Test" : "Validation");
-    if (scoped.some((event) => event.phase === "completed")) completed.add("single");
-  }
-  if ((!heartbeat && !scopedEvents) || total < 1) return null;
-  const done = Math.min(completed.size, total);
+  if (!count) return null;
+  const { completed: done, total } = count;
+  if (!current) current = benchmarkName || (lane === "held_out_test" ? "Final Test" : "Validation");
   const judgeModel = typeof judge?.extras?.model === "string" ? judge.extras.model : "";
   const judgeCached = Number(judge?.extras?.cached || 0);
   const suite = lane === "held_out_test" ? "Final Test" : "Validation";
