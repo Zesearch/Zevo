@@ -1,3 +1,4 @@
+import { isMidTrainingValidationEvent } from "../lib/trainingTelemetry";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
@@ -42,6 +43,8 @@ const METRIC_ALIAS: Record<string, string> = {
 // the point) instead of vanishing unbidden (not fine, and invisible).
 const NON_METRIC_KEYS = new Set([
   "step", "total", "epoch", "t",
+  "benchmark_index", "benchmark_total", "parallel_workers", "suite_rows_total",
+  "suite_rows_completed", "suite_rows_verified", "world_size",
   "train_runtime", "train_samples_per_second", "train_steps_per_second",
   "eval_runtime", "eval_samples_per_second", "eval_steps_per_second",
   "total_flos", "num_input_tokens_seen",
@@ -204,6 +207,7 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
     event.event_type === "progress" && event.extras?.execution_purpose === "unverified"
   ).length;
   const eligibleEvents = useMemo(() => executionEvents.filter((event) => {
+    if (isMidTrainingValidationEvent(event)) return false;
     if (event.event_type !== "progress" && event.event_type !== "attempt") return true;
     const purpose = event.extras?.execution_purpose;
     return showHistory ? purpose === "unverified" : purpose === "workload";

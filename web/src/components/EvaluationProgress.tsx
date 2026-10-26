@@ -2,8 +2,8 @@ import type { ExecutionEventDTO, HeartbeatDTO } from "../lib/api";
 
 export function evaluationAttemptLabel(phase: string, sequence: number, lane: string): string {
   const suite = lane === "held_out_test" ? "Held-Out" : "Validation";
-  if (phase === "repair") return `Retry ${suite} Evaluation · ${sequence}`;
-  return sequence > 1 ? `Re-evaluate ${suite} · ${sequence}` : `Evaluate ${suite}`;
+  if (phase === "repair") return `Retry ${suite} Evaluation`;
+  return sequence > 1 ? `Re-evaluate ${suite}` : `Evaluate ${suite}`;
 }
 
 export function EvaluationProgress({ events, heartbeat, lane, paused = false, benchmarkName = "" }: {

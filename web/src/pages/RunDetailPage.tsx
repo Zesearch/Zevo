@@ -1,3 +1,5 @@
+import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
+import { trainingActivity } from "../lib/trainingTelemetry";
 import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
 import { instructionBlocks, stageStatus } from "../lib/stageStatus";
 import { latestTimelineTickets, timelineTicketStatus } from "../lib/timelineStatus";
@@ -1076,6 +1078,8 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
     )
     : [];
   const parallelWorkers = Number(latestInferenceProgress?.extras?.parallel_workers || 0);
+  const currentTrainingActivity = t.agent_id === "train"
+    ? trainingActivity(t.execution_events, t.mid_training_validation, t.status, paused || needsInput) : null;
   const activations = t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : chronological;
   return (
     <Bezel className="overflow-hidden">
@@ -1083,6 +1087,7 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
         <div className="flex items-center gap-2 font-mono text-sm">
           <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{t.id}</Link>
           <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />
+          {currentTrainingActivity && <span className="text-xs text-sky-300">{currentTrainingActivity}</span>}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
         </div>
         <div className="flex items-center gap-3">
@@ -1093,10 +1098,12 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
       </div>
       {activations.length > 1 && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
-          <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation attempts" : "Activations"}</span>
+          <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation history" : "Activations"}</span>
           {activations.map((heartbeat, index) => {
             const active = heartbeat.id === picked?.id;
-            const label = t.agent_id === "evaluation"
+            const label = t.agent_id === "train" && heartbeat.id === chronological.at(-1)?.id && currentTrainingActivity
+              ? currentTrainingActivity
+              : t.agent_id === "evaluation"
               ? evaluationAttemptLabel(heartbeat.activation_phase, index + 1, t.lane)
               : t.agent_id === "orchestrator"
               ? index === 0 ? "Initial" : `Repair ${index}`
@@ -1106,6 +1113,7 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
             return (
               <button
                 key={heartbeat.id}
+                title={heartbeat.started_at ? new Date(heartbeat.started_at).toLocaleString() : undefined}
                 type="button"
                 onClick={() => setSelectedActivation(chronological.findIndex((item) => item.id === heartbeat.id))}
                 className={`rounded-full border px-2.5 py-1 font-mono text-[11px] transition ${
@@ -1162,6 +1170,12 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
             </div>
           )}
         </div>
+        {t.agent_id === "train" && (t.mid_training_validation || t.payload.first_validation_fraction != null) && (
+          <div className="rounded-bezel border border-sky-500/25 bg-sky-500/[0.04] p-3">
+            <div className="mb-2"><Kicker strong>Mid-training Validation</Kicker></div>
+            <MidTrainingValidationPanel data={t.mid_training_validation} events={t.execution_events} activity={currentTrainingActivity} />
+          </div>
+        )}
         {hbId ? (
           <div>
             <div className="mb-1.5"><Kicker strong>Live activity</Kicker></div>
