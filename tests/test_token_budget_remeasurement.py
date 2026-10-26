@@ -785,3 +785,27 @@ def test_settled_budget_floor_reads_published_batches_of_the_same_model_only():
     assert rm.settled_budget_floor(run, {'base_model': 'm'}) == 512
     assert rm.settled_budget_floor(run, {'base_model': 'other'}) == 2048
     assert rm.settled_budget_floor(run, {'base_model': 'none'}) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lane", ["optimization", "held_out_test"])
+async def test_checkpoint_replay_uses_staged_suite_configs_before_baseline_lookup(scenario, lane):
+    from zevo.engine.run.runner import _build_validation_suite_members, _build_holdout_suite_members
+    session, run, originals, root = scenario
+    suite = [{**m, 'public': m['validation_set'], 'inference_data_profile': '/profile.json'}
+             for m in run.holdout['validation_sets']]
+    run.holdout = {**run.holdout, 'validation_sets': suite, 'test_sets': suite}
+    if lane == 'held_out_test':
+        for ticket in originals:
+            ticket.lane = lane
+            ticket.payload = {**ticket.payload, 'test_set_name': 'math'}
+    await session.commit()
+    assert await rm.intercept_completion(session, originals[-1])
+    batch = rm.pending(run)
+    item = batch['cohort'][0]
+    replay = await rm._new_inference(session, run, batch, item)
+    builder = _build_holdout_suite_members if lane == 'held_out_test' else _build_validation_suite_members
+    members = await builder(ticket=replay, payload=replay.payload, work_dir=str(root), run=run, session=session)
+    assert [m.name for m in members] == ['qa']
+    assert members[0].inference_config_path == batch['configs']['qa']
+    assert members[0].configuration_mode == 'reuse'
