@@ -1,4 +1,4 @@
-import { isMidTrainingValidationEvent } from "../lib/trainingTelemetry";
+import { continuousTrainingEvents, isMidTrainingValidationEvent } from "../lib/trainingTelemetry";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
@@ -212,18 +212,7 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
     const purpose = event.extras?.execution_purpose;
     return showHistory ? purpose === "unverified" : purpose === "workload";
   }), [executionEvents, showHistory]);
-  const latestAttemptId = useMemo(() => {
-    let latest = "";
-    for (const event of eligibleEvents) {
-      if ((event.event_type === "attempt" || event.event_type === "progress") && event.attempt_id) {
-        latest = event.attempt_id;
-      }
-    }
-    return latest;
-  }, [eligibleEvents]);
-  const scopedEvents = latestAttemptId
-    ? eligibleEvents.filter((event) => event.attempt_id === latestAttemptId)
-    : eligibleEvents;
+  const scopedEvents = useMemo(() => continuousTrainingEvents(eligibleEvents), [eligibleEvents]);
   const historyControl = historicalCount > 0 ? (
     <div className="mb-2 text-xs text-dim">
       <button className="underline" onClick={() => setShowHistory(!showHistory)}>
@@ -318,7 +307,7 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
   }, [pageCount]);
   useEffect(() => {
     setPage(0);
-  }, [latestAttemptId]);
+  }, [showHistory]);
 
   if (data.length === 0) {
     const phase = scopedEvents[scopedEvents.length - 1]?.phase;

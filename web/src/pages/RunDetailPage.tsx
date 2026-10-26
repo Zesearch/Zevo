@@ -1162,11 +1162,11 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
           />
           {/* Loss chart is a TRAIN-only thing (inference has no loss); guard on the
               agent so a stray/contaminated loss row can't surface it elsewhere. */}
-          {t.agent_id === "train" && executionEvents.some(
+          {t.agent_id === "train" && t.execution_events.some(
             (p) => p.event_type === "attempt" || p.loss > 0,
           ) && (
             <div className="mt-3 rounded-bezel border border-hair bg-canvas/40 p-2">
-              <TrainingMonitor executionEvents={executionEvents} />
+              <TrainingMonitor executionEvents={t.execution_events} />
             </div>
           )}
         </div>
