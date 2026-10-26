@@ -3,9 +3,11 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { transformWithEsbuild } from 'vite';
 const telemetry = readFileSync(new URL('../src/lib/trainingTelemetry.ts', import.meta.url), 'utf8');
+const shared = readFileSync(new URL('../src/lib/executionProgress.ts', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../src/lib/midTrainingStatus.ts', import.meta.url), 'utf8')
+  .replace('import { latestExecution } from "./executionProgress";', '')
   .replace('import { trainingActivity, isMidTrainingValidationEvent } from "./trainingTelemetry";', '');
-const { code } = await transformWithEsbuild(`${telemetry}\n${source}`, 'status.ts', { loader: 'ts' });
+const { code } = await transformWithEsbuild(`${shared}\n${telemetry}\n${source}`, 'status.ts', { loader: 'ts' });
 const { midTrainingExecution, validationStatus, decisionStatus, inferenceProgress, midTrainingHasStarted } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const event = (ts, phase, extras = {}) => ({ ts, phase, event_type: 'progress', loss: -1,
@@ -64,4 +66,12 @@ test('validation branch appears only on first real validation and survives resum
   assert.equal(midTrainingHasStarted(ticket([validation, event('04', 'train')])), true);
   assert.equal(midTrainingHasStarted(ticket([], { measurements: [{ step: 100 }] })), true);
   assert.equal(midTrainingHasStarted(undefined, 1), true);
+});
+
+test('restarted workload cannot inherit the previous validation counters', () => {
+  const old = event('01', 'scoring', { execution_id: 'old', phase: 'benchmark_complete', benchmark_name: 'A' });
+  const fresh = event('02', 'generate:A', { execution_id: 'new', benchmark_name: 'A', suite_rows_completed: 0, suite_rows_total: 100 });
+  const execution = midTrainingExecution(ticket([old, fresh]));
+  assert.deepEqual(execution.events, [fresh]);
+  assert.equal(inferenceProgress(execution.events).completed, 0);
 });
