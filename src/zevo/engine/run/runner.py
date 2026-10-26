@@ -1583,8 +1583,8 @@ async def _build_evaluation_suite_members(
             from zevo.holdout_storage import resolve_asset
         for index, item in enumerate(suite):
             name = str(item.get("name") or "")
-            from zevo.engine.run.remeasurement import replay_item
-            if name == primary_name or name in replay_item(run, ticket.id).get("retained", {}):
+            from zevo.engine.run.remeasurement import replay_item, retained_scores
+            if name == primary_name or name in retained_scores(replay_item(run, ticket.id)):
                 continue
             product = next((
                 candidate for candidate in products
@@ -4531,7 +4531,7 @@ async def run_ticket(
     if run.cancel_requested_at is not None:
         return tk
     from zevo.engine.run.remeasurement import pending
-    if pending(run) and tk.agent_id == "orchestrator":
+    if pending(run) and tk.agent_id in {"orchestrator", "train"}:
         return tk  # the complete cohort, not a partial score, releases the loop
     if finalization(run) and not finalization_allows(tk.agent_id, tk.lane):
         tk.status = "cancelled"
@@ -8428,6 +8428,10 @@ async def _holdout_settled(session: AsyncSession, run_id: str) -> bool:
     hold the loop forever — a missing test point is a gap in one series, an
     unwakeable supervisor is a dead run.
     """
+    from zevo.engine.run.remeasurement import pending as pending_remeasurement
+    run = await session.get(Run, run_id, populate_existing=True)
+    if run is not None and pending_remeasurement(run):
+        return False  # Successful individual tickets do not settle an unpublished cohort.
     pending = (await session.execute(
         select(func.count()).select_from(Ticket).where(
             Ticket.run_id == run_id,

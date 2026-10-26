@@ -809,3 +809,151 @@ async def test_checkpoint_replay_uses_staged_suite_configs_before_baseline_looku
     assert [m.name for m in members] == ['qa']
     assert members[0].inference_config_path == batch['configs']['qa']
     assert members[0].configuration_mode == 'reuse'
+
+
+async def add_reusable_suite(session, run, originals, root, lane, scored):
+    import csv
+    suite = [{**m, 'public': m['validation_set'], 'inference_data_profile': '/profile.json'}
+             for m in run.holdout['validation_sets']]
+    results = {}
+    for ticket in originals:
+        ticket.lane = lane
+        ticket.payload = {**ticket.payload, 'test_set_name': 'math' if lane == 'held_out_test' else ''}
+        for name in ('math', 'qa'):
+            path = root / f'{ticket.id}-{name}-predictions.csv'
+            with path.open('w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['id', 'complete_prediction'])
+                writer.writeheader()
+                writer.writerows({'id': i, 'complete_prediction': 'answer'} for i in range(20))
+            session.add(WorkProduct(ticket_id=ticket.id, role='predictions', path=str(path),
+                                    meta={'suite_member_name': name}))
+        if scored:
+            source = 'baseline' if ticket.iteration == 0 else 'trained'
+            results[f"{source}|{ticket.iteration}|{ticket.payload['base_model']}"] = {
+                'math': {'score': .2}, 'qa': {'score': .4}}
+    prefix = 'suite' if lane == 'held_out_test' else 'validation_suite'
+    run.holdout = {**run.holdout, 'validation_sets': suite, 'test_sets': suite,
+                   f'{prefix}_results': results}
+    await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('lane', ['optimization', 'held_out_test'])
+@pytest.mark.parametrize('scored', [False, True])
+@pytest.mark.parametrize('changed', ['math', 'qa'])
+async def test_unchanged_member_reuses_predictions_and_only_missing_scores(scenario, monkeypatch, lane, scored, changed):
+    from zevo.engine.run.runner import _build_validation_suite_members, _build_holdout_suite_members, _build_evaluation_suite_members
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, lane, scored)
+    reused = 'qa' if changed == 'math' else 'math'
+    for product in await rm._products(session, originals[-1].id, 'generation_diagnostics'):
+        Path(product.path).write_text(diagnostics(limited=2 if product.meta['suite_member_name'] == changed else 0).model_dump_json())
+    async def handoff(session, run, batch):
+        batch['handoff_pending'] = False
+        rm._store(run, batch)
+        await session.commit()
+    monkeypatch.setattr(rm, '_handoff', handoff)
+    assert await rm.intercept_completion(session, originals[-1])
+    batch = deepcopy(rm.pending(run))
+    assert batch['affected'] == [changed]
+    for index, item in enumerate(batch['cohort']):
+        assert item['active_members'] == [changed]  # Current, baseline AND historical checkpoint.
+        assert item['retained'][reused]['reason'] == 'unchanged_configuration'
+        assert ('score' in item['retained'][reused]) == scored
+        await rm.advance(session, run.id)
+        replay = await session.get(Ticket, item['inference_id'])
+        builder = _build_holdout_suite_members if lane == 'held_out_test' else _build_validation_suite_members
+        assert not await builder(ticket=replay, payload=replay.payload, work_dir=str(root), run=run, session=session)
+        # Only math is generated; qa remains the exact previous artifact.
+        replay.status = 'succeeded'
+        path = root / f'{replay.id}-revised-math.json'
+        path.write_text(diagnostics().model_dump_json())
+        for role in ['predictions', 'generation_diagnostics']:
+            session.add(WorkProduct(ticket_id=replay.id, role=role, path=str(path), meta={'suite_member_name': changed}))
+        await session.commit()
+        products = await rm._products(session, replay.id, 'predictions', run)
+        assert next(p for p in products if p.meta['suite_member_name'] == reused).path == item['retained'][reused]['assets']['predictions']['path']
+        await rm.intercept_completion(session, replay)
+        evaluation = await session.get(Ticket, rm.pending(run)['cohort'][index]['evaluation_id'])
+        members = await _build_evaluation_suite_members(evaluation, evaluation.payload, evaluation.inputs, run, session)
+        assert [m.name for m in members] == ([] if scored else ['qa'])
+        evaluation.status = 'succeeded'
+        for name in rm.evaluation_members(batch, item):
+            session.add(WorkProduct(ticket_id=evaluation.id, role='metrics', path=str(root / f'{evaluation.id}-{name}-metrics.json'),
+                                    meta={'suite_member_name': name, 'score': .8 if name == changed else (.4 if name == 'qa' else .2)}))
+        await session.commit()
+        await rm.intercept_completion(session, evaluation)
+    assert rm.batches(run)[0]['status'] == 'published', rm.batches(run)[0].get('error')
+    events = (await session.scalars(select(ScoreEvent).where(ScoreEvent.split == ('test' if lane == 'held_out_test' else 'validation')))).all()
+    assert len(events) == 3
+    assert [e.score for e in events] == pytest.approx([.6 if changed == 'math' else .5] * 3)
+    assert all(e.extras['reused_members'] == {reused: 'unchanged_configuration'} for e in events)
+
+
+@pytest.mark.asyncio
+async def test_unchanged_config_without_complete_artifacts_is_not_reused(scenario):
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, 'optimization', False)
+    (root / f'{originals[0].id}-qa-predictions.csv').unlink()
+    await rm.intercept_completion(session, originals[-1])
+    batch = rm.pending(run)
+    assert batch['cohort'][0]['active_members'] == ['math']
+    assert batch['cohort'][1]['active_members'] == ['math', 'qa']
+
+
+@pytest.mark.asyncio
+async def test_unchanged_predictions_without_scores_need_evaluation_not_gpu(scenario):
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, 'optimization', False)
+    config = str(config_file(root))
+    item = {'source_id': originals[-1].id, 'inference_id': originals[-1].id}
+    batch = {'id': 'score-only', 'lane': 'optimization', 'status': 'running', 'base_model': originals[-1].payload['base_model'],
+             'reuse_tickets': True, 'configs': {'math': config, 'qa': config}, 'cohort': [item]}
+    await rm._plan_retention(session, run, batch, [])
+    assert item['active_members'] == [] and not item['retained_only']
+    rm._store(run, batch)
+    replay = await rm._new_inference(session, run, batch, item)
+    assert replay.status == 'succeeded'
+    assert rm.evaluation_members(batch, item) == ['math', 'qa']
+    assert len(await rm._products(session, replay.id, 'predictions', run)) == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_settled_member_predictions_without_stale_score(scenario):
+    session, run, originals, root = scenario
+    await add_reusable_suite(session, run, originals, root, 'optimization', True)
+    for product in await rm._products(session, originals[-1].id, 'generation_diagnostics'):
+        Path(product.path).write_text(diagnostics(limited=2).model_dump_json())
+    await rm.intercept_completion(session, originals[-1])
+    batch = deepcopy(rm.pending(run))
+    current = originals[-1]
+    await finish_inference(session, current, root, limited=2)
+    for name, path in batch['configs'].items():
+        session.add(WorkProduct(ticket_id=current.id, role='inference_config', path=path, meta={'suite_member_name': name}))
+    await session.commit()
+    evidence = await rm._evidence(session, run, current)
+    batch['status'] = 'superseded'
+    rm._store(run, batch)
+    await rm._retry(session, run, batch, evidence, ['math'])
+    new = rm.pending(run)
+    assert new['cohort'][0]['active_members'] == ['math']
+    assert new['cohort'][0]['retained']['qa']['config_path'] == batch['configs']['qa']
+    assert 'score' not in new['cohort'][0]['retained']['qa']
+    # Baseline has never run either new budget, so both still need replay.
+    assert new['cohort'][1]['active_members'] == ['math', 'qa']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['running', 'paused', 'published'])
+async def test_cohort_blocks_next_iteration_between_successful_tickets(scenario, status):
+    from zevo.engine.run.runner import _holdout_settled
+    session, run, originals, root = scenario
+    batch = {'id': 'barrier', 'status': status, 'lane': 'held_out_test', 'cohort': []}
+    rm._store(run, batch)
+    await session.commit()
+    assert all(t.status == 'succeeded' for t in originals)
+    assert await _holdout_settled(session, run.id) is (status == 'published')
+    if status == 'paused':
+        await rm.advance(session, run.id)
+        assert rm.pending(run)['status'] == 'paused'
+        assert run.status == 'running'
