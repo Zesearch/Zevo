@@ -54,7 +54,7 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
           <span className="text-brass-300">Evaluation</span>
           {current && <span> · {current}</span>}
           {judge && (
-            <span className="ml-3 text-brass-300" title={judgeModel || undefined}>
+            <span className="ml-3 text-[10px] text-sky-300" title={judgeModel || undefined}>
               Model Judge · {judge.current_step.toLocaleString()} / {judge.total_steps.toLocaleString()} responses judged
               {judgeCached > 0 && <span className="text-dim"> · {judgeCached.toLocaleString()} cached</span>}
             </span>

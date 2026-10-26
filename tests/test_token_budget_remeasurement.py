@@ -620,6 +620,10 @@ async def test_partial_repetition_exemption_preserves_score_and_selects_other_pr
     assert baseline['active_members'] == ['qa']
     replay = await rm._new_inference(session, run, batch, baseline)
     assert replay.payload['test_set_name'] == 'validation:qa'
+    from zevo.engine.run.scheduler.bindings import resolve_input_bindings
+    resolved = await resolve_input_bindings(session, run_id=run.id, inputs=replay.inputs)
+    assert resolved['inference_data_profile']['artifact_role'] == 'inference_data_profile'
+    assert resolved['inference_data_profile']['path'] == '/profile.json'
     assert rm.configuration_override(run, replay, 'math') == baseline['retained']['math']['config_path']
     assert load_inference_config(rm.configuration_override(run, replay, 'qa')).measurement.max_new_tokens == 512
     for i, item in enumerate(batch['cohort']):
