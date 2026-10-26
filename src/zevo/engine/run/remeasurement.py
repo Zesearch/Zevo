@@ -160,9 +160,17 @@ def _suite(run: Run, lane: str) -> list[dict]:
     return _heldout_test_sets(run) if lane == "held_out_test" else _validation_sets(run)
 
 
+def _primary_member(run: Run, ticket: Ticket) -> str:
+    names = [str(member["name"]) for member in _suite(run, ticket.lane)]
+    name = str((ticket.payload or {}).get("test_set_name") or "")
+    if ticket.lane != "held_out_test" and name.startswith("validation:"):
+        name = name[len("validation:"):]
+    return name if name in names else (names[0] if names else "")
+
+
 async def _evidence(session: AsyncSession, run: Run, ticket: Ticket) -> dict[str, dict]:
     suite = _suite(run, ticket.lane)
-    primary = str(suite[0]["name"]) if suite else ""
+    primary = _primary_member(run, ticket)
     evidence = {}
     for product in await _products(session, ticket.id, "generation_diagnostics", run):
         name = str((product.meta or {}).get("suite_member_name") or primary)
@@ -259,7 +267,7 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
             path = next((b["configs"].get(name, "") for b in reversed(previous)
                          if b["status"] == "published"), "")
             if not path:
-                product = next((p for p in products if (p.meta or {}).get("suite_member_name", names[0]) == name), None)
+                product = next((p for p in products if (p.meta or {}).get("suite_member_name", _primary_member(run, baseline)) == name), None)
                 if product is None:
                     raise ValueError(f"missing frozen baseline configuration for {name}")
                 path = product.path
@@ -300,7 +308,7 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
 
 async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affected: list[str]) -> None:
     """Reuse unchanged predictions; reuse scores separately when available."""
-    names = list(batch["configs"])
+    names = [str(member["name"]) for member in _suite(run, batch["lane"])]
     for item in batch["cohort"]:
         source = await session.get(Ticket, item["source_id"])
         evidence = await _evidence(session, run, source)
@@ -323,7 +331,7 @@ async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affecte
             assets = {}
             for role in ("predictions", "generation_diagnostics", "inference_config"):
                 product = next((p for p in await _products(session, source.id, role)
-                                if (p.meta or {}).get("suite_member_name", names[0]) == name), None)
+                                if (p.meta or {}).get("suite_member_name", _primary_member(run, source)) == name), None)
                 if product is None or not Path(product.path).is_file():
                     break
                 assets[role] = {"path": product.path, "meta": deepcopy(product.meta)}
