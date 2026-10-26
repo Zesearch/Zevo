@@ -173,6 +173,16 @@ async def test_progress_wakes_orchestrator_and_decision_is_delivered(tmp_path, m
         wakes = (await db.execute(select(AgentWakeupRequest))).scalars().all()
         assert len(wakes) == 1
         assert wakes[0].ticket_id == "orch-1"
+        assert wakes[0].payload["adaptive_training_request_id"] == request_id
+        from zevo.engine.run.adaptive_training import activation_validation_context
+        context = activation_validation_context((await db.get(Run, "r")).lifecycle, wakes[0].reason, wakes[0].payload)
+        from datetime import datetime, timezone
+        failed = HeartbeatRun(id="failed-orch", ticket_id="orch-1", agent_id="orchestrator", driver="stub", model="stub",
+                              finished_at=datetime.now(timezone.utc), exit_code=1, resolved_config={"mid_training": context})
+        current = HeartbeatRun(id="live-orch", ticket_id="orch-1", agent_id="orchestrator", driver="stub", model="stub",
+                               resolved_config={"mid_training": context})
+        db.add_all([failed, current])
+        await db.commit()
         async def route(*args):
             return object()
         async def execute(info, command, **kwargs):
@@ -185,6 +195,16 @@ async def test_progress_wakes_orchestrator_and_decision_is_delivered(tmp_path, m
         decision = AdaptiveTrainingDecision(request_id=request_id, action="continue", next_step=40, reason="check progress")
         result = await decide_adaptive_training(db, "r", "train-1", decision)
         assert result["status"] == "decided"
+        from zevo.api.routers.ui.heartbeats import _mid_training_contexts
+        contexts = await _mid_training_contexts(db, [failed, current])
+        assert contexts["live-orch"]["action"] == "continue"
+        assert contexts["live-orch"]["next_step"] == 40
+        assert contexts["failed-orch"]["action"] == ""
+        # A manual resume can submit the decision without an adaptive wake;
+        # the accepted request still provides an exact activation association.
+        current.resolved_config = {}
+        await db.commit()
+        assert (await _mid_training_contexts(db, [current]))[current.id]["action"] == "continue"
         assert json.loads(path.read_text()) == decision.model_dump()
         assert await decide_adaptive_training(db, "r", "train-1", decision) == result
         from fastapi import HTTPException
@@ -384,3 +404,14 @@ def test_validation_panel_min_metric_stop_and_untrusted_history():
     for bad in [{**report, "contract_sha256": "other"}, {**report, "ticket_id": "other"},
                 {**report, "measurements": [{"step": 10, "score": float('nan'), "metrics": {}}]}]:
         assert validation_summary(ticket, life, [SimpleNamespace(extras={"adaptive_report": bad})]) is None
+
+
+def test_activation_context_requires_explicit_request_or_repair_parent():
+    from zevo.engine.run.adaptive_training import activation_validation_context
+    lifecycle = {"adaptive_training_requests": {"abc": {"status": "pending", "ticket_id": "train", "step": 552}}}
+    expected = {"request_id": "abc", "train_ticket_id": "train", "step": 552}
+    assert activation_validation_context(lifecycle, "mid-training Validation decision abc", {}) == expected
+    assert activation_validation_context(lifecycle, "", {"adaptive_training_request_id": "abc"}) == expected
+    assert activation_validation_context(lifecycle, "retry", {}, expected) == expected
+    assert activation_validation_context(lifecycle, "ordinary scheduling", {}) is None
+    assert activation_validation_context(lifecycle, "", {"adaptive_training_request_id": "other"}) is None

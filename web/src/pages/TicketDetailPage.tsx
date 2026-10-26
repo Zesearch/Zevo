@@ -416,11 +416,11 @@ export function TicketDetailPage() {
       )}
 
       {tk.agent_id === "train" && (tk.mid_training_validation || tk.payload.first_validation_fraction != null) && (
-        <Section title="Mid-training Validation" className="mt-4">
+        <div className="mt-4 rounded-bezel border border-hair bg-panel/40 p-4">
           <MidTrainingValidationPanel data={tk.mid_training_validation} events={tk.execution_events}
             activity={trainingActivity(tk.execution_events, tk.mid_training_validation, tk.status,
               runInstructions.some((item) => instructionBlocks(item.status)))} />
-        </Section>
+        </div>
       )}
 
       {/* The Training monitor holds ONLY the loss/metric charts. */}

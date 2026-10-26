@@ -1,3 +1,4 @@
+import { isMidTrainingActivation, midTrainingActivationLabel } from "../lib/midTrainingActivations";
 import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
 import { trainingActivity } from "../lib/trainingTelemetry";
 import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
@@ -501,9 +502,10 @@ function PipelineTimeline({
     [heartbeats, supervisorId],
   );
   const orchestratorWakes = useMemo(
-    () => heartbeatGroups(rawOrchestratorWakes).map(settledHeartbeat),
+    () => heartbeatGroups(rawOrchestratorWakes.filter((heartbeat) => !isMidTrainingActivation(heartbeat))).map(settledHeartbeat),
     [rawOrchestratorWakes],
   );
+  const midTrainingWakes = rawOrchestratorWakes.filter(isMidTrainingActivation);
   const wakeIndex = useMemo(
     () => new Map(rawOrchestratorWakes.map((heartbeat, index) => [heartbeat.id, index])),
     [rawOrchestratorWakes],
@@ -549,7 +551,7 @@ function PipelineTimeline({
   // Input/binding validation can fail before a heartbeat is created. The
   // supervisor Ticket still becomes failed, so represent that terminal event
   // explicitly instead of letting the Timeline end with an old successful wake.
-  const latestOrchestratorWake = orchestratorWakes.at(-1);
+  const latestOrchestratorWake = heartbeatGroups(rawOrchestratorWakes).map(settledHeartbeat).at(-1);
   const unrecordedOrchestratorFailure = supervisor?.status === "failed"
     && (!latestOrchestratorWake || (
       latestOrchestratorWake.exit_code === 0
@@ -615,7 +617,7 @@ function PipelineTimeline({
   const paused = allTickets.find((ticket) => pausedTicketIds.has(ticket.id));
   const running = paused
     || allTickets.find((t) => t.status === "running" || t.status === "repairing");
-  const runningOrchestrator = orchestratorWakes.find((heartbeat) => heartbeat.is_live);
+  const runningOrchestrator = rawOrchestratorWakes.find((heartbeat) => heartbeat.is_live);
   const [sel, setSel] = useState<string>("");
   // While the run is LIVE the right panel follows the running stage — a click
   // earlier in the run should not pin the view to a stage that finished ten
@@ -629,7 +631,9 @@ function PipelineTimeline({
   // activation. Successful finished Runs still leave selection to the user.
   const selectedId = sel || running?.id || (
     runningOrchestrator
-      ? `${supervisorId}#${wakeIndex.get(runningOrchestrator.id) ?? 0}`
+      ? isMidTrainingActivation(runningOrchestrator)
+        ? `${supervisorId}#mid:${runningOrchestrator.mid_training!.train_ticket_id}`
+        : `${supervisorId}#${wakeIndex.get(runningOrchestrator.id) ?? 0}`
       : unrecordedOrchestratorFailure ? `${supervisorId}#failed` : ""
   );
   // Track EXPANDED groups; empty by default → the timeline starts fully collapsed.
@@ -667,7 +671,8 @@ function PipelineTimeline({
             && failureGroupKey === g.key;
           const groupPaused = currentTickets.some((ticket) => pausedTicketIds.has(ticket.id));
           const groupRunning = !groupPaused && (currentTickets.some((t) => t.status === "running" || t.status === "repairing")
-            || groupOrchestrator.some((heartbeat) => heartbeat.is_live));
+            || groupOrchestrator.some((heartbeat) => heartbeat.is_live)
+            || midTrainingWakes.some((heartbeat) => heartbeat.is_live && groupTickets.some((ticket) => ticket.id === heartbeat.mid_training?.train_ticket_id)));
           const groupFailed = ticketStatus === "failed"
             || groupOrchestrator.at(-1)?.action === "mark_failed"
             || groupHasUnrecordedFailure;
@@ -826,6 +831,19 @@ function PipelineTimeline({
                         </button>
                       </li>,
                     );
+                    const checkpoints = midTrainingWakes.filter((heartbeat) => heartbeat.mid_training?.train_ticket_id === t.id);
+                    if (checkpoints.length) {
+                      const selection = `${supervisorId}#mid:${t.id}`;
+                      const latest = checkpoints.at(-1)!;
+                      rows.push(<li key={`mid-training-${t.id}`} className="ml-5 border-l border-lilac-500/30 py-1 pl-4">
+                        <button type="button" onClick={() => setSel(selection)}
+                          className={`w-full rounded-lg p-2 text-left ${selectedId === selection ? "bg-lilac-500/10" : "hover:bg-raised/40"}`}>
+                          <span className="block text-xs font-medium text-lilac-300">Mid-training Orchestrator</span>
+                          <span className="mt-1 block text-xs text-dim">{midTrainingActivationLabel(latest, checkpoints)}</span>
+                          <span className="block text-[11px] text-dim">{checkpoints.length} activations</span>
+                        </button>
+                      </li>);
+                    }
                   });
                   // The held-out lane hangs OFF the round, it is not a step in
                   // it. The orchestrator did not plan these tickets, cannot
@@ -922,8 +940,9 @@ function PipelineTimeline({
           may carry a wake suffix (see planRow) — split it back apart here. */}
       <StageDetail
         ticketId={selectedId.split("#")[0]}
-        wake={selectedId.includes("#") && !selectedId.endsWith("#failed")
+        wake={selectedId.includes("#") && !selectedId.endsWith("#failed") && !selectedId.includes("#mid:")
           ? Number(selectedId.split("#")[1]) : undefined}
+        midTrainingTicketId={selectedId.includes("#mid:") ? selectedId.split("#mid:")[1] : undefined}
         showUnrecordedFailure={selectedId.endsWith("#failed")}
         benchmarkProgress={run.benchmark_progress}
         paused={pausedTicketIds.has(selectedId.split("#")[0])}
@@ -934,9 +953,10 @@ function PipelineTimeline({
   );
 }
 
-function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkProgress, paused = false, needsInput = false, applying = false }: {
+function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailure = false, benchmarkProgress, paused = false, needsInput = false, applying = false }: {
   ticketId: string;
   wake?: number;
+  midTrainingTicketId?: string;
   showUnrecordedFailure?: boolean;
   benchmarkProgress?: BenchmarkProgress;
   paused?: boolean;
@@ -953,7 +973,7 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
   // finishes — so `limit=1` showed one wake's tokens and cost while the run
   // header summed them all, and the stages never added up to the total.
   const { data: heartbeats = [] } = useSWR<HeartbeatDTO[]>(
-    ticketId ? `/api/heartbeats?ticket_id=${encodeURIComponent(ticketId)}&limit=50` : null,
+    ticketId ? `/api/heartbeats?ticket_id=${encodeURIComponent(ticketId)}&limit=500` : null,
     { refreshInterval: 3000 },
   );
   // A cluster allocation is recorded immediately after `sbatch`, before Slurm
@@ -975,20 +995,22 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
   const [seek, setSeek] = useState<{ ts: string; n: number }>({ ts: "", n: 0 });
   const [selectedActivation, setSelectedActivation] = useState<number | undefined>(undefined);
   const chronological = [...heartbeats].sort((a, b) => a.started_at.localeCompare(b.started_at));
+  const midActivations = midTrainingTicketId ? chronological.filter((heartbeat) =>
+    isMidTrainingActivation(heartbeat) && heartbeat.mid_training?.train_ticket_id === midTrainingTicketId) : [];
   const orchestrationGroup = t?.agent_id === "orchestrator"
     ? heartbeatGroups(chronological).find((group) => group.some((heartbeat) =>
         heartbeat.id === chronological[wake ?? chronological.length - 1]?.id))
     : undefined;
-  const defaultWake = orchestrationGroup?.at(-1);
+  const defaultWake = midTrainingTicketId ? midActivations.at(-1) : orchestrationGroup?.at(-1);
   const effectiveWake = selectedActivation ?? (defaultWake
     ? chronological.findIndex((heartbeat) => heartbeat.id === defaultWake.id) : wake);
   const picked = showUnrecordedFailure
     ? undefined
-    : effectiveWake !== undefined ? chronological[effectiveWake] : heartbeats[0];
+    : effectiveWake !== undefined ? chronological[effectiveWake] : midTrainingTicketId ? undefined : heartbeats[0];
   const hbId = picked?.id;
   useEffect(() => {
     setSelectedActivation(undefined);
-  }, [ticketId, wake]);
+  }, [ticketId, wake, midTrainingTicketId]);
   // Clear on switch. LiveTranscript resets its own feed per heartbeat, but this
   // copy would otherwise keep the previous activation's steps on screen until
   // the new one produced its first event.
@@ -1080,12 +1102,12 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
   const parallelWorkers = Number(latestInferenceProgress?.extras?.parallel_workers || 0);
   const currentTrainingActivity = t.agent_id === "train"
     ? trainingActivity(t.execution_events, t.mid_training_validation, t.status, paused || needsInput) : null;
-  const activations = t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : chronological;
+  const activations = midTrainingTicketId ? midActivations : t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : chronological;
   return (
     <Bezel className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
-          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{t.id}</Link>
+          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? "Mid-training Orchestrator" : t.id}</Link>
           <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />
           {currentTrainingActivity && <span className="text-xs text-sky-300">{currentTrainingActivity}</span>}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
@@ -1096,12 +1118,12 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
           </Link>
         </div>
       </div>
-      {activations.length > 1 && (
+      {(activations.length > 1 || midTrainingTicketId) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
           <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation history" : "Activations"}</span>
           {activations.map((heartbeat, index) => {
             const active = heartbeat.id === picked?.id;
-            const label = t.agent_id === "train" && heartbeat.id === chronological.at(-1)?.id && currentTrainingActivity
+            const label = midTrainingTicketId ? midTrainingActivationLabel(heartbeat, activations) : t.agent_id === "train" && heartbeat.id === chronological.at(-1)?.id && currentTrainingActivity
               ? currentTrainingActivity
               : t.agent_id === "evaluation"
               ? evaluationAttemptLabel(heartbeat.activation_phase, index + 1, t.lane)
@@ -1172,7 +1194,6 @@ function StageDetail({ ticketId, wake, showUnrecordedFailure = false, benchmarkP
         </div>
         {t.agent_id === "train" && (t.mid_training_validation || t.payload.first_validation_fraction != null) && (
           <div className="rounded-bezel border border-sky-500/25 bg-sky-500/[0.04] p-3">
-            <div className="mb-2"><Kicker strong>Mid-training Validation</Kicker></div>
             <MidTrainingValidationPanel data={t.mid_training_validation} events={t.execution_events} activity={currentTrainingActivity} />
           </div>
         )}
