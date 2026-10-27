@@ -23,3 +23,17 @@ export function midTrainingActivationLabel(heartbeat: HeartbeatDTO, activations:
     : heartbeat.exit_code !== 0 ? "Failed" : "No decision recorded";
   return `Step ${context.step.toLocaleString()}${retry} · ${outcome}`;
 }
+
+export function midTrainingActionLabel(heartbeat?: HeartbeatDTO): string {
+  if (!heartbeat) return "Plan validation";
+  const context = heartbeat.mid_training;
+  if (context?.action === "continue") return "Resume training";
+  if (context?.action === "stop") return "Stop training";
+  if (heartbeat.action === "mark_failed") return "Stop Run";
+  if (heartbeat.action === "wait") return "Wait for dependencies";
+  if (context?.phase === "inference") return "Start Inference";
+  if (context?.phase === "evaluation") return "Start Evaluation";
+  if (context?.phase === "repair_inference") return "Repair Inference";
+  if (context?.phase === "repair_evaluation") return "Repair Evaluation";
+  return heartbeat.is_live ? "Decide next training step…" : "Review validation";
+}

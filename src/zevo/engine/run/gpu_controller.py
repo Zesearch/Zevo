@@ -152,13 +152,14 @@ def upload_text_command(path: str, content: str) -> str:
     return "python3 -c " + shlex.quote(script)
 
 
-def controller_script(stage_script: str, directory: str, *, idle_seconds: int = 1800, single_workload: bool = False) -> str:
-    """Preserve the site's validated SBATCH resource/container directives."""
+def controller_script(stage_script: str, directory: str, *, idle_seconds: int = 1800, single_workload: bool = False, env_setup: str = "") -> str:
+    """Use the validated allocation envelope and initialize its Python environment."""
     directives = [line for line in stage_script.splitlines() if line.startswith("#SBATCH")]
     encoded = base64.b64encode(CONTROLLER_SOURCE.encode()).decode()
     program = f"import base64;exec(base64.b64decode({encoded!r}))"
     return "\n".join([
-        "#!/bin/bash", *directives,
+        "#!/bin/bash", *directives, "set -e", env_setup,
+        "command -v python3 >/dev/null || { echo 'allocation controller requires python3 after env_setup' >&2; exit 127; }",
         "exec python3 -c " + shlex.quote(program) + " " + shlex.quote(directory)
         + " " + str(idle_seconds) + " " + str(int(single_workload)), "",
     ])
@@ -377,12 +378,20 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             body = "#!/bin/bash\n" + envelope + body
         wrapper = controller_script(body, directory,
                                     idle_seconds=0 if run.gpu_allocation_mode == "per_run" else 1800,
-                                    single_workload=run.gpu_allocation_mode == "per_submission")
+                                    single_workload=run.gpu_allocation_mode == "per_submission",
+                                    env_setup=info.cluster.env_setup)
         Path(contract.script_path).with_name("allocation-controller.sbatch").write_text(wrapper)
         command = publish + " && " + upload_text_command(wrapper_path, wrapper)
         command += " && " + _slurm_cli_bootstrap_command(info.cluster.env_setup, required=("sbatch", "squeue", "sacct", "scancel")) + "sbatch --parsable -- " + shlex.quote(wrapper_path)
     else:
         command = publish + " && printf '%s\\n' " + shlex.quote(owner.instance_id)
+    if owner is not None:
+        controller_body = (owner.meta or {}).get("controller_script_snapshot", "")
+        if not controller_body:
+            response = await _ssh(info, "cat -- " + shlex.quote(directory + "/controller.sbatch"), timeout_seconds=30)
+            controller_body = response.get("stdout", "") if response.get("ok") else ""
+    else:
+        controller_body = wrapper
     result = await _ssh(info, _slurm_login_command(command), timeout_seconds=30)
     if not result.get("ok"):
         raise ValueError("controller submission failed: " + str(result.get("error") or result.get("stdout")))
@@ -390,6 +399,7 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
     if not job_id.isdecimal():
         raise ValueError(f"controller returned invalid job id: {job_id!r}")
     return job_id, {
+        "controller_script_snapshot": "\n".join(line for line in controller_body.splitlines() if line.startswith("#SBATCH")),
         "allocation_walltime": walltime,
         "controller_directory": directory,
         "controller_outcome_path": outcome,

@@ -1,4 +1,5 @@
 import useSWR from "swr";
+import { midTrainingActionLabel } from "../lib/midTrainingActivations";
 import type { HeartbeatDTO, TicketDetail, RunDetail } from "../lib/api";
 import { midTrainingHasStarted, midTrainingDecisionHasStarted } from "../lib/midTrainingStatus";
 import { StatusBadge, statusToneFor } from "./StatusBadge";
@@ -15,7 +16,7 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
   const inference = inferences.find((item) => item.id === selectedId) || inferences.at(-1);
   const evaluation = evaluations.find((item) => item.id === selectedId) || evaluations.at(-1);
   const children = [
-    ...(midTrainingDecisionHasStarted(ticket, activations.length) ? [{ label: "Orchestrator", selection: `${supervisorId}#mid:${ticketId}`,
+    ...(midTrainingDecisionHasStarted(ticket, activations.length) ? [{ label: midTrainingActionLabel(latest), selection: `${supervisorId}#mid:${ticketId}`,
       status: "",
       description: latest?.mid_training ? `Step ${latest.mid_training.step.toLocaleString()}` : "Checkpoint orchestration" }] : []),
     ...(inference ? [{label: "Inference", selection: inference.id,
@@ -30,7 +31,7 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
         aria-pressed={selectedId === `${ticketId}#validation:overview`}
         className={`rounded px-2 py-1 text-left text-[11px] font-medium uppercase tracking-wider text-skyx-300/70 hover:bg-raised/40 ${selectedId === `${ticketId}#validation:overview` ? "bg-skyx-500/10" : ""}`}>Mid-training Validation</button>
       <ol className="relative">{children.map((child, index) => {
-        const orchestrator = child.label === "Orchestrator";
+        const orchestrator = child.selection.includes("#mid:");
         const active = selectedId === child.selection;
         const tone = statusToneFor(child.status);
         return <li key={child.selection} className="relative">

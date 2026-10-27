@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { transformWithEsbuild } from 'vite';
 const source = readFileSync(new URL('../src/lib/executionProgress.ts', import.meta.url), 'utf8');
 const { code } = await transformWithEsbuild(source, 'execution.ts', { loader: 'ts' });
-const { activationExecution, benchmarkCounts, latestExecution } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+const { latestBenchmarkEvent, activationExecution, benchmarkCounts, latestExecution } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const hb = (id, hour, phase) => ({id, started_at: `2026-10-26T${hour}:00:00Z`, activation_phase: phase});
 const event = (hour, heartbeat, execution, name, complete = false) => ({ts: `2026-10-26T${hour}:10:00Z`, heartbeat_id: heartbeat,
   phase: 'generate', extras: {execution_id: execution, benchmark_name: name, benchmark_total: 3, benchmark_complete: complete}});
@@ -46,4 +46,11 @@ test('evaluation shares deduplication but counts scoring completion markers', ()
   assert.equal(benchmarkCounts([generated], undefined, "evaluation"), null);
   const scoring = {phase: 'scoring 1/1: A', extras: {benchmark_total: 1}};
   assert.deepEqual(benchmarkCounts([generated, scoring], undefined, "evaluation"), {completed: 0, total: 1});
+});
+
+test('benchmark name survives output writing and completion events', () => {
+  const generation = event('10', 'a', 'first', 'val-omni', true);
+  const output = {...generation, phase: 'write_outputs', extras: {execution_id: 'first'}};
+  assert.equal(latestBenchmarkEvent([generation, output]), generation);
+  assert.equal(latestBenchmarkEvent([output]), undefined);
 });

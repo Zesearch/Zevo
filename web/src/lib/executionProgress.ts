@@ -49,3 +49,11 @@ export function benchmarkCounts(events: ExecutionEventDTO[], members?: string[],
   }
   return total > 0 ? { completed: Math.min(done.size, total), total } : null;
 }
+
+/** Lifecycle events after generation carry no benchmark label. Keep the latest
+ * benchmark metadata within the already selected execution. */
+export function latestBenchmarkEvent(events: ExecutionEventDTO[]): ExecutionEventDTO | undefined {
+  return [...events].reverse().find((event) =>
+    typeof event.extras?.benchmark_name === "string" && !!event.extras.benchmark_name
+    || Array.isArray(event.extras?.active_benchmarks) && event.extras.active_benchmarks.length > 0);
+}

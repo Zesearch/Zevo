@@ -50,7 +50,9 @@ ParsedMarker = (
 )
 
 
-_OWNER_RE = re.compile(r"^([a-z][a-z0-9_-]*-\d+):")
+# Mid-training tickets end in a request hash rather than a numeric sequence.
+# Consumers still require an exact owner match before accepting a marker.
+_OWNER_RE = re.compile(r"^([a-z][a-z0-9_-]*-[a-z0-9]+):")
 
 
 def _split_owner(body: str) -> tuple[str, str]:

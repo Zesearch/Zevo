@@ -193,6 +193,14 @@ class InferenceTaskInput(AgentTaskInput):
             "replace only <absolute-predictions-csv-path>."
         ),
     )
+    frozen_reuse_artifacts: dict[str, str] = Field(default_factory=dict, description="Engine-pinned SHA-256 of reuse inputs; never modify these files.")
+    slurm_launch_reuse: dict[str, Any] = Field(default_factory=dict, description=(
+        "Engine-owned launch replay. mode=reuse: the exact Slurm script is already rendered at slurm_job.script_path; "
+        "upload it unchanged and stage this ticket's inputs at the paths it uses. Do not regenerate environment, "
+        "container directives, or launch commands. mode=repair permits launch changes after a real workload failure or a recorded template incompatibility. "
+        "mode=unavailable must fail explicitly; do not invent a new launcher and call it reuse."
+    ))
+
     reusable_predict_script_path: str = Field(
         "",
         description=(

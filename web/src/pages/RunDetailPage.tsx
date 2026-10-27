@@ -1,8 +1,8 @@
 import { GenerationReport } from "../components/GenerationReport";
-import { activationExecution } from "../lib/executionProgress";
+import { latestBenchmarkEvent, activationExecution } from "../lib/executionProgress";
 import { measurementProgress } from "../lib/measurementProgress";
 import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
-import { isMidTrainingActivation, midTrainingActivationLabel } from "../lib/midTrainingActivations";
+import { isMidTrainingActivation, midTrainingActivationLabel, midTrainingActionLabel } from "../lib/midTrainingActivations";
 import { MidTrainingTimelineBranch } from "../components/MidTrainingTimelineBranch";
 import { StageProgress } from "../components/StageProgress";
 import { trainingActivity } from "../lib/trainingTelemetry";
@@ -1107,7 +1107,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
     <Bezel className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
-          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? "Orchestrator" : t.id}</Link>
+          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? midTrainingActionLabel(picked) : t.id}</Link>
           {!midTrainingTicketId && <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />}
           {currentTrainingActivity && <span className="text-xs text-sky-300">{currentTrainingActivity}</span>}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
@@ -1233,7 +1233,7 @@ function BenchmarkStageProgress({ ticket, events, useCurrentAttempt }: {
 }) {
   const count = measurementProgress(ticket, events, useCurrentAttempt);
   if (!count || ticket.agent_id !== "inference") return null;
-  const latest = events.at(-1);
+  const latest = latestBenchmarkEvent(events);
   const names = Array.isArray(latest?.extras?.active_benchmarks)
     ? latest.extras.active_benchmarks.filter((name): name is string => typeof name === "string") : [];
   const name = names.length ? names.map(shortBenchmarkName).join(" · ")
