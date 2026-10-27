@@ -38,6 +38,7 @@ test('validation badges describe validation instead of copying Train status', ()
 test('decision badges separate live, failed and accepted checkpoint activations', () => {
   const accepted = { exit_code: 0, is_live: false, mid_training: { action: 'continue' } };
   assert.equal(decisionStatus([], false), 'queued');
+  assert.equal(decisionStatus([{ exit_code: 0, action: 'emit_ticket', mid_training: { phase: 'inference' } }], false), 'succeeded');
   assert.equal(decisionStatus([accepted], false), 'succeeded');
   assert.equal(decisionStatus([accepted], false, true), 'queued');
   assert.equal(decisionStatus([accepted, { exit_code: 1, is_live: false }], false), 'failed');

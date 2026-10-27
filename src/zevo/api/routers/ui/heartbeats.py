@@ -43,6 +43,7 @@ async def _by_id_prefix(db: AsyncSession, heartbeat_id: str) -> HeartbeatRun | N
 
 
 class MidTrainingActivationDTO(BaseModel):
+    phase: str = "decision"
     request_id: str
     train_ticket_id: str
     step: int
@@ -149,6 +150,12 @@ async def _mid_training_contexts(db: AsyncSession, rows: list[HeartbeatRun]) -> 
                 continue
             key, value = accepted[0]
             context = {"request_id": key, "train_ticket_id": value["ticket_id"], "step": value["step"]}
+        if context.get("phase"):
+            stage = (lifecycles.get(row.ticket_id) or {}).get("adaptive_checkpoints", {}).get(context.get("request_id"), {})
+            req = stage.get("request", {})
+            if req.get("ticket_id") == context.get("train_ticket_id") and req.get("step") == context.get("step"):
+                contexts[row.id] = {**context, "action": "", "next_step": None}
+            continue
         request = requests.get(context.get("request_id"))
         if not request or request.get("ticket_id") != context.get("train_ticket_id") or request.get("step") != context.get("step"):
             continue

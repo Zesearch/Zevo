@@ -72,13 +72,24 @@ def _sha256(path: str | Path) -> str:
 
 
 def sample_rows(questions: str | Path) -> tuple[list[str], list[dict], list[int]]:
+    path = Path(questions)
     csv.field_size_limit(1 << 30)
-    with open(questions, newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        fields = reader.fieldnames
-        rows = list(reader)
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        if path.suffix.lower() in {".json", ".jsonl", ".ndjson"}:
+            rows = json.load(handle) if path.suffix.lower() == ".json" else [json.loads(line) for line in handle if line.strip()]
+            if not isinstance(rows, list):
+                raise ValueError("calibration JSON must contain an array of rows")
+            if any(not isinstance(row, dict) or not row for row in rows):
+                raise ValueError("calibration JSONL rows must be nonempty objects")
+            fields = list(dict.fromkeys(key for row in rows for key in row))
+        else:
+            reader = csv.DictReader(handle)
+            fields = reader.fieldnames
+            rows = list(reader)
+            if any(None in row or any(value is None for value in row.values()) for row in rows):
+                raise ValueError("calibration CSV rows must match the header")
     if not fields or not rows:
-        raise ValueError("calibration requires nonempty prepared questions-only CSV")
+        raise ValueError("calibration requires nonempty questions-only CSV, JSONL or JSON")
     # Deterministic length-stratified selection, including both tails. Use only
     # supplied public inputs; never load reference answers or a scorer.
     ordered = sorted(range(len(rows)), key=lambda i: (

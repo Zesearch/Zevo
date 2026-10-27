@@ -10,7 +10,8 @@ const second = { ...first, id: 'second', exit_code: 0, mid_training: { ...first.
 test('ordinary scheduling and pipeline actions stay on the main timeline', () => {
   assert.equal(isMidTrainingActivation(first), true);
   assert.equal(isMidTrainingActivation({ ...first, mid_training: null }), false);
-  for (const action of ['emit_ticket', 'mark_done', 'mark_failed']) assert.equal(isMidTrainingActivation({ ...first, action }), false);
+  assert.equal(isMidTrainingActivation({ ...first, action: 'emit_ticket', child_ticket_id: 'mid-infer-r1' }), true);
+  assert.equal(isMidTrainingActivation({ ...first, mid_training: null, action: 'emit_ticket' }), false);
   assert.equal(isMidTrainingActivation({ ...first, activation_phase: 'instruction' }), false);
 });
 test('each activation retains its own decision and checkpoint retries remain distinct', () => {

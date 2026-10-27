@@ -33,7 +33,7 @@ export function decisionStatus(activations: HeartbeatDTO[], paused: boolean, awa
   const latest = activations.at(-1);
   if (latest && latest.exit_code !== 0) return "failed";
   if (awaitingDecision) return "queued";
-  if (latest?.mid_training?.action) return "succeeded";
+  if (latest?.mid_training?.action || (latest?.mid_training?.phase && latest.action === "emit_ticket")) return "succeeded";
   return "queued";
 }
 
@@ -56,7 +56,7 @@ export function midTrainingHasStarted(ticket: TicketDetail | undefined, activati
     && isMidTrainingValidationEvent(event));
 }
 
-/** Keep the decision row absent until scoring has produced a decision request. */
+/** Reveal Orchestrator when its first checkpoint activation starts. */
 export function midTrainingDecisionHasStarted(ticket: TicketDetail | undefined, activationCount = 0): boolean {
   return activationCount > 0 || !!ticket?.mid_training_validation?.awaiting_decision;
 }

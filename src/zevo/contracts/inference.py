@@ -401,6 +401,12 @@ class InferenceSuiteMemberResult(BaseModel):
 
 
 class InferenceResult(AgentResult):
+    execution_retry_reason: str = Field("", max_length=2000, description=(
+        "Only for a failed collect Result when verified existing artifacts cannot finish the work: "
+        "explain why another GPU execution is necessary. The engine issues a new submit activation "
+        "on this same ticket. Leave empty for file/path/evidence fixes and revalidation. "
+        "Never use this to change frozen inference settings; length remeasurement remains engine-owned."
+    ))
     status: Literal["succeeded", "deferred", "failed"]
     operation: Literal["run_inference"] = "run_inference"
     inference_config_path: str = Field(

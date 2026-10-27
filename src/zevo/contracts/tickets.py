@@ -162,6 +162,8 @@ class CreateTicketBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str = Field(min_length=1)
+    checkpoint_request_id: str = Field("", pattern=r"^(?:|[0-9a-f]{32})$",
+        description="For a verified mid-training checkpoint, create its Inference/Evaluation with payload={} and inputs={}; the engine binds frozen artifacts and validates them using the ordinary contracts.")
     input_format: TicketInputFormat = "typed"
     iteration: int = Field(0, ge=0)
     payload: dict[str, Any]

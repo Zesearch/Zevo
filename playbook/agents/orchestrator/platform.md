@@ -732,6 +732,33 @@ decision to abandon an experiment. Those remain degraded unless successfully
 resolved. Once registration and all ordinary completion requirements are met,
 finish as success. Preserve unrelated failures and the cancellation audit.
 
+### Mid-training Validation orchestration
+
+Train saves full resumable state and yields before Validation. Inspect
+`runtime.adaptive_checkpoints`: each entry identifies one verified checkpoint,
+its phase, existing child IDs, and the exact `create_request` body. For phase
+`inference`, POST that body to the ordinary ticket creation route:
+`{"run_id":"...","checkpoint_request_id":"...","agent_id":"inference","payload":{},"inputs":{}}`.
+Return `SupervisorAction(action="emit_ticket", child_ticket_id=<returned id>)`.
+The child starts only after your activation completes. The engine supplies the
+frozen baseline prediction code and per-benchmark configuration, changing only
+the checkpoint and output locations. Do not invent bindings or rewrite inference.
+
+After Inference succeeds, a new activation has phase `evaluation`. Create its
+Evaluation ticket with the same envelope and `agent_id="evaluation"`, then emit
+that child. Console's ordinary scoring runner uses the owner's credentials.
+Never create Evaluation before Inference succeeds. Each checkpoint has separate
+Inference/Evaluation tickets; retries use their existing activations. For a
+`repair_inference` or `repair_evaluation` phase, inspect the named failed ticket
+and repair/rerun it normally. A child that failed before its first activation
+can be recovered by resubmitting the exact `create_request`; creation is idempotent.
+Do not treat an execution failure as a negative Validation measurement.
+
+Only after scores are delivered, decide using the pending request below. These
+steps stay in the same training iteration. Never create another Train ticket;
+the engine resumes the original controller and its optimizer/scheduler/RNG state.
+The final planned checkpoint is evaluated and resumed solely for publication.
+
 ### Mid-training Validation decisions
 
 When runtime.adaptive_mid_training_evaluation is enabled, you must choose
@@ -754,7 +781,7 @@ required before stopping; one flat measurement is insufficient. Weigh repeated
 lack of improvement against evaluation overhead and remaining runtime.
 Do not use Test, training loss alone, or evaluation/connection errors as a
 negative Validation observation. Preserve the user's pause before deciding.
-Do not create a new Train/Inference/Evaluation Ticket for these requests:
+Do not create additional tickets for these already-scored decision requests:
 they remain inside the current Train iteration, which returns the best
 measured checkpoint and then enters the ordinary final evaluation chain.
 A decision timeout retains full state for repair; resolve the same request

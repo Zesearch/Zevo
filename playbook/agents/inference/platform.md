@@ -182,6 +182,17 @@ only after accepting the Result and artifacts. Collect never parses or replays
 the copied log into telemetry: the live watcher owns progress while the job is
 running.
 
+For a completed job with missing or unusable artifacts, first repair paths,
+formatting, or calibration evidence and revalidate the existing outputs. If
+another GPU execution is genuinely necessary, return a failed InferenceResult
+with `execution_retry_reason` explaining the verified blocker. Do not return a
+deferred Result referring to the completed job. The engine then grants a new
+submit contract on this same Ticket, retaining the prior execution for audit.
+Reuse unaffected members. This request does not authorize changes to frozen
+candidate settings: token-budget remeasurement is still engine-owned. Repeated
+failures without changed artifacts or a new execution stop after three occurrences.
+Held-out errors/evidence remain inside the held-out branch.
+
 A failed external job wakes this Ticket directly in a repair activation with a
 new submit contract and `slurm_job.previous_execution` identifying the failed
 job and its exact logs. In this activation, diagnose the error, reuse compatible
@@ -394,16 +405,19 @@ requests ends with backend `finish_reason=length`, even if it already contains a
 answer. For 64 questions, three truncated questions meet the target and four require adjustment or the documented exception below.
 
 When `length_calibration_helper_path` is supplied, copy that exact system helper
-to the GPU runtime as `zevo_length_calibration.py`. For each member:
+to the GPU runtime as `zevo_length_calibration.py`. Use the exact assigned
+`scoring_set` bytes (CSV or JSONL) for prepare/check and the measured gate; never
+substitute a converted file for this identity. The prepared calibration sample
+is CSV and is a separate input to prediction. For each member:
 
-1. Run `python zevo_length_calibration.py prepare --questions <member-questions.csv>
+1. Run `python zevo_length_calibration.py prepare --questions <exact-assigned-scoring-set.csv-or-jsonl>
    --output <separate-calibration-questions.csv>`. This selects a reproducible
    length-stratified sample including both tails. Never use labels or scoring.
 2. Validate a provisional YAML with `config_validation_command`, then generate
    only this sample with the real model, prompt, stop controls and serving backend.
    Write separate GenerationDiagnostics with sample-local row/request indices.
 3. Run `python zevo_length_calibration.py check --config <member-config.yaml>
-   --questions <member-questions.csv> --diagnostics <calibration-diagnostics.json>
+   --questions <exact-assigned-scoring-set.csv-or-jsonl> --diagnostics <calibration-diagnostics.json>
    --predictions <calibration-predictions.csv>`.
    Always preserve complete raw outputs in the configured raw_output_column (default
    complete_prediction). Before increasing a budget, the helper checks whether at

@@ -75,7 +75,7 @@ async def test_twenty_repairs_stay_on_one_ticket_then_escalate(session: AsyncSes
 
     for attempt in range(1, MAX_REPAIR_ATTEMPTS + 1):
         scheduled = await _apply_ticket_failure_policy(
-            session, ticket, error_message="generated train_config schema mismatch",
+            session, ticket, error_message=f"generated train_config schema mismatch {attempt}",
         )
         assert scheduled is True
         assert ticket.status == "repairing"
@@ -174,3 +174,31 @@ async def test_external_repair_preserves_collection_and_enforces_budget(session,
     assert await _activate_failed_workload_repair(session, ticket) is allowed
     assert ticket.status == expected
     assert ticket.repair_attempts == used + (1 if expected == "repairing" else 0)
+
+
+@pytest.mark.asyncio
+async def test_unchanged_failures_stop_and_artifact_change_resets(session, tmp_path):
+    from zevo.db import WorkProduct
+    session.add(Run(id="r", task_name="t", metric="score", status="running"))
+    ticket = Ticket(id="infer-r", run_id="r", agent_id="inference", lane="held_out_test", status="running")
+    artifact = tmp_path / "config.yaml"
+    artifact.write_text("v1")
+    session.add(ticket)
+    session.add(WorkProduct(ticket_id=ticket.id, role="inference_config", path=str(artifact)))
+    await session.commit()
+    for _ in range(2):
+        assert await _apply_ticket_failure_policy(session, ticket, error_message="invalid calibration")
+    artifact.write_text("v2")
+    for _ in range(2):
+        assert await _apply_ticket_failure_policy(session, ticket, error_message="invalid calibration")
+    assert not await _apply_ticket_failure_policy(session, ticket, error_message="invalid calibration")
+    assert ticket.status == "failed" and ticket.repair_route == "terminal"
+    assert "no new execution" in ticket.summary
+
+
+def test_execution_retry_permission_is_consumed_by_new_attempt():
+    from zevo.engine.run.repair_progress import execution_retry_authorized
+    meta = {'execution_attempt': 3, 'inference_execution_retry': {'execution_attempt': 3, 'reason': 'missing outputs'}}
+    assert execution_retry_authorized(meta)
+    assert not execution_retry_authorized({**meta, 'execution_attempt': 4})
+    assert not execution_retry_authorized({'execution_attempt': 3})

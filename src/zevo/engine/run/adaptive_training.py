@@ -22,6 +22,12 @@ def activation_validation_context(lifecycle, reason, payload, previous=None):
     if not request_id and previous:
         request_id = previous.get("request_id")
     request = lifecycle.get("adaptive_training_requests", {}).get(request_id)
+    checkpoint_id = (payload or {}).get("adaptive_checkpoint_request_id") or (previous or {}).get("request_id")
+    stage = lifecycle.get("adaptive_checkpoints", {}).get(checkpoint_id)
+    if stage and not (payload or {}).get("adaptive_training_request_id") and ((payload or {}).get("adaptive_checkpoint_request_id") or (previous or {}).get("phase")):
+        req = stage["request"]
+        return {"request_id": checkpoint_id, "train_ticket_id": req["ticket_id"], "step": req["step"],
+                "phase": (payload or {}).get("adaptive_checkpoint_phase") or (previous or {}).get("phase", "inference")}
     if not request or (request.get("status") != "pending" and not previous):
         return None
     return {"request_id": request_id, "train_ticket_id": request["ticket_id"], "step": request["step"]}
@@ -330,7 +336,6 @@ async def handle_checkpoint_yield(session, run, train, job, meta):
     if meta.get("checkpoint_yield"):
         return True
     from zevo.engine.run.remote_jobs import _device_info_for_ticket, _ssh
-    from zevo.engine.run.wakeup import queue_wakeup
     from zevo.paths import REPO_ROOT
     events = (await session.execute(select(ExecutionEvent).where(
         ExecutionEvent.ticket_id == train.id, ExecutionEvent.phase == "adaptive_checkpoint")
@@ -384,33 +389,17 @@ async def handle_checkpoint_yield(session, run, train, job, meta):
         proof = await _ssh(info, "python3 -c " + shlex.quote(code), timeout_seconds=60)
         if not proof.get("ok") or "checkpoint-verified" not in proof.get("stdout", ""):
             raise ValueError("checkpoint state verification failed; segment remains uncollected")
-        infer_id = f"mid-infer-{key}"
-        primary = contract["members"][0]["files"]
-        infer = Ticket(id=infer_id, run_id=run.id, agent_id="inference", lane="optimization", iteration=train.iteration,
-            status="queued", payload={"operation": "run_inference", "model_source": "checkpoint",
-                "base_model": train.payload["base_model"], "scoring_set": str(path.parent / primary["questions"]["path"]),
-                "sample_submission": str(path.parent / primary["sample_submission"]["path"]),
-                "test_set_name": "", "mid_training_checkpoint": request},
-            inputs={"device_info": dict(train.inputs["device_info"]),
-                    "checkpoint": {"path": request["checkpoint"]},
-                    "inference_config": {"path": str(path.parent / primary["inference_config"]["path"])}},
-            customization={}, summary=f"Checkpoint {request['step']} Validation inference")
-        session.add(infer)
-        stages[key] = {"request": request, "inference_ticket_id": infer_id, "evaluation_ticket_id": "",
+        stages[key] = {"request": request, "inference_ticket_id": "", "evaluation_ticket_id": "",
                        "job_row_id": job.id, "metrics_delivered": False, "resume_queued": False}
         run.lifecycle = {**(run.lifecycle or {}), "adaptive_checkpoints": stages}
     train.status = "waiting_external"
-    train.summary = f"Checkpoint {request['step']} saved; waiting for Inference and Evaluation"
+    train.summary = f"Checkpoint {request['step']} saved; waiting for Orchestrator"
     train.error_message = ""
     meta.pop("checkpoint_handoff_error", None)
     meta.update(checkpoint_yield=key, collect_wakeup_queued=True)
     job.meta = meta
     await session.flush()
-    if not previous:
-        await queue_wakeup(session, agent_id="inference", ticket_id=stages[key]["inference_ticket_id"],
-                           source="on_demand", reason=f"Validate checkpoint {request['step']}")
-    else:
-        await session.commit()
+    await wake_checkpoint_orchestrator(session, run, key, "inference")
     return True
 
 
@@ -517,22 +506,21 @@ async def reconcile_checkpoint_stages(session):
             if await instruction_gate_active(session, run.id):
                 continue
             path, contract = checkpoint_contract(run, train)
-            infer = await session.get(Ticket, stage["inference_ticket_id"])
-            if not infer or infer.status != "succeeded":
+            infer = await session.get(Ticket, stage.get("inference_ticket_id") or "")
+            if not infer:
+                await wake_checkpoint_orchestrator(session, run, key, "inference")
                 continue
-            eval_id = stage.get("evaluation_ticket_id") or f"mid-eval-{key}"
-            evaluation = await session.get(Ticket, eval_id)
+            if infer.status in {"failed", "cancelled"}:
+                await wake_checkpoint_orchestrator(session, run, key, "repair_inference", infer)
+                continue
+            if infer.status != "succeeded":
+                continue
+            evaluation = await session.get(Ticket, stage.get("evaluation_ticket_id") or "")
             if evaluation is None:
-                evaluation = Ticket(id=eval_id, run_id=run.id, agent_id="evaluation", status="queued", lane="optimization",
-                    iteration=train.iteration, inputs={}, customization={}, payload={"mid_training_checkpoint": request},
-                    summary=f"Checkpoint {request['step']} Validation evaluation")
-                session.add(evaluation)
-                stage = {**stage, "evaluation_ticket_id": eval_id}
-                stages[key] = stage
-                run.lifecycle = {**run.lifecycle, "adaptive_checkpoints": stages}
-                await session.flush()
-                await queue_wakeup(session, agent_id="evaluation", ticket_id=eval_id, source="on_demand",
-                                   reason=f"Evaluate checkpoint {request['step']}")
+                await wake_checkpoint_orchestrator(session, run, key, "evaluation")
+                continue
+            if evaluation.status in {"failed", "cancelled"}:
+                await wake_checkpoint_orchestrator(session, run, key, "repair_evaluation", evaluation)
                 continue
             if evaluation.status != "succeeded":
                 continue
@@ -583,3 +571,149 @@ async def reconcile_checkpoint_stages(session):
                 if live:
                     continue
                 await _queue_checkpoint_resume(session, run, train, stages, key)
+
+
+def checkpoint_orchestration_context(run):
+    """Only verified Validation checkpoint work, never a second iteration."""
+    result = []
+    for key, stage in (run.lifecycle or {}).get("adaptive_checkpoints", {}).items():
+        if stage.get("resume_queued"):
+            continue
+        request = stage["request"]
+        phase = "decision" if stage.get("metrics_delivered") else stage.get("orchestrator_wake", {}).get("phase", "inference")
+        result.append({"request_id": key, "train_ticket_id": request["ticket_id"],
+            "step": request["step"], "planned_steps": request["planned_steps"],
+            "inference_ticket_id": stage.get("inference_ticket_id", ""),
+            "evaluation_ticket_id": stage.get("evaluation_ticket_id", ""),
+            "metrics_delivered": stage.get("metrics_delivered", False),
+            "phase": phase,
+            "create_request": {"run_id": run.id, "checkpoint_request_id": key,
+                               "agent_id": "inference" if phase in {"inference", "repair_inference"} else "evaluation",
+                               "payload": {}, "inputs": {}}})
+    return result
+
+
+async def wake_checkpoint_orchestrator(session, run, key, phase, child=None):
+    from zevo.engine.run.wakeup import queue_wakeup
+    stages = dict((run.lifecycle or {}).get("adaptive_checkpoints", {}))
+    stage = dict(stages[key])
+    token = {"phase": phase, "ticket_id": child.id if child else "",
+             "updated_at": str(child.updated_at) if child else ""}
+    if stage.get("orchestrator_wake") == token:
+        await session.commit()
+        return
+    if not run.supervisor_ticket_id:
+        raise ValueError("checkpoint orchestration requires the Run supervisor")
+    stage["orchestrator_wake"] = token
+    stages[key] = stage
+    run.lifecycle = {**run.lifecycle, "adaptive_checkpoints": stages}
+    await queue_wakeup(session, agent_id="orchestrator", ticket_id=run.supervisor_ticket_id,
+        source="on_demand", reason=f"mid-training checkpoint {phase} {key}",
+        payload={"adaptive_checkpoint_request_id": key, "adaptive_checkpoint_phase": phase})
+
+
+async def create_checkpoint_stage(session, run, body):
+    """Orchestrator's POST /tickets, with verified frozen inputs and normal validation.
+
+    A yielded Train is deliberately not succeeded, so its internal checkpoint
+    cannot use the ordinary final-model producer binding. Only this verified
+    request admits that exception; all input roles and sources are still checked.
+    """
+    from fastapi import HTTPException
+    from zevo.db import HeartbeatRun, TicketNotice
+    from zevo.contracts.tickets import validate_bindings, validate_stored_payload
+    from zevo.engine.run.scheduler.bindings import resolve_input_bindings
+    from zevo.engine.run.steering import instruction_gate_active
+    if run.status != "running" or run.cancel_requested_at is not None:
+        raise HTTPException(409, "checkpoint Run is not active")
+    if await instruction_gate_active(session, run.id):
+        raise HTTPException(409, "resolve the Run instruction before checkpoint work")
+    if body.payload or body.inputs or body.ticket_id or body.input_format != "typed" or body.customization:
+        raise ValueError("checkpoint requests use payload={}, inputs={} and engine-owned frozen bindings")
+    key, agent = body.checkpoint_request_id, body.agent_id
+    if agent not in {"inference", "evaluation"}:
+        raise ValueError("invalid checkpoint stage")
+    stages = dict((run.lifecycle or {}).get("adaptive_checkpoints", {}))
+    stage = dict(stages.get(key) or {})
+    if not stage or stage.get("resume_queued"):
+        raise HTTPException(409, "checkpoint is missing or already resumed")
+    request = stage["request"]
+    train = await session.get(Ticket, request["ticket_id"])
+    if not train or train.run_id != run.id or train.status != "waiting_external":
+        raise HTTPException(409, "Train has not yielded this checkpoint")
+    live = (await session.execute(select(HeartbeatRun).where(
+        HeartbeatRun.ticket_id == run.supervisor_ticket_id,
+        HeartbeatRun.finished_at.is_(None)))).scalars().all()
+    if not live:
+        raise HTTPException(409, "checkpoint child must be emitted by an active Orchestrator")
+    path, contract = checkpoint_contract(run, train)
+    validate_checkpoint_request(request, train, hashlib.sha256(path.read_bytes()).hexdigest())
+    field = f"{agent}_ticket_id"
+    existing = await session.get(Ticket, stage.get(field) or "")
+    if existing and existing.status not in {"failed", "cancelled"}:
+        return existing
+    if existing:
+        attempted = (await session.execute(select(HeartbeatRun.id).where(
+            HeartbeatRun.ticket_id == existing.id).limit(1))).first()
+        if attempted or existing.status == "cancelled":
+            raise HTTPException(409, f"repair or rerun existing {existing.id}; do not duplicate checkpoint work")
+    # The normal live-specialist guard exempts only this yielded Train and the
+    # exact checkpoint child, never another concurrently active experiment.
+    active = (await session.execute(select(Ticket).where(Ticket.run_id == run.id,
+        Ticket.lane == "optimization", Ticket.agent_id != "orchestrator",
+        Ticket.status.in_(("queued", "running", "repairing", "waiting_external", "awaiting_input"))))).scalars().all()
+    if any(t.id not in {train.id, existing.id if existing else ""} for t in active):
+        raise HTTPException(409, "another optimization specialist is active")
+    primary = contract["members"][0]
+    files = primary["files"]
+    if agent == "inference":
+        if stage.get("evaluation_ticket_id") or stage.get("metrics_delivered"):
+            raise HTTPException(409, "checkpoint inference is already consumed by Evaluation")
+        payload = {"operation": "run_inference", "model_source": "checkpoint",
+            "base_model": train.payload["base_model"], "test_set_name": "",
+            "scoring_set": str(path.parent / files["questions"]["path"]),
+            "sample_submission": str(path.parent / files["sample_submission"]["path"])}
+        inputs = {"device_info": dict(train.inputs["device_info"]),
+            "checkpoint": {"artifact_role": "checkpoint", "path": request["checkpoint"]},
+            "inference_config": {"artifact_role": "inference_config", "path": str(path.parent / files["inference_config"]["path"])},
+            "predict_script": {"artifact_role": "script", "path": str(path.parent / files["predict_script"]["path"])}}
+    else:
+        infer = await session.get(Ticket, stage.get("inference_ticket_id") or "")
+        if not infer or infer.status != "succeeded" or infer.run_id != run.id:
+            raise HTTPException(409, "checkpoint Inference has not succeeded")
+        script = files.get("evaluation_script")
+        payload = {"metric": primary["metric"], "answer_fields": primary["answer_fields"],
+            "evaluation_config": primary.get("evaluation_config", {}), "test_set_name": primary["name"],
+            "scoring_set": str(path.parent / files["labels"]["path"]),
+            "sample_submission": str(path.parent / files["sample_submission"]["path"]),
+            "evaluation_script": str(path.parent / script["path"]) if script else "",
+            "evaluator_sha256": script["sha256"] if script else ""}
+        products = (await session.execute(select(WorkProduct).where(WorkProduct.ticket_id == infer.id,
+            WorkProduct.role == "predictions").order_by(WorkProduct.created_at.desc()))).scalars().all()
+        product = next((p for p in products if (p.meta or {}).get("suite_primary") or not (p.meta or {}).get("suite_member_name")), None)
+        if product is None:
+            raise ValueError("successful checkpoint Inference has no primary predictions artifact")
+        inputs = {"predictions": {"artifact_role": "predictions", "source_ticket_id": infer.id,
+                                   "work_product_id": product.id}}
+    payload = validate_stored_payload(agent_id=agent, input_format="typed", payload=payload)
+    inputs = validate_bindings(agent_id=agent, payload=payload, inputs=inputs)
+    inputs = await resolve_input_bindings(session, run_id=run.id, inputs=inputs)
+    prefix = "mid-infer" if agent == "inference" else "mid-eval"
+    ticket = existing or Ticket(id=f"{prefix}-{key}", run_id=run.id, agent_id=agent,
+        lane="optimization", iteration=train.iteration, input_format="typed", customization={})
+    ticket.payload = {**payload, "mid_training_checkpoint": request}
+    ticket.inputs = inputs
+    ticket.status = "queued"
+    ticket.error_message = ""
+    ticket.summary = f"Checkpoint {request['step']} Validation {agent}"
+    session.add(ticket)
+    stage[field] = ticket.id
+    stages[key] = stage
+    run.lifecycle = {**run.lifecycle, "adaptive_checkpoints": stages}
+    await session.flush()
+    session.add(TicketNotice(ticket_id=ticket.id, code="ticket.awaiting_supervisor_completion",
+        severity="info", body="Checkpoint ticket awaits Orchestrator emit_ticket completion."))
+    # _release_emitted_child owns queueing, just as for ordinary child tickets.
+    await session.commit()
+    await session.refresh(ticket)
+    return ticket

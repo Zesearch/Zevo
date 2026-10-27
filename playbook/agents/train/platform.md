@@ -859,9 +859,9 @@ TrainResult's weights-only intermediate branch points.
 
 After every saved checkpoint the helper emits `adaptive_checkpoint` and exits
 with status 0 through SystemExit. Do not catch that exit or publish a final model.
-The engine verifies the saved state and creates an independent Inference ticket
+The engine verifies the saved state and wakes Orchestrator to create an independent Inference ticket
 using every frozen Validation benchmark and baseline configuration. Only after
-Inference succeeds does Console create an Evaluation ticket, using its ordinary
+Inference succeeds does Orchestrator create a Console Evaluation ticket, using its ordinary
 runner and the run owner's provider credentials. Train does neither inference
 nor scoring; never copy judge keys to the cluster.
 

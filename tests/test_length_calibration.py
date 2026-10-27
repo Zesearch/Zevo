@@ -207,3 +207,44 @@ def test_repetition_requires_coverage_and_does_not_exempt_normal_reasoning():
     # Final-turn text cannot certify an earlier truncated turn.
     records.append({'row_index': 0, 'finish_reason': 'stop'})
     assert not repetition_evidence(records, {i: looping for i in range(10)})['dominated']
+
+
+def test_jsonl_keeps_first_row_and_exact_five_percent(tmp_path):
+    from zevo.contracts.length_calibration import sample_rows, check, validate
+    import json
+    questions = tmp_path / 'questions.jsonl'
+    questions.write_text(''.join(json.dumps({'id': str(i), 'question': f'Q {i}'}) + '\n' for i in range(40)))
+    _, sample, indices = sample_rows(questions)
+    assert len(sample) == 40 and indices == list(range(40)) and sample[0]['id'] == '0'
+    config = tmp_path / 'inference.yaml'
+    config.write_text('{}')
+    diagnostics = tmp_path / 'diagnostics.json'
+    diagnostics.write_text(json.dumps({'records': [dict(row_index=i, request_index=i,
+        finish_reason='length' if i in (20, 39) else 'stop', generated_tokens=2048) for i in range(40)]}))
+    report = check(config, questions, diagnostics)
+    assert json.loads(report.read_text())['acceptance'] == 'within_target'
+    validate(config, questions)
+    questions.write_text(questions.read_text().replace('Q 0', 'changed'))
+    with pytest.raises(ValueError, match='assigned questions'):
+        validate(config, questions)
+
+
+def test_jsonl_and_csv_select_same_scalar_rows(tmp_path):
+    from zevo.contracts.length_calibration import sample_rows, main
+    import csv, json
+    rows = [{'id': str(i), 'question': 'a, "b"\n' * (i + 1)} for i in range(100)]
+    jl, csvpath = tmp_path / 'q.jsonl', tmp_path / 'q.csv'
+    jl.write_text('\n'.join(json.dumps(r) for r in rows))
+    with csvpath.open('w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=['id', 'question']); w.writeheader(); w.writerows(rows)
+    assert sample_rows(jl) == sample_rows(csvpath)
+    assert main(['prepare', '--questions', str(jl), '--output', str(tmp_path / 'sample.csv')]) == 0
+
+
+@pytest.mark.parametrize('content', ['{}', '[1]', '[{}]'])
+def test_malformed_json_questions_rejected(tmp_path, content):
+    from zevo.contracts.length_calibration import sample_rows
+    path = tmp_path / 'questions.json'
+    path.write_text(content)
+    with pytest.raises(ValueError):
+        sample_rows(path)

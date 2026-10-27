@@ -946,6 +946,12 @@ function PipelineTimeline({
         key={selectedId} ticketId={selectedId.split("#")[0]}
         paused={pausedTicketIds.has(selectedId.split("#")[0]) || needsInstructionInput} /> : <StageDetail
         ticketId={selectedId.split("#")[0]}
+        checkpointTickets={(() => {
+          const selected = run.tickets.find((item) => item.id === selectedId);
+          return selected?.mid_training_parent ? run.tickets.filter((item) =>
+            item.mid_training_parent === selected.mid_training_parent && item.agent_id === selected.agent_id) : [];
+        })()}
+        onCheckpointSelect={setSel}
         wake={selectedId.includes("#") && !selectedId.endsWith("#failed") && !selectedId.includes("#mid:")
           ? Number(selectedId.split("#")[1]) : undefined}
         midTrainingTicketId={selectedId.includes("#mid:") ? selectedId.split("#mid:")[1] : undefined}
@@ -959,10 +965,12 @@ function PipelineTimeline({
   );
 }
 
-function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailure = false, paused = false, needsInput = false, applying = false }: {
+function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = [], onCheckpointSelect, showUnrecordedFailure = false, paused = false, needsInput = false, applying = false }: {
   ticketId: string;
   wake?: number;
   midTrainingTicketId?: string;
+  checkpointTickets?: RunDetail["tickets"];
+  onCheckpointSelect?: (id: string) => void;
   showUnrecordedFailure?: boolean;
   paused?: boolean;
   needsInput?: boolean;
@@ -1007,8 +1015,14 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
   const [seek, setSeek] = useState<{ ts: string; n: number }>({ ts: "", n: 0 });
   const [selectedActivation, setSelectedActivation] = useState<number | undefined>(undefined);
   const chronological = [...heartbeats].sort((a, b) => a.started_at.localeCompare(b.started_at));
-  const midActivations = midTrainingTicketId ? chronological.filter((heartbeat) =>
+  const [selectedCheckpoint, setSelectedCheckpoint] = useState<string | undefined>(undefined);
+  const allMidActivations = midTrainingTicketId ? chronological.filter((heartbeat) =>
     isMidTrainingActivation(heartbeat) && heartbeat.mid_training?.train_ticket_id === midTrainingTicketId) : [];
+  const midCheckpoints = [...new Map(allMidActivations.map((heartbeat) =>
+    [heartbeat.mid_training!.request_id, heartbeat.mid_training!])).values()];
+  const currentCheckpoint = midCheckpoints.find((item) => item.request_id === selectedCheckpoint)?.request_id
+    ?? midCheckpoints.at(-1)?.request_id;
+  const midActivations = allMidActivations.filter((heartbeat) => heartbeat.mid_training?.request_id === currentCheckpoint);
   const orchestrationGroup = t?.agent_id === "orchestrator"
     ? heartbeatGroups(chronological).find((group) => group.some((heartbeat) =>
         heartbeat.id === chronological[wake ?? chronological.length - 1]?.id))
@@ -1022,6 +1036,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
   const hbId = picked?.id;
   useEffect(() => {
     setSelectedActivation(undefined);
+    setSelectedCheckpoint(undefined);
   }, [ticketId, wake, midTrainingTicketId]);
   // Clear on switch. LiveTranscript resets its own feed per heartbeat, but this
   // copy would otherwise keep the previous activation's steps on screen until
@@ -1102,7 +1117,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
     <Bezel className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
-          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? "Orchestrator decisions" : t.id}</Link>
+          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? "Orchestrator" : t.id}</Link>
           <StatusBadge status={midTrainingTicketId
             ? decisionStatus(midActivations, paused || needsInput, midTrain?.mid_training_validation?.awaiting_decision)
             : stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />
@@ -1115,6 +1130,21 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
           </Link>
         </div>
       </div>
+      {midTrainingTicketId && midCheckpoints.length > 0 && <div className="flex items-center gap-3 border-b border-hair px-4 py-2.5">
+        <label htmlFor="orchestrator-checkpoint" className="text-xs text-dim">Checkpoint</label>
+        <select id="orchestrator-checkpoint" value={currentCheckpoint}
+          onChange={(event) => { setSelectedCheckpoint(event.target.value); setSelectedActivation(undefined); }}
+          className="rounded border border-hair bg-panel px-2 py-1 text-xs">
+          {midCheckpoints.map((item) => <option key={item.request_id} value={item.request_id}>Step {item.step}</option>)}
+        </select>
+      </div>}
+      {checkpointTickets.length > 0 && <div className="flex items-center gap-3 border-b border-hair px-4 py-2.5">
+        <label htmlFor="checkpoint-selection" className="text-xs text-dim">Checkpoint</label>
+        <select id="checkpoint-selection" value={ticketId} onChange={(event) => onCheckpointSelect?.(event.target.value)}
+          className="rounded border border-hair bg-panel px-2 py-1 text-xs">
+          {checkpointTickets.map((item) => <option key={item.id} value={item.id}>Step {item.mid_training_step} · {item.status}</option>)}
+        </select>
+      </div>}
       {(activations.length > 1 || midTrainingTicketId) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
           <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation history" : "Activations"}</span>
@@ -1200,7 +1230,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
             />
           </div>
         ) : (
-          <div className="text-xs text-dim">{midTrainingTicketId ? "No checkpoint decision activation recorded yet." : "No activity yet for this stage."}</div>
+          <div className="text-xs text-dim">{midTrainingTicketId ? "No checkpoint orchestration activation recorded yet." : "No activity yet for this stage."}</div>
         )}
       </div>
     </Bezel>
