@@ -205,35 +205,3 @@ async def test_checkpoint_wakeup_preserves_identity_when_normal_wake_is_already_
                                   payload={'adaptive_training_request_id': 'checkpoint'})
         assert wake.id == first.id and wake.payload['adaptive_training_request_id'] == 'checkpoint'
     await engine.dispose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('new_protocol', [False, True])
-async def test_rolling_deploy_drains_only_preexisting_training_workers(new_protocol):
-    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    Session = async_sessionmaker(engine, expire_on_commit=False)
-    key = 'a'*32
-    request = {'ticket_id': 'train', 'request_id': key, 'contract_sha256': 'digest',
-        'direction': 'max', 'step': 20, 'planned_steps': 100,
-        'decision_path': f'/remote/train/decision-{key}.json',
-        'measurements': [{'step': 20, 'score': .7}]}
-    async with Session() as db:
-        lifecycle = {'adaptive_mid_training_evaluation': True,
-            'adaptive_validation_contracts': {'train': 'digest'}}
-        if new_protocol:
-            lifecycle['adaptive_validation_contract_paths'] = {'train': '/new/contract.json'}
-        db.add_all([Run(id='r', task_name='t', metric='accuracy', status='running',
-                        supervisor_ticket_id='orch', lifecycle=lifecycle),
-            Ticket(id='train', run_id='r', agent_id='train', status='waiting_external'),
-            Ticket(id='orch', run_id='r', agent_id='orchestrator'),
-            HeartbeatRun(id='hb', ticket_id='train', agent_id='train', driver='stub', model='stub')])
-        await db.commit()
-        db.add(ExecutionEvent(ticket_id='train', heartbeat_id='hb', attempt_id='attempt',
-            event_type='progress', phase='adaptive_validation', extras={'adaptive_request': request}))
-        await db.commit()
-        assert await reconcile_adaptive_training(db) == (0 if new_protocol else 1)
-        assert await reconcile_adaptive_training(db) == 0
-        assert len((await db.execute(select(AgentWakeupRequest))).scalars().all()) == (0 if new_protocol else 1)
-    await engine.dispose()

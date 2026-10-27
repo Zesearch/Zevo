@@ -30,7 +30,7 @@ def activation_validation_context(lifecycle, reason, payload, previous=None):
 async def build_validation_contract(session, run, ticket, work_dir):
     if not (run.lifecycle or {}).get("adaptive_mid_training_evaluation"):
         return {}
-    if (run.lifecycle or {}).get("adaptive_validation_contract_paths", {}).get(ticket.id):
+    if (run.lifecycle or {}).get("adaptive_validation_contracts", {}).get(ticket.id):
         path, _ = checkpoint_contract(run, ticket)
         return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
     fraction = (ticket.payload or {}).get("first_validation_fraction")
@@ -136,60 +136,8 @@ def validate_request(request, ticket):
 
 
 async def reconcile_adaptive_training(session):
-    count = await _drain_existing_training_workers(session)
     await reconcile_checkpoint_stages(session)
-    return count
-
-
-async def _drain_existing_training_workers(session):
-    """Finish already-launched controllers during a rolling deployment."""
-    events = (await session.execute(
-        select(ExecutionEvent, Ticket).join(Ticket, Ticket.id == ExecutionEvent.ticket_id)
-        .join(Run, Run.id == Ticket.run_id)
-        .where(ExecutionEvent.phase == "adaptive_validation", Run.status == "running",
-               Ticket.status.in_(("running", "waiting_external")))
-        .order_by(ExecutionEvent.ts.desc()).limit(200)
-    )).all()
-    count = 0
-    for event, ticket in events:
-        run = (await session.execute(select(Run).where(Run.id == ticket.run_id).with_for_update().execution_options(populate_existing=True))).scalar_one()
-        if not (run.lifecycle or {}).get("adaptive_mid_training_evaluation"):
-            continue
-        # New contracts use independent checkpoint tickets; only pre-deploy
-        # workers may hand off an already-scored adaptive_validation marker.
-        if (run.lifecycle or {}).get("adaptive_validation_contract_paths", {}).get(ticket.id):
-            continue
-        raw_request = (event.extras or {}).get("adaptive_request")
-        if not isinstance(raw_request, dict):
-            continue
-        request = dict(raw_request)
-        try:
-            validate_request(request, ticket)
-        except (ValueError, TypeError):
-            continue
-        requests = dict((run.lifecycle or {}).get("adaptive_training_requests") or {})
-        key = request["request_id"]
-        if key in requests:
-            continue
-        if any(row.get("ticket_id") == ticket.id and row.get("step", 0) > request["step"]
-               for row in requests.values()):
-            continue
-        # Match the engine-built frozen contract, not a worker-selected evaluation.
-        contracts = (run.lifecycle or {}).get("adaptive_validation_contracts", {})
-        if request.get("contract_sha256") != contracts.get(ticket.id):
-            continue
-        requests[key] = {**request, "iteration": ticket.iteration, "status": "pending"}
-        run.lifecycle = {**(run.lifecycle or {}), "adaptive_training_requests": requests}
-        if run.supervisor_ticket_id:
-            from zevo.engine.run.wakeup import queue_wakeup
-            await queue_wakeup(session, agent_id="orchestrator", ticket_id=run.supervisor_ticket_id,
-                               source="on_demand", reason=f"mid-training Validation decision {key}",
-                               payload={"adaptive_training_request_id": key})
-        else:
-            await session.commit()
-        count += 1
-    return count
-
+    return 0
 
 
 async def decide_adaptive_training(session, run_id, ticket_id, body):
