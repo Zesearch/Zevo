@@ -1283,6 +1283,12 @@ async def _sweep_stuck_tickets(
             )
 
         if runner_gone:
+            # Re-read under lock: the runner may have published its validated
+            # Result since this sweep read the list of running tickets.
+            tk = (await session.execute(select(Ticket).where(Ticket.id == tk.id)
+                .with_for_update().execution_options(populate_existing=True))).scalar_one()
+            if tk.status != "running":
+                continue
             tk.status = "failed"
             tk.error_message = reason
             if not tk.summary:

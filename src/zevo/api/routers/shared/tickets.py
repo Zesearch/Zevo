@@ -489,6 +489,8 @@ async def create_ticket(
     body: CreateTicketBody,
     db: AsyncSession = Depends(get_db),
 ) -> CreateTicketResponse:
+    if body.checkpoint_request_id and (not body.run_id or body.agent_id not in {"inference", "evaluation"}):
+        raise HTTPException(422, "checkpoint stages require a Run and Inference or Evaluation")
     # Validate agent exists
     a = (await db.execute(select(AgentRow).where(AgentRow.id == body.agent_id))).scalar_one_or_none()
     if a is None:
@@ -589,7 +591,7 @@ async def create_ticket(
                 Ticket.agent_id != "orchestrator",
                 Ticket.status.in_(("queued", "running", "repairing", "awaiting_input", "waiting_external")),
             ).order_by(Ticket.created_at.asc()).limit(1))).scalar_one_or_none()
-            if live_specialist is not None:
+            if live_specialist is not None and not body.checkpoint_request_id:
                 raise HTTPException(
                     409,
                     {
@@ -665,6 +667,14 @@ async def create_ticket(
                         ),
                     },
                 )
+
+    if body.checkpoint_request_id:
+        from zevo.engine.run.adaptive_training import create_checkpoint_stage
+        try:
+            tk = await create_checkpoint_stage(db, owning_run, body)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return CreateTicketResponse.model_validate(_to_dto(tk).model_dump())
 
     # Resolve ticket_id
     tid = body.ticket_id

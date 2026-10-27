@@ -96,6 +96,8 @@ from zevo.engine.remote_transfer import (
     ssh_base_args,
 )
 from zevo.engine.observe.score_monitor import extract_score, materialize_metrics_artifact
+from zevo.engine.run.adaptive_training import checkpoint_orchestration_context
+from zevo.engine.run.repair_progress import execution_retry_authorized
 from zevo.engine.observe.run_metrics import (
     baseline_and_best_test,
     upsert_history_fact,
@@ -926,7 +928,8 @@ async def _slurm_stage_job_contract(
             or checkpoint_resume
             or (
                 str(getattr(ticket, "status", "")) == "repairing"
-                and (prior_state != "COMPLETED" or (stage == "train" and meta.get("training_completion_repair")))
+                and (prior_state != "COMPLETED" or (stage == "train" and meta.get("training_completion_repair"))
+                    or (stage == "inference" and execution_retry_authorized(meta)))
                 and int(getattr(ticket, "repair_attempts", 0) or 0) <= MAX_REPAIR_ATTEMPTS
             )
         )
@@ -1857,6 +1860,7 @@ async def _build_input(
         payload = {**payload, "runtime": {**payload.get("runtime", {}),
             "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
             "validation_generation_reports": validation_generation_reports(run),
+            "adaptive_checkpoints": checkpoint_orchestration_context(run),
             "adaptive_training_requests": list((run.lifecycle or {}).get("adaptive_training_requests", {}).values())}}
         return _build_orchestrate_input(ticket, payload)
     if agent_id == "data":
@@ -4232,7 +4236,8 @@ async def _submit_validated_slurm_stage(
         if (previous_state not in _SLURM_TERMINAL_STATES
             or (previous_state == "COMPLETED" and not contract.restart_instruction_id and not measurement_restart
                 and not (ticket.agent_id == "train" and (previous_meta.get("training_completion_repair")
-                    or checkpoint_resume)))):
+                    or checkpoint_resume))
+                and not (ticket.agent_id == "inference" and execution_retry_authorized(previous_meta)))):
             raise ValueError("Slurm replacement requires the prior workload to be terminal")
         if int(previous_meta.get("execution_attempt") or 1) + 1 != contract.attempt:
             raise ValueError("the Slurm retry attempt is not consecutive")
@@ -4259,6 +4264,7 @@ async def _submit_validated_slurm_stage(
             previous_implementation_sha256
             and previous_implementation_sha256 == implementation_sha256
             and not measurement_restart and not checkpoint_resume
+            and not (ticket.agent_id == "inference" and execution_retry_authorized(previous.meta or {}))
         ):
             raise ValueError(
                 "a failed Slurm job may be re-executed only after its generated "
@@ -4404,6 +4410,14 @@ async def _apply_ticket_failure_policy(
         ticket.repair_attempts = int(ticket.repair_attempts or 0)
         ticket.repair_route = "terminal"
         return False
+    if disposition.route == "self" and ticket.agent_id in {"train", "inference"}:
+        from zevo.engine.run.repair_progress import repeated_without_progress
+        if await repeated_without_progress(session, ticket, error_message):
+            ticket.status = "failed"
+            ticket.repair_route = "terminal" if ticket.lane == "held_out_test" else "orchestrator"
+            ticket.error_message = "Repair stopped after 3 unchanged failures: " + error_message[:1800]
+            ticket.summary = "Repair stopped: no new execution or changed artifacts across 3 failures"
+            return False
     if (
         disposition.route == "self"
         and int(ticket.repair_attempts or 0) < MAX_REPAIR_ATTEMPTS
@@ -5884,7 +5898,7 @@ async def run_ticket(
         except Exception as e:
             _warn("holdout_check", e)
 
-    hb.finished_at = datetime.now(timezone.utc)
+    # Keep the activation live until engine validation and artifact publication finish.
     hb.exit_code = exit_code
     hb.error_message = error_message[:2000]
     # Absolute values agree with the live checkpoints (no double charging).
@@ -5893,6 +5907,7 @@ async def run_ticket(
 
     from zevo.engine.run.activation_control import finish_superseded_activation
     if await finish_superseded_activation(session, tk, hb):
+        hb.finished_at = datetime.now(timezone.utc)
         await session.commit()
         return tk
 
@@ -6719,6 +6734,15 @@ async def run_ticket(
                 if stage_row is not None:
                     stage_row.meta = {**dict(stage_row.meta or {}), "training_completion_repair": True}
 
+        if (isinstance(output, InferenceResult) and status == "failed"
+            and output.execution_retry_reason.strip()
+            and getattr(getattr(inp, "slurm_job", None), "phase", "") == "collect"):
+            stage_row = await _latest_slurm_resource_request(session, tk)
+            if stage_row is not None:
+                stage_row.meta = {**dict(stage_row.meta or {}), "inference_execution_retry": {
+                    "heartbeat_id": heartbeat_id, "execution_attempt": int((stage_row.meta or {}).get("execution_attempt") or 1),
+                    "reason": output.execution_retry_reason.strip()}}
+
         if status == "deferred" and prepared_slurm_submission:
             try:
                 deferred_stage_row = await _submit_validated_slurm_stage(
@@ -6768,6 +6792,8 @@ async def run_ticket(
                     else "skipped"
                 )
                 tk.repair_route = ""
+        if status == "failed" and (tk.error_message or "").startswith("Repair stopped after 3 unchanged failures:"):
+            summary = tk.error_message
         _set_current_ticket_outcome_text(tk, status=status, summary=summary)
         if status in ("succeeded", "degraded"):
             _apply_run_score_monitor(run, tk, output, artifact_meta)
@@ -7099,6 +7125,7 @@ async def run_ticket(
                     f"{tk.agent_id.title()} applied this instruction."
                 )
 
+    hb.finished_at = datetime.now(timezone.utc)
     await session.commit()
 
     if status == "deferred" and not cancelled_by_user:
@@ -8761,6 +8788,7 @@ async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
         "generation_backend": run.generation_backend,
         "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
         "validation_generation_reports": validation_generation_reports(run),
+        "adaptive_checkpoints": checkpoint_orchestration_context(run),
         "adaptive_training_requests": list((run.lifecycle or {}).get("adaptive_training_requests", {}).values()),
         "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),
     }

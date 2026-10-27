@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
-from zevo.db import Base, Run, Ticket, HeartbeatRun, ExecutionEvent, WorkProduct, AgentWakeupRequest, InfraInstance
+from zevo.db import Agent, Base, Run, Ticket, HeartbeatRun, ExecutionEvent, WorkProduct, AgentWakeupRequest, InfraInstance
 from zevo.engine.run.adaptive_training import (
     reconcile_adaptive_training, validate_checkpoint_request, build_checkpoint_evaluation_input,
     handle_checkpoint_yield,
@@ -34,7 +34,8 @@ def bundle(root):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('final', [False, True])
 @pytest.mark.parametrize('streamed', [False, True])
-async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, final, streamed):
+@pytest.mark.parametrize('recover', [False, True])
+async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, final, streamed, recover):
     from zevo.engine.run import remote_jobs
     from zevo.engine.agent.drivers.evaluation_runner import EvaluationRunnerDriver
     from zevo.engine.run.runner import _advance_measurements, _maybe_wake_supervisor, _apply_run_score_monitor
@@ -66,10 +67,11 @@ async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, f
             lifecycle={'adaptive_mid_training_evaluation': True, 'adaptive_validation_contracts': {'train-1': digest},
                        'adaptive_validation_contract_paths': {'train-1': str(path)}})
         train = Ticket(id='train-1', run_id='r', agent_id='train', status='waiting_external', iteration=1,
-                       payload={'base_model': 'model'}, inputs={'device_info': {'path': '/device.json'}})
+                       payload={'base_model': 'model'}, inputs={'device_info': {'artifact_role': 'device_info', 'path': '/device.json'}})
         job = InfraInstance(id='job', provider='cluster', instance_id='123', run_id='r', ticket_id=train.id,
                             meta={'scheduler_state': 'COMPLETED', 'submission_committed': True,
                                   'remote_workdir': '/remote/train-1', 'log_path': '/remote/train-1/slurm-123.out'})
+        db.add_all([Agent(id=a, name=a, title=a, identity_path='') for a in ('inference', 'evaluation')])
         db.add_all([run, train, job, Ticket(id='orch', run_id='r', agent_id='orchestrator', status='succeeded'),
                     HeartbeatRun(id='hb', ticket_id=train.id, agent_id='train', driver='stub', model='stub')])
         await db.commit()
@@ -81,10 +83,57 @@ async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, f
         from zevo.engine.run.scheduler.reconciler import _reconcile_slurm_stage_jobs
         assert await _reconcile_slurm_stage_jobs(db) == (0, 0)  # No final-model collect wake.
         assert await handle_checkpoint_yield(db, run, train, job, dict(job.meta))
-        infer = await db.get(Ticket, f'mid-infer-{key}')
-        assert infer is not None and train.status == 'waiting_external'
+        from datetime import datetime, timezone
+        from fastapi import HTTPException
+        from zevo.api.routers.shared.tickets import create_ticket
+        from zevo.contracts.tickets import CreateTicketBody
+        from zevo.contracts.orchestrator import SupervisorAction
+        from zevo.engine.run.runner import _release_emitted_child
+        from zevo.engine.run.scheduler.bindings import resolve_input_bindings
+        assert await db.get(Ticket, f'mid-infer-{key}') is None
+        async def emit(agent):
+            # A real Orchestrator activation creates the child via the ordinary API.
+            for wake in (await db.execute(select(AgentWakeupRequest).where(AgentWakeupRequest.agent_id == 'orchestrator'))).scalars():
+                wake.status = 'completed'
+            active = HeartbeatRun(ticket_id='orch', agent_id='orchestrator', driver='stub', model='stub')
+            db.add(active)
+            await db.commit()
+            body = CreateTicketBody(run_id='r', agent_id=agent, checkpoint_request_id=key, payload={}, inputs={})
+            if agent == 'inference':
+                premature = CreateTicketBody(run_id='r', agent_id='evaluation', checkpoint_request_id=key, payload={}, inputs={})
+                with pytest.raises(HTTPException, match='has not succeeded'):
+                    await create_ticket(premature, db)
+            response = await create_ticket(body, db)
+            child = await db.get(Ticket, response.id)
+            assert (await create_ticket(body, db)).id == child.id
+            # No child wake is released before the supervisor completes.
+            assert not (await db.execute(select(AgentWakeupRequest).where(AgentWakeupRequest.ticket_id == child.id))).first()
+            await resolve_input_bindings(db, run_id='r', inputs=child.inputs)
+            active.finished_at = datetime.now(timezone.utc)
+            await db.commit()
+            await _release_emitted_child(db, supervisor=await db.get(Ticket, 'orch'),
+                output=SupervisorAction(ticket_id='orch', action='emit_ticket', child_ticket_id=child.id), heartbeat_id=active.id)
+            return child
+        body = CreateTicketBody(run_id='r', agent_id='inference', checkpoint_request_id=key, payload={}, inputs={})
+        with pytest.raises(HTTPException, match='active Orchestrator'):
+            await create_ticket(body, db)
+        if recover:
+            # Reproduce the production startup failure: no heartbeat, invalid old binding.
+            failed = Ticket(id=f'mid-infer-{key}', run_id='r', agent_id='inference', status='failed',
+                            inputs={'checkpoint': {'path': request['checkpoint']}})
+            db.add(failed)
+            stages = dict(run.lifecycle['adaptive_checkpoints'])
+            stages[key] = {**stages[key], 'inference_ticket_id': failed.id}
+            run.lifecycle = {**run.lifecycle, 'adaptive_checkpoints': stages}
+            await db.commit()
+            await reconcile_adaptive_training(db)
+            await reconcile_adaptive_training(db)
+            assert run.lifecycle['adaptive_checkpoints'][key]['orchestrator_wake']['phase'] == 'repair_inference'
+        infer = await emit('inference')
+        assert infer.inputs['checkpoint']['artifact_role'] == 'checkpoint'
+        assert train.status == 'waiting_external'
         assert (await db.execute(select(Ticket).where(Ticket.agent_id == 'evaluation'))).scalars().all() == []
-        assert [w.agent_id for w in (await db.execute(select(AgentWakeupRequest))).scalars()] == ['inference']
+        assert [w.agent_id for w in (await db.execute(select(AgentWakeupRequest).where(AgentWakeupRequest.status != 'coalesced'))).scalars()] == ['orchestrator', 'inference']
         infer.status = 'repairing'
         await db.commit()
         await reconcile_adaptive_training(db)
@@ -96,11 +145,13 @@ async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, f
         await db.commit()
         await reconcile_adaptive_training(db)
         await reconcile_adaptive_training(db)
+        assert not (await db.execute(select(Ticket).where(Ticket.agent_id == 'evaluation'))).first()
+        evaluation = await emit('evaluation')
         evaluations = (await db.execute(select(Ticket).where(Ticket.agent_id == 'evaluation'))).scalars().all()
         assert len(evaluations) == 1
         evaluation = evaluations[0]
-        wakes = (await db.execute(select(AgentWakeupRequest))).scalars().all()
-        assert [w.agent_id for w in wakes] == ['inference', 'evaluation']
+        wakes = (await db.execute(select(AgentWakeupRequest).where(AgentWakeupRequest.status != 'coalesced'))).scalars().all()
+        assert [w.agent_id for w in wakes] == ['orchestrator', 'inference', 'orchestrator', 'evaluation']
         work = tmp_path / 'evaluation'
         work.mkdir()
         inp = await build_checkpoint_evaluation_input(db, run, evaluation, str(work))
@@ -120,11 +171,11 @@ async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, f
         assert run.lifecycle['adaptive_checkpoints'][key]['metrics_delivered']
         await reconcile_adaptive_training(db)
         assert len(deliveries) == 2
-        wakes = (await db.execute(select(AgentWakeupRequest))).scalars().all()
+        wakes = (await db.execute(select(AgentWakeupRequest).where(AgentWakeupRequest.status != 'coalesced'))).scalars().all()
         if final:
-            assert [w.agent_id for w in wakes] == ['inference', 'evaluation', 'train']
+            assert [w.agent_id for w in wakes] == ['orchestrator', 'inference', 'orchestrator', 'evaluation', 'train']
         else:
-            assert [w.agent_id for w in wakes] == ['inference', 'evaluation', 'orchestrator']
+            assert [w.agent_id for w in wakes] == ['orchestrator', 'inference', 'orchestrator', 'evaluation', 'orchestrator']
             assert train.status == 'waiting_external'
             decisions = dict(run.lifecycle['adaptive_training_requests'])
             decisions[key] = {**decisions[key], 'status': 'decided', 'decision': {'action': 'continue'}}
@@ -205,3 +256,14 @@ async def test_checkpoint_wakeup_preserves_identity_when_normal_wake_is_already_
                                   payload={'adaptive_training_request_id': 'checkpoint'})
         assert wake.id == first.id and wake.payload['adaptive_training_request_id'] == 'checkpoint'
     await engine.dispose()
+
+
+def test_checkpoint_activation_identity_keeps_dispatch_and_decision_separate():
+    from zevo.engine.run.adaptive_training import activation_validation_context
+    request = {'ticket_id': 'train', 'step': 100, 'status': 'pending'}
+    lifecycle = {'adaptive_checkpoints': {'a': {'request': request}}, 'adaptive_training_requests': {'a': request}}
+    dispatch = activation_validation_context(lifecycle, '', {'adaptive_checkpoint_request_id': 'a', 'adaptive_checkpoint_phase': 'inference'})
+    assert dispatch == {'request_id': 'a', 'train_ticket_id': 'train', 'step': 100, 'phase': 'inference'}
+    decision = activation_validation_context(lifecycle, '', {'adaptive_training_request_id': 'a'}, dispatch)
+    assert 'phase' not in decision
+    assert activation_validation_context(lifecycle, '', {}) is None

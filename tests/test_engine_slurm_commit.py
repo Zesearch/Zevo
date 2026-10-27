@@ -21,7 +21,7 @@ from zevo.engine.run.runner import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint'])
+@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry'])
 async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, mode) -> None:
     remeasure = mode != "repair"
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -106,7 +106,7 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
     async with Session() as session:
         run = Run(id="run-1", task_name="task", status="running", metric="accuracy")
         ticket = Ticket(
-            id="train-1", run_id="run-1", agent_id="train", status="running",
+            id="train-1", run_id="run-1", agent_id="inference" if mode == "collect_retry" else "train", status="running",
             payload={}, inputs={}, customization={},
         )
         session.add_all([run, ticket])
@@ -149,7 +149,9 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
                 heartbeat_id="heartbeat-2",
             )
 
-        if mode == "checkpoint":
+        if mode == "collect_retry":
+            row.meta = {**row.meta, "inference_execution_retry": {"execution_attempt": 1, "reason": "prediction output lost after job completed"}}
+        elif mode == "checkpoint":
             row.meta = {**row.meta, "checkpoint_yield": "request", "checkpoint_resume": "request"}
             run.lifecycle = {"adaptive_checkpoints": {"request": {
                 "request": {"ticket_id": ticket.id, "step": 20, "planned_steps": 100},

@@ -362,10 +362,10 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     monkeypatch.setattr(runner, "_latest_slurm_resource_request", latest)
     monkeypatch.setattr(runner, "probe_slurm_capacity", probe)
 
-    async def contract():
+    async def contract(stage="train"):
         return await runner._slurm_stage_job_contract(
             run=run, ticket=ticket, work_dir=str(tmp_path), filename="train.sbatch",
-            device_info_path=str(path), session=None, stage="train",
+            device_info_path=str(path), session=None, stage=stage,
         )
 
     submit = asyncio.run(contract())
@@ -447,6 +447,16 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert observed == ["probe"]
     assert (previous.num_gpus, previous.nodes) == (6, 2)
     assert (retry.num_gpus, retry.nodes) == (6, 2)
+
+    ticket.lane = "optimization"
+    monkeypatch.setattr(runner, "_validation_sets", lambda _: [])
+    job_row.meta["scheduler_state"] = "COMPLETED"
+    assert asyncio.run(contract("inference")).phase == "collect"
+    job_row.meta["inference_execution_retry"] = {"execution_attempt": 1, "reason": "verified output loss"}
+    assert asyncio.run(contract("inference")).phase == "submit"
+    job_row.meta.update({"execution_attempt": 2, "retry_of_bookkeeping_row_id": "request-0", "retry_of_job_id": "12344"})
+    assert asyncio.run(contract("inference")).phase == "collect"  # authorization was for attempt 1 only
+    job_row.meta["scheduler_state"] = "FAILED"
 
     job_row.meta.update({
         "execution_attempt": runner.MAX_REPAIR_ATTEMPTS + 1,

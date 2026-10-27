@@ -278,7 +278,7 @@ export type HeartbeatDTO = {
   action: string;
   action_summary: string;
   child_ticket_id: string;
-  mid_training?: { request_id: string; train_ticket_id: string; step: number; action: string; next_step?: number | null } | null;
+  mid_training?: { phase?: string; request_id: string; train_ticket_id: string; step: number; action: string; next_step?: number | null } | null;
 };
 
 /** A file of a file set that is NOT on disk — fetched at run time. */

@@ -1198,3 +1198,37 @@ async def test_unlimited_queue_wait_does_not_cancel_old_pending_job(session, mon
     assert "queue_timeout_requested_at" not in job.meta
     assert job.released_at is None
     assert ticket.status == "waiting_external"
+
+
+@pytest.mark.asyncio
+async def test_collect_publication_wins_over_stale_reconciler_snapshot(session, monkeypatch):
+    from sqlalchemy import update
+    await _mk(session, 'train-publishing', started_ago=120, finished=True)
+    original = session.execute
+    published = False
+
+    async def interleaved(statement, *args, **kwargs):
+        nonlocal published
+        if getattr(statement, '_for_update_arg', None) is not None and not published:
+            published = True
+            # The runner commits after the sweep selected running tickets,
+            # before the sweep takes its write lock. Preserve its valid model.
+            await original(update(Ticket).where(Ticket.id == 'train-publishing')
+                .values(status='succeeded').execution_options(synchronize_session=False))
+            await session.commit()
+        return await original(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, 'execute', interleaved)
+    assert await _sweep_stuck_tickets(session, CUTOFF) == 0
+    assert published
+    assert (await session.get(Ticket, 'train-publishing')).status == 'succeeded'
+
+
+@pytest.mark.asyncio
+async def test_driver_exit_during_collect_validation_is_still_live(session):
+    await _mk(session, 'train-validating', started_ago=120, chatter_ago=1)
+    hb = await session.get(HeartbeatRun, 'hb-train-validating')
+    hb.exit_code = 0  # Driver exited; engine has not published the result yet.
+    await session.commit()
+    assert hb.finished_at is None
+    assert await _sweep_stuck_tickets(session, CUTOFF) == 0
