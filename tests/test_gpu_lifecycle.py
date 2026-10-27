@@ -351,3 +351,64 @@ async def test_retained_allocation_accounting_fallback(monkeypatch, queue, accou
     else:
         assert await _retained_allocation_state(info, '123') == expected
     assert len(calls) == (1 if accounting is None else 2)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('scenario', ['yielded', 'running', 'resumed', 'wrong_checkpoint', 'wrong_row', 'unverified', 'other_consumer', 'previous_segment'])
+async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(monkeypatch, scenario):
+    from zevo.engine.run import remote_jobs
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    commands = []
+    async def ssh(info, command, **kwargs):
+        commands.append(command)
+        return dict(ok=True, stdout='RUNNING\n' if 'squeue -h' in command else '123\n')
+    monkeypatch.setattr(remote_jobs, '_ssh', ssh)
+    request = dict(request_id='checkpoint-111', ticket_id='train-1', step=111)
+    stage = dict(request=request, job_row_id='owner', inference_ticket_id='infer-1', resume_queued=False)
+    meta = dict(controller_directory='/controller', scheduler_state='COMPLETED', nodes=1,
+                checkpoint_yield='checkpoint-111')
+    if scenario == 'running':
+        meta['scheduler_state'] = 'RUNNING'
+    if scenario == 'resumed':
+        stage['resume_queued'] = True
+    if scenario == 'wrong_row':
+        stage['job_row_id'] = 'old-row'
+    async with Session() as session:
+        run = Run(id='run-1', metric='accuracy', gpu_allocation_mode='per_run',
+                  lifecycle={'adaptive_checkpoints': {} if scenario == 'unverified' else {'checkpoint-111': stage}})
+        train = Ticket(id='train-1', run_id=run.id, agent_id='train', status='waiting_external')
+        ticket = Ticket(id='infer-1', run_id=run.id, agent_id='inference',
+                        payload={'mid_training_checkpoint': {**request, 'step': 222} if scenario == 'wrong_checkpoint' else request})
+        owner = InfraInstance(id='owner', run_id=run.id, ticket_id=train.id, instance_id='123',
+                              provider='cluster', gpu_count=4, meta=meta)
+        session.add_all([run, train, ticket, owner])
+        if scenario == 'previous_segment':
+            from datetime import datetime, timezone, timedelta
+            session.add(InfraInstance(id='previous-train-row', run_id=run.id, ticket_id=train.id,
+                instance_id='123', provider='cluster', gpu_count=4,
+                created_at=datetime.now(timezone.utc) - timedelta(hours=1),
+                meta={**meta, 'allocation_owner_row_id': 'owner', 'checkpoint_yield': 'previous-checkpoint',
+                      'checkpoint_resume': 'previous-checkpoint'}))
+        if scenario == 'other_consumer':
+            session.add_all([
+                Ticket(id='other', run_id=run.id, agent_id='inference', status='running'),
+                InfraInstance(id='other-row', run_id=run.id, ticket_id='other', provider='cluster',
+                              instance_id='123', meta={'controller_directory': '/controller', 'allocation_owner_row_id': 'owner'}),
+            ])
+        await session.commit()
+        kwargs = dict(run=run, ticket=ticket,
+                      contract=SimpleNamespace(num_gpus=4, nodes=1, remote_script_path='/infer.sh',
+                          remote_work_dir='/remote', stdout_path='/out', stderr_path='/err'),
+                      info=SimpleNamespace(cluster=SimpleNamespace(env_setup='')),
+                      heartbeat_id='infer-hb', sha256='digest')
+        if scenario in {'yielded', 'previous_segment'}:
+            job, submitted = await submit_workload(session, **kwargs)
+            assert job == '123' and submitted['allocation_owner_row_id'] == 'owner'
+            assert any('infer-hb' in command for command in commands)
+        else:
+            with pytest.raises(ValueError, match='busy with another stage'):
+                await submit_workload(session, **kwargs)
+            assert not any('infer-hb' in command for command in commands)
+    await engine.dispose()

@@ -1232,3 +1232,25 @@ async def test_driver_exit_during_collect_validation_is_still_live(session):
     await session.commit()
     assert hb.finished_at is None
     assert await _sweep_stuck_tickets(session, CUTOFF) == 0
+
+@pytest.mark.asyncio
+async def test_premature_collect_handoff_survives_completion_and_queues_collect(session):
+    from zevo.engine.run.runner import _return_slurm_collect_to_watcher
+    ticket = Ticket(id='train-premature-collect', run_id='r1', agent_id='train', status='running', payload={}, inputs={})
+    heartbeat = HeartbeatRun(id='premature-collect-hb', ticket_id=ticket.id, agent_id='train',
+        driver='codex_cli', model='m', started_at=_ago(100), finished_at=_ago(90), exit_code=0)
+    job = InfraInstance(instance_id='12399', provider='cluster', status='released',
+        run_id='r1', ticket_id=ticket.id, released_at=_ago(10),
+        meta={'resource_request': True, 'scheduler_state': 'COMPLETED', 'scheduler_exit_code': '0:0',
+              'submission_committed': True, 'submission_heartbeat_id': 'original-submit',
+              'collect_wakeup_queued': True})
+    _return_slurm_collect_to_watcher(job, heartbeat_id=heartbeat.id)
+    session.add_all([ticket, heartbeat, job])
+    await session.commit()
+    assert await _sweep_stuck_tickets(session, CUTOFF) == 0
+    assert await _reconcile_slurm_stage_jobs(session) == (0, 1)
+    await session.refresh(ticket)
+    await session.refresh(job)
+    assert ticket.status == 'queued'
+    assert job.meta['collect_wakeup_queued'] is True
+    assert job.meta['submission_heartbeat_id'] == 'original-submit'
