@@ -1496,12 +1496,18 @@ async def _build_inference_input(
             member.inference_config_path = revised
             member.configuration_mode = "reuse"
     if shared_core:
-        # Reject incompatible reuse before allocating/submitting GPU work.
-        for config_path in [inference_config_path, *[
-            member.inference_config_path for member in suite_members
-        ]]:
-            if config_path:
-                validate_inference_core(load_inference_config(config_path), shared_core)
+        # Align reusable configs before freezing inputs or submitting GPU work.
+        # Historical configurations and completed predictions remain untouched.
+        from zevo.engine.run.inference_alignment import align_reused_config
+        previous_execution = await _latest_slurm_resource_request(session, ticket)
+        allow_alignment = previous_execution is None
+        if inference_config_path:
+            inference_config_path = align_reused_config(
+                inference_config_path, shared_core, work_dir, allow_create=allow_alignment)
+        for member in suite_members:
+            if member.inference_config_path:
+                member.inference_config_path = align_reused_config(
+                    member.inference_config_path, shared_core, work_dir, allow_create=allow_alignment)
         core_file = Path(work_dir) / "shared_inference_core.json"
         core_file.parent.mkdir(parents=True, exist_ok=True)
         core_file.write_text(json.dumps(shared_core, indent=2), encoding="utf-8")
