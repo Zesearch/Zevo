@@ -4,7 +4,6 @@ import { measurementProgress } from "../lib/measurementProgress";
 import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
 import { isMidTrainingActivation, midTrainingActivationLabel } from "../lib/midTrainingActivations";
 import { MidTrainingTimelineBranch } from "../components/MidTrainingTimelineBranch";
-import { decisionStatus } from "../lib/midTrainingStatus";
 import { StageProgress } from "../components/StageProgress";
 import { trainingActivity } from "../lib/trainingTelemetry";
 import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
@@ -15,7 +14,6 @@ import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom"
 import useSWR from "swr";
 import { StopCircle, ChevronRight, ChevronDown, Clock, ListChecks, Package, ArrowLeft, Layers3, ScrollText } from "lucide-react";
 import { InputChangesNotice } from "../components/InputChangesNotice";
-import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
 import { TrainingMonitor } from "../components/TrainingMonitor";
 import { EvaluationProgress, evaluationAttemptLabel } from "../components/EvaluationProgress";
 import { RunInstructionPanel } from "../components/RunInstructionPanel";
@@ -943,8 +941,7 @@ function PipelineTimeline({
           may carry a wake suffix (see planRow) — split it back apart here. */}
       <div className="min-w-0 space-y-4">
       {selectedId.includes("#validation:") ? <MidTrainingPhaseDetail
-        key={selectedId} ticketId={selectedId.split("#")[0]}
-        paused={pausedTicketIds.has(selectedId.split("#")[0]) || needsInstructionInput} /> : <StageDetail
+        key={selectedId} ticketId={selectedId.split("#")[0]} /> : <StageDetail
         ticketId={selectedId.split("#")[0]}
         checkpointTickets={(() => {
           const selected = run.tickets.find((item) => item.id === selectedId);
@@ -981,13 +978,6 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
     refreshInterval: (latest) =>
       latest && ["succeeded", "failed", "cancelled", "skipped", "degraded"].includes(latest.status) ? 0 : 3000,
   });
-  const checkpointParent = (t?.payload.mid_training_checkpoint as { ticket_id?: string } | undefined)?.ticket_id;
-  const { data: checkpointTrain } = useSWR<TicketDetail>(
-    checkpointParent ? `/api/tickets/${checkpointParent}` : null, { refreshInterval: 3000 },
-  );
-  const { data: midTrain } = useSWR<TicketDetail>(
-    midTrainingTicketId ? `/api/tickets/${midTrainingTicketId}` : null, { refreshInterval: 3000 },
-  );
   // EVERY wake of this stage, not just the latest. A ticket gets one heartbeat
   // per wake, and the orchestrator is re-woken after each child ticket
   // finishes — so `limit=1` showed one wake's tokens and cost while the run
@@ -1118,9 +1108,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
           <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? "Orchestrator" : t.id}</Link>
-          <StatusBadge status={midTrainingTicketId
-            ? decisionStatus(midActivations, paused || needsInput, midTrain?.mid_training_validation?.awaiting_decision)
-            : stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />
+          {!midTrainingTicketId && <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />}
           {currentTrainingActivity && <span className="text-xs text-sky-300">{currentTrainingActivity}</span>}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
         </div>
@@ -1193,8 +1181,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
           {t.agent_id === "evaluation" && (
             <EvaluationProgress events={t.execution_events} heartbeat={picked} activations={chronological} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
           )}
-          {checkpointTrain && <MidTrainingValidationPanel data={checkpointTrain.mid_training_validation}
-            events={checkpointTrain.execution_events} activity={null} showExecutionProgress={false} />}
+
           {activeResourceRequest && (
             <ResourceRequestStatus instance={activeResourceRequest} />
           )}

@@ -232,3 +232,28 @@ async def test_old_watcher_job_cannot_collect_a_newer_running_job() -> None:
         )
 
     await engine.dispose()
+
+@pytest.mark.parametrize('state,allowed', [
+    ('PENDING', True), ('RUNNING', True), ('CONFIGURING', True), ('COMPLETING', True),
+    ('COMPLETED', False), ('FAILED', False), ('CANCELLED by 123', False), ('', False),
+])
+def test_premature_collect_waits_only_for_live_workload(state, allowed):
+    from types import SimpleNamespace
+    from zevo.engine.run.runner import _deferred_collect_problem
+    contract = SimpleNamespace(phase='collect', bookkeeping_row_id='row', job_id='123')
+    row = SimpleNamespace(id='row', instance_id='123', meta={'scheduler_state': state})
+    assert (_deferred_collect_problem(contract, row) is None) is allowed
+    row.instance_id = 'another-job'
+    assert _deferred_collect_problem(contract, row) is not None
+
+@pytest.mark.parametrize('state', ['RUNNING', 'COMPLETED'])
+def test_deferred_collect_rearms_watcher_without_rewriting_submission(state):
+    from types import SimpleNamespace
+    from zevo.engine.run.runner import _return_slurm_collect_to_watcher
+    original = dict(scheduler_state=state, submission_committed=True,
+                    submission_heartbeat_id='submit-hb', submission_committed_at='original-time',
+                    log_path='/original/out', controller_request_id='submit-hb')
+    row = SimpleNamespace(meta={**original, 'collect_wakeup_queued': True})
+    # COMPLETED covers the job finishing between result validation and publication.
+    assert _return_slurm_collect_to_watcher(row, heartbeat_id="collect-hb") == state
+    assert row.meta == {**original, "watcher_handoff_heartbeat_id": "collect-hb"}

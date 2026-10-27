@@ -1244,7 +1244,7 @@ async def _sweep_stuck_tickets(
             and not meta.get("collect_wakeup_queued")
             and not meta.get("superseded_by_instruction_id")
             and latest_hb is not None
-            and meta.get("submission_heartbeat_id") == latest_hb.id
+            and (meta.get("watcher_handoff_heartbeat_id") or meta.get("submission_heartbeat_id")) == latest_hb.id
         ):
             continue
 

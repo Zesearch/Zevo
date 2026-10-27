@@ -254,6 +254,27 @@ async def _retained_allocation_state(info, job_id: str) -> str:
     return states.pop()
 
 
+def _checkpoint_allocation_handoff(run, ticket, consumer, train):
+    """Only the verified checkpoint's own Inference may borrow a yielded Train GPU."""
+    meta = consumer.meta or {}
+    key = meta.get("checkpoint_yield")
+    request = (ticket.payload or {}).get("mid_training_checkpoint") or {}
+    stage = (run.lifecycle or {}).get("adaptive_checkpoints", {}).get(key, {})
+    return bool(
+        key and ticket.agent_id == "inference"
+        and train is not None and train.agent_id == "train"
+        and train.status == "waiting_external"
+        and train.run_id == run.id and consumer.run_id == run.id
+        and request.get("request_id") == key
+        and request.get("ticket_id") == train.id == consumer.ticket_id
+        and stage.get("request") == request
+        and stage.get("job_row_id") == consumer.id
+        and stage.get("inference_ticket_id") == ticket.id
+        and not stage.get("resume_queued") and not meta.get("checkpoint_resume")
+        and meta.get("scheduler_state") == "COMPLETED"
+    )
+
+
 async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id, sha256):
     """Reuse a healthy owned allocation or submit one finite controller job."""
     from sqlalchemy import select
@@ -271,7 +292,7 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             InfraInstance.run_id == run.id, InfraInstance.provider == "cluster",
             Ticket.id != ticket.id,
             Ticket.status.notin_(["succeeded", "degraded", "failed", "cancelled", "skipped"]),
-        )
+        ).order_by(InfraInstance.created_at.desc())
     )).scalars().all())
     owner = None
     for row in candidates:
@@ -296,9 +317,22 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             raise ValueError("stage does not fit the retained run allocation; resource plan must cover all stages")
         # No concurrent commands on one set of GPUs. The orchestrator can retry
         # after the active consumer completes, never overlap torchrun processes.
-        if any((r.meta or {}).get("controller_directory") == meta["controller_directory"]
-               for r in active_consumers):
-            raise ValueError("retained allocation is busy with another stage")
+        for consumer_index, consumer in enumerate(active_consumers):
+            if (consumer.meta or {}).get("controller_directory") != meta["controller_directory"]:
+                continue
+            train = await session.get(Ticket, consumer.ticket_id)
+            # Earlier completed segments remain as bookkeeping rows on the same
+            # Train ticket. The verified current checkpoint supersedes them.
+            current_checkpoint = next((other for other in active_consumers
+                if other.ticket_id == consumer.ticket_id
+                and (other.meta or {}).get("controller_directory") == meta["controller_directory"]
+                and _checkpoint_allocation_handoff(run, ticket, other, train)), None)
+            if (current_checkpoint is not None
+                    and consumer_index > active_consumers.index(current_checkpoint)
+                    and (consumer.meta or {}).get("scheduler_state") == "COMPLETED"):
+                continue
+            if not _checkpoint_allocation_handoff(run, ticket, consumer, train):
+                raise ValueError("retained allocation is busy with another stage")
         owner = row
         break
     directory = ((owner.meta or {})["controller_directory"] if owner is not None

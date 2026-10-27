@@ -4122,6 +4122,19 @@ _SLURM_TERMINAL_STATES = {
 }
 
 
+def _deferred_collect_problem(contract, row):
+    """A premature collect may wait for its exact, still-live workload."""
+    if contract.phase != "collect" or row.id != contract.bookkeeping_row_id:
+        return None
+    state = str((row.meta or {}).get("scheduler_state") or "").strip().upper().split("+")[0].split(" ")[0]
+    if row.instance_id == contract.job_id and state in {"PENDING", "CONFIGURING", "RUNNING", "COMPLETING", "SUSPENDED"}:
+        return None
+    return {
+        "declared": "a live registered workload or a newly registered continuation Slurm job",
+        "reported": f"deferred collect cannot wait on job {row.instance_id} in state {state or 'UNKNOWN'}",
+    }
+
+
 def _is_resource_request(meta: dict[str, Any]) -> bool:
     """Recognize the generic marker plus legacy finite-stage rows."""
     return bool(meta.get("resource_request") or meta.get("stage_job"))
@@ -4339,6 +4352,16 @@ def _slurm_job_was_submitted_by(
         and row.instance_id
         and str((row.meta or {}).get("submission_heartbeat_id") or "") == heartbeat_id
     )
+
+
+def _return_slurm_collect_to_watcher(row, *, heartbeat_id):
+    """Rearm collection without changing the original submission's identity."""
+    meta = dict(row.meta or {})
+    meta.pop("collect_wakeup_queued", None)
+    meta["watcher_handoff_heartbeat_id"] = heartbeat_id
+    row.meta = meta
+    state = str(meta.get("scheduler_state") or "PENDING").strip().upper()
+    return state.split()[0].rstrip("+") if state else "PENDING"
 
 
 def _commit_slurm_submission(
@@ -6157,17 +6180,8 @@ async def run_ticket(
                             (stage_row.meta or {}).get("gpus_per_node") or 0
                         ),
                     }
-                elif (
-                    inp.slurm_job.phase == "collect"
-                    and stage_row.id == inp.slurm_job.bookkeeping_row_id
-                ):
-                    runtime_contract_mismatches["deferred_status"] = {
-                        "declared": "a newly registered continuation Slurm job",
-                        "reported": (
-                            "deferred collect result still points at the terminal "
-                            f"job {inp.slurm_job.job_id}"
-                        ),
-                    }
+                elif problem := _deferred_collect_problem(inp.slurm_job, stage_row):
+                    runtime_contract_mismatches["deferred_status"] = problem
             if isinstance(output, TrainResult) and isinstance(inp, TrainTaskInput):
                 try:
                     train_config = load_train_config(output.train_config_path)
@@ -7061,12 +7075,16 @@ async def run_ticket(
         # checks and the durable JOBID/status-path registration have passed.
         # Only now may the deterministic watcher stream or poll this job.
         await session.refresh(deferred_stage_row)
-        state = _commit_slurm_submission(
-            deferred_stage_row,
-            heartbeat_id=heartbeat_id,
-            stdout_path=inp.slurm_job.stdout_path,
-            stderr_path=inp.slurm_job.stderr_path,
-        )
+        if (inp.slurm_job.phase == "collect"
+                and deferred_stage_row.id == inp.slurm_job.bookkeeping_row_id):
+            state = _return_slurm_collect_to_watcher(deferred_stage_row, heartbeat_id=heartbeat_id)
+        else:
+            state = _commit_slurm_submission(
+                deferred_stage_row,
+                heartbeat_id=heartbeat_id,
+                stdout_path=inp.slurm_job.stdout_path,
+                stderr_path=inp.slurm_job.stderr_path,
+            )
         prefix = "Running" if state == "RUNNING" else "Waiting"
         if prefix == "Running":
             tk.status = "running"
@@ -7074,6 +7092,8 @@ async def run_ticket(
                 f"Running: Slurm job {deferred_stage_row.instance_id} is running; "
                 "Zevo will collect and validate its outputs after it finishes."
             )
+        elif state in _SLURM_TERMINAL_STATES:
+            body = f"Waiting: Slurm job {deferred_stage_row.instance_id} finished; output collection is pending."
         else:
             body = (
                 f"Waiting: Slurm job {deferred_stage_row.instance_id} was submitted "

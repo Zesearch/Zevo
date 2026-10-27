@@ -1,10 +1,9 @@
 import useSWR from "swr";
 import type { HeartbeatDTO, TicketDetail, RunDetail } from "../lib/api";
-import { decisionStatus, midTrainingHasStarted, midTrainingDecisionHasStarted } from "../lib/midTrainingStatus";
-import { midTrainingActivationLabel } from "../lib/midTrainingActivations";
+import { midTrainingHasStarted, midTrainingDecisionHasStarted } from "../lib/midTrainingStatus";
 import { StatusBadge, statusToneFor } from "./StatusBadge";
 
-export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations, selectedId, onSelect, paused, evaluations = [], inferences = [] }: {
+export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations, selectedId, onSelect, evaluations = [], inferences = [] }: {
   evaluations?: RunDetail["tickets"];
   inferences?: RunDetail["tickets"];
   ticketId: string; supervisorId: string; activations: HeartbeatDTO[]; selectedId: string;
@@ -17,8 +16,8 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
   const evaluation = evaluations.find((item) => item.id === selectedId) || evaluations.at(-1);
   const children = [
     ...(midTrainingDecisionHasStarted(ticket, activations.length) ? [{ label: "Orchestrator", selection: `${supervisorId}#mid:${ticketId}`,
-      status: decisionStatus(activations, paused, ticket?.mid_training_validation?.awaiting_decision),
-      description: latest ? midTrainingActivationLabel(latest, activations) : "Waiting for checkpoint orchestration" }] : []),
+      status: "",
+      description: latest?.mid_training ? `Step ${latest.mid_training.step.toLocaleString()}` : "Checkpoint orchestration" }] : []),
     ...(inference ? [{label: "Inference", selection: inference.id,
       status: inference.status, description: `Checkpoint ${inference.mid_training_step} · Validation predictions`}] : []),
     ...(evaluation ? [{label: "Evaluation", selection: evaluation.id,
@@ -27,7 +26,9 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
   return <li className="relative">
     <span className="absolute left-[18px] top-0 h-5 w-4 rounded-bl-[10px] border-b border-l border-hair" />
     <div className="ml-[38px] pb-1 pt-1.5">
-      <div className="pl-2 text-[11px] font-medium uppercase tracking-wider text-skyx-300/70">Mid-training Validation</div>
+      <button type="button" onClick={() => onSelect(`${ticketId}#validation:overview`)}
+        aria-pressed={selectedId === `${ticketId}#validation:overview`}
+        className={`rounded px-2 py-1 text-left text-[11px] font-medium uppercase tracking-wider text-skyx-300/70 hover:bg-raised/40 ${selectedId === `${ticketId}#validation:overview` ? "bg-skyx-500/10" : ""}`}>Mid-training Validation</button>
       <ol className="relative">{children.map((child, index) => {
         const orchestrator = child.label === "Orchestrator";
         const active = selectedId === child.selection;
@@ -37,13 +38,13 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
           <button type="button" onClick={() => onSelect(child.selection)}
             className={`flex w-full items-start gap-2.5 rounded-lg px-2 py-1 text-left transition ${active ? orchestrator ? "bg-lilac-500/10" : "bg-skyx-500/10" : "hover:bg-raised/40"}`}>
             <span className="relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
-              {tone.live && <span className={`absolute inline-flex h-full w-full animate-ping ${orchestrator ? "rotate-45 bg-lilac-400" : `rounded-full ${tone.dot}`} opacity-60`} />}
+              {!orchestrator && tone.live && <span className={`absolute inline-flex h-full w-full animate-ping ${orchestrator ? "rotate-45 bg-lilac-400" : `rounded-full ${tone.dot}`} opacity-60`} />}
               <span className={`relative h-2 w-2 ${orchestrator ? "rotate-45 bg-lilac-400/70" : `rounded-full ${tone.dot}`}`} />
             </span>
             <span className="min-w-0 flex-1">
               <span className="flex items-center justify-between gap-2">
                 <span className={`text-[13px] ${orchestrator ? active ? "italic text-lilac-200" : "italic text-lilac-300/75" : active ? "text-skyx-200" : "text-skyx-300/80"}`}>{child.label}</span>
-                <StatusBadge status={child.status} />
+                {!orchestrator && <StatusBadge status={child.status} />}
               </span>
               <span className="block truncate font-mono text-[11px] text-dim">{child.description}</span>
             </span>
