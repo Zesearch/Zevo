@@ -1,4 +1,4 @@
-import { latestExecution } from "./executionProgress";
+import { latestExecution, benchmarkCounts } from "./executionProgress";
 import type { ExecutionEventDTO, HeartbeatDTO, TicketDetail } from "./api";
 import { trainingActivity, isMidTrainingValidationEvent } from "./trainingTelemetry";
 
@@ -17,7 +17,8 @@ export function midTrainingExecution(ticket: TicketDetail) {
 
 export function validationStatus(ticket: TicketDetail, paused: boolean): string {
   if (ticket.mid_training_validation?.complete) return "succeeded";
-  const { phase } = midTrainingExecution(ticket);
+  const { phase, events } = midTrainingExecution(ticket);
+  if (events.at(-1)?.phase === "adaptive_evaluation") return "succeeded";
   if (phase && ["failed", "cancelled"].includes(ticket.status)) return ticket.status;
   if (paused) return "paused";
   if (phase) return "running";
@@ -39,12 +40,10 @@ export function decisionStatus(activations: HeartbeatDTO[], paused: boolean, awa
 export function inferenceProgress(events: ExecutionEventDTO[]) {
   const latest = events.filter((event) => event.phase.startsWith("generate")).at(-1);
   if (!latest) return null;
-  const suiteTotal = Number(latest.extras?.suite_rows_total);
-  const suiteDone = Number(latest.extras?.suite_rows_completed);
-  const suite = Number.isFinite(suiteTotal) && suiteTotal > 0 && Number.isFinite(suiteDone);
+  const counts = benchmarkCounts(events);
+  if (!counts) return null;
   return { name: String(latest.extras?.benchmark_name || "Validation"),
-    completed: suite ? suiteDone : latest.current_step, total: suite ? suiteTotal : latest.total_steps,
-    suite, workers: Number(latest.extras?.parallel_workers || 0) };
+    ...counts, workers: Number(latest.extras?.parallel_workers || 0) };
 }
 
 /** Reveal the branch on its first real validation, then retain its history. */
@@ -55,4 +54,9 @@ export function midTrainingHasStarted(ticket: TicketDetail | undefined, activati
   if (validation?.measurements?.length || validation?.awaiting_decision || validation?.complete) return true;
   return ticket.execution_events.some((event) => event.extras?.execution_purpose === "workload"
     && isMidTrainingValidationEvent(event));
+}
+
+/** Keep the decision row absent until scoring has produced a decision request. */
+export function midTrainingDecisionHasStarted(ticket: TicketDetail | undefined, activationCount = 0): boolean {
+  return activationCount > 0 || !!ticket?.mid_training_validation?.awaiting_decision;
 }

@@ -74,61 +74,6 @@ def validate_measurement(measurement, contract, contract_sha256, step):
 
 
 
-def score_validation_predictions(contract_path, *, predictions_dir, step, contract_sha256):
-    """Run frozen scorers ourselves; the generated child supplies predictions only."""
-    import runpy
-    import sys
-    base = Path(contract_path).parent
-    contract = json.loads(Path(contract_path).read_text())
-    metric_helper = contract["helpers"]["metrics"]
-    scorer_path = base / metric_helper["path"]
-    if hashlib.sha256(scorer_path.read_bytes()).hexdigest() != metric_helper["sha256"]:
-        raise ValueError("built-in scorer changed")
-    scorers = runpy.run_path(str(scorer_path))
-    results = {}
-    for index, member in enumerate(contract["members"]):
-        files = member["files"]
-        predictions = Path(predictions_dir) / f"{index:03d}" / "predictions.csv"
-        labels = base / files["labels"]["path"]
-        sample = base / files["sample_submission"]["path"]
-        expected, _ = scorers["_load_table"](sample)
-        actual, rows = scorers["_load_table"](predictions)
-        gold_columns, gold = scorers["_load_table"](labels)
-        if actual != expected or len(rows) != len(gold) or not rows:
-            raise ValueError("predictions violate the frozen columns or row count")
-        identity = [key for key in expected if key in gold_columns and key not in member["answer_fields"]]
-        for prediction, answer in zip(rows, gold):
-            if any(str(prediction.get(key, "")) != str(answer.get(key) if answer.get(key) is not None else "") for key in identity):
-                raise ValueError("predictions violate the frozen row identity/order")
-        output = predictions.with_name("metrics.json")
-        output.unlink(missing_ok=True)
-        script = files.get("evaluation_script")
-        if script:
-            subprocess.run([sys.executable, str(base / script["path"]),
-                            str(predictions), str(labels), str(output)], check=True)
-            metrics = json.loads(output.read_text())
-        else:
-            config = member.get("evaluation_config", {})
-            prediction_columns = [key for key in expected if key not in identity]
-            answer_fields = member["answer_fields"]
-            prediction_column = config.get("prediction_column") or (prediction_columns[0] if len(prediction_columns) == 1 else "")
-            answer_column = config.get("answer_column") or (answer_fields[0] if len(answer_fields) == 1 else "")
-            if prediction_column not in prediction_columns or answer_column not in answer_fields:
-                raise ValueError("ambiguous or invalid built-in evaluation columns")
-            metrics = scorers["score_default"](
-                predictions, labels, metric=member["metric"],
-                prediction_col_hint=prediction_column, gold_col_hint=answer_column,
-                strict=config.get("strict", False), f1_average=config.get("f1_average", "micro"))
-            if metrics.get("status") != "succeeded":
-                raise ValueError("built-in Validation scoring failed")
-            atomic_json(output, metrics)
-        score = metrics.get("score")
-        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-            raise ValueError("frozen scorer returned no finite score")
-        results[member["name"]] = score
-    return {"split": "validation", "step": step, "contract_sha256": contract_sha256, "metrics": results}
-
-
 def validate_decision(decision, request):
     if decision.get("request_id") != request["request_id"]:
         raise ValueError("decision belongs to another checkpoint request")
@@ -158,13 +103,13 @@ def emit_validation_report(ticket_id, ledger):
 
 def run_adaptive_training(*, ticket_id, contract_path, contract_sha256,
                           planned_steps, first_step, train_command,
-                          evaluate_command, work_dir, decision_timeout=1800, world_size=1):
+                          work_dir, world_size=1):
     """Run full-state segments and ask the live agent after Validation checks.
 
-    Both commands are argv lists (no shell). Train reads ZEVO_* variables and
-    writes checkpoint-<step> with ordinary Trainer state; evaluation writes
-    member predictions under ZEVO_ADAPTIVE_PREDICTIONS_DIR. The caller publishes report["selected_checkpoint"]
-    with the normal checkpoint transaction helper after this returns.
+    Train runs one full-state segment then exits this controller with status 0.
+    The backend owns separate Inference and Evaluation tickets and queues a
+    new Train activation only after the Orchestrator decision (or final score).
+    The caller publishes report["selected_checkpoint"] only when this returns.
     """
     if type(world_size) is not int or world_size < 1:
         raise ValueError("world_size must be positive")
@@ -239,23 +184,27 @@ def run_adaptive_training(*, ticket_id, contract_path, contract_sha256,
         verify_resume_checkpoint(checkpoint, step=step, planned_steps=planned_steps, world_size=world_size)
         if not ledger["measurements"] or ledger["measurements"][-1]["step"] != step:
             metrics_path = root / f"validation-{step}.json"
-            env["ZEVO_ADAPTIVE_PREDICTIONS_DIR"] = str(root / f"validation-{step}")
-            Path(env["ZEVO_ADAPTIVE_PREDICTIONS_DIR"]).mkdir(exist_ok=True)
-            for index in range(len(contract["members"])):
-                (Path(env["ZEVO_ADAPTIVE_PREDICTIONS_DIR"]) / f"{index:03d}" / "predictions.csv").unlink(missing_ok=True)
-            env["ZEVO_ADAPTIVE_METRICS_PATH"] = str(metrics_path)
-            # Errors propagate without recording a negative observation. The
-            # saved segment is reused on retry, never trained a second time.
-            for member in contract["members"]:
-                for artifact in member["files"].values():
-                    file = Path(contract_path).parent / artifact["path"]
-                    if hashlib.sha256(file.read_bytes()).hexdigest() != artifact["sha256"]:
-                        raise ValueError("frozen Validation artifact changed")
-            subprocess.run(evaluate_command, env=env, check=True)
-            measurement = score_validation_predictions(
-                contract_path, predictions_dir=env["ZEVO_ADAPTIVE_PREDICTIONS_DIR"],
-                step=step, contract_sha256=contract_sha256)
-            atomic_json(metrics_path, measurement)
+            pending = ledger.get("pending_checkpoint")
+            if not pending or pending["step"] != step:
+                request_id = uuid.uuid4().hex
+                pending = {**identity, "request_id": request_id, "step": step,
+                           "checkpoint": str(checkpoint), "metrics_path": str(metrics_path),
+                           "decision_path": str(root / f"decision-{request_id}.json"),
+                           "direction": contract["direction"], "measurements": list(ledger["measurements"]),
+                           "decisions": list(ledger["decisions"])}
+                ledger["pending_checkpoint"] = pending
+                metrics_path.unlink(missing_ok=True)
+                atomic_json(ledger_path, ledger)
+            if not metrics_path.exists():
+                marker = {"phase": "adaptive_checkpoint", "step": step, "total": planned_steps,
+                          "t": time.time(), "adaptive_checkpoint_request": pending}
+                print(f"__PROGRESS__:{ticket_id}:" + json.dumps(marker), flush=True)
+                # This is a successful segment handoff, not final Train completion.
+                # Exit releases the allocation controller's workload slot.
+                raise SystemExit(0)
+            measurement = json.loads(metrics_path.read_text())
+            if measurement.get("request_id") != pending["request_id"]:
+                raise ValueError("evaluation response belongs to another checkpoint")
             score = validate_measurement(measurement, contract, contract_sha256, step)
             ledger["measurements"].append({
                 "step": step, "score": score, "metrics": measurement["metrics"],
@@ -286,22 +235,16 @@ def run_adaptive_training(*, ticket_id, contract_path, contract_sha256,
             atomic_json(ledger_path, ledger)
             emit_validation_report(ticket_id, ledger)
             return ledger
-        pending = ledger.get("pending")
-        if not pending or pending["step"] != step:
-            request_id = uuid.uuid4().hex
-            pending = {**identity, "request_id": request_id, "step": step,
-                       "decision_path": str(root / f"decision-{request_id}.json"),
-                       "measurements": ledger["measurements"], "direction": direction}
-            ledger["pending"] = pending
-            atomic_json(ledger_path, ledger)
-        deadline = time.monotonic() + decision_timeout
-        while not Path(pending["decision_path"]).exists():
-            if time.monotonic() >= deadline:
-                raise TimeoutError("agent decision timed out; full resumable state is retained")
-            marker = {"phase": "adaptive_validation", "step": step, "total": planned_steps,
-                      "t": time.time(), "adaptive_request": pending}
-            print(f"__PROGRESS__:{ticket_id}:" + json.dumps(marker), flush=True)
-            time.sleep(10)
+        pending = {**ledger["pending_checkpoint"], "measurements": ledger["measurements"]}
+        ledger["pending"] = pending
+        atomic_json(ledger_path, ledger)
+        if not Path(pending["decision_path"]).exists():
+            # Defensive recovery: never train further or retain a GPU process
+            # if a response was delivered but the decision is still pending.
+            print(f"__PROGRESS__:{ticket_id}:" + json.dumps({
+                "phase": "adaptive_checkpoint", "step": step, "total": planned_steps,
+                "t": time.time(), "adaptive_checkpoint_request": ledger["pending_checkpoint"]}), flush=True)
+            raise SystemExit(0)
         decision = validate_decision(json.loads(Path(pending["decision_path"]).read_text()), pending)
         ledger["decisions"].append(decision)
         if decision["action"] == "stop":
@@ -313,6 +256,7 @@ def run_adaptive_training(*, ticket_id, contract_path, contract_sha256,
             return ledger
         ledger["next_step"] = decision["next_step"]
         ledger.pop("pending", None)
+        ledger.pop("pending_checkpoint", None)
         atomic_json(ledger_path, ledger)
         emit_validation_report(ticket_id, ledger)
 

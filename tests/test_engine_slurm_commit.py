@@ -21,8 +21,9 @@ from zevo.engine.run.runner import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('remeasure', [False, True])
-async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, remeasure) -> None:
+@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint'])
+async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, mode) -> None:
+    remeasure = mode != "repair"
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -148,7 +149,13 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
                 heartbeat_id="heartbeat-2",
             )
 
-        if remeasure:
+        if mode == "checkpoint":
+            row.meta = {**row.meta, "checkpoint_yield": "request", "checkpoint_resume": "request"}
+            run.lifecycle = {"adaptive_checkpoints": {"request": {
+                "request": {"ticket_id": ticket.id, "step": 20, "planned_steps": 100},
+                "job_row_id": row.id, "resume_queued": True, "metrics_delivered": True}},
+                "adaptive_training_requests": {"request": {"status": "decided"}}}
+        elif remeasure:
             # A deliberate budget replay can reuse a successful implementation;
             # it must be authorized by the engine's exact pending attempt.
             run.lifecycle = {'token_budget_remeasurements': [{

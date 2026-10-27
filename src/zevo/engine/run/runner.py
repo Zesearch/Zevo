@@ -915,12 +915,15 @@ async def _slurm_stage_job_contract(
     measurement_restart = restarts_workload(run, ticket.id, job_row.id if job_row is not None else "")
     from zevo.engine.run.steering import requested_slurm_gpus
     requested_gpus = await requested_slurm_gpus(session, ticket.id) if cluster and session is not None else 0
+    from zevo.engine.run.adaptive_training import checkpoint_resume_authorized
+    checkpoint_resume = checkpoint_resume_authorized(run, ticket, job_row)
     repair_submission = bool(
         cluster
         and job_row is not None
         and prior_state in _SLURM_TERMINAL_STATES
         and (
             restart_instruction_id or measurement_restart
+            or checkpoint_resume
             or (
                 str(getattr(ticket, "status", "")) == "repairing"
                 and (prior_state != "COMPLETED" or (stage == "train" and meta.get("training_completion_repair")))
@@ -1103,6 +1106,14 @@ async def _build_train_input(
 ) -> BaseModel:
     from zevo.engine.run.adaptive_training import build_validation_contract
     adaptive = await build_validation_contract(session, run, ticket, work_dir)
+    context = dict(specialist_context or {})
+    resumptions = [stage for stage in (run.lifecycle or {}).get("adaptive_checkpoints", {}).values()
+                   if stage["request"]["ticket_id"] == ticket.id and stage.get("resume_queued")]
+    if resumptions:
+        latest = max(resumptions, key=lambda stage: stage["request"]["step"])
+        context["adaptive_resume"] = {**latest["request"],
+            "work_dir": str(PurePosixPath(latest["request"]["checkpoint"]).parent),
+            "instruction": "Relaunch the same controller with its existing ledger, train command and full plan. Do not reset state, change configuration or run inference/scoring. It consumes the saved metrics and decision, resumes full optimizer state or publishes the selected best checkpoint."}
     iteration = int(ticket.iteration or 0)
     parent_model = payload.get("model_source") == "checkpoint"
     wandb_values = {
@@ -1162,7 +1173,7 @@ async def _build_train_input(
     return TrainTaskInput(
         ticket_id=ticket.id,
         **_customization_kwargs(ticket.customization or {}),
-        run_context=dict(specialist_context or {}),
+        run_context=context,
         operation="train",
         run_id=str(ticket.run_id or ""),
         iteration=iteration,
@@ -1432,7 +1443,7 @@ async def _build_holdout_suite_members(
 
 async def _build_inference_input(
     ticket: Ticket, payload: dict, inputs: dict, work_dir: str, generation_backend: str,
-    run: Run, session: AsyncSession, specialist_context: dict | None = None,
+    run: Run, session: AsyncSession, specialist_context: dict | None = None, *, checkpoint_members: list | None = None,
 ) -> BaseModel:
     # Ticket creation has already resolved the lane's immutable questions-only
     # set and output template. Read the stored work order verbatim; consulting
@@ -1454,7 +1465,7 @@ async def _build_inference_input(
         if not core_path:
             raise ValueError("held-out inference requires the Validation baseline core")
         shared_core = inference_core(load_inference_config(core_path))
-    suite_members = (
+    suite_members = checkpoint_members if checkpoint_members is not None else (
         await _build_validation_suite_members(
             ticket=ticket, payload=payload, work_dir=work_dir, run=run,
             session=session,
@@ -1474,10 +1485,10 @@ async def _build_inference_input(
     from zevo.engine.run.remeasurement import configuration_override
     primary_member = primary_name or (str(frozen_suite[0]["name"]) if frozen_suite else "")
     inference_config_path = (
-        configuration_override(run, ticket, primary_member) or inference_config_path
+        (configuration_override(run, ticket, primary_member) if checkpoint_members is None else "") or inference_config_path
     )
     for member in suite_members:
-        revised = configuration_override(run, ticket, member.name)
+        revised = configuration_override(run, ticket, member.name) if checkpoint_members is None else ""
         if revised:
             member.inference_config_path = revised
             member.configuration_mode = "reuse"
@@ -1879,11 +1890,17 @@ async def _build_input(
             session, specialist_context,
         )
     if agent_id == "inference":
+        from zevo.engine.run.adaptive_training import is_checkpoint_stage, build_checkpoint_inference_input
+        if is_checkpoint_stage(ticket):
+            return await build_checkpoint_inference_input(session, run, ticket, work_dir, generation_backend, specialist_context)
         return await _build_inference_input(
             ticket, payload, inputs, work_dir, generation_backend, run,
             session, specialist_context,
         )
     if agent_id == "evaluation":
+        from zevo.engine.run.adaptive_training import is_checkpoint_evaluation, build_checkpoint_evaluation_input
+        if is_checkpoint_evaluation(ticket):
+            return await build_checkpoint_evaluation_input(session, run, ticket, work_dir)
         return _build_evaluation_input(
             ticket, payload, inputs, work_dir, run,
             suite_members=await _build_evaluation_suite_members(
@@ -1956,6 +1973,7 @@ async def _build_specialist_context(
                 Ticket.iteration == previous_iteration,
                 Ticket.lane == "optimization",
                 Ticket.agent_id.in_(("train", "evaluation")),
+                ~Ticket.id.startswith("mid-eval-"), ~Ticket.id.startswith("mid-infer-"),
                 HeartbeatResult.status.in_(("succeeded", "degraded")),
             )
             .order_by(HeartbeatResult.created_at.desc())
@@ -3285,6 +3303,9 @@ def _apply_run_score_monitor(
     tickets skip this entirely; their numbers go through `_record_holdout_score`
     so that a test result can never be mistaken for a tuning result.
     """
+    from zevo.engine.run.adaptive_training import is_checkpoint_stage
+    if is_checkpoint_stage(ticket):
+        return
     from zevo.engine.run.remeasurement import is_replay, is_superseded_prediction, pending
     if ticket.lane == "held_out_test" or pending(run) or is_replay(run, ticket) or is_superseded_prediction(run, ticket):
         return
@@ -4194,6 +4215,8 @@ async def _submit_validated_slurm_stage(
         previous_meta = dict(previous.meta or {}) if previous is not None else {}
         from zevo.engine.run.remeasurement import restarts_workload
         measurement_restart = restarts_workload(run, ticket.id, previous.id if previous is not None else "")
+        from zevo.engine.run.adaptive_training import checkpoint_resume_authorized
+        checkpoint_resume = checkpoint_resume_authorized(run, ticket, previous)
         previous_state = str(previous_meta.get("scheduler_state") or "").upper()
         previous_state = previous_state.split()[0].rstrip("+") if previous_state else ""
         if (
@@ -4208,7 +4231,8 @@ async def _submit_validated_slurm_stage(
                 raise ValueError("replacement instruction does not belong to this Run")
         if (previous_state not in _SLURM_TERMINAL_STATES
             or (previous_state == "COMPLETED" and not contract.restart_instruction_id and not measurement_restart
-                and not (ticket.agent_id == "train" and previous_meta.get("training_completion_repair")))):
+                and not (ticket.agent_id == "train" and (previous_meta.get("training_completion_repair")
+                    or checkpoint_resume)))):
             raise ValueError("Slurm replacement requires the prior workload to be terminal")
         if int(previous_meta.get("execution_attempt") or 1) + 1 != contract.attempt:
             raise ValueError("the Slurm retry attempt is not consecutive")
@@ -4234,7 +4258,7 @@ async def _submit_validated_slurm_stage(
         if (
             previous_implementation_sha256
             and previous_implementation_sha256 == implementation_sha256
-            and not measurement_restart
+            and not measurement_restart and not checkpoint_resume
         ):
             raise ValueError(
                 "a failed Slurm job may be re-executed only after its generated "
@@ -4579,6 +4603,11 @@ async def run_ticket(
         await session.commit()
         return tk
     activation_payload = dict(activation_payload or {})
+    if tk.agent_id == "train":
+        checkpoints = [stage for stage in (run.lifecycle or {}).get("adaptive_checkpoints", {}).values()
+                       if stage["request"]["ticket_id"] == tk.id]
+        if any(not stage.get("resume_queued") for stage in checkpoints):
+            return tk  # Validation owns execution; stale Train wakes cannot collect/resume it.
     # Activation-local control, never an Agent-authored Ticket payload field.
     tk._restart_instruction_id = (
         str(activation_payload.get("run_instruction_id") or "")
@@ -4891,6 +4920,8 @@ async def run_ticket(
         # This tag lets the Run Timeline omit a steering-only activation while
         # retaining the heartbeat as a complete audit record.
         hb.activation_phase = "instruction"
+    elif tk.agent_id == "train" and activation_payload.get("adaptive_resume_request_id"):
+        hb.activation_phase = "continue"
     elif status_at_pickup == "repairing":
         hb.activation_phase = "repair"
     elif isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled:
@@ -7180,6 +7211,9 @@ async def run_ticket(
             except Exception as e:  # noqa: BLE001
                 _warn("scoping_settlement", e)
             return tk
+        from zevo.engine.run.adaptive_training import is_checkpoint_stage
+        if is_checkpoint_stage(tk):
+            return tk
         from zevo.engine.run.remeasurement import intercept_completion
         if await intercept_completion(session, tk):
             return tk
@@ -7499,6 +7533,7 @@ async def _spawn_validation_eval(
             Ticket.run_id == run.id,
             Ticket.lane == "optimization",
             Ticket.agent_id == "evaluation",
+            ~Ticket.id.startswith("mid-eval-"), ~Ticket.id.startswith("mid-infer-"),
             Ticket.iteration == int(source.iteration or 0),
         )
     )).scalars().all()
@@ -7775,6 +7810,7 @@ async def _spawn_holdout_eval(
             Ticket.run_id == run.id,
             Ticket.lane == "held_out_test",
             Ticket.agent_id == "evaluation",
+            ~Ticket.id.startswith("mid-eval-"), ~Ticket.id.startswith("mid-infer-"),
         )
     )).scalars().all()
     existing = next((
@@ -8373,6 +8409,9 @@ async def _advance_measurements(
     result: BaseModel | None = None,
 ) -> None:
     """Record what this ticket measured, and move the held-out lane one hop."""
+    from zevo.engine.run.adaptive_training import is_checkpoint_stage
+    if is_checkpoint_stage(tk):
+        return
     from zevo.db import Run as _Run
 
     # Validation Evaluation, held-out Evaluation, and the Orchestrator Journal
@@ -8405,6 +8444,7 @@ async def _advance_measurements(
                 select(Ticket).where(
                     Ticket.run_id == run.id,
                     Ticket.agent_id == "inference",
+                    ~Ticket.id.startswith("mid-infer-"),
                     Ticket.lane == "optimization",
                     Ticket.iteration == int(tk.iteration or 0),
                     Ticket.status.in_(("succeeded", "degraded")),
@@ -8536,6 +8576,7 @@ async def _has_deferred_evaluation(session: AsyncSession, run_id: str) -> bool:
             Ticket.run_id == run_id,
             Ticket.lane == "optimization",
             Ticket.agent_id == "evaluation",
+            ~Ticket.id.startswith("mid-eval-"), ~Ticket.id.startswith("mid-infer-"),
             Ticket.supervisor_wake_deferred.is_(True),
         ).limit(1)
     )).scalar_one_or_none()
@@ -8550,6 +8591,7 @@ async def _clear_deferred_evaluations(
             Ticket.run_id == run_id,
             Ticket.lane == "optimization",
             Ticket.agent_id == "evaluation",
+            ~Ticket.id.startswith("mid-eval-"), ~Ticket.id.startswith("mid-infer-"),
             Ticket.supervisor_wake_deferred.is_(True),
         )
     )).scalars().all()
@@ -8575,6 +8617,7 @@ async def _release_deferred_wake(session: AsyncSession, run_id: str) -> None:
             Ticket.run_id == run_id,
             Ticket.lane == "optimization",
             Ticket.agent_id == "evaluation",
+            ~Ticket.id.startswith("mid-eval-"), ~Ticket.id.startswith("mid-infer-"),
         ).order_by(Ticket.created_at.desc())
     )).scalars().all()
     held = next((t for t in rows if t.supervisor_wake_deferred), None)
@@ -8667,6 +8710,9 @@ async def _release_emitted_child(
 
 async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
     """Wake the supervisor only when the completed DAG frontier is settled."""
+    from zevo.engine.run.adaptive_training import is_checkpoint_stage
+    if is_checkpoint_stage(child):
+        return
     from zevo.db import Run
     from zevo.engine.run.wakeup import queue_wakeup
     run = (await session.execute(select(Run).where(Run.id == child.run_id))).scalar_one_or_none()

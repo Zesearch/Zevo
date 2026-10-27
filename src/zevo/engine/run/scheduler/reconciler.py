@@ -1076,6 +1076,19 @@ async def _reconcile_slurm_stage_jobs(
                 meta.get("scheduler_reason") or f"Slurm job {state.lower()}"
             )[:2000]
             meta["monitor_terminal"] = True
+            if state == "COMPLETED" and not meta.get("superseded_by_instruction_id"):
+                from zevo.engine.run.adaptive_training import handle_checkpoint_yield
+                try:
+                    if await handle_checkpoint_yield(session, run, ticket, row, meta):
+                        continue
+                except (ValueError, OSError) as exc:
+                    # Failed verification must never fall through to final-model
+                    # collection or stop monitoring unrelated Runs.
+                    meta["checkpoint_handoff_error"] = str(exc)[:1000]
+                    row.meta = meta
+                    ticket.summary = "Checkpoint handoff verification pending"
+                    log.warning("checkpoint handoff for %s: %s", ticket.id, exc)
+                    continue
             can_queue_collect = (
                 bool(meta.get("submission_committed"))
                 and not meta.get("superseded_by_instruction_id")
@@ -1205,6 +1218,9 @@ async def _sweep_stuck_tickets(
             ) not in _SLURM_TERMINAL_STATES
         ), None)
         if live_stage is not None:
+            continue
+        if stage_rows and (stage_rows[0].meta or {}).get("checkpoint_yield") and not (stage_rows[0].meta or {}).get("checkpoint_resume"):
+            # Independent validation tickets own progress while Train is yielded.
             continue
 
         latest_hb = (await session.execute(

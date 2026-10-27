@@ -15,6 +15,7 @@ import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom"
 import useSWR from "swr";
 import { StopCircle, ChevronRight, ChevronDown, Clock, ListChecks, Package, ArrowLeft, Layers3, ScrollText } from "lucide-react";
 import { InputChangesNotice } from "../components/InputChangesNotice";
+import { MidTrainingValidationPanel } from "../components/MidTrainingValidationPanel";
 import { TrainingMonitor } from "../components/TrainingMonitor";
 import { EvaluationProgress, evaluationAttemptLabel } from "../components/EvaluationProgress";
 import { RunInstructionPanel } from "../components/RunInstructionPanel";
@@ -338,7 +339,7 @@ function groupByIteration(tickets: TLTicket[]): StageGroup[] {
   const groups: StageGroup[] = [];
   const byKey = new Map<string, StageGroup>();
   for (const t of sorted) {
-    if (agentIdOf(t) === "orchestrator") continue;
+    if (agentIdOf(t) === "orchestrator" || t.mid_training_parent) continue;
     const gi = info.get(t.id);
     if (!gi) continue;
     let g = byKey.get(gi.key);
@@ -579,8 +580,8 @@ function PipelineTimeline({
     return (lastStage && info.get(lastStage.id)?.key) || groups.at(-1)?.key || "baseline";
   })();
   const allTickets = useMemo(
-    () => groups.flatMap((g) => [...g.tickets, ...g.mirror]),
-    [groups],
+    () => [...groups.flatMap((g) => [...g.tickets, ...g.mirror]), ...run.tickets.filter((t) => t.mid_training_parent)],
+    [groups, run.tickets],
   );
   const pausedTicketIds = useMemo(() => {
     const blocking = activeInstructions.filter((i) => instructionBlocks(i.status));
@@ -842,7 +843,8 @@ function PipelineTimeline({
                     const checkpoints = midTrainingWakes.filter((heartbeat) => heartbeat.mid_training?.train_ticket_id === t.id);
                     if (t.mid_training_enabled || checkpoints.length) {
                       rows.push(<MidTrainingTimelineBranch key={`mid-training-${t.id}`} ticketId={t.id}
-                        supervisorId={supervisorId} activations={checkpoints} selectedId={selectedId} onSelect={setSel}
+                        supervisorId={supervisorId} inferences={run.tickets.filter((item) => item.mid_training_parent === t.id && item.agent_id === "inference")}
+                        evaluations={run.tickets.filter((item) => item.mid_training_parent === t.id && item.agent_id === "evaluation")} activations={checkpoints} selectedId={selectedId} onSelect={setSel}
                         paused={pausedTicketIds.has(t.id) || needsInstructionInput} />);
                     }
                   });
@@ -971,6 +973,10 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
     refreshInterval: (latest) =>
       latest && ["succeeded", "failed", "cancelled", "skipped", "degraded"].includes(latest.status) ? 0 : 3000,
   });
+  const checkpointParent = (t?.payload.mid_training_checkpoint as { ticket_id?: string } | undefined)?.ticket_id;
+  const { data: checkpointTrain } = useSWR<TicketDetail>(
+    checkpointParent ? `/api/tickets/${checkpointParent}` : null, { refreshInterval: 3000 },
+  );
   const { data: midTrain } = useSWR<TicketDetail>(
     midTrainingTicketId ? `/api/tickets/${midTrainingTicketId}` : null, { refreshInterval: 3000 },
   );
@@ -1157,6 +1163,8 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, showUnrecordedFailur
           {t.agent_id === "evaluation" && (
             <EvaluationProgress events={t.execution_events} heartbeat={picked} activations={chronological} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
           )}
+          {checkpointTrain && <MidTrainingValidationPanel data={checkpointTrain.mid_training_validation}
+            events={checkpointTrain.execution_events} activity={null} showExecutionProgress={false} />}
           {activeResourceRequest && (
             <ResourceRequestStatus instance={activeResourceRequest} />
           )}

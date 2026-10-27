@@ -54,73 +54,75 @@ def test_weights_only_checkpoint_is_not_resumable(helper, tmp_path):
 
 
 def test_live_decisions_stop_and_keep_best_checkpoint(helper, tmp_path, monkeypatch):
-    contract = {"first_validation_fraction": 0.2, "split": "validation", "direction": "max", "members": [{"name": "math", "files": {}}]}
-    contract_path = tmp_path / "contract.json"
-    contract_path.write_text(json.dumps(contract))
-    digest = hashlib.sha256(contract_path.read_bytes()).hexdigest()
-    root = tmp_path / "train-1"
-    calls = []
-    scores = {20: .6, 40: .59, 60: .58}
-    def command(argv, *, env, check):
-        step = int(env["ZEVO_ADAPTIVE_TARGET_STEP"])
-        calls.append((argv[0], step, env["ZEVO_ADAPTIVE_RESUME_CHECKPOINT"]))
-        if argv == ["train"]:
-            write_checkpoint(Path(env["ZEVO_ADAPTIVE_CHECKPOINT"]), step, 100)
-        else:
-            Path(env["ZEVO_ADAPTIVE_METRICS_PATH"]).write_text(json.dumps({
-                "split": "validation", "contract_sha256": digest, "step": step, "metrics": {"math": scores[step]}}))
-    def decide(_):
-        ledger = json.loads((root / "adaptive-training.json").read_text())
-        request = ledger["pending"]
-        decision = {"request_id": request["request_id"], "reason": "repeated plateau",
-                    "action": "stop" if request["step"] == 60 else "continue",
-                    "next_step": None if request["step"] == 60 else request["step"] + 20}
-        helper.atomic_json(request["decision_path"], decision)
-    monkeypatch.setattr(helper.subprocess, "run", command)
-    monkeypatch.setattr(helper, "score_validation_predictions", lambda *a, **kw: {
-        "split": "validation", "contract_sha256": digest, "step": kw["step"],
-        "metrics": {"math": scores[kw["step"]]}})
-    monkeypatch.setattr(helper.time, "sleep", decide)
-    arguments = dict(ticket_id="train-1", contract_path=contract_path, contract_sha256=digest,
-                     planned_steps=100, first_step=20, train_command=["train"], evaluate_command=["eval"], work_dir=root)
-    report = helper.run_adaptive_training(**arguments)
-    assert report["reason"] == "adaptive_early_stopping"
-    assert report["selected_step"] == 20
-    assert report["completed_steps"] == 60
-    assert [row[:2] for row in calls] == [("train", 20), ("eval", 20), ("train", 40), ("eval", 40), ("train", 60), ("eval", 60)]
-    assert calls[2][2] == str(root / "checkpoint-20")
-    assert helper.run_adaptive_training(**arguments) == report
-    assert len(calls) == 6  # Completed invocation is idempotent.
-
-
-def test_evaluation_failure_preserves_segment_without_negative_score(helper, tmp_path, monkeypatch):
-    contract = {"first_validation_fraction": 0.99, "split": "validation", "direction": "max", "members": [{"name": "math", "files": {}}]}
+    contract = {"first_validation_fraction": .2, "split": "validation", "direction": "max",
+                "members": [{"name": "math", "files": {}}]}
     path = tmp_path / "contract.json"
     path.write_text(json.dumps(contract))
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     root = tmp_path / "train-1"
-    trained = []
-    failed = [False]
+    calls = []
     def command(argv, *, env, check):
-        if argv == ["train"]:
-            trained.append(20)
-            write_checkpoint(Path(env["ZEVO_ADAPTIVE_CHECKPOINT"]), 20, 20)
-        elif not failed[0]:
-            failed[0] = True
-            raise RuntimeError("GPU unavailable")
-        else:
-            Path(env["ZEVO_ADAPTIVE_METRICS_PATH"]).write_text(json.dumps({
-                "split": "validation", "contract_sha256": digest, "step": 20, "metrics": {"math": .5}}))
+        assert argv == ["train"]  # Train never invokes inference or scoring.
+        step = int(env["ZEVO_ADAPTIVE_TARGET_STEP"])
+        calls.append((step, env["ZEVO_ADAPTIVE_RESUME_CHECKPOINT"]))
+        write_checkpoint(Path(env["ZEVO_ADAPTIVE_CHECKPOINT"]), step, 100)
     monkeypatch.setattr(helper.subprocess, "run", command)
-    monkeypatch.setattr(helper, "score_validation_predictions", lambda *a, **kw: {
-        "split": "validation", "contract_sha256": digest, "step": kw["step"], "metrics": {"math": .5}})
-    args = dict(ticket_id="train-1", contract_path=path, contract_sha256=digest, planned_steps=20,
-                first_step=20, train_command=["train"], evaluate_command=["eval"], work_dir=root)
-    with pytest.raises(RuntimeError, match="GPU unavailable"):
-        helper.run_adaptive_training(**args)
-    assert json.loads((root / "adaptive-training.json").read_text())["measurements"] == []
+    args = dict(ticket_id="train-1", contract_path=path, contract_sha256=digest,
+                planned_steps=100, first_step=20, train_command=["train"], work_dir=root)
+    for step, score in [(20, .6), (40, .59), (60, .58)]:
+        with pytest.raises(SystemExit) as exited:
+            helper.run_adaptive_training(**args)
+        assert exited.value.code == 0
+        pending = json.loads((root / "adaptive-training.json").read_text())["pending_checkpoint"]
+        assert pending["step"] == step
+        # A restart while inference/evaluation is unfinished re-yields the same
+        # request; it must not train again or manufacture a negative score.
+        count = len(calls)
+        with pytest.raises(SystemExit):
+            helper.run_adaptive_training(**args)
+        assert len(calls) == count
+        assert json.loads((root / "adaptive-training.json").read_text())["pending_checkpoint"] == pending
+        helper.atomic_json(pending["metrics_path"], {"request_id": pending["request_id"],
+            "split": "validation", "contract_sha256": digest, "step": step, "metrics": {"math": score}})
+        # Even with a score, no new optimization before the decision arrives.
+        with pytest.raises(SystemExit):
+            helper.run_adaptive_training(**args)
+        assert len(calls) == count
+        helper.atomic_json(pending["decision_path"], {"request_id": pending["request_id"],
+            "reason": "repeated plateau", "action": "stop" if step == 60 else "continue",
+            "next_step": None if step == 60 else step + 20})
+    report = helper.run_adaptive_training(**args)
+    assert report["reason"] == "adaptive_early_stopping"
+    assert report["selected_step"] == 20 and report["completed_steps"] == 60
+    assert calls == [(20, ""), (40, str(root / "checkpoint-20")), (60, str(root / "checkpoint-40"))]
+    assert helper.run_adaptive_training(**args) == report
+    assert len(calls) == 3
+
+
+def test_final_checkpoint_waits_for_console_scoring_without_retraining(helper, tmp_path, monkeypatch):
+    contract = {"first_validation_fraction": .99, "split": "validation", "direction": "max",
+                "members": [{"name": "math", "files": {}}]}
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(contract))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    root = tmp_path / "train-1"
+    calls = []
+    def command(argv, *, env, check):
+        calls.append(argv)
+        write_checkpoint(Path(env["ZEVO_ADAPTIVE_CHECKPOINT"]), 20, 20)
+    monkeypatch.setattr(helper.subprocess, "run", command)
+    args = dict(ticket_id="train-1", contract_path=path, contract_sha256=digest,
+                planned_steps=20, first_step=20, train_command=["train"], work_dir=root)
+    for _ in range(2):
+        with pytest.raises(SystemExit):
+            helper.run_adaptive_training(**args)
+    ledger = json.loads((root / "adaptive-training.json").read_text())
+    assert ledger["measurements"] == [] and not ledger.get("complete")
+    pending = ledger["pending_checkpoint"]
+    helper.atomic_json(pending["metrics_path"], {"request_id": pending["request_id"],
+        "split": "validation", "contract_sha256": digest, "step": 20, "metrics": {"math": .5}})
     assert helper.run_adaptive_training(**args)["reason"] == "plan_completed"
-    assert trained == [20]
+    assert calls == [["train"]]
 
 
 def test_adaptive_completion_validates_retained_best(helper, tmp_path, monkeypatch):
@@ -159,7 +161,8 @@ async def test_progress_wakes_orchestrator_and_decision_is_delivered(tmp_path, m
     async with Session() as db:
         db.add(Run(id="r", task_name="t", metric="accuracy", status="running", supervisor_ticket_id="orch-1",
                    lifecycle={"adaptive_mid_training_evaluation": True,
-                              "adaptive_validation_contracts": {"train-1": "frozen"}}))
+                              "adaptive_validation_contracts": {"train-1": "frozen"},
+                              "adaptive_training_requests": {request_id: {**request, "status": "pending"}}}))
         db.add_all([Ticket(id="train-1", run_id="r", agent_id="train", status="waiting_external", iteration=1),
                     Ticket(id="orch-1", run_id="r", agent_id="orchestrator", status="succeeded")])
         db.add(HeartbeatRun(id="hb", ticket_id="train-1", agent_id="train", driver="stub", model="stub"))
@@ -168,14 +171,12 @@ async def test_progress_wakes_orchestrator_and_decision_is_delivered(tmp_path, m
                               event_type="progress", phase="adaptive_validation", current_step=20,
                               extras={"adaptive_request": request}))
         await db.commit()
-        assert await reconcile_adaptive_training(db) == 1
+        # Only backend-created, scored requests can be decided; raw telemetry
+        # no longer starts an Orchestrator activation.
         assert await reconcile_adaptive_training(db) == 0
-        wakes = (await db.execute(select(AgentWakeupRequest))).scalars().all()
-        assert len(wakes) == 1
-        assert wakes[0].ticket_id == "orch-1"
-        assert wakes[0].payload["adaptive_training_request_id"] == request_id
+        assert not (await db.execute(select(AgentWakeupRequest))).scalars().all()
         from zevo.engine.run.adaptive_training import activation_validation_context
-        context = activation_validation_context((await db.get(Run, "r")).lifecycle, wakes[0].reason, wakes[0].payload)
+        context = activation_validation_context((await db.get(Run, "r")).lifecycle, "", {"adaptive_training_request_id": request_id})
         from datetime import datetime, timezone
         failed = HeartbeatRun(id="failed-orch", ticket_id="orch-1", agent_id="orchestrator", driver="stub", model="stub",
                               finished_at=datetime.now(timezone.utc), exit_code=1, resolved_config={"mid_training": context})
@@ -234,29 +235,6 @@ def test_request_rejects_other_ticket_paths_and_test_lane():
     ticket.lane = "held_out_test"
     with pytest.raises(ValueError, match="optimization"):
         validate_request(request, ticket)
-
-
-def test_system_scores_predictions_with_frozen_builtin_and_checks_alignment(helper, tmp_path):
-    import shutil
-    source = ROOT / "src/zevo/engine/method/eval_metrics.py"
-    shutil.copyfile(source, tmp_path / "metrics.py")
-    (tmp_path / "gold.csv").write_text("id,answer\n1,A\n2,B\n")
-    (tmp_path / "sample.csv").write_text("id,prediction\n")
-    prediction_dir = tmp_path / "predictions"
-    (prediction_dir / "000").mkdir(parents=True)
-    prediction = prediction_dir / "000/predictions.csv"
-    prediction.write_text("id,prediction\n1,A\n2,C\n")
-    contract = {"split": "validation", "direction": "max",
-                "helpers": {"metrics": {"path": "metrics.py", "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}},
-                "members": [{"name": "math", "metric": "accuracy", "answer_fields": ["answer"],
-                             "files": {"labels": {"path": "gold.csv"}, "sample_submission": {"path": "sample.csv"}}}]}
-    path = tmp_path / "contract.json"
-    path.write_text(json.dumps(contract))
-    result = helper.score_validation_predictions(path, predictions_dir=prediction_dir, step=20, contract_sha256="frozen")
-    assert result["metrics"] == {"math": .5}
-    prediction.write_text("id,prediction\n2,B\n1,A\n")
-    with pytest.raises(ValueError, match="identity"):
-        helper.score_validation_predictions(path, predictions_dir=prediction_dir, step=20, contract_sha256="frozen")
 
 
 @pytest.mark.asyncio
@@ -335,7 +313,7 @@ def test_first_boundary_must_be_supplied_by_orchestrator(helper, tmp_path, fract
         helper.run_adaptive_training(ticket_id="train-1", contract_path=path,
             contract_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
             planned_steps=100, first_step=20, train_command=["must-not-run"],
-            evaluate_command=["must-not-run"], work_dir=tmp_path / "train-1")
+            work_dir=tmp_path / "train-1")
 
 
 def test_train_cannot_override_first_boundary(helper, tmp_path):
@@ -347,7 +325,7 @@ def test_train_cannot_override_first_boundary(helper, tmp_path):
         helper.run_adaptive_training(ticket_id="train-1", contract_path=path,
             contract_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
             planned_steps=101, first_step=20, train_command=["must-not-run"],
-            evaluate_command=["must-not-run"], work_dir=tmp_path / "train-1")
+            work_dir=tmp_path / "train-1")
 
 
 def test_pipeline_requires_initial_plan_only_when_enabled():
