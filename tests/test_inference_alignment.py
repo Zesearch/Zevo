@@ -106,3 +106,35 @@ async def test_input_builder_aligns_primary_and_suite_before_slurm(configs, monk
     assert inp.inference_config_path != str(source)
     assert inference_core(load_inference_config(inp.suite_members[0].inference_config_path)) == shared
     assert inp.configuration_mode == 'reuse'
+
+
+@pytest.mark.asyncio
+async def test_first_heldout_keeps_test_selection_and_calibration_with_validation_script(tmp_path, monkeypatch):
+    from zevo.engine.run import runner
+    from zevo.contracts.infrastructure import SlurmStageJobContract
+    from zevo.db import Ticket, Run
+    config_path = _write_inference_config(tmp_path)
+    config = load_inference_config(config_path)
+    predict = tmp_path / 'validation-predict.py'
+    predict.write_text('print("verified implementation")')
+    monkeypatch.setattr(runner, '_build_validation_suite_members', AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, '_build_holdout_suite_members', AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, '_latest_slurm_resource_request', AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, '_slurm_stage_job_contract', AsyncMock(return_value=SlurmStageJobContract()))
+    run = Run(id='run', metric='accuracy', holdout={})
+    ticket = Ticket(id='heldout-baseline', run_id=run.id, agent_id='inference', lane='held_out_test', iteration=0)
+    inp = await runner._build_inference_input(ticket,
+        {'operation':'run_inference', 'base_model':config.base_model,
+         'scoring_set':'/test/questions.jsonl', 'sample_submission':'/test/submission.csv',
+         'model_source':'base_model'},
+        {'device_info':{'path':'/device.json'},
+         'shared_inference_config':{'path':str(config_path)},
+         'predict_script':{'path':str(predict)},
+         'inference_data_profile':{'path':'/test/profile.json'}},
+        str(tmp_path / 'test-work'), 'vllm', run, SimpleNamespace())
+    assert inp.reusable_predict_script_path == str(predict)
+    assert inp.shared_inference_core == inference_core(config)
+    assert inp.configuration_mode == 'select' and inp.inference_config_path == ''
+    assert inp.length_calibration_helper_path
+    assert inp.scoring_set == '/test/questions.jsonl'
+    assert inp.inference_data_profile_path == '/test/profile.json'

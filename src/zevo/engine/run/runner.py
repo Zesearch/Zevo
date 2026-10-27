@@ -2790,11 +2790,9 @@ def _slurm_stage_result_problem(
         except (OSError, ValueError) as exc:
             return str(exc)
         replay = inp.slurm_launch_reuse
-        if replay.get("mode") == "unavailable":
-            return str(replay["reason"])
-        expected = replay.get("expected_sha256")
+        expected = replay.get("expected_sha256") if contract.phase == "collect" else None
         if expected and hashlib.sha256(body.encode()).hexdigest() != expected:
-            return "reused Slurm launch changed outside engine-owned path/resource substitutions"
+            return "executed Slurm launch changed during collection"
     required = (
         "#SBATCH", contract.job_name, executable_name,
         contract.status_path, contract.lifecycle_prologue,
@@ -4309,7 +4307,8 @@ async def _submit_validated_slurm_stage(
     if isinstance(inp, InferenceTaskInput):
         from zevo.engine.run.inference_launch import snapshot, verify_frozen_inputs
         verify_frozen_inputs(inp.frozen_reuse_artifacts)
-        expected_launch = inp.slurm_launch_reuse.get("expected_sha256")
+        expected_launch = (inp.slurm_launch_reuse.get("expected_sha256")
+                           if contract.phase == "collect" else None)
         if expected_launch and expected_launch != local_script_sha256:
             raise ValueError("reused Slurm launch changed before submission")
         launch_snapshot = snapshot(inp, Path(contract.script_path).read_text())
@@ -7820,7 +7819,10 @@ async def _spawn_holdout_infer(
     inputs = dict(source.inputs or {})
     inputs.pop("inference_config", None)
     inputs["shared_inference_config"] = _artifact_binding("inference_config", source)
-    inputs.pop("predict_script", None)
+    # Selecting Test-specific mappings/budgets does not require regenerating
+    # the successful Validation implementation. Checkpoint measurements below
+    # can override this with their own held-out baseline implementation.
+    inputs["predict_script"] = _artifact_binding("script", source)
     inputs.pop("inference_data_profile", None)
     data_rows = (await session.execute(
         select(Ticket).where(
