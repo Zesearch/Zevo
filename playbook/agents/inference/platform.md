@@ -22,9 +22,9 @@
    `option_scoring_helper_path` helper beside `predict.py` to emit per-option
    log-likelihoods (see the option-scoring section). Reuse
    `reusable_predict_script_path` when
-   it reads the supplied YAML and model artifact generically. Otherwise
-   generate `predict.py` from the YAML and state
-   the concrete incompatibility that prevented reuse. Upload required files to
+   useful; otherwise adapt or generate `predict.py` for the supplied YAML and
+   model artifact. The source is optional guidance, not a required code match.
+   Upload required files to
    a ticket-specific remote directory, using the `remote_transfer` helper by
    default or correctly constructed direct SCP when needed. Run directly for
    cloud/instance or use the finite cluster job below.
@@ -697,18 +697,38 @@ the engine checks all members before GPU submission, not just the primary.
 
 ### Reusing a successful Slurm launch
 
-For `configuration_mode=reuse`, inspect the engine-owned `slurm_launch_reuse`.
-When its mode is `reuse`, `slurm_job.script_path` already contains the successful
-launch with this execution's model, paths, lifecycle and resource identifiers.
-Do not rewrite it or add container/environment directives. Upload those exact
-bytes, stage this ticket's inputs and suite manifest at its referenced paths,
-and report the exact absolute engine-assigned script path. Reuse mode never
-authorizes modifying frozen YAML files, even in place. The engine pins their
-hashes before the activation and verifies them before submission/publication.
+Inspect the engine-owned `slurm_launch_reuse` independently of
+`configuration_mode`. Selecting a new benchmark configuration does not imply
+rebuilding a working execution environment. In particular, the first held-out
+baseline inherits Validation's verified predict script and launch while selecting
+its own Test input mappings and calibrated length budgets under the shared core.
+`slurm_launch_reuse` and `reusable_predict_script_path` are references, not a
+requirement to reproduce a script. Prefer the proven environment activation,
+container setup, CUDA/dependency paths and launch approach when useful. Adapt
+model/checkpoint bindings, benchmark membership, input/output paths and config
+hash guards to the current work order. You may modify or regenerate the scripts
+when needed without waiting for a failed GPU job or a special repair mode.
+Source and seed hashes record provenance; they do not lock the new implementation.
+Do not overwrite historical source artifacts: work in this ticket's directory.
 
-Only mode `repair` authorizes launch changes after a real failed workload or an
-engine-recorded template incompatibility; explain
-the concrete failure and preserve the frozen measurement inputs. A successful
-repair becomes a new immutable launch snapshot. Mode `unavailable` means there
-is no verified compatible launch to reuse: report the missing evidence rather
-than silently generating a replacement.
+In mode `unavailable`, no verified launch reference was found. Prepare an
+implementation from the current task and platform instructions; missing or
+incompatible reference code alone is not a reason to fail. A supplied predict
+script is likewise optional implementation guidance. Stage all required helpers,
+suite manifests, questions and configuration files for the current task.
+
+Configuration requirements remain independent: execute the supplied frozen YAML,
+or select a first baseline under the shared core as directed. Do not change
+prompts, sampling, stops, seeds or length budgets without task authorization.
+Never carry Validation questions or old benchmark membership into a Test job.
+
+For the same execution attempt and measurement revision, the engine preserves the
+local draft across activations instead of replacing repairs with old templates.
+A new execution/measurement contract gets a fresh draft, preferentially informed
+by this ticket's latest successful GPU execution, even when the ticket is running
+again for remeasurement.
+
+Submission still validates script structure, lifecycle/resource requirements,
+configuration consistency and the uploaded file hash, then records the exact
+execution snapshot. In `collect` mode preserve that snapshot so reported results
+refer to the workload that actually ran, not a subsequently edited script.

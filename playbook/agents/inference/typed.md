@@ -4,7 +4,7 @@
 |---|---|
 | `operation` | Always `run_inference`. |
 | `benchmark_id` | Engine-assigned identity of the primary benchmark. Copy it unchanged into the suite manifest and progress markers; never derive it from the display name. |
-| `configuration_mode` | `select` only for baseline Validation; otherwise `reuse`. |
+| `configuration_mode` | `select` for a benchmark's first baseline configuration, including held-out Test under the shared Validation core; `reuse` for its frozen configuration. Independent of execution-script reuse. |
 | `iteration` | The initial model Baseline is 0. A later Zevo-selected model may establish its Baseline at the next unused Train iteration; trained checkpoints are 1..N. |
 | `model_source` | `base_model` or `checkpoint`. |
 | `base_model` | Exact baseline model identity. |
@@ -21,7 +21,7 @@
 | `remote_env_helper_path` | System-owned builder of the pinned `infer` environment on a direct host. Run `bash ~/zevo/env/remote_env.sh ensure infer` over SSH (upload this copy there if absent) and use the interpreter it prints. Never build the environment yourself. Empty for cluster. |
 | `memory_helper_path` | System-owned helper used to derive the concrete GPU fraction and the matching free-memory preflight threshold. |
 | `predictions_validation_command` | Exact side-effect-free output validator with assigned questions/sample paths already inserted. Replace only `<absolute-predictions-csv-path>` after copy-back. |
-| `reusable_predict_script_path` | Prior verified `predict.py`; reuse when compatible, otherwise document why regeneration was required. |
+| `reusable_predict_script_path` | Optional prior `predict.py` reference; reuse, adapt or regenerate as needed for the current task. |
 | `configuration_suggestions` | Baseline-only high-level advice; reuse mode rejects new suggestions. |
 | `configuration_pins` | Binding user values. |
 | `device_info_path` | Cloud/instance device contract or cluster access route. |

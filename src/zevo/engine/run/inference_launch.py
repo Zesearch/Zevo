@@ -1,12 +1,12 @@
-"""Replay successful Inference Slurm launches without asking an agent to rewrite them.
+"""Seed inference launches from successful executions, preserving repaired drafts.
 
-The snapshot belongs to a committed workload, not the latest mutable script on
-disk. Rebinding is deliberately narrow: paths, model argument, ticket identity,
- lifecycle markers and scheduler resources. Everything else is byte-preserved.
+Configuration inputs stay immutable. Launch scripts may adapt the current work
+order; committed execution snapshots remain immutable evidence.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shlex
 from pathlib import Path
@@ -19,7 +19,7 @@ def digest(path):
 
 
 def frozen_inputs(inp):
-    paths = [inp.inference_config_path, inp.reusable_predict_script_path,
+    paths = [inp.inference_config_path,
              *[m.inference_config_path for m in inp.suite_members]]
     try:
         return {str(Path(p).resolve()): digest(p) for p in paths if p}
@@ -68,7 +68,7 @@ def _model_argument(body, old, new):
         body, count = re.subn(pattern, lambda m: m[1] + shlex.quote(new), body)
         if count:
             return body
-    raise ValueError("successful Slurm script has no safely rebindable --model argument; explicit launch repair required")
+    raise ValueError("successful Slurm script has no safely rebindable --model argument; task-specific launch adaptation required")
 
 
 def render(source, inp):
@@ -180,9 +180,31 @@ async def verified_existing_launch(session, row, owner):
     return None
 
 
+def launch_target_signature(inp, pins):
+    """Identify the work order a mutable launch draft was prepared for."""
+    job = inp.slurm_job
+    target = {
+        "model": inp.checkpoint_path or inp.base_model,
+        "configuration_mode": inp.configuration_mode,
+        "inputs": pins,
+        "questions": inp.scoring_set,
+        "sample_submission": inp.sample_submission,
+        "members": [{key: getattr(member, key, "") for key in (
+            "benchmark_id", "name", "scoring_set", "sample_submission",
+            "inference_config_path", "configuration_mode", "work_dir",
+        )} for member in inp.suite_members],
+        "job": {key: getattr(job, key, "") for key in (
+            "attempt", "script_path", "remote_script_path", "remote_work_dir",
+            "job_name", "nodes", "num_gpus", "gpus_per_node", "stdout_path",
+            "stderr_path", "status_path", "runtime_prologue", "lifecycle_prologue",
+        )},
+    }
+    return hashlib.sha256(json.dumps(target, sort_keys=True).encode()).hexdigest()
+
+
 async def prepare_launch(session, run, ticket, inp):
     """Pin reuse inputs for all providers; issue Slurm replay when applicable."""
-    if inp.configuration_mode != "reuse":
+    if inp.configuration_mode != "reuse" and not inp.reusable_predict_script_path:
         return inp
     pins = frozen_inputs(inp)
     from zevo.db import Run
@@ -195,7 +217,10 @@ async def prepare_launch(session, run, ticket, inp):
     all_pins = dict((run.lifecycle or {}).get("inference_reuse_artifacts", {}))
     ticket_pins = dict(all_pins.get(ticket.id, {}))
     if revision in ticket_pins:
-        original = ticket_pins[revision]
+        original = dict(ticket_pins[revision])
+        # Older activations pinned the advisory predict source alongside configs.
+        if inp.reusable_predict_script_path:
+            original.pop(str(Path(inp.reusable_predict_script_path).resolve()), None)
         if set(original) != set(pins):
             raise ValueError("reused Inference bindings changed without a measurement revision")
         verify_frozen_inputs(original)
@@ -209,24 +234,34 @@ async def prepare_launch(session, run, ticket, inp):
     if not contract.enabled:
         return inp.model_copy(update={"frozen_reuse_artifacts": pins})
     from zevo.db import InfraInstance, Ticket
-    # A failed actual workload can authorize a changed launch. A typo in a
-    # collect Result alone cannot turn immutable replay into free-form codegen.
+    # Launch adaptation is independent of config reuse. Real GPU failures also
+    # authorize repair of the environment; collect must preserve executed bytes.
     prior = contract.previous_execution or {}
     repairing = contract.phase == "submit" and contract.attempt > 1 and prior.get("scheduler_state") in {
         "FAILED", "OUT_OF_MEMORY", "TIMEOUT", "NODE_FAIL", "BOOT_FAIL", "CANCELLED", "PREEMPTED"}
     if contract.phase == "collect":
         row = await session.get(InfraInstance, contract.bookkeeping_row_id)
-        source = (row.meta or {}).get("inference_launch") if row else None
         expected = (row.meta or {}).get("script_sha256", "") if row else ""
-        pins = (row.meta or {}).get("frozen_reuse_artifacts", pins) if row else pins
+        pins = dict((row.meta or {}).get("frozen_reuse_artifacts", pins) if row else pins)
+        if inp.reusable_predict_script_path:
+            pins.pop(str(Path(inp.reusable_predict_script_path).resolve()), None)
         verify_frozen_inputs(pins)
         return inp.model_copy(update={"frozen_reuse_artifacts": pins,
                                       "slurm_launch_reuse": {"mode": "collect", "expected_sha256": expected}})
+    signature = launch_target_signature(inp, pins)
+    drafts = dict((run.lifecycle or {}).get("inference_launch_drafts", {}))
+    ticket_drafts = dict(drafts.get(ticket.id, {}))
+    draft = ticket_drafts.get(revision, {})
+    if draft.get("target_sha256") == signature and Path(contract.script_path).is_file():
+        provenance = dict(draft["provenance"])
+        # A result-schema repair must not overwrite a corrected launcher.
+        return inp.model_copy(update={"frozen_reuse_artifacts": pins,
+                                      "slurm_launch_reuse": provenance})
     rows = (await session.execute(select(InfraInstance, Ticket).join(Ticket, Ticket.id == InfraInstance.ticket_id)
-        .where(InfraInstance.run_id == run.id, Ticket.agent_id == "inference",
-               Ticket.status.in_(("succeeded", "degraded")))
-        .order_by(InfraInstance.created_at.desc()))).all()
-    expected_predict = digest(inp.reusable_predict_script_path) if inp.reusable_predict_script_path else ""
+        .where(InfraInstance.run_id == run.id, Ticket.agent_id == "inference")
+        # A completed execution remains usable when its ticket is running again
+        # for remeasurement. Prefer that ticket's own latest successful launch.
+        .order_by((Ticket.id == ticket.id).desc(), InfraInstance.created_at.desc()))).all()
     for row, owner in rows:
         # Validation may never inherit held-out scripts or paths. Test may use
         # the successful Validation launcher, with its own bound data paths.
@@ -241,31 +276,42 @@ async def prepare_launch(session, run, ticket, inp):
             source = await verified_existing_launch(session, row, owner)
         if not source:
             continue
-        if expected_predict and source.get("predict_sha256") != expected_predict:
-            continue
+        if (not isinstance(source.get("body"), str)
+                or hashlib.sha256(source["body"].encode()).hexdigest() != source.get("sha256")):
+            continue  # Corrupt reference evidence must not block fresh implementation.
         provenance = {"source_ticket_id": owner.id, "source_execution_id": row.id,
                       "source_sha256": source["sha256"], "mode": "repair" if repairing else "reuse"}
+        adapting = not repairing and inp.configuration_mode == "select"
+        if adapting:
+            provenance.update(mode="adapt", reason=(
+                "The target benchmarks require their own input mappings and length calibration. "
+                "Use the successful launch and predict script as references when useful. "
+                "Adapt or regenerate the implementation for this work order; keep its config contract."
+            ))
         source_path = Path(inp.work_dir) / "launch-reuse" / (source["sha256"] + ".sbatch")
         source_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.write_text(source["body"])
         provenance["source_script_path"] = str(source_path.resolve())
-        if not repairing:
-            try:
-                body = render(source, inp)
-            except ValueError as exc:
-                # Unknown shell interpolation cannot be safely rewritten by
-                # the engine. Explicit repair may adapt the launcher while
-                # configuration and source implementation stay pinned.
-                if "safely rebindable" not in str(exc):
-                    raise
-                provenance.update(mode="repair", reason=str(exc))
-            else:
-                Path(contract.script_path).parent.mkdir(parents=True, exist_ok=True)
-                Path(contract.script_path).write_text(body)
-                provenance["expected_sha256"] = digest(contract.script_path)
+        try:
+            body = render(source, inp)
+        except (ValueError, KeyError, TypeError) as exc:
+            # Reference-only: arbitrary shell expressions need not be mechanically
+            # rebindable. The agent can adapt or replace this seed.
+            body = source["body"]
+            provenance["reason"] = (provenance.get("reason", "") + " " + str(exc)).strip()
+        Path(contract.script_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(contract.script_path).write_text(body)
+        provenance["seed_sha256"] = digest(contract.script_path)
+        ticket_drafts[revision] = {"target_sha256": signature, "provenance": provenance}
+        drafts[ticket.id] = ticket_drafts
+        run.lifecycle = {**(run.lifecycle or {}), "inference_launch_drafts": drafts}
+        await session.flush()
         return inp.model_copy(update={"frozen_reuse_artifacts": pins, "slurm_launch_reuse": provenance})
-    # Missing evidence must not silently fall back to regenerating a launch.
-    # Real failed workloads may still enter explicit, audited repair.
+    provenance = {"mode": "unavailable",
+        "reason": "No verified successful Slurm reference is available; prepare a launcher for the current work order"}
+    ticket_drafts[revision] = {"target_sha256": signature, "provenance": provenance}
+    drafts[ticket.id] = ticket_drafts
+    run.lifecycle = {**(run.lifecycle or {}), "inference_launch_drafts": drafts}
+    await session.flush()
     return inp.model_copy(update={"frozen_reuse_artifacts": pins,
-        "slurm_launch_reuse": {"mode": "repair" if repairing else "unavailable",
-            "reason": "No successful compatible Slurm launch snapshot is available"}})
+                                  "slurm_launch_reuse": provenance})

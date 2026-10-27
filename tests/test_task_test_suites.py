@@ -1102,6 +1102,10 @@ async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
         assert ticket.inputs["shared_inference_config"] == {
             "artifact_role": "inference_config", "source_ticket_id": source.id,
         }
+        assert ticket.inputs["predict_script"] == {
+            "artifact_role": "script", "source_ticket_id": source.id,
+        }
+        assert "inference_config" not in ticket.inputs
         members = await _build_holdout_suite_members(
             ticket=ticket,
             payload=dict(ticket.payload or {}),
@@ -1112,6 +1116,7 @@ async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
         assert len(members) == 1
         assert members[0].name == "qa"
         assert members[0].benchmark_id == "test:1"
+        assert members[0].configuration_mode == "select"
         assert members[0].configuration_pins["inference_config"][
             "inference_query"
         ] == next(
