@@ -353,6 +353,58 @@ async def test_retained_allocation_accounting_fallback(monkeypatch, queue, accou
     assert len(calls) == (1 if accounting is None else 2)
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['train', 'inference', 'data'])
+@pytest.mark.parametrize('status', ['running', 'repairing', 'waiting_external'])
+@pytest.mark.parametrize('released', [True, False])
+async def test_retained_allocation_ignores_only_released_resource_claims(monkeypatch, stage, status, released):
+    from datetime import datetime, timezone
+    from zevo.engine.run import remote_jobs
+
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    commands = []
+
+    async def ssh(info, command, **kwargs):
+        commands.append(command)
+        return dict(ok=True, stdout='RUNNING\n' if 'squeue -h' in command else '123\n')
+
+    monkeypatch.setattr(remote_jobs, '_ssh', ssh)
+    try:
+        async with Session() as session:
+            run = Run(id='run', metric='accuracy', gpu_allocation_mode='per_run')
+            previous = Ticket(id='previous', run_id=run.id, agent_id='train', status='succeeded')
+            consumer = Ticket(id='consumer', run_id=run.id, agent_id=stage, status=status)
+            ticket = Ticket(id='next', run_id=run.id, agent_id='inference')
+            owner = InfraInstance(id='owner', run_id=run.id, ticket_id=previous.id,
+                provider='cluster', instance_id='123', gpu_count=4,
+                meta=dict(controller_directory='/controller', nodes=1))
+            claim = InfraInstance(id='claim', run_id=run.id, ticket_id=consumer.id,
+                provider='cluster', instance_id='123', gpu_count=4,
+                released_at=datetime.now(timezone.utc) if released else None,
+                meta=dict(controller_directory='/controller', allocation_owner_row_id=owner.id,
+                          scheduler_state='FAILED' if released else 'RUNNING'))
+            session.add_all([run, previous, consumer, ticket, owner, claim])
+            await session.commit()
+            kwargs = dict(run=run, ticket=ticket,
+                contract=SimpleNamespace(num_gpus=4, nodes=1, remote_script_path='/infer.sh',
+                    remote_work_dir='/remote', stdout_path='/out', stderr_path='/err'),
+                info=SimpleNamespace(cluster=SimpleNamespace(env_setup='')),
+                heartbeat_id='next-hb', sha256='digest')
+            if released:
+                job, submitted = await submit_workload(session, **kwargs)
+                assert job == '123' and submitted['allocation_owner_row_id'] == owner.id
+                assert any('next-hb' in command for command in commands)
+            else:
+                with pytest.raises(ValueError, match='busy with another stage'):
+                    await submit_workload(session, **kwargs)
+                assert not any('next-hb' in command for command in commands)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('scenario', ['yielded', 'running', 'resumed', 'wrong_checkpoint', 'wrong_row', 'unverified', 'other_consumer', 'previous_segment'])
 async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(monkeypatch, scenario):
     from zevo.engine.run import remote_jobs

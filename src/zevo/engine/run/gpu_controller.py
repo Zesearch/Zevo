@@ -301,6 +301,10 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
     active_consumers = list((await session.execute(
         select(InfraInstance).join(Ticket, Ticket.id == InfraInstance.ticket_id).where(
             InfraInstance.run_id == run.id, InfraInstance.provider == "cluster",
+            # A ticket can remain active across repair/collect activations after
+            # its previous workload has been released. Only live resource claims
+            # can block another stage from using the retained allocation.
+            InfraInstance.released_at.is_(None),
             Ticket.id != ticket.id,
             Ticket.status.notin_(["succeeded", "degraded", "failed", "cancelled", "skipped"]),
         ).order_by(InfraInstance.created_at.desc())
