@@ -5,7 +5,7 @@ export function isMidTrainingValidationEvent(event: ExecutionEventDTO): boolean 
   const extras = event.extras || {};
   return !!(extras.benchmark_name || extras.benchmark_id || extras.adaptive_request || extras.adaptive_report)
     || "benchmark_index" in extras || "benchmark_total" in extras
-    || event.phase === "adaptive_validation" || event.phase.startsWith("scoring")
+    || event.phase === "adaptive_checkpoint" || event.phase === "adaptive_validation" || event.phase === "adaptive_evaluation" || event.phase.startsWith("scoring")
     || extras.phase === "model_judge" || extras.phase === "benchmark_complete";
 }
 
@@ -19,6 +19,8 @@ export function trainingActivity(
   const latest = [...events].filter((event) => event.extras?.execution_purpose === "workload")
     .sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
   if (!latest) return null;
+  if (latest.phase === "adaptive_checkpoint") return "Awaiting checkpoint validation";
+  if (latest.phase === "adaptive_evaluation") return "Awaiting checkpoint evaluation";
   if (latest.phase.startsWith("scoring") || latest.extras?.phase === "model_judge"
       || latest.extras?.phase === "benchmark_complete") return "Mid-training Validation · Scoring";
   if (isMidTrainingValidationEvent(latest) && latest.phase.startsWith("generate"))

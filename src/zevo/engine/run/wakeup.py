@@ -76,7 +76,9 @@ async def queue_wakeup(
         ).scalars().first()
         if existing is not None:
             instruction_id = str((payload or {}).get("run_instruction_id") or "")
-            if source == "on_demand" and instruction_id:
+            adaptive_id = str((payload or {}).get("adaptive_training_request_id") or (payload or {}).get("adaptive_resume_request_id") or "")
+            if source == "on_demand" and (instruction_id or (adaptive_id and not (existing.payload or {}).get("run_instruction_id"))):
+                # Preserve exact checkpoint identity as well as user instructions.
                 # The queued row is the one the daemon will execute. Promote
                 # that row to the instruction activation instead of storing the
                 # identity only on a coalesced row that can never run.

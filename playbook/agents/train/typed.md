@@ -140,3 +140,9 @@ provides first_validation_fraction; convert it to ceil(full planned steps × fra
 with minimum step 1, without changing the fraction. The result must
 include adaptive_training_report_path; early stopping requires a backend-recorded
 Orchestrator decision and preserves the best measured checkpoint.
+
+Mid-training Train saves a full resumable checkpoint and exits its workload.
+The engine runs independent Inference → Console Evaluation → Orchestrator,
+then queues this same Train ticket with `run_context.adaptive_resume`. Reuse its
+stable work_dir, existing ledger and original training command. Do not run
+inference/scoring inside Train or stage judge API keys on the GPU host.

@@ -831,11 +831,14 @@ fraction; a missing plan must be repaired by the Orchestrator. Keep the original
 full optimizer-step and epoch target fixed. In train.py, invoke
 `run_adaptive_training(ticket_id=..., contract_path=...,
 contract_sha256=adaptive_validation_contract_sha256, planned_steps=...,
-first_step=..., train_command=[...], evaluate_command=[...], work_dir=..., world_size=<training.world_size>)`.
+first_step=..., train_command=[...], work_dir=..., world_size=<training.world_size>)`.
 The work_dir must be inside this Ticket's remote directory. The controller
 holds no CUDA model. Launch the entire DDP training child as one argv command;
-wait for all ranks to exit before running Validation. The existing allocation
-remains reserved while awaiting an agent decision; do not rent extra GPUs.
+wait for all ranks to save and exit. The controller then exits successfully,
+releasing the workload slot before the engine starts separate Validation tickets.
+Use a stable Ticket-local work_dir across activations (never an attempt directory).
+On resume, follow run_context.adaptive_resume.work_dir and relaunch the exact same
+controller and training command with the unchanged plan. Do not reset its ledger.
 
 The training child reads `ZEVO_ADAPTIVE_TARGET_STEP`,
 `ZEVO_ADAPTIVE_PLANNED_STEPS`, `ZEVO_ADAPTIVE_RESUME_CHECKPOINT`, and
@@ -854,24 +857,21 @@ retention so neither the last resumable checkpoint nor the best measured one
 can be deleted. Segment checkpoints are internal recovery state, not
 TrainResult's weights-only intermediate branch points.
 
-The evaluation child reads `ZEVO_ADAPTIVE_CHECKPOINT`,
-`ZEVO_ADAPTIVE_VALIDATION_CONTRACT` and `ZEVO_ADAPTIVE_PREDICTIONS_DIR`.
-Generate answers for ALL frozen Validation members using the supplied,
-unchanged baseline predict script and inference configurations. Invoke the
-baseline script's existing CLI with the checkpoint and member data paths;
-do not rewrite its parsing or decoding logic. Write each member's predictions
-to `<ZEVO_ADAPTIVE_PREDICTIONS_DIR>/<zero-padded index>/predictions.csv`.
-Do not author scores: the system helper validates sample-submission columns,
-row count/order and invokes the frozen evaluator or the platform's exact
-built-in implementation. Keep predictions and evaluator outputs for audit.
-An evaluation exception fails that attempt without a negative score; the
-saved training segment is reused on repair.
+After every saved checkpoint the helper emits `adaptive_checkpoint` and exits
+with status 0 through SystemExit. Do not catch that exit or publish a final model.
+The engine verifies the saved state and creates an independent Inference ticket
+using every frozen Validation benchmark and baseline configuration. Only after
+Inference succeeds does Console create an Evaluation ticket, using its ordinary
+runner and the run owner's provider credentials. Train does neither inference
+nor scoring; never copy judge keys to the cluster.
 
-The helper emits an adaptive_validation progress marker and waits for a live
-Orchestrator decision after each nonterminal measurement. It executes the
-returned next step, or stops normally when instructed. Never write its
-decision files yourself. A timeout preserves resumable state and is a repair
-condition, not permission to stop or silently proceed.
+Only after scoring succeeds does Orchestrator decide continue or stop. The engine
+then queues a new activation of this same Train ticket. Relaunch the controller
+against the existing ledger; it consumes the metrics and decision, resumes full
+optimizer/scheduler/RNG state, or returns the best checkpoint for publication.
+The final planned checkpoint is scored too, then resumed solely for publication.
+Never write decision or score files yourself, or treat missing feedback as
+permission to continue. Evaluation retries leave training/checkpoints unchanged.
 
 After the controller returns, publish its selected Validation-best checkpoint
 through `publish_adaptive_checkpoint(report_path, final_dir=...,

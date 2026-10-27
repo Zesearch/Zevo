@@ -5,10 +5,10 @@ import { transformWithEsbuild } from 'vite';
 const telemetry = readFileSync(new URL('../src/lib/trainingTelemetry.ts', import.meta.url), 'utf8');
 const shared = readFileSync(new URL('../src/lib/executionProgress.ts', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../src/lib/midTrainingStatus.ts', import.meta.url), 'utf8')
-  .replace('import { latestExecution } from "./executionProgress";', '')
+  .replace('import { latestExecution, benchmarkCounts } from "./executionProgress";', '')
   .replace('import { trainingActivity, isMidTrainingValidationEvent } from "./trainingTelemetry";', '');
 const { code } = await transformWithEsbuild(`${shared}\n${telemetry}\n${source}`, 'status.ts', { loader: 'ts' });
-const { midTrainingExecution, validationStatus, decisionStatus, inferenceProgress, midTrainingHasStarted } = await import(
+const { midTrainingExecution, validationStatus, decisionStatus, inferenceProgress, midTrainingHasStarted, midTrainingDecisionHasStarted } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const event = (ts, phase, extras = {}) => ({ ts, phase, event_type: 'progress', loss: -1,
   current_step: 0, total_steps: 100, extras: { execution_purpose: 'workload', ...extras } });
@@ -17,12 +17,12 @@ const ticket = (events, validation = {}) => ({ status: 'running', execution_even
 test('resume discards previous checkpoint counters and ignores unverified events', () => {
   const old = event('01', 'generate:old', { benchmark_name: 'A', suite_rows_completed: 100, suite_rows_total: 100 });
   const training = event('02', 'train');
-  const fresh = event('03', 'generate:new', { benchmark_name: 'A', suite_rows_completed: 5, suite_rows_total: 100 });
+  const fresh = event('03', 'generate:new', { benchmark_name: 'A', suite_rows_completed: 5, suite_rows_total: 100, benchmark_total: 3 });
   const unverified = event('04', 'training', { execution_purpose: 'unverified' });
   const execution = midTrainingExecution(ticket([unverified, fresh, old, training]));
   assert.deepEqual(execution.events, [fresh]);
   assert.equal(execution.phase, 'inference');
-  assert.equal(inferenceProgress(execution.events).completed, 5);
+  assert.equal(inferenceProgress(execution.events).completed, 0);
 });
 
 test('validation badges describe validation instead of copying Train status', () => {
@@ -70,8 +70,24 @@ test('validation branch appears only on first real validation and survives resum
 
 test('restarted workload cannot inherit the previous validation counters', () => {
   const old = event('01', 'scoring', { execution_id: 'old', phase: 'benchmark_complete', benchmark_name: 'A' });
-  const fresh = event('02', 'generate:A', { execution_id: 'new', benchmark_name: 'A', suite_rows_completed: 0, suite_rows_total: 100 });
+  const fresh = event('02', 'generate:A', { execution_id: 'new', benchmark_name: 'A', suite_rows_completed: 0, suite_rows_total: 100, benchmark_total: 3 });
   const execution = midTrainingExecution(ticket([old, fresh]));
   assert.deepEqual(execution.events, [fresh]);
   assert.equal(inferenceProgress(execution.events).completed, 0);
+});
+
+test('decision row appears only after scoring requests it and retains prior activations', () => {
+  assert.equal(midTrainingDecisionHasStarted(ticket([event('01', 'generate:A')])), false);
+  assert.equal(midTrainingDecisionHasStarted(ticket([event('02', 'scoring')])), false);
+  assert.equal(midTrainingDecisionHasStarted(ticket([], {awaiting_decision: true})), true);
+  assert.equal(midTrainingDecisionHasStarted(ticket([]), 1), true);
+});
+
+test('inference counts committed benchmarks rather than generated rows', () => {
+  const rows = event('01', 'generate:A', {benchmark_id: 'validation:0', benchmark_total: 3, suite_rows_completed: 8082, suite_rows_total: 8082});
+  assert.equal(inferenceProgress([rows]).completed, 0);
+  const completed = {...rows, ts: '02', extras: {...rows.extras, benchmark_complete: true}};
+  const progress = inferenceProgress([rows, completed, completed]);
+  assert.equal(progress.completed, 1);
+  assert.equal(progress.total, 3);
 });
