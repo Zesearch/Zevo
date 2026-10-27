@@ -55,3 +55,19 @@ def test_runner_mode_skips_stale_file_but_reads_new_bytes(tmp_path: Path):
     with log.open("a") as fh:
         fh.write('__PROGRESS__:train-001:{"step":2,"total":10,"loss":1.5}\n')
     assert reader.poll()[0][1]["step"] == 2
+
+
+def test_mid_training_hash_owner_progress_and_foreign_owner_filter(tmp_path: Path):
+    owner = "mid-infer-d583f4bc3d614862911cd996e942a968"
+    other = "mid-infer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    log = tmp_path / "infer.log"
+    log.write_text(
+        f"__PHASE__:{owner}:inference@100\n"
+        f'__PROGRESS__:{owner}:{{"step":1,"benchmark_total":3}}\n'
+        f'__PROGRESS__:{other}:{{"step":3,"benchmark_total":3}}\n'
+        '__PROGRESS__:{"step":3,"benchmark_total":3}\n'
+    )
+    got = LiveMarkerReader(tmp_path, owner).poll()
+    assert [kind for kind, _ in got] == ["phase", "progress"]
+    assert got[1][1]["step"] == 1
+    assert got[1][1]["benchmark_total"] == 3

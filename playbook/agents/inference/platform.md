@@ -694,3 +694,21 @@ the primary member and use the same core for every additional member. On
 held-out submit handoff, make every member config available at its assigned
 `work_dir/inference_config.yaml` (or report its exact path in `suite_members`);
 the engine checks all members before GPU submission, not just the primary.
+
+### Reusing a successful Slurm launch
+
+For `configuration_mode=reuse`, inspect the engine-owned `slurm_launch_reuse`.
+When its mode is `reuse`, `slurm_job.script_path` already contains the successful
+launch with this execution's model, paths, lifecycle and resource identifiers.
+Do not rewrite it or add container/environment directives. Upload those exact
+bytes, stage this ticket's inputs and suite manifest at its referenced paths,
+and report the exact absolute engine-assigned script path. Reuse mode never
+authorizes modifying frozen YAML files, even in place. The engine pins their
+hashes before the activation and verifies them before submission/publication.
+
+Only mode `repair` authorizes launch changes after a real failed workload or an
+engine-recorded template incompatibility; explain
+the concrete failure and preserve the frozen measurement inputs. A successful
+repair becomes a new immutable launch snapshot. Mode `unavailable` means there
+is no verified compatible launch to reuse: report the missing evidence rather
+than silently generating a replacement.

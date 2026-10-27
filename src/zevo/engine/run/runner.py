@@ -2777,6 +2777,18 @@ def _slurm_stage_result_problem(
         body = path.read_text(encoding="utf-8")
     except OSError as exc:
         return f"cannot read cluster stage Slurm script: {exc}"
+    if isinstance(inp, InferenceTaskInput):
+        from zevo.engine.run.inference_launch import verify_frozen_inputs
+        try:
+            verify_frozen_inputs(inp.frozen_reuse_artifacts)
+        except (OSError, ValueError) as exc:
+            return str(exc)
+        replay = inp.slurm_launch_reuse
+        if replay.get("mode") == "unavailable":
+            return str(replay["reason"])
+        expected = replay.get("expected_sha256")
+        if expected and hashlib.sha256(body.encode()).hexdigest() != expected:
+            return "reused Slurm launch changed outside engine-owned path/resource substitutions"
     required = (
         "#SBATCH", contract.job_name, executable_name,
         contract.status_path, contract.lifecycle_prologue,
@@ -4287,11 +4299,28 @@ async def _submit_validated_slurm_stage(
     from zevo.engine.run.remote_jobs import _ssh
 
     from zevo.engine.run.gpu_controller import submit_workload
+    launch_snapshot = {}
+    if isinstance(inp, InferenceTaskInput):
+        from zevo.engine.run.inference_launch import snapshot, verify_frozen_inputs
+        verify_frozen_inputs(inp.frozen_reuse_artifacts)
+        expected_launch = inp.slurm_launch_reuse.get("expected_sha256")
+        if expected_launch and expected_launch != local_script_sha256:
+            raise ValueError("reused Slurm launch changed before submission")
+        launch_snapshot = snapshot(inp, Path(contract.script_path).read_text())
     job_id, controller_meta = await submit_workload(
         session, run=run, ticket=ticket, contract=contract, info=info,
         heartbeat_id=heartbeat_id, sha256=local_script_sha256,
     )
 
+    if launch_snapshot:
+        from zevo.engine.run.inference_launch import effective_snapshot
+        controller_body = controller_meta.get("controller_script_snapshot")
+        if controller_body:
+            launch_snapshot = effective_snapshot(launch_snapshot, controller_body)
+        else:
+            # Submission can proceed, but missing allocation evidence cannot
+            # be advertised to later tickets as a verified replay template.
+            launch_snapshot = {}
     gpu = info.gpu
     row = InfraInstance(
         instance_id=job_id,
@@ -4322,6 +4351,7 @@ async def _submit_validated_slurm_stage(
             "retry_of_job_id": contract.retry_of_job_id,
             "script_sha256": local_script_sha256,
             "implementation_sha256": implementation_sha256,
+            **({"inference_launch": launch_snapshot, "inference_launch_reuse": inp.slurm_launch_reuse, "frozen_reuse_artifacts": inp.frozen_reuse_artifacts} if launch_snapshot else {}),
             **controller_meta,
         },
     )
@@ -4839,6 +4869,9 @@ async def run_ticket(
             session=session,
             specialist_context=specialist_context,
         )
+        if isinstance(inp, InferenceTaskInput):
+            from zevo.engine.run.inference_launch import prepare_launch
+            inp = await prepare_launch(session, run, tk, inp)
     except ValueError as payload_err:
         # The session may be mid-statement from the failed build; clear it so the
         # escalation writes commit cleanly.
@@ -4848,6 +4881,7 @@ async def run_ticket(
         await _escalate_stored_payload_validation_failure(
             session, tk, run, payload_err
         )
+
     # Provider sessions are not durable state.  Inject only the bounded lessons
     # that belong to this Run, Agent, lane, and current semantic identity.
     # Transient runtime state is deliberately excluded; a new Run always
@@ -6106,6 +6140,12 @@ async def run_ticket(
                     "declared": expected_operation,
                     "reported": reported_operation or "<missing>",
                 }
+        if isinstance(inp, InferenceTaskInput) and isinstance(output, InferenceResult):
+            from zevo.engine.run.inference_launch import verify_frozen_inputs
+            try:
+                verify_frozen_inputs(inp.frozen_reuse_artifacts)
+            except (OSError, ValueError) as exc:
+                runtime_contract_mismatches["frozen_reuse_artifacts"] = {"declared": "unchanged bound files", "reported": str(exc)}
         if status == "deferred":
             if not isinstance(output, (DataResult, TrainResult, InferenceResult)):
                 runtime_contract_mismatches["deferred_status"] = {

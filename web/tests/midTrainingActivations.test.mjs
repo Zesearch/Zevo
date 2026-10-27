@@ -21,3 +21,13 @@ test('each activation retains its own decision and checkpoint retries remain dis
   const next = { ...second, id: 'third', mid_training: { ...second.mid_training, step: 1104, action: 'stop' } };
   assert.equal(midTrainingActivationLabel(next, [first, second, next]), 'Step 1,104 · Stop');
 });
+
+test('mid-training branch names the concrete action instead of the agent', async () => {
+  const { midTrainingActionLabel: label } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+  assert.equal(label({...first, action:'emit_ticket', mid_training:{...first.mid_training, phase:'inference'}}), 'Start Inference');
+  assert.equal(label({...first, action:'emit_ticket', mid_training:{...first.mid_training, phase:'evaluation'}}), 'Start Evaluation');
+  assert.equal(label(second), 'Resume training');
+  assert.equal(label({...second,mid_training:{...second.mid_training,action:'stop'}}), 'Stop training');
+  assert.equal(label({...first, action:'mark_failed'}), 'Stop Run');
+  assert.equal(label({...first,action:'',is_live:true}), 'Decide next training step…');
+});

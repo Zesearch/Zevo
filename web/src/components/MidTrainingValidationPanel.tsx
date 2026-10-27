@@ -72,7 +72,8 @@ function ValidationDetails({ data, step, onStep, onClose }: {
   </DialogOwner.Provider>, document.body);
 }
 
-export function MidTrainingValidationPanel({ data, events = [], activity, showExecutionProgress = true }: {
+export function MidTrainingValidationPanel({ data, events = [], activity, showExecutionProgress = true, showHeading = true }: {
+  showHeading?: boolean;
   showExecutionProgress?: boolean;
   data?: MidTrainingValidation | null; events?: ExecutionEventDTO[]; activity?: string | null;
 }) {
@@ -89,7 +90,7 @@ export function MidTrainingValidationPanel({ data, events = [], activity, showEx
   const generating = activity === "Mid-training Validation · Inference";
   return <div>
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-      <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300">Mid-training Validation</h3>
+      {showHeading && <h3 className="text-sm font-medium">Mid-training Validation</h3>}
       {!!data?.measurements.length && <button type="button" className="text-xs text-sky-300 hover:underline"
         onClick={() => { setStep(undefined); setOpen(true); }}>See more details</button>}
     </div>
