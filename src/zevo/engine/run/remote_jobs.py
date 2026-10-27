@@ -60,6 +60,7 @@ async def _ssh(
     remote_command: str,
     *,
     timeout_seconds: float = 20,
+    stdout_limit: int = 1000,
 ) -> dict[str, Any]:
     command = [
         *ssh_base_args(info.ssh),
@@ -78,7 +79,8 @@ async def _ssh(
         return {
             "ok": proc.returncode == 0,
             "exit_code": int(proc.returncode or 0),
-            "stdout": stdout.decode("utf-8", "replace")[:1000],
+            "stdout": stdout.decode("utf-8", "replace")[:stdout_limit],
+            "stdout_truncated": len(stdout.decode("utf-8", "replace")) > stdout_limit,
             "error": stderr.decode("utf-8", "replace")[:1000],
         }
     except Exception as exc:  # cleanup must not mask cancellation itself

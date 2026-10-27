@@ -198,3 +198,78 @@ def test_controller_initializes_environment_before_python(tmp_path):
     assert result.returncode == 127
     assert marker.exists()
     assert 'requires python3 after env_setup' in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_existing_launch_import_checks_real_inference_implementation(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from zevo.engine.run.inference_launch import verified_existing_launch, digest
+    from zevo.engine.run.runner import _slurm_stage_implementation_sha256
+    from zevo.engine.run import remote_jobs
+    inp = input_for(tmp_path)
+    script = Path(inp.slurm_job.script_path)
+    script.write_text(successful_body(inp))
+    contract = SimpleNamespace(stage="inference", script_path=str(script))
+    row = SimpleNamespace(meta={
+        "script_sha256": digest(script),
+        "implementation_sha256": _slurm_stage_implementation_sha256(contract),
+        "remote_workdir": inp.slurm_job.remote_work_dir,
+        "status_path": "/remote/status", "controller_directory": "/remote/controller",
+    })
+    owner = SimpleNamespace(id=inp.ticket_id, inputs={}, payload={"base_model": "org/model"})
+    result = SimpleNamespace(output={"slurm_script_path": str(script),
+        "predict_script_path": inp.reusable_predict_script_path})
+    session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: [result]))))
+    monkeypatch.setattr(remote_jobs, "_device_info_for_ticket", AsyncMock(return_value=object()))
+    monkeypatch.setattr(remote_jobs, "_ssh", AsyncMock(return_value={
+        "ok": True, "stdout": "#!/bin/bash\n#SBATCH --partition=beta\n"}))
+    source = await verified_existing_launch(session, row, owner)
+    assert source is not None
+    assert source["predict_sha256"] == digest(inp.reusable_predict_script_path)
+    different = tmp_path / "different_predict.py"
+    different.write_text("different implementation")
+    result.output["predict_script_path"] = str(different)
+    assert await verified_existing_launch(session, row, owner) is None
+    result.output["predict_script_path"] = inp.reusable_predict_script_path
+    Path(inp.reusable_predict_script_path).write_text("changed implementation")
+    assert await verified_existing_launch(session, row, owner) is None
+
+
+def test_shared_model_variable_updates_model_and_tokenizer_together(tmp_path):
+    old = input_for(tmp_path)
+    new = input_for(tmp_path, 'infer-2', '/checkpoint/new')
+    body = successful_body(old).replace('python ', 'MODEL="org/model"\npython ').replace(
+        '--model org/model --tokenizer org/model', '--model "$MODEL" --tokenizer "$MODEL"')
+    rendered = render(snapshot(old, body), new)
+    assert 'MODEL=/checkpoint/new' in rendered
+    assert '--model "$MODEL" --tokenizer "$MODEL"' in rendered
+
+
+@pytest.mark.asyncio
+async def test_controller_headers_are_complete_or_unavailable(monkeypatch):
+    from unittest.mock import AsyncMock
+    from zevo.engine.run import remote_jobs
+    from zevo.engine.run.gpu_controller import read_controller_headers
+    headers = '#SBATCH --container-mounts=' + '/mount,' * 300 + '\n'
+    ssh = AsyncMock(return_value={'ok': True, 'stdout': headers, 'stdout_truncated': False})
+    monkeypatch.setattr(remote_jobs, '_ssh', ssh)
+    assert await read_controller_headers(object(), '/controller') == headers
+    assert ssh.call_args.kwargs['stdout_limit'] == 65536
+    ssh.return_value = {'ok': True, 'stdout': headers[:1000], 'stdout_truncated': True}
+    assert await read_controller_headers(object(), '/controller') is None
+
+
+@pytest.mark.asyncio
+async def test_ssh_marks_truncation_and_supports_full_header_reads(monkeypatch):
+    from unittest.mock import AsyncMock
+    from zevo.engine.run import remote_jobs
+    stdout = b'x' * 2000
+    process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(stdout, b'')))
+    monkeypatch.setattr(remote_jobs.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process))
+    monkeypatch.setattr(remote_jobs, 'ssh_base_args', lambda _: [])
+    info = SimpleNamespace(ssh=SimpleNamespace(user='user', host='host'))
+    limited = await remote_jobs._ssh(info, 'read headers')
+    assert len(limited['stdout']) == 1000 and limited['stdout_truncated']
+    complete = await remote_jobs._ssh(info, 'read headers', stdout_limit=65536)
+    assert len(complete['stdout']) == 2000 and not complete['stdout_truncated']

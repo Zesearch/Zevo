@@ -152,6 +152,16 @@ def upload_text_command(path: str, content: str) -> str:
     return "python3 -c " + shlex.quote(script)
 
 
+async def read_controller_headers(info, directory):
+    """Read complete allocation directives, never a truncated script prefix."""
+    from zevo.engine.run.remote_jobs import _ssh
+    response = await _ssh(info, "sed -n '/^#SBATCH/p' " + shlex.quote(directory + "/controller.sbatch"),
+                          timeout_seconds=30, stdout_limit=65536)
+    if not response.get("ok") or response.get("stdout_truncated"):
+        return None
+    return response.get("stdout", "")
+
+
 def controller_script(stage_script: str, directory: str, *, idle_seconds: int = 1800, single_workload: bool = False, env_setup: str = "") -> str:
     """Use the validated allocation envelope and initialize its Python environment."""
     directives = [line for line in stage_script.splitlines() if line.startswith("#SBATCH")]
@@ -388,8 +398,7 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
     if owner is not None:
         controller_body = (owner.meta or {}).get("controller_script_snapshot", "")
         if not controller_body:
-            response = await _ssh(info, "cat -- " + shlex.quote(directory + "/controller.sbatch"), timeout_seconds=30)
-            controller_body = response.get("stdout", "") if response.get("ok") else ""
+            controller_body = await read_controller_headers(info, directory) or ""
     else:
         controller_body = wrapper
     result = await _ssh(info, _slurm_login_command(command), timeout_seconds=30)

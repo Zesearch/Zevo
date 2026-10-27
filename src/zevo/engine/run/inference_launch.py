@@ -148,7 +148,9 @@ async def verified_existing_launch(session, row, owner):
         try:
             if digest(script) != meta["script_sha256"]:
                 continue
-            if _slurm_stage_implementation_sha256(SimpleNamespace(script_path=script)) != meta["implementation_sha256"]:
+            if _slurm_stage_implementation_sha256(SimpleNamespace(stage="inference", script_path=script)) != meta["implementation_sha256"]:
+                continue
+            if digest(predict) != digest(Path(script).with_name("predict.py")):
                 continue
             from zevo.contracts.infrastructure import slurm_lifecycle_prologue
             from zevo.engine.run.scheduler.bindings import input_path
@@ -164,14 +166,15 @@ async def verified_existing_launch(session, row, owner):
                            "inference_config": output.get("inference_config_path", "")}}
             if not meta.get("controller_directory"):
                 continue
-            from zevo.engine.run.remote_jobs import _device_info_for_ticket, _ssh
+            from zevo.engine.run.remote_jobs import _device_info_for_ticket
+            from zevo.engine.run.gpu_controller import read_controller_headers
             info = await _device_info_for_ticket(session, owner)
             if not info:
                 continue
-            response = await _ssh(info, "cat -- " + shlex.quote(meta["controller_directory"] + "/controller.sbatch"), timeout_seconds=30)
-            if not response.get("ok"):
+            headers = await read_controller_headers(info, meta["controller_directory"])
+            if headers is None:
                 continue
-            return effective_snapshot(source, response["stdout"])
+            return effective_snapshot(source, headers)
         except (OSError, ValueError, KeyError):
             continue
     return None
