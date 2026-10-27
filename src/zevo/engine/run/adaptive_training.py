@@ -273,7 +273,7 @@ def is_checkpoint_evaluation(ticket):
 
 
 def checkpoint_resume_authorized(run, ticket, job):
-    if ticket.agent_id != "train" or job is None:
+    if job is None or getattr(ticket, "agent_id", "") != "train":
         return False
     meta = job.meta or {}
     key = meta.get("checkpoint_resume")
