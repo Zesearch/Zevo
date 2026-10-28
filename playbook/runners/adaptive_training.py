@@ -12,9 +12,18 @@ import json
 import math
 import os
 from pathlib import Path
-import subprocess
 import time
 import uuid
+
+# The deployed module and repository source expose the identical launch API.
+import importlib.util
+_runtime_path = Path(__file__).with_name("zevo_gpu_runtime.py")
+if not _runtime_path.is_file():
+    _runtime_path = Path(__file__).with_name("gpu_runtime.py")
+_runtime_spec = importlib.util.spec_from_file_location("zevo_gpu_runtime", _runtime_path)
+gpu_runtime = importlib.util.module_from_spec(_runtime_spec)
+_runtime_spec.loader.exec_module(gpu_runtime)
+
 
 
 def atomic_json(path, value):
@@ -167,7 +176,7 @@ def run_adaptive_training(*, ticket_id, contract_path, contract_sha256,
         # Reuse a completed segment after a controller/connection restart.
         ready = checkpoint / ".zevo-resumable.json"
         if not ready.exists():
-            subprocess.run(train_command, env=env, check=True)
+            gpu_runtime.run(train_command, profile="train", model=ledger["resume_checkpoint"], env=env)
             verify_resume_checkpoint(checkpoint, step=step, planned_steps=planned_steps, world_size=world_size)
             sizes = {str(p.relative_to(checkpoint)): p.stat().st_size
                      for p in checkpoint.rglob("*") if p.is_file()}

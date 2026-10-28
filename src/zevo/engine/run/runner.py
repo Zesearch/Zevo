@@ -278,26 +278,11 @@ def _max_training_rows(run: Run) -> int:
 def check_training_row_selection(
     recipe: DataRecipe, *, iteration: int, max_training_rows: int, n_rows_out: int,
 ) -> None:
-    """Enforce who may select Training rows.
+    """Enforce the user's row cap at every iteration.
 
-    Iteration 0 prepares the entire eligible source so the first Validation
-    measurement is not shaped by a selection nobody asked for. The one
-    exception is the user's typed `max_training_rows`: under it the recipe may
-    carry a deterministic `subset` and nothing else. The cap binds every
-    iteration. A limit written in prose never reaches here, by design.
+    Initial Data may select, filter, sample or weight Training rows. The recipe
+    records those choices; iteration zero does not impose a separate ban.
     """
-    if iteration == 0:
-        allowed = {"subset"} if max_training_rows > 0 else set()
-        selected = [
-            field for field in ("subset", "filters", "sampling", "weighting")
-            if getattr(recipe, field) and field not in allowed
-        ]
-        if selected:
-            raise ValueError(
-                "initial Data selected Training source rows: " + ", ".join(selected)
-                + ("" if max_training_rows <= 0 else
-                   f" (only a deterministic subset of at most {max_training_rows} rows is permitted)")
-            )
     if max_training_rows > 0 and n_rows_out > max_training_rows:
         raise ValueError(
             f"DataResult.n_rows_out={n_rows_out} exceeds the Run's "
@@ -339,17 +324,6 @@ def _build_data_input(
             f"Data payload operation={operation!r} conflicts with lane={ticket.lane!r}; "
             f"expected {expected_operation!r}"
         )
-    if not held_out and int(ticket.iteration or 0) == 0:
-        initial_intent = dict(payload.get("recipe_intent") or {})
-        selected = [
-            field for field in ("subset", "filters", "sampling", "weighting")
-            if initial_intent.get(field)
-        ]
-        if selected:
-            raise ValueError(
-                "initial Data must keep all eligible Training source rows; "
-                "selection can begin in later iterations: " + ", ".join(selected)
-            )
     dataset = "" if held_out else str(payload.get("dataset") or "")
     remote_huggingface = bool(not held_out and looks_like_hub_id(dataset))
     device_info_path = (
@@ -1205,6 +1179,7 @@ async def _build_train_input(
                 if slurm_job.enabled else ""
             )
         ),
+        gpu_runtime_helper_path=str(Path(work_dir) / "zevo_gpu_runtime.py"),
         telemetry_helper_path=str(Path(work_dir) / "zevo_train_telemetry.py"),
         remote_env_helper_path=(
             str(Path(work_dir) / "zevo_remote_env.sh")
@@ -1570,6 +1545,7 @@ async def _build_inference_input(
             str(Path(work_dir) / "zevo_length_calibration.py")
             if not inference_config_path else ""
         ),
+        gpu_runtime_helper_path=str(Path(work_dir) / "zevo_gpu_runtime.py"),
         parallel_runner_path=str(Path(work_dir) / "zevo_parallel_inference.py"),
         remote_env_helper_path=(
             str(Path(work_dir) / "zevo_remote_env.sh")
@@ -1847,6 +1823,16 @@ def _build_freeform_input(
         work_dir=work_dir,
         run_id=ticket.run_id or "",
     )
+
+
+def _stage_gpu_runtime_helper(inp: BaseModel, work_dir: str) -> BaseModel:
+    """Expose the GPU capability to every typed specialist, including new stages."""
+    from zevo.contracts._base import AgentTaskInput
+    if not isinstance(inp, AgentTaskInput):
+        return inp
+    helper_path = Path(work_dir) / "zevo_gpu_runtime.py"
+    shutil.copyfile(REPO_ROOT / "playbook/runners/gpu_runtime.py", helper_path)
+    return inp.model_copy(update={"gpu_runtime_helper_path": str(helper_path)})
 
 
 async def _build_input(
@@ -2833,6 +2819,15 @@ def _slurm_stage_result_problem(
         )
         if static_problem:
             return static_problem
+    if (contract.phase == "submit" and contract.num_gpus > 0
+            and getattr(inp, "gpu_runtime_helper_path", "")):
+        # These engine-owned launchers invoke the wrapper internally. All other
+        # GPU stages must wrap their foreground command directly, regardless of
+        # stage name (preparation, scoring, training, generation, etc.).
+        runtime_launchers = ("zevo_gpu_runtime.py", "zevo_parallel_inference.py", "zevo_adaptive_training.py")
+        commands = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+        if not any(name in commands for name in runtime_launchers):
+            return "GPU workload must launch through zevo_gpu_runtime.py or a system runner that invokes it"
     if executable_name == "train.py":
         if not configuration_path:
             return "cluster Train must report train_config_path before submission handoff"
@@ -4192,7 +4187,8 @@ async def _slurm_watcher_job_is_current(
         and current_job.instance_id == expected_job_id
         and bool(current_meta.get("submission_committed"))
         and not current_meta.get("superseded_by_instruction_id")
-        and current_job.released_at is not None
+        and (not payload.get("resource_row_id") or payload["resource_row_id"] == current_job.id)
+        # A finished workload can retain its allocation for the next stage.
         and current_state in _SLURM_TERMINAL_STATES
     )
 
@@ -4875,6 +4871,7 @@ async def run_ticket(
             session=session,
             specialist_context=specialist_context,
         )
+        inp = _stage_gpu_runtime_helper(inp, work_dir)
         if isinstance(inp, InferenceTaskInput):
             from zevo.engine.run.inference_launch import prepare_launch
             inp = await prepare_launch(session, run, tk, inp)

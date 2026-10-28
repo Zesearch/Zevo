@@ -325,7 +325,7 @@ device envelope argues otherwise—record the deviation in the YAML `direction`.
 
 Most iterations run on ONE GPU and need nothing here: omit the optional
 `training.distributed` sub-config (leave it null) and keep
-`training.world_size=1`. The launch command stays exactly `python train.py`.
+`training.world_size=1`. The workload command remains `python train.py`, inside the system runtime wrapper below.
 Do not add a distributed plan to a run that fits comfortably on a single card;
 the plateau-breaking wins for a small LoRA SFT are data and hyperparameters,
 not more GPUs.
@@ -360,7 +360,7 @@ stage request did not select.
 Emit the launcher exactly as `zevo.contracts.configuration.build_launch_command`
 derives it, so the recorded command and the executed command agree:
 
-- single-GPU: `python train.py` (unchanged).
+- single-GPU workload: `python train.py` inside the system runtime wrapper.
 - ddp / fsdp: `torchrun` — `--standalone --nnodes=1 --nproc_per_node=<gpus>` on
   one node; `--nnodes --nproc_per_node --rdzv_backend=c10d --rdzv_id
   --rdzv_endpoint=<rank0-host:port>` across nodes. `accelerate launch` is an
@@ -903,3 +903,38 @@ completed or stopped early. Return the report copied locally as
 the selected model may precede the last step trained. A valid agent-approved
 early stop is succeeded, not failed or cancelled. Normal candidate Inference,
 Evaluation and held-out Test still run after Train completes.
+
+
+### Shared GPU runtime preparation
+
+Copy `gpu_runtime_helper_path` to `zevo_gpu_runtime.py` beside the training
+helpers. After activating the assigned environment, launch ordinary training
+through it on each GPU node, preserving every existing workload/resume argument:
+
+```bash
+python zevo_gpu_runtime.py --profile train --model /absolute/model/path -- python train.py ...
+python zevo_gpu_runtime.py --profile train --model /absolute/model/path -- torchrun --standalone --nproc_per_node=4 train.py ...
+```
+
+For multi-node training, each node wraps its own local launcher; do not prepare
+only on the head node or share its local paths with other nodes. The adaptive
+training controller submits each segment's original command and resume inputs
+to the same `zevo_gpu_runtime.run(...)` API. Parallel workers use its asynchronous
+`launch(...)` form. Cache preparation, process supervision and publication all
+belong to that shared launcher; stage code does not construct wrapper commands.
+Upload the helper even on a frozen-script resume.
+
+The wrapper verifies local scratch type/space, stages exact dependency package
+copies without relocating the Python interpreter, restores compatible compiler
+caches locally and publishes successful cache updates under locks. Checkpoints,
+optimizer/scheduler/RNG state and training outputs remain in their assigned
+persistent locations. It never skips or modifies resume restoration. Missing
+local scratch or an unknown GPU environment produces a logged fallback to the
+original environment. Set ZEVO_LOCAL_SCRATCH to a verified local bind mount when
+container /tmp is an unsupported overlay. Set ZEVO_RUNTIME_CACHE_ROOT for the
+persistent store; ZEVO_INFERENCE_CACHE_ROOT or the sibling of HF_HOME are defaults.
+
+Use `zevo_gpu_runtime.timed` around import/setup, model construction, full-state
+resume restoration and first-batch warmup in generated scripts. Keep checkpoint
+validation and resume evidence unchanged. A 60-second read-only diagnostic
+reports subprocess states/wait channels; it never automatically restarts training.

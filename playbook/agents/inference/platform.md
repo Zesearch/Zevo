@@ -170,14 +170,37 @@ python zevo_parallel_inference.py --predict predict.py --model MODEL_PATH \
   --max-workers RESOURCE_PLAN_REPLICAS
 ```
 
-Use absolute paths in the real script. The helper isolates each worker's GPUs,
-HOME and temporary directory. Compilation caches (FlashInfer, Triton,
-TorchInductor, CUDA and vLLM) persist under `ZEVO_INFERENCE_CACHE_ROOT`, or
-beside `HF_HOME` when configured. Cache keys isolate users, model/engine settings,
-Python environment, library versions, GPU architecture and driver. Each worker
-holds an exclusive cache-slot lock until shutdown; unknown environments or
-unavailable slots fall back to private temporary caches without waiting.
-An existing cache directory does not guarantee every kernel is a cache hit.
+Copy `gpu_runtime_helper_path` as `zevo_gpu_runtime.py` beside the parallel
+runner (including frozen-script reuse and mid-training Validation). Use absolute
+paths in the real script. The parallel helper supplies each worker's original
+argv, model/config and environment to `zevo_gpu_runtime.launch(...)`, the same
+public launcher used by every GPU stage. The common `prepare_environment(...)`
+API optionally prepares dependencies/tokenizer files once per node before
+independent replicas launch. It never changes
+frozen YAML bytes or model weights.
+
+The runtime checks filesystem type, ownership and free space before selecting
+`ZEVO_LOCAL_SCRATCH`, `SLURM_TMPDIR`, `TMPDIR`, or `/tmp`; remote filesystems and
+RAM-backed tmpfs are not accepted as local scratch. If no supported directory or
+GPU identity is available it logs an explicit fallback. On overlay-only hosts,
+configure a verified local bind-mounted scratch directory.
+
+Dependency copies preserve package contents and use the original interpreter,
+not a relocated virtualenv. Python stdlib/interpreter reads can still touch the
+original filesystem. Compiled artifacts use private local writable directories;
+compatible snapshots persist under `ZEVO_RUNTIME_CACHE_ROOT`, otherwise
+`ZEVO_INFERENCE_CACHE_ROOT`, otherwise beside `HF_HOME`. Architecture-inspection,
+FlashInfer, Triton, CUDA and extension caches are scoped by GPU/runtime/dependency
+identity. Graph caches additionally retain checkpoint and engine identity.
+Only successful executions publish cache snapshots, under exclusive locks;
+concurrent workers never share a mutable local cache. Library cache checks remain
+authoritative. Existing directories do not guarantee kernel hits.
+
+For newly generated resident adapters, import `timed` from `zevo_gpu_runtime`
+and time tokenizer loading and engine construction separately. Existing library
+logs additionally expose architecture resolution, weight loading, compilation
+and warmup phases. A 60-second runtime diagnostic lists process names, states
+and kernel wait channels without reading command arguments, secrets or answers.
 The helper splits large prepared CSV benchmarks when useful,
 merges results in original row order, and marks each Benchmark complete as
 soon as its shard artifacts are validated, even while a replica continues with
@@ -193,7 +216,10 @@ It never reads private answers. Do not preselect one `CUDA_VISIBLE_DEVICES`
 before calling it: it needs Slurm's complete device mask. Run the system-owned
 `required_free_memory_gib` preflight for every GPU group that will run a
 replica. When only one replica fits, direct `predict.py --suite ...` remains
-valid.
+valid inside `python zevo_gpu_runtime.py --profile inference --model MODEL_PATH
+--config CONFIG_PATH -- python predict.py ...`. Prefer the resident parallel
+helper with one worker when available, so tokenizer preparation and phase
+telemetry use the same path as multi-replica inference.
 Use exactly `#SBATCH --output=<slurm_job.stdout_path>` and
 `#SBATCH --error=<slurm_job.stderr_path>`. Keep stdout and stderr separate;
 never write a cluster job directly to `infer.log`, reuse one filename across

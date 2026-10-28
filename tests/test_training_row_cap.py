@@ -1,12 +1,4 @@
-"""A user's Training row cap is a typed field, not prose.
-
-Smoke run b37b423c asked for "at most 500 training rows" in `data_query`. The
-Data agent honoured it, the engine's iteration-0 rule ("prepare the entire
-eligible split") rejected the subset, and a repair activation re-did the whole
-preparation. The cap now lives in `max_training_rows`: the engine stamps it on
-the Data work order, it is the only thing that permits an iteration-0 subset,
-and prose limits are documented as not applied.
-"""
+"""Training selection is allowed from iteration zero; typed row caps still bind."""
 from __future__ import annotations
 
 import pytest
@@ -44,25 +36,20 @@ def test_both_request_shapes_accept_the_cap() -> None:
         AutoUserRequest(task_objective="o", max_training_rows=-1)
 
 
-def test_iteration0_without_a_cap_still_forbids_every_selection() -> None:
-    check_training_row_selection(_recipe(), iteration=0, max_training_rows=0, n_rows_out=10_000)
-    for field, value in (("subset", "train[:500]"), ("filters", ["len>3"]),
-                         ("sampling", {"n": 5}), ("weighting", {"a": 1.0})):
-        with pytest.raises(ValueError, match="initial Data selected"):
-            check_training_row_selection(
-                _recipe(**{field: value}), iteration=0, max_training_rows=0, n_rows_out=500,
-            )
-
-
-def test_iteration0_under_a_cap_permits_only_a_subset() -> None:
+@pytest.mark.parametrize("iteration", [0, 2])
+@pytest.mark.parametrize("cap", [0, 500])
+@pytest.mark.parametrize("selection", [
+    {"subset": "seed=0 sample 500"},
+    {"filters": ["remove exact prompt/completion duplicates"]},
+    {"sampling": {"n": 500, "seed": 0}},
+    {"weighting": {"source_a": 1.0}},
+    {"subset": "train[:500]", "filters": ["len>3"],
+     "sampling": {"seed": 0}, "weighting": {"source_a": 1.0}},
+])
+def test_selection_allowed_with_or_without_cap(iteration, cap, selection) -> None:
     check_training_row_selection(
-        _recipe(subset="seed=0 sample 500"), iteration=0, max_training_rows=500, n_rows_out=500,
+        _recipe(**selection), iteration=iteration, max_training_rows=cap, n_rows_out=500,
     )
-    with pytest.raises(ValueError, match="filters"):
-        check_training_row_selection(
-            _recipe(subset="train[:500]", filters=["len>3"]),
-            iteration=0, max_training_rows=500, n_rows_out=500,
-        )
 
 
 def test_the_cap_binds_every_iteration() -> None:

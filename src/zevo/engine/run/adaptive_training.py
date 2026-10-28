@@ -52,7 +52,7 @@ async def build_validation_contract(session, run, ticket, work_dir):
     shutil.copyfile(REPO_ROOT / "src/zevo/engine/method/eval_metrics.py", metrics_file)
     helpers = {"metrics": {"path": metrics_file.name,
                           "sha256": hashlib.sha256(metrics_file.read_bytes()).hexdigest()}}
-    for name in ("inference_memory", "option_scoring", "parallel_inference"):
+    for name in ("inference_memory", "option_scoring", "parallel_inference", "gpu_runtime"):
         target = root / f"zevo_{name}.py"
         shutil.copyfile(REPO_ROOT / f"playbook/runners/{name}.py", target)
         helpers[name] = {"path": target.name, "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}

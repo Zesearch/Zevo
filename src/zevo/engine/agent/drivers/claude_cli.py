@@ -89,12 +89,14 @@ class ClaudeStreamStalled(RuntimeError):
 
 
 class _CliActivity:
-    """Ignore transport heartbeats; honor explicit, bounded Bash timeouts."""
+    """Ignore transport heartbeats; honor Bash's effective bounded timeout."""
 
-    def __init__(self, clock: Callable[[], float], max_tool_seconds: float):
+    def __init__(self, clock: Callable[[], float], max_tool_seconds: float,
+                 default_tool_seconds: float = DEFAULT_AGENT_BASH_TIMEOUT_SECONDS):
         self.clock = clock
         self.last = clock()
         self.max_tool_seconds = max_tool_seconds
+        self.default_tool_seconds = default_tool_seconds
         self.deadlines: dict[str, float] = {}
         self.buffer = b""
 
@@ -135,8 +137,13 @@ class _CliActivity:
                 self.deadlines.pop(str(block.get("tool_use_id", "")), None)
             elif block.get("type") == "tool_use" and is_bash_tool(str(block.get("name", ""))):
                 tool_id = str(block.get("id", ""))
+                tool_input = block.get("input") or {}
+                if tool_input.get("run_in_background"):
+                    continue
                 try:
-                    seconds = float((block.get("input") or {}).get("timeout", 0)) / 1000
+                    # Missing timeout uses the same default passed to the CLI.
+                    # Shell text (including `timeout ...`) is not tool metadata.
+                    seconds = float(tool_input.get("timeout", self.default_tool_seconds * 1000)) / 1000
                 except (TypeError, ValueError):
                     continue
                 if tool_id and math.isfinite(seconds) and seconds > 0:
@@ -783,7 +790,11 @@ class ClaudeCliDriver:
             stdout_chunks: list[str] = []
             stderr_chunks: list[str] = []
             loop = asyncio.get_running_loop()
-            activity = _CliActivity(loop.time, float(env["BASH_MAX_TIMEOUT_MS"]) / 1000)
+            activity = _CliActivity(
+                loop.time,
+                max_tool_seconds=float(env["BASH_MAX_TIMEOUT_MS"]) / 1000,
+                default_tool_seconds=float(env["BASH_DEFAULT_TIMEOUT_MS"]) / 1000,
+            )
 
             # Emit a synthetic event so the operator sees which auth mode
             # was used (helps when debugging "is this even using my Max plan?").

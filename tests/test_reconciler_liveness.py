@@ -395,6 +395,7 @@ async def test_slurm_watcher_wakes_deferred_ticket_only_at_terminal(
     )).scalars().all()
     assert len(wakeups) == 1
     assert wakeups[0].source == "slurm_watcher"
+    assert wakeups[0].payload["resource_row_id"] == job.id
 
 
 @pytest.mark.asyncio
