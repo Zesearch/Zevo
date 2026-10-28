@@ -144,3 +144,108 @@ async def test_execution_identity_is_not_inferred_from_agent_claims(db, provider
     with pytest.raises(ValueError, match="identity"):
         await register_execution(db, execution_id="real", ticket_id="another-ticket",
                                  heartbeat_id=hb.id, runtime_key=provider, log_path="/work/train.log")
+
+
+@pytest.mark.asyncio
+async def test_terminal_stdout_replay_recovers_tail_once_and_preserves_phase_order(db, monkeypatch):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from zevo.engine.run.scheduler import reconciler as r
+    from zevo.db import InfraInstance
+
+    run, ticket, heartbeat = await setup(db, 'inference')
+    now = datetime.now(timezone.utc).timestamp()
+    lines = [f'__PHASE__:{ticket.id}:setup@{now}\n',
+             f'__PHASE__:{ticket.id}:load_model@{now}\n']
+    for i in range(3):
+        lines.append(f'__PROGRESS__:{ticket.id}:' + json.dumps({
+            'phase': 'generate', 'benchmark_name': f'Benchmark {i}',
+            'benchmark_id': f'validation:{i}', 'benchmark_complete': True,
+            'step': 10, 'total': 10, 't': now + i + 1,
+        }) + '\n')
+    # Foreign ticket markers must not leak into this execution.
+    lines.append('__PHASE__:inference-other-001:done@' + str(now) + '\n')
+    calls = []
+
+    async def spawn(*args, **kwargs):
+        calls.append(args[-1])
+        stdout = asyncio.StreamReader()
+        stdout.feed_data(''.join(lines).encode())
+        stdout.feed_eof()
+        return SimpleNamespace(stdout=stdout, returncode=0,
+                               wait=AsyncMock(return_value=0),
+                               communicate=AsyncMock(return_value=(b'', b'')))
+
+    monkeypatch.setattr(r.asyncio, 'create_subprocess_exec', spawn)
+    monkeypatch.setattr(r, '_slurm_connection', AsyncMock(return_value={'host': 'host', 'user': 'u', 'key': '/test/key'}))
+    row = InfraInstance(id='execution', instance_id='123', provider='cluster', ticket_id=ticket.id,
+                        run_id=run.id, status='ready')
+    meta = {'submission_heartbeat_id': heartbeat.id,
+            'remote_workdir': '/work/ticket', 'log_path': '/work/ticket/out.log'}
+    # Simulate the live stream recording only the first two phases/benchmarks.
+    for kind, payload in [m for line in lines[:4] for m in r.scan_text(line) if m]:
+        await r._persist_slurm_execution_marker(
+            db, ticket_id=ticket.id, heartbeat=heartbeat, kind=kind, payload=payload,
+            phase=payload.get('phase', ''), attempt_id=heartbeat.id,
+            execution_id=row.id, runtime_key='cluster:123', log_path=meta['log_path'])
+    await db.flush()
+    live = asyncio.create_task(asyncio.Event().wait())
+    r._SLURM_STATUS_STREAMS[row.id] = live
+    await r._drain_terminal_telemetry(db, row=row, run=run, ticket=ticket, meta=meta)
+    assert live.cancelled()
+    assert row.id not in r._SLURM_STATUS_STREAMS
+    assert meta.get('telemetry_drained'), meta
+    await db.flush()
+    events = (await db.execute(select(ExecutionEvent))).scalars().all()
+    assert len(events) == 5
+    assert sum(e.extras.get('benchmark_complete', False) for e in events) == 3
+    assert all(e.extras['execution_id'] == row.id for e in events)
+    assert calls == ['exec cat -- /work/ticket/out.log']
+    await r._drain_terminal_telemetry(db, row=row, run=run, ticket=ticket, meta=meta)
+    assert len(calls) == 1
+    # Retry after a scheduler restart is still idempotent.
+    meta.pop('telemetry_drained')
+    await r._drain_terminal_telemetry(db, row=row, run=run, ticket=ticket, meta=meta)
+    await db.flush()
+    assert len((await db.execute(select(ExecutionEvent))).scalars().all()) == 5
+    phases = {e.phase: e for e in events if e.event_type == 'phase'}
+    assert phases['setup'].extras['telemetry_sequence'] == 1
+    assert phases['load_model'].extras['telemetry_sequence'] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('error', [OSError('unreachable'), TimeoutError()])
+async def test_terminal_drain_failure_is_bounded_and_retryable(db, monkeypatch, error):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from zevo.engine.run.scheduler import reconciler as r
+    run, ticket, heartbeat = await setup(db, 'inference')
+    monkeypatch.setattr(r, '_slurm_connection', AsyncMock(return_value={'host': 'host', 'user': 'u', 'key': '/test/key'}))
+    stream = AsyncMock(side_effect=error)
+    monkeypatch.setattr(r, '_stream_slurm_status_events', stream)
+    meta = {'submission_heartbeat_id': heartbeat.id,
+            'remote_workdir': '/work/ticket', 'log_path': '/work/ticket/out.log'}
+    row = SimpleNamespace(id='execution', instance_id='123')
+    await r._drain_terminal_telemetry(db, row=row, run=run, ticket=ticket, meta=meta)
+    assert not meta.get('telemetry_drained')
+    assert meta['telemetry_drain_error']
+    assert meta['telemetry_drain_retry_at']
+    # Failed telemetry must neither raise into Collect nor busy-loop SSH retries.
+    await r._drain_terminal_telemetry(db, row=row, run=run, ticket=ticket, meta=meta)
+    assert stream.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_config_replay_preserves_engine_owned_activation_metadata(db):
+    _, ticket, heartbeat = await setup(db, "inference")
+    heartbeat.resolved_config = {"execution_phase": "submit", "measurement_revision": "r2"}
+    await _persist_slurm_execution_marker(
+        db, ticket_id=ticket.id, heartbeat=heartbeat, kind="config",
+        payload={"batch_size": 64, "execution_phase": "collect", "telemetry_sequence": 1},
+        phase="setup", attempt_id=heartbeat.id)
+    assert heartbeat.resolved_config["execution_phase"] == "submit"
+    assert heartbeat.resolved_config["measurement_revision"] == "r2"
+    assert heartbeat.resolved_config["batch_size"] == 64
+    assert "telemetry_sequence" not in heartbeat.resolved_config

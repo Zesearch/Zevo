@@ -549,8 +549,8 @@ class DataTaskInput(AgentTaskInput):
         0, ge=0,
         description=(
             "Engine-stamped Run-level cap on prepared Training rows; 0 means "
-            "no cap. At iteration 0 it is the only reason a `subset` is "
-            "permitted. Prose row limits in data_query are not applied."
+            "no cap. Selection is allowed at every iteration but must respect "
+            "this cap. Prose row limits in data_query are not applied."
         ),
     )
     branch_transition: dict[str, str] = Field(

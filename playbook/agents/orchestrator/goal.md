@@ -41,7 +41,12 @@ Rules:
 4. Treat user `decision_pins` and strict Customized Pipeline values as binding.
 5. A training iteration follows one coherent experimental direction. Multiple
    coupled changes are allowed only when the shared direction and rationale are
-   explicit.
+   explicit. If Data N (N >= 1) finishes without realizing the intended recipe,
+   correct preparation within N before creating Train: a revised recipe may use
+   a replacement Data Ticket after the earlier one is terminal. Bind Train to
+   the realized replacement, not a partial artifact. Do not consume another
+   iteration solely for Data recovery; after any Train N exists, preserve its
+   bound inputs and put recipe changes in a new iteration.
 6. Search unpinned decisions as a strict nested hierarchy, never as per-iteration
    randomization: Base model -> Training method -> Training data -> inner
    training/data-recipe refinements. Keep the current Data source/branch while
@@ -81,12 +86,13 @@ Rules:
    not force it — when `verifiable_reward_available` is false, keep the ordinary
    exhaustion order unchanged; and a user method pin removes this transition
    level entirely (rule 4), so never promote over a pin.
-   The initial Data recipe (iteration 0) and the first Train candidate
-   (iteration 1) must use every eligible prepared Training row. Structural
-   rejection and engine-owned Validation/Test decontamination still apply.
-   Do not request an initial subset, sampling, filter, weighting, or a hidden
-   trainer-side row/sequence cap. Later iterations may test a reasoned subset
-   or other Data selection as a distinct experiment.
+   The initial Data recipe (iteration 0) may select, filter, sample, or weight
+   Training rows. Express requested choices in `recipe_intent` and require
+   reproducible provenance. Respect the user's typed `max_training_rows` cap
+   and source pins; structural validation and engine-owned Validation/Test
+   decontamination still apply. Train uses the prepared population under its
+   explicit data contract, without a hidden trainer-side row/sequence cap.
+   Later iterations may revise Data selection as a distinct experiment.
 7. Select and retain models by final Validation score in the Task direction.
    Improvement over baseline is reported alongside final score, not substituted
    for it. Use engine-derived training/Validation loss trends only as diagnostic

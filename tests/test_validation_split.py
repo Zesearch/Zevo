@@ -1285,17 +1285,20 @@ def test_the_complete_stored_data_payload_is_the_only_runner_authority(tmp_path:
     assert built.remote_preparation_receipt_path == (
         f"/work/data/runs/r/prepared/{'a' * 64}/preparation_receipt.json"
     )
-    payload["recipe_intent"] = {"subset": "first 100 rows"}
-    with pytest.raises(ValueError, match="initial Data must keep all eligible"):
-        _build_data_input(
+    payload["recipe_intent"] = {
+        "subset": "first 100 rows", "filters": ["remove exact duplicates"],
+        "sampling": {"seed": 0}, "weighting": {"source_a": 1.0},
+    }
+    for iteration in (0, 2):
+        ticket.iteration = iteration
+        built = _build_data_input(
             ticket, payload, {"device_info": {"path": str(device_info)}},
             str(tmp_path), run,
         )
-    ticket.iteration = 2
-    assert _build_data_input(
-        ticket, payload, {"device_info": {"path": str(device_info)}},
-        str(tmp_path), run,
-    ).recipe_intent.subset == "first 100 rows"
+        for field, value in payload["recipe_intent"].items():
+            assert getattr(built.recipe_intent, field) == value
+        assert built.scoring_set == ""
+        assert built.answer_fields == []
 
 
 @pytest.mark.asyncio

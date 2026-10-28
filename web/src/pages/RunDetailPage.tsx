@@ -1,7 +1,7 @@
-import { inferencePreparation } from "../lib/executionProgress";
+import { ExecutionPhase } from "../components/ExecutionPhase";
 import { executionPhase } from "../lib/activationPhase";
 import { GenerationReport } from "../components/GenerationReport";
-import { latestBenchmarkEvent, activationExecution } from "../lib/executionProgress";
+import { latestBenchmarkEvent, activationExecution, executionPhase as workloadPhase } from "../lib/executionProgress";
 import { measurementProgress } from "../lib/measurementProgress";
 import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
 import { isMidTrainingActivation, midTrainingActivationLabel, midTrainingActionLabel } from "../lib/midTrainingActivations";
@@ -1095,6 +1095,10 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
   );
   const inferenceEvents = activationExecution(t.execution_events.filter(
     (event) => event.extras?.execution_purpose === "workload"), picked, chronological);
+  const phaseEvents = activationExecution(t.execution_events.filter(
+    (event) => !event.extras?.execution_purpose || event.extras.execution_purpose === "workload"), picked, chronological);
+  const phaseActive = !!picked && picked.id === chronological.at(-1)?.id
+    && (!!activeResourceRequest || picked.is_live) && !paused && !needsInput;
   const nextActivation = chronological.find((item) => picked && item.started_at > picked.started_at);
   const attemptStart = t.measurement_attempt?.started_at;
   const useCurrentAttempt = !!picked && !!attemptStart
@@ -1180,7 +1184,8 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
             </div>
           )}
           <GenerationReport report={t.generation_report} />
-          <BenchmarkStageProgress ticket={t} events={inferenceEvents} useCurrentAttempt={useCurrentAttempt} heartbeat={picked} active={!!picked && picked.id === chronological.at(-1)?.id && (!!activeResourceRequest || picked.is_live)} />
+          <ExecutionPhase events={t.agent_id === "inference" ? inferenceEvents : phaseEvents} agent={t.agent_id} active={phaseActive} />
+          <BenchmarkStageProgress ticket={t} events={inferenceEvents} useCurrentAttempt={useCurrentAttempt} active={phaseActive} />
           {t.agent_id === "evaluation" && (
             <EvaluationProgress events={t.execution_events} heartbeat={picked} activations={chronological} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
           )}
@@ -1229,26 +1234,13 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
 
 /** Show benchmark progress only while viewing Inference. Evaluation keeps its
  * ordinary status and results, without a second progress bar. */
-function BenchmarkStageProgress({ ticket, events, useCurrentAttempt, heartbeat, active }: {
+function BenchmarkStageProgress({ ticket, events, useCurrentAttempt, active }: {
   active: boolean;
-  heartbeat?: HeartbeatDTO;
   ticket: TicketDetail;
   events: ExecutionEventDTO[];
   useCurrentAttempt: boolean;
 }) {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    if (!active) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [heartbeat?.id, active]);
-  const preparation = inferencePreparation(events);
-  if (ticket.agent_id === "inference" && preparation && active) {
-    const elapsed = Math.max(0, Math.floor((now - Date.parse(preparation.startedAt)) / 1000));
-    return <div className="rounded-bezel border border-hair p-3 font-mono text-xs text-slate-300">
-      {preparation.label}<span className="ml-3 tabular-nums text-dim">{Math.floor(elapsed / 60)}m {elapsed % 60}s</span>
-    </div>;
-  }
+  if (active && workloadPhase(events, ticket.agent_id)) return null;
   const count = measurementProgress(ticket, events, useCurrentAttempt);
   if (!count || ticket.agent_id !== "inference") return null;
   const latest = latestBenchmarkEvent(events);

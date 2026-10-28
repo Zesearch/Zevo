@@ -67,19 +67,22 @@ the exact config/split. When `dataset` is empty, require a non-empty
 `data_query`; it is natural-language search guidance and may rely on the task
 objective in `run_context` for domain and output-shape context.
 
-On the initial iteration-0 Data Ticket, use the entire eligible source split:
-no `subset`, `filters`, `sampling`, or `weighting`. Reject only structurally
-unusable rows, then let the engine remove Validation/Test overlaps. Later Data
+Initial Data may subset, filter, deduplicate, sample, or weight Training rows
+when appropriate to the task and supplied `recipe_intent`. Record the realized
+choices, reproducible selection parameters, and measured before/after counts in
+the Data recipe. Respect explicit source and recipe constraints. Later Data
 revisions may select rows only through their explicit `recipe_intent`.
+Structural validation and engine-owned Validation/Test decontamination apply
+at every iteration.
 
-The single exception is the typed `max_training_rows` field. When it is greater
-than zero, prepare at most that many rows at every iteration, selecting them as
-one deterministic `subset` (a seeded sample or a fixed slice, recorded in the
-recipe) and no other selection. The engine stamps this field from the Run; it
-is the only authority for a row cap. A row limit written in prose in
-`data_query`, the objective, or `run_context` is not a cap: do not apply it,
-prepare the entire eligible split, and note the discrepancy in `notes`. Never
-report `n_rows_out` above the cap.
+When the typed `max_training_rows` field is greater than zero, prepare at most
+that many rows at every iteration. This cap can coexist with filtering,
+sampling, weighting, or a deterministic subset; record the choices in the
+recipe. The engine stamps this field from the Run; it is the only authority
+for a row cap. A row limit written in prose in `data_query`, the objective, or
+`run_context` is not a cap: do not apply that limit, and note the discrepancy
+in `notes`. Zero means no row cap, not a requirement to keep every source row.
+Never report `n_rows_out` above the cap.
 
 Map only evidence genuinely present in the source into the method family:
 

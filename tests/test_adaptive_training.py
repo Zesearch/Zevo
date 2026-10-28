@@ -61,12 +61,14 @@ def test_live_decisions_stop_and_keep_best_checkpoint(helper, tmp_path, monkeypa
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     root = tmp_path / "train-1"
     calls = []
-    def command(argv, *, env, check):
-        assert argv == ["train"]  # Train never invokes inference or scoring.
+    def command(argv, *, env, profile, model):
+        assert argv == ["train"]  # No inference or scoring command.
+        assert profile == "train"
+        assert model == env["ZEVO_ADAPTIVE_RESUME_CHECKPOINT"]
         step = int(env["ZEVO_ADAPTIVE_TARGET_STEP"])
         calls.append((step, env["ZEVO_ADAPTIVE_RESUME_CHECKPOINT"]))
         write_checkpoint(Path(env["ZEVO_ADAPTIVE_CHECKPOINT"]), step, 100)
-    monkeypatch.setattr(helper.subprocess, "run", command)
+    monkeypatch.setattr(helper.gpu_runtime, "run", command)
     args = dict(ticket_id="train-1", contract_path=path, contract_sha256=digest,
                 planned_steps=100, first_step=20, train_command=["train"], work_dir=root)
     for step, score in [(20, .6), (40, .59), (60, .58)]:
@@ -107,10 +109,11 @@ def test_final_checkpoint_waits_for_console_scoring_without_retraining(helper, t
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     root = tmp_path / "train-1"
     calls = []
-    def command(argv, *, env, check):
+    def command(argv, *, env, profile, model):
+        assert profile == "train"
         calls.append(argv)
         write_checkpoint(Path(env["ZEVO_ADAPTIVE_CHECKPOINT"]), 20, 20)
-    monkeypatch.setattr(helper.subprocess, "run", command)
+    monkeypatch.setattr(helper.gpu_runtime, "run", command)
     args = dict(ticket_id="train-1", contract_path=path, contract_sha256=digest,
                 planned_steps=20, first_step=20, train_command=["train"], work_dir=root)
     for _ in range(2):

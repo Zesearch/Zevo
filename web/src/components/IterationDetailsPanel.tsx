@@ -3,6 +3,7 @@ import useSWR from "swr";
 import { ChevronRight, X } from "lucide-react";
 import type { RunDetail } from "../lib/api";
 import { assignIterations, iterationOrder } from "../lib/iterations";
+import { currentPredictionArtifacts } from "../lib/predictionArtifacts";
 import { fmtMetric, fmtScore, isPercentageMetric, metricScoreRange } from "../lib/format";
 import { Kicker } from "./zevo/primitives";
 
@@ -217,16 +218,16 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
           return ticket?.agent_id === "train" && item.role === "checkpoint"
             && item.meta.checkpoint_kind !== "intermediate";
         }) || group.artifacts.find((item) => ticketById.get(item.ticket_id)?.agent_id === "train" && item.role === "checkpoint");
-        const validationPredictions = group.artifacts.filter((item) => {
+        const validationPredictions = currentPredictionArtifacts(group.artifacts.filter((item) => {
           const ticket = ticketById.get(item.ticket_id);
           return ticket?.agent_id === "inference" && ticket.lane === "optimization"
             && item.role === "predictions";
-        });
+        }));
         const infer = validationPredictions[0];
-        const testPredictions = group.artifacts.filter((item) => {
+        const testPredictions = currentPredictionArtifacts(group.artifacts.filter((item) => {
           const ticket = ticketById.get(item.ticket_id);
           return ticket?.lane === "held_out_test" && item.role === "predictions";
-        });
+        }));
         const testPrediction = testPredictions[0];
         const testEvidence = testPrediction || group.artifacts.find((item) => {
           const ticket = ticketById.get(item.ticket_id);

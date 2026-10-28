@@ -223,9 +223,22 @@ async def test_old_watcher_job_cannot_collect_a_newer_running_job() -> None:
             session, ticket, {"job_id": "200", "scheduler_state": "RUNNING"},
         )
         newer = await session.get(InfraInstance, "new-job")
+        # Workload is done while the per-run allocation is still retained.
+        newer.meta = {**newer.meta, "scheduler_state": "COMPLETED"}
+        await session.commit()
+        assert newer.released_at is None
+        assert await _slurm_watcher_job_is_current(
+            session, ticket, {"job_id": "200", "resource_row_id": "new-job"},
+        )
+        assert not await _slurm_watcher_job_is_current(
+            session, ticket, {"job_id": "200", "resource_row_id": "old-job"},
+        )
+        newer.meta = {**newer.meta, "superseded_by_instruction_id": "next"}
+        await session.commit()
+        assert not await _slurm_watcher_job_is_current(session, ticket, {"job_id": "200"})
+        newer.meta = {k: v for k, v in newer.meta.items() if k != "superseded_by_instruction_id"}
         newer.status = "released"
         newer.released_at = datetime.now(timezone.utc)
-        newer.meta = {**newer.meta, "scheduler_state": "COMPLETED"}
         await session.commit()
         assert await _slurm_watcher_job_is_current(
             session, ticket, {"job_id": "200", "scheduler_state": "COMPLETED"},

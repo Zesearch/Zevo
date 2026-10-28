@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from pydantic import BaseModel
@@ -150,3 +151,70 @@ def test_tool_result_clears_quiet_allowance():
         activity.stdout((json.dumps(obj) + '\n').encode())
     now = 50
     assert activity.latest() == 0
+
+
+@pytest.mark.parametrize("command", ["timeout 420 python probe.py | tail -45",
+                                     "timeout 1500 python train.py --mode align"])
+def test_missing_tool_timeout_uses_cli_default_with_finite_deadline(command):
+    now = 0.0
+    activity = claude_module._CliActivity(lambda: now, 15000, default_tool_seconds=3600)
+    event = {'type': 'assistant', 'message': {'content': [
+        {'type': 'tool_use', 'id': 'probe', 'name': 'Bash',
+         'input': {'command': command}}]}}
+    activity.stdout((json.dumps(event) + '\n').encode())
+    now = 301
+    activity.stdout(b'{"type":"tool_progress","heartbeat":true}\n')
+    assert activity.latest() == 301
+    now = 3700
+    activity.stdout(b'{"type":"tool_progress","heartbeat":true}\n')
+    assert activity.latest() == 3600
+    # Duplicate delivery must not restart the tool's allowance.
+    activity.stdout((json.dumps(event) + '\n').encode())
+    assert activity.deadlines['probe'] == 3600
+
+
+@pytest.mark.parametrize("tool_input,expected", [
+    ({}, 30),
+    ({'timeout': 10000}, 10),
+    ({'timeout': 999999}, 60),
+    ({'run_in_background': True}, None),
+])
+def test_effective_tool_timeout_and_completion(tool_input, expected):
+    now = 0.0
+    activity = claude_module._CliActivity(lambda: now, 60, default_tool_seconds=30)
+    activity.stdout((json.dumps({'type': 'assistant', 'message': {'content': [
+        {'type': 'tool_use', 'id': 'x', 'name': 'Bash', 'input': tool_input}]}}) + '\n').encode())
+    assert activity.deadlines.get('x') == expected
+    now = 5
+    activity.stdout((json.dumps({'type': 'user', 'message': {'content': [
+        {'type': 'tool_result', 'tool_use_id': 'x', 'content': 'done'}]}}) + '\n').encode())
+    now = 20
+    assert activity.latest() == 5
+
+
+@pytest.mark.asyncio
+async def test_silent_default_timeout_tool_finishes_before_watchdog():
+    loop = asyncio.get_running_loop()
+    activity = claude_module._CliActivity(loop.time, 1, default_tool_seconds=0.3)
+    activity.stdout((json.dumps({'type': 'assistant', 'message': {'content': [
+        {'type': 'tool_use', 'id': 'x', 'name': 'Bash', 'input': {'command': 'probe'}}]}}) + '\n').encode())
+    await _await_cli_activity(
+        [asyncio.create_task(asyncio.sleep(0.12))], last_activity=activity.latest,
+        idle_timeout_seconds=0.04, agent_id='train',
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_timeout_tool_still_expires():
+    loop = asyncio.get_running_loop()
+    activity = claude_module._CliActivity(loop.time, 1, default_tool_seconds=0.04)
+    activity.stdout((json.dumps({'type': 'assistant', 'message': {'content': [
+        {'type': 'tool_use', 'id': 'x', 'name': 'Bash', 'input': {}}]}}) + '\n').encode())
+    task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        with pytest.raises(ClaudeStreamStalled):
+            await _await_cli_activity([task], last_activity=activity.latest,
+                                      idle_timeout_seconds=0.04, agent_id='train')
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

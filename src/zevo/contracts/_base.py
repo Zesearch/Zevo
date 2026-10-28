@@ -21,6 +21,13 @@ class AgentTaskInput(BaseModel):
             "into the result ticket_id; never shorten or derive it."
         ),
     )
+    gpu_runtime_helper_path: str = Field(
+        "", description=(
+            "System-owned, stage-independent GPU runtime/cache wrapper. Available to every "
+            "specialist; use for GPU workloads only, after environment activation on each "
+            "compute node. CPU-only work does not require it."
+        ),
+    )
     customization: AgentCustomization = Field(default_factory=AgentCustomization)
     run_context: dict[str, Any] = Field(
         default_factory=dict,

@@ -220,9 +220,14 @@ async def _persist_slurm_execution_marker(
     attempt_id = str(payload.get("attempt_id") or attempt_id or heartbeat.id)
 
     if kind == "config":
+        # Replaying stdout must preserve engine-owned activation metadata.
+        protected = {key: value for key, value in (heartbeat.resolved_config or {}).items()
+                     if key in {"mid_training", "execution_phase", "measurement_revision"}}
         heartbeat.resolved_config = {
-            key: value for key, value in payload.items()
-            if key not in {"kind", "owner", "attempt_id", "t"}
+            **{key: value for key, value in payload.items()
+               if key not in {"kind", "owner", "attempt_id", "t", "telemetry_sequence",
+                              "mid_training", "execution_phase", "measurement_revision"}},
+            **protected,
         }
         return True
 
@@ -243,7 +248,8 @@ async def _persist_slurm_execution_marker(
             current_step=0,
             total_steps=0,
             loss=-1.0,
-            extras={"execution_id": execution.id, "execution_purpose": execution.purpose},
+            extras={"execution_id": execution.id, "execution_purpose": execution.purpose,
+                    "telemetry_sequence": payload.get("telemetry_sequence", 0)},
             ts=occurred_at,
         ))
         return True
@@ -252,7 +258,7 @@ async def _persist_slurm_execution_marker(
         name = str(payload.get("phase") or phase or "")
         if not name:
             return False
-        existing = (await session.execute(select(ExecutionEvent.id).where(
+        existing = (await session.execute(select(ExecutionEvent).where(
             ExecutionEvent.heartbeat_id == heartbeat.id,
             ExecutionEvent.attempt_id == attempt_id,
             ExecutionEvent.event_type == "phase",
@@ -260,6 +266,9 @@ async def _persist_slurm_execution_marker(
             ExecutionEvent.ts == occurred_at,
         ).limit(1))).scalar_one_or_none()
         if existing is not None:
+            if payload.get("telemetry_sequence"):
+                existing.extras = {**dict(existing.extras or {}),
+                                   "telemetry_sequence": payload["telemetry_sequence"]}
             return False
         session.add(ExecutionEvent(
             ticket_id=ticket_id,
@@ -270,7 +279,8 @@ async def _persist_slurm_execution_marker(
             current_step=0,
             total_steps=0,
             loss=-1.0,
-            extras={"execution_id": execution.id, "execution_purpose": execution.purpose},
+            extras={"execution_id": execution.id, "execution_purpose": execution.purpose,
+                    "telemetry_sequence": payload.get("telemetry_sequence", 0)},
             ts=occurred_at,
         ))
         return True
@@ -559,6 +569,7 @@ async def _record_slurm_execution_marker(
 async def _stream_slurm_status_events(
     *, row_id: str, job_id: str, ticket_id: str, heartbeat_id: str,
     connection: dict[str, Any], status_path: str, telemetry_path: str = "",
+    replay_session: AsyncSession | None = None,
 ) -> None:
     """Stream lifecycle plus Train/Inference telemetry over one SSH session."""
     remote_paths = [status_path]
@@ -567,6 +578,10 @@ async def _stream_slurm_status_events(
     tail_command = "exec tail -q -n +1 -F -- " + " ".join(
         shlex.quote(path) for path in remote_paths
     )
+    if replay_session is not None:
+        # Finite replay reads the exact workload stdout to EOF. Never tail the
+        # allocation's next workload or feed merged status/stdout ordering back.
+        tail_command = "exec cat -- " + shlex.quote(telemetry_path)
     args = [
         *ssh_base_args(
             key_path=str(connection.get("key") or ""),
@@ -589,6 +604,11 @@ async def _stream_slurm_status_events(
             return
         current_phase = ""
         current_attempt = heartbeat_id
+        sequence = 0
+        replay_heartbeat = (await replay_session.get(HeartbeatRun, heartbeat_id)
+                            if replay_session is not None else None)
+        if replay_session is not None and (replay_heartbeat is None or replay_heartbeat.ticket_id != ticket_id):
+            raise ValueError("terminal telemetry heartbeat does not match ticket")
         while True:
             raw = await proc.stdout.readline()
             if not raw:
@@ -598,7 +618,7 @@ async def _stream_slurm_status_events(
                 line,
                 expected_job_id=job_id,
             )
-            if parsed is not None:
+            if parsed is not None and replay_session is None:
                 event, exit_code, occurred_at = parsed
                 await _record_slurm_status_event(
                     row_id=row_id,
@@ -616,6 +636,8 @@ async def _stream_slurm_status_events(
                 owner = str(payload.get("owner") or "")
                 if owner != ticket_id:
                     continue
+                sequence += 1
+                payload["telemetry_sequence"] = sequence
                 if kind == "attempt":
                     current_attempt = str(payload.get("attempt_id") or current_attempt)
                 elif kind == "phase":
@@ -624,6 +646,13 @@ async def _stream_slurm_status_events(
                 elif kind == "progress":
                     payload.setdefault("attempt_id", current_attempt)
                     payload.setdefault("phase", current_phase)
+                if replay_session is not None:
+                    await _persist_slurm_execution_marker(
+                        replay_session, ticket_id=ticket_id, heartbeat=replay_heartbeat,
+                        kind=kind, payload=payload, phase=current_phase, attempt_id=current_attempt,
+                        execution_id=row_id, runtime_key=f"cluster:{job_id}", log_path=telemetry_path,
+                    )
+                    continue
                 await _record_slurm_execution_marker(
                     row_id=row_id,
                     job_id=job_id,
@@ -634,6 +663,9 @@ async def _stream_slurm_status_events(
                     phase=current_phase,
                     attempt_id=current_attempt,
                 )
+        if replay_session is not None:
+            if await proc.wait() != 0:
+                raise RuntimeError("terminal telemetry SSH read failed")
     finally:
         if proc.returncode is None:
             proc.terminate()
@@ -707,6 +739,45 @@ def _cancel_inactive_slurm_status_streams(active_row_ids: set[str]) -> None:
         if row_id not in active_row_ids:
             _SLURM_STATUS_STREAMS.pop(row_id, None)
             task.cancel()
+
+
+async def _drain_terminal_telemetry(session: AsyncSession, *, row: InfraInstance,
+                                    run: Run, ticket: Ticket, meta: dict[str, Any]) -> None:
+    """Reconcile stdout before Collect; artifact verification remains the fallback.
+
+    Replay is idempotent and scoped by resource row, heartbeat and log path.
+    Use the caller's transaction so progress writes cannot deadlock on Ticket
+    rows already modified by this reconcile pass.
+    """
+    if meta.get("telemetry_drained") or ticket.agent_id not in {"train", "inference"}:
+        return
+    path = _slurm_telemetry_path(meta)
+    heartbeat_id = str(meta.get("submission_heartbeat_id") or "")
+    if not path or not heartbeat_id:
+        return
+    retry_at = _meta_datetime(meta.get("telemetry_drain_retry_at"))
+    if retry_at and retry_at > datetime.now(timezone.utc):
+        return
+    task = _SLURM_STATUS_STREAMS.pop(row.id, None)
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    try:
+        connection = await _slurm_connection(run, session)
+        if not connection:
+            raise ValueError("terminal telemetry connection unavailable")
+        await asyncio.wait_for(_stream_slurm_status_events(
+            row_id=row.id, job_id=row.instance_id, ticket_id=ticket.id,
+            heartbeat_id=heartbeat_id, connection=connection, status_path="",
+            telemetry_path=path, replay_session=session,
+        ), timeout=30)
+        meta["telemetry_drained"] = True
+        meta.pop("telemetry_drain_error", None)
+        meta.pop("telemetry_drain_retry_at", None)
+    except (OSError, ValueError, RuntimeError, asyncio.TimeoutError) as exc:
+        meta["telemetry_drain_error"] = str(exc)[:300] or type(exc).__name__
+        meta["telemetry_drain_retry_at"] = (datetime.now(timezone.utc) + _dt.timedelta(seconds=30)).isoformat()
+        log.warning("[slurm-status] terminal drain for %s: %s", row.id, type(exc).__name__)
 
 
 async def _query_slurm_job(
@@ -866,19 +937,16 @@ async def _reconcile_slurm_stage_jobs(
         newest.append((row, run, ticket))
 
     stream_row_ids = {
-        row.id
-        for row, _run, _ticket in newest
-        if _normalise_slurm_state(
-            str((row.meta or {}).get("scheduler_state") or "")
-        ) not in _SLURM_TERMINAL_STATES
+        row.id for row, _run, _ticket in newest
+        if not (row.meta or {}).get("telemetry_drained")
         and bool((row.meta or {}).get("submission_heartbeat_id"))
-        and not bool((row.meta or {}).get("scheduler_event_exit_pending"))
         and not bool((row.meta or {}).get("queue_timeout_requested_at"))
         and bool(_slurm_status_path(dict(row.meta or {})))
     }
     _cancel_inactive_slurm_status_streams(stream_row_ids)
     for row, run, ticket in newest:
-        if row.id not in stream_row_ids:
+        if (row.id not in stream_row_ids or _normalise_slurm_state(
+                str((row.meta or {}).get("scheduler_state") or "")) in _SLURM_TERMINAL_STATES):
             continue
         try:
             await _ensure_slurm_status_stream(
@@ -1056,6 +1124,7 @@ async def _reconcile_slurm_stage_jobs(
             row.status = "provisioning"
 
         if terminal and committed:
+            await _drain_terminal_telemetry(session, row=row, run=run, ticket=ticket, meta=meta)
             meta.pop("scheduler_event_exit_pending", None)
             # If a very short job completed between two checks, do not label its
             # whole lifetime as queue wait. Regular jobs get the actual first
@@ -1114,7 +1183,7 @@ async def _reconcile_slurm_stage_jobs(
                         + ("collect and validate its outputs" if state == "COMPLETED"
                            else "diagnose and repair in one activation")
                     ),
-                    payload={"job_id": row.instance_id, "scheduler_state": state},
+                    payload={"job_id": row.instance_id, "resource_row_id": row.id, "scheduler_state": state},
                 )
                 resumed += 1
                 continue

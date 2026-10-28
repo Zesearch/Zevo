@@ -46,7 +46,40 @@ def _payload_block(input_payload: BaseModel) -> str:
     return (
         f"## Ticket payload ({type(input_payload).__name__})\n\n"
         f"```json\n{input_payload.model_dump_json(indent=2)}\n```"
+        + _gpu_runtime_block(input_payload)
     )
+
+
+def _gpu_runtime_block(input_payload: BaseModel) -> str:
+    if not getattr(input_payload, "gpu_runtime_helper_path", ""):
+        return ""
+    return """
+
+## Shared GPU execution contract
+The supplied gpu_runtime_helper_path is system-owned and applies to ANY GPU
+workload, irrespective of the Ticket's agent, stage, model, or algorithm.
+CPU-only work does not require this helper and must not acquire GPUs for it.
+For a new GPU launch, upload the helper beside the workload and activate the
+assigned environment first. On EACH compute node launch the foreground workload:
+  python zevo_gpu_runtime.py --profile gpu -- <original command and arguments>
+Optionally supply --model <exact-local-model-directory> for conservative graph
+cache reuse; without a known model identity graphs stay private. --profile is
+only a diagnostic label, not a backend or cache selector. Preserve frozen
+configs, assigned devices, resource limits, checkpoints and resume arguments.
+All GPU process launches use this same public interface. Shell commands use the
+CLI above; Python coordinators call zevo_gpu_runtime.launch(argv, model=...,
+config_path=..., env=...) or its blocking form run(...). Stage code supplies only
+original argv and execution inputs; the shared launcher constructs supervision,
+cache preparation and cleanup. System coordinators use this identical API for
+workers and resumed segments. Do not manually add another wrapper around a
+system coordinator; the GPU process boundary is owned by the shared launcher.
+The wrapper validates local scratch, stages compatible dependencies/caches,
+executes in private local cache directories and publishes only successful cache
+artifacts. It never stores training state in disposable scratch. On unavailable
+local scratch or GPU compatibility it logs a fallback to the original execution.
+Existing remote jobs and Collect are read-only: do not rewrite/restart their
+executed scripts to retrofit this contract. Use it on the next new GPU launch.
+"""
 
 
 def _conversation_block(conversation: list[dict] | None) -> str:

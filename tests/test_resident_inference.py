@@ -46,6 +46,7 @@ def run_resident(tmp_path, counts, *, fail_member='', incompatible=False, calibr
     runtime.mkdir()
     runner = runtime / 'zevo_parallel_inference.py'
     shutil.copyfile(HELPER, runner)
+    shutil.copyfile(HELPER.with_name("gpu_runtime.py"), runtime / "zevo_gpu_runtime.py")
     shutil.copyfile(HELPER.parents[2] / 'src/zevo/contracts/length_calibration.py',
                     runtime / 'zevo_length_calibration.py')
     adapter = tmp_path / 'predict.py'

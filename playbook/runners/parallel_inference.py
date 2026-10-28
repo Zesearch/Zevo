@@ -19,10 +19,19 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
+
+# The deployed module and repository source expose the identical launch API.
+import importlib.util
+_runtime_path = Path(__file__).with_name("zevo_gpu_runtime.py")
+if not _runtime_path.is_file():
+    _runtime_path = Path(__file__).with_name("gpu_runtime.py")
+_runtime_spec = importlib.util.spec_from_file_location("zevo_gpu_runtime", _runtime_path)
+gpu_runtime = importlib.util.module_from_spec(_runtime_spec)
+_runtime_spec.loader.exec_module(gpu_runtime)
+
 
 csv.field_size_limit(1 << 30)
 
@@ -140,85 +149,7 @@ def _allocate(parts: list[Part], worker_count: int) -> list[list[Part]]:
     return assigned
 
 
-def _cache_signature(model: str, config: dict) -> str | None:
-    """Discover compatibility without importing torch or initializing CUDA."""
-    import hashlib
-    import importlib.metadata
-    import platform
-    try:
-        gpu = subprocess.run(['nvidia-smi', '--query-gpu=name,compute_cap,driver_version',
-                              '--format=csv,noheader'], capture_output=True, text=True, timeout=5)
-        if gpu.returncode or not gpu.stdout.strip():
-            return None
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    versions = {}
-    for package in ('torch', 'vllm', 'triton', 'flashinfer-python', 'nvidia-cutlass-dsl', 'transformers'):
-        try:
-            versions[package] = importlib.metadata.version(package)
-        except importlib.metadata.PackageNotFoundError:
-            versions[package] = 'absent'
-    identity = {'schema': 1, 'uid': os.getuid(), 'python': sys.version,
-                'environment': sys.prefix, 'architecture': platform.machine(),
-                'gpu': sorted(set(gpu.stdout.strip().splitlines())), 'packages': versions,
-                'model': model, 'engine': _engine_identity(config)}
-    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
-
-
-class _CacheSlots(dict):
-    def __init__(self):
-        super().__init__()
-        self.fds = {}
-
-
-@contextmanager
-def _cache_slots(base: dict[str, str], model: str, config: dict, workers: int):
-    """Hold exclusive cache leases until every worker has shut down.
-
-    Contention or an unknown GPU/runtime falls back to job-private caches.
-    There is no waiting on another run and no deletion of shared artifacts.
-    """
-    import fcntl
-    root = base.get('ZEVO_INFERENCE_CACHE_ROOT')
-    if not root and base.get('HF_HOME'):
-        root = str(Path(base['HF_HOME']).expanduser().parent / 'inference-runtime-cache')
-    slots = _CacheSlots()
-    locks = []
-    try:
-        signature = _cache_signature(model, config) if root else None
-        if root and signature:
-            directory = Path(root).expanduser().resolve() / f'uid-{os.getuid()}' / signature
-            try:
-                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                for worker in range(workers):
-                    for index in range(32):
-                        slot = directory / f'slot-{index:02d}'
-                        slot.mkdir(exist_ok=True, mode=0o700)
-                        lock = (slot / '.lease').open('a+')
-                        try:
-                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        except OSError:
-                            lock.close()
-                            continue
-                        locks.append(lock)
-                        reused = (slot / '.initialized').exists()
-                        print(f"[cache] worker {worker}: {'existing' if reused else 'new'} isolated cache slot {slot}", flush=True)
-                        (slot / '.initialized').touch()
-                        slots[worker] = slot
-                        slots.fds[worker] = lock.fileno()
-                        break
-            except OSError as exc:
-                print(f'[cache] persistent cache unavailable: {exc}; remaining workers use temporary caches', flush=True)
-        if len(slots) < workers:
-            print(f'[cache] {workers - len(slots)} worker(s) use temporary caches (no compatible free persistent slot)', flush=True)
-        yield slots
-    finally:
-        for lock in locks:
-            lock.close()
-
-
-def _worker_environment(base: dict[str, str], root: Path, devices: list[str],
-                        cache: Path | None = None) -> dict[str, str]:
+def _worker_environment(base: dict[str, str], root: Path, devices: list[str]) -> dict[str, str]:
     env = dict(base)
     env["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
     # IPC and HOME remain private. Only compiled/runtime caches can persist.
@@ -226,7 +157,7 @@ def _worker_environment(base: dict[str, str], root: Path, devices: list[str],
         location = root / suffix
         location.mkdir(parents=True, exist_ok=True)
         env[key] = str(location)
-    cache_root = cache or root
+    cache_root = root
     for key, suffix in (
         ("XDG_CACHE_HOME", "home/.cache"),
         ("FLASHINFER_CACHE_DIR", "home/.cache/flashinfer"),
@@ -237,9 +168,6 @@ def _worker_environment(base: dict[str, str], root: Path, devices: list[str],
         location = cache_root / suffix
         location.mkdir(parents=True, exist_ok=True)
         env[key] = str(location)
-    if cache is not None:
-        # Some FlashInfer versions use Path.home() instead of their env knob.
-        (root / "home/.cache").symlink_to(cache / "home/.cache", target_is_directory=True)
     if len(env["TMPDIR"]) > 80:
         raise ValueError("worker TMPDIR is too long for vLLM IPC sockets")
     return env
@@ -302,7 +230,7 @@ def _engine_identity(config: dict) -> dict:
     # Prompt mappings and sampling parameters do not construct the model. All
     # engine/tokenizer settings must agree before sharing a loaded replica.
     return {key: config.get(key) for key in (
-        "base_model", "generation_backend", "tokenizer_source",
+        "base_model", "generation_backend", "tokenizer_source", "tokenizer_revision",
         "chat_template_source", "chat_template_hash", "template_kwargs", "special_token_ids",
     )} | {"implementation_config": {
         key: value for key, value in config.get("implementation_config", {}).items()
@@ -332,10 +260,16 @@ def _resident_worker(predict: str, model: str, manifest: str, summary: str,
         raise ValueError("predict module is unavailable")
     adapter = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = adapter
+    started = time.monotonic()
+    print("[startup] importing prediction adapter", flush=True)
     spec.loader.exec_module(adapter)
+    print(f"[startup] adapter import took {time.monotonic() - started:.3f}s", flush=True)
     if not callable(getattr(adapter, "load_engine", None)) or not callable(getattr(adapter, "predict_member", None)):
         raise ValueError("resident predict.py requires load_engine and predict_member")
+    started = time.monotonic()
+    print("[startup] loading engine (tokenizer, architecture, weights, compile and warmup)", flush=True)
     engine = adapter.load_engine(model, _load_config(members[0]["config"]))
+    print(f"[startup] engine ready after {time.monotonic() - started:.3f}s", flush=True)
     helper = _calibration_helper() if calibrate else None
     try:
         if calibrate:
@@ -458,9 +392,15 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
         flush=True,
     )
     _phase(ticket, "setup")
-    with tempfile.TemporaryDirectory(prefix="zevo-inf-", dir=os.environ.get("TMPDIR")) as scratch, \
-            _cache_slots(os.environ, model, _load_config(members[0]["config"]), workers) as cache_slots:
+    with tempfile.TemporaryDirectory(prefix="zevo-inf-", dir=os.environ.get("TMPDIR")) as scratch:
         root = Path(scratch)
+        _phase(ticket, "prepare_runtime")
+        # Only pre-stage a shared tokenizer when all workers agree on identity.
+        first_identity = _engine_identity(_load_config(members[0]["config"]))
+        shared_config = members[0]["config"] if all(
+            _engine_identity(_load_config(member["config"])) == first_identity for member in members
+        ) else ""
+        runtime_env = gpu_runtime.prepare_environment(model=model, config_path=shared_config)
         parts, counts, complete = _partitions(members, workers, root)
         already_done_rows = sum(counts[index] for index in complete)
         if not parts:
@@ -545,15 +485,15 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
             commit_member(index)
         _phase(ticket, "load_model")
         ready_workers: set[int] = set()
+        startup_rank = 0
         gate = root / "generation-ready"
         helper = _calibration_helper() if calibrate else None
         try:
             for index, batch in active:
                 worker_root = root / f"w{index}"
                 env = _worker_environment(
-                    os.environ, worker_root,
+                    runtime_env, worker_root,
                     mask[index * gpus_per_worker:(index + 1) * gpus_per_worker],
-                    cache=cache_slots.get(index),
                 )
                 worker_members = [
                     {**part.member, "questions": part.questions,
@@ -574,11 +514,9 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                                "--model", model, "--suite", str(manifest),
                                "--summary", str(worker_summary), "--ticket-id", ticket,
                                "--generation-gate", str(gate)] + (["--calibrate"] if calibrate else [])
-                proc = subprocess.Popen(
-                    command, env=env, stdout=subprocess.PIPE, stderr=None,
-                    text=True, bufsize=1,
-                    # Keep the lease if the parent dies before this worker.
-                    pass_fds=((cache_slots.fds[index],) if index in cache_slots.fds else ()),
+                proc = gpu_runtime.launch(
+                    command, profile="inference", model=model, config_path=batch[0].member["config"],
+                    env=env, stdout=subprocess.PIPE, stderr=None, text=True, bufsize=1,
                 )
                 processes.append((index, proc, batch))
 
@@ -623,6 +561,18 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                                 and owners[member_index] <= successful_workers):
                             commit_member(member_index)
                     continue
+                if not generation_started:
+                    milestones = (("non-default args:", "resolve_model"),
+                                  ("Resolved architecture:", "initialize_engine"),
+                                  ("Initializing a V1 LLM engine", "initialize_engine"),
+                                  ("Loading model from scratch", "load_weights"),
+                                  ("Dynamo bytecode transform", "compile_model"),
+                                  ("Available KV cache memory", "warmup"),
+                                  ("Graph capturing finished", "warmup"))
+                    for rank, (text, phase) in enumerate(milestones, 1):
+                        if text in line and rank > startup_rank:
+                            startup_rank = rank
+                            _phase(ticket, phase)
                 if resident and line == "__ZEVO_RESIDENT_READY__":
                     ready_workers.add(worker)
                     if len(ready_workers) == len(active):

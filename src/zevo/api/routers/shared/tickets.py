@@ -484,6 +484,34 @@ async def _optimization_data_tickets(db: AsyncSession, run_id: str) -> list[Tick
     return [t for t in rows if not is_scoping_ticket(t)]
 
 
+async def _guard_data_revision_before_train(
+    db: AsyncSession, run_id: str, iteration: int, existing_data: list[Ticket],
+) -> None:
+    """Allow sequential Data revisions until Train fixes the iteration's inputs."""
+    active_data = next((ticket for ticket in existing_data
+                        if int(ticket.iteration or 0) == iteration
+                        and ticket.status not in TERMINAL_TICKET_STATUSES), None)
+    if active_data is not None:
+        raise HTTPException(409, {
+            "error": "the iteration already has active Data",
+            "ticket_id": active_data.id,
+            "advice": "Wait for that Data Ticket to finish before replacing its recipe.",
+        })
+    train = (await db.execute(select(Ticket).where(
+        Ticket.run_id == run_id,
+        Ticket.lane == "optimization",
+        Ticket.agent_id == "train",
+        Ticket.iteration == iteration,
+    ).order_by(Ticket.created_at).limit(1))).scalar_one_or_none()
+    # Even queued/failed/cancelled Train tickets have bound data provenance.
+    if train is not None:
+        raise HTTPException(409, {
+            "error": "the iteration's training data is already bound to Train",
+            "ticket_id": train.id,
+            "advice": "Keep that Train Ticket's data unchanged; move a new Data recipe to the next iteration.",
+        })
+
+
 @router.post("/tickets", response_model=CreateTicketResponse)
 async def create_ticket(
     body: CreateTicketBody,
@@ -781,6 +809,8 @@ async def create_ticket(
                     raise HTTPException(409, "the first optimization Data ticket is iteration 0")
                 if existing_data and iteration == 0:
                     raise HTTPException(409, "iteration 0 Data is already settled or active")
+                if iteration > 0:
+                    await _guard_data_revision_before_train(db, run_id, iteration, existing_data)
                 if existing_data:
                     previous_payload = dict(existing_data[-1].payload or {})
                     source_fields = (
@@ -821,16 +851,6 @@ async def create_ticket(
                             "branch_transition was supplied but the Data source and "
                             "training method remain in the active branch",
                         )
-                same_iteration = [
-                    ticket for ticket in existing_data
-                    if int(ticket.iteration or 0) == iteration
-                ]
-                if same_iteration:
-                    raise HTTPException(
-                        409,
-                        "one coherent Data recipe is allowed per iteration; "
-                        f"reuse {same_iteration[-1].id} or move the revision to the next iteration",
-                    )
                 requested_signature = str(payload.get("data_intent_signature") or "")
                 reusable = next((
                     ticket for ticket in reversed(existing_data)

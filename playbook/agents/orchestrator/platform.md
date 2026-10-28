@@ -320,7 +320,16 @@ branch and is allowed only after the previous Data branch is evidenced as
 exhausted. A Method transition may also require Data N for its record shape,
 but only after all credible Data branches under the old Method are exhausted.
 Empty/zero detailed fields delegate them to Data. The API rejects an unchanged
-intent signature and permits only one coherent Data recipe per iteration.
+intent signature. For N >= 1, if Data only partially realizes the requested
+recipe, inspect the realized rows before creating Train. Once that Data Ticket
+is terminal, a corrected recipe may create a replacement Data Ticket in the
+same iteration N, provided no Train Ticket has been created there. Keep the
+earlier Ticket as history and bind both Train data inputs to the successful
+replacement. Do not advance the iteration merely to recover Data preparation.
+An unchanged recipe should reuse/repair its existing Ticket. Once Train exists
+(including queued, failed, or cancelled Train), a new recipe requires a new
+iteration so its bound data provenance stays unchanged. Initial iteration-0
+Data and the frozen scoring populations retain their existing restrictions.
 
 Data downloads or uploads the source once to the remote plane, performs detect,
 analysis, transformation and preparation there, and returns only a remote
