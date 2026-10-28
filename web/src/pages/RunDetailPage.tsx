@@ -1,3 +1,5 @@
+import { inferencePreparation } from "../lib/executionProgress";
+import { executionPhase } from "../lib/activationPhase";
 import { GenerationReport } from "../components/GenerationReport";
 import { latestBenchmarkEvent, activationExecution } from "../lib/executionProgress";
 import { measurementProgress } from "../lib/measurementProgress";
@@ -792,7 +794,7 @@ function PipelineTimeline({
                     const activationCaptions = Array.from(new Set(
                       (heartbeatsByTicket.get(t.id) || [])
                         .map((heartbeat) => operationCaption(
-                          t, heartbeat.operation, heartbeat.activation_phase,
+                          t, heartbeat.operation, executionPhase(heartbeat),
                         ))
                         .filter(Boolean),
                     ));
@@ -1145,7 +1147,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
               : t.agent_id === "orchestrator"
               ? index === 0 ? "Initial" : `Repair ${index}`
               : heartbeat.operation
-              ? operationCaption(t, heartbeat.operation, heartbeat.activation_phase)
+              ? operationCaption(t, heartbeat.operation, executionPhase(heartbeat))
               : `Activation ${index + 1}`;
             return (
               <button
@@ -1160,6 +1162,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
                 }`}
               >
                 {label}
+                {heartbeat.activation_phase === "repair" && heartbeat.execution_phase && <span className="ml-2 text-dim">Repair</span>}
               </button>
             );
           })}
@@ -1177,7 +1180,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
             </div>
           )}
           <GenerationReport report={t.generation_report} />
-          <BenchmarkStageProgress ticket={t} events={inferenceEvents} useCurrentAttempt={useCurrentAttempt} />
+          <BenchmarkStageProgress ticket={t} events={inferenceEvents} useCurrentAttempt={useCurrentAttempt} heartbeat={picked} active={!!picked && picked.id === chronological.at(-1)?.id && (!!activeResourceRequest || picked.is_live)} />
           {t.agent_id === "evaluation" && (
             <EvaluationProgress events={t.execution_events} heartbeat={picked} activations={chronological} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
           )}
@@ -1226,11 +1229,26 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
 
 /** Show benchmark progress only while viewing Inference. Evaluation keeps its
  * ordinary status and results, without a second progress bar. */
-function BenchmarkStageProgress({ ticket, events, useCurrentAttempt }: {
+function BenchmarkStageProgress({ ticket, events, useCurrentAttempt, heartbeat, active }: {
+  active: boolean;
+  heartbeat?: HeartbeatDTO;
   ticket: TicketDetail;
   events: ExecutionEventDTO[];
   useCurrentAttempt: boolean;
 }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [heartbeat?.id, active]);
+  const preparation = inferencePreparation(events);
+  if (ticket.agent_id === "inference" && preparation && active) {
+    const elapsed = Math.max(0, Math.floor((now - Date.parse(preparation.startedAt)) / 1000));
+    return <div className="rounded-bezel border border-hair p-3 font-mono text-xs text-slate-300">
+      {preparation.label}<span className="ml-3 tabular-nums text-dim">{Math.floor(elapsed / 60)}m {elapsed % 60}s</span>
+    </div>;
+  }
   const count = measurementProgress(ticket, events, useCurrentAttempt);
   if (!count || ticket.agent_id !== "inference") return null;
   const latest = latestBenchmarkEvent(events);

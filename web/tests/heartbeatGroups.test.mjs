@@ -40,3 +40,9 @@ test('checkpoint repair activations never merge into an unrelated supervisor act
   assert.deepEqual(heartbeatGroups([ordinary, checkpoint, retry, next]).map(group => group.map(h => h.id)),
     [['1'], ['2', '3'], ['4']]);
 });
+
+test('collect repair stays separate from submit while same-phase retries group', () => {
+  const groups = heartbeatGroups([{...hb('1', 'submit'), execution_phase: 'submit'},
+    {...hb('2', 'repair'), execution_phase: 'collect'}, {...hb('3', 'repair'), execution_phase: 'collect'}]);
+  assert.deepEqual(groups.map(g => g.map(h => h.id)), [['1'], ['2', '3']]);
+});

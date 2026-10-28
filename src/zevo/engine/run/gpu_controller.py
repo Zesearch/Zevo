@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Kept stdlib-only: this program runs on the remote compute node, not the API.
 CONTROLLER_SOURCE = r'''
-import json, os, pathlib, signal, subprocess, sys, time
+import json, os, pathlib, shlex, signal, subprocess, sys, time
 root = pathlib.Path(sys.argv[1])
 idle_seconds = int(sys.argv[2])
 single_workload = len(sys.argv) > 3 and sys.argv[3] == "1"
@@ -38,6 +38,29 @@ def forward(signum, frame):
 for sig in (signal.SIGUSR1, signal.SIGUSR2):
     signal.signal(sig, forward)
 
+def cleanup_error(message):
+    print("Zevo: cleanup: " + message, file=sys.stderr, flush=True)
+
+def workload_command(script):
+    # SBATCH directives are comments to bash. Apply this workload's container
+    # options to a step, never to the retained controller's batch environment.
+    options = []
+    for line in script.read_text().splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            break
+        if stripped.startswith("#SBATCH"):
+            args = shlex.split(stripped[len("#SBATCH"):], comments=True)
+            if args and args[0].startswith("--container"):
+                options.extend(args)
+    if not options:
+        return ["bash", str(script)]
+    # One launcher, as in the non-container path. Workloads may themselves use
+    # srun/torchrun; overlap prevents the outer container step reserving CPUs
+    # from those inner steps. Only one workload is dispatched at a time.
+    return ["srun", "--overlap", "--nodes=1", "--ntasks=1",
+            "--kill-on-bad-exit=1", *options, "bash", str(script)]
+
 def stop_slurm_steps():
     # srun workers can live outside the local process group, including on
     # other nodes. The controller is the sole consumer of this allocation.
@@ -47,23 +70,31 @@ def stop_slurm_steps():
         for attempt in range(6):
             listed = subprocess.run(["squeue", "--steps", "-h", "-j", job_id, "-o", "%i"],
                                     capture_output=True, text=True, timeout=10)
-            if listed.returncode: return False
+            if listed.returncode:
+                cleanup_error("squeue failed (exit %s): %s" % (listed.returncode, listed.stderr.strip()))
+                return False
             steps = [line.strip() for line in listed.stdout.splitlines()
                      if line.strip().startswith(job_id + ".")
                      and line.strip().split(".", 1)[1].isdigit()]
             if not steps: return True
             for step in steps:
-                subprocess.run(["scancel", "--signal=KILL", step],
-                               capture_output=True, timeout=10)
+                cancelled = subprocess.run(["scancel", "--signal=KILL", step],
+                                           capture_output=True, text=True, timeout=10)
+                if cancelled.returncode:
+                    cleanup_error("scancel %s failed (exit %s): %s" %
+                                  (step, cancelled.returncode, cancelled.stderr.strip()))
             time.sleep(1)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        cleanup_error("Slurm step cleanup unavailable: %s: %s" % (type(exc).__name__, exc))
         return False
+    cleanup_error("Slurm steps still present after cleanup: %s" % steps)
     return False
 
 def stop_marked_workers(attempt):
     # Detached local workers can escape a process group. They still inherit
     # this command's unique marker, which is never placed on the controller.
     if not os.path.isdir("/proc"):
+        cleanup_error("/proc unavailable for worker verification")
         return not bool(os.environ.get("SLURM_JOB_ID"))
     marker = ("ZEVO_GPU_ATTEMPT=" + attempt).encode()
     for iteration in range(20):
@@ -79,6 +110,7 @@ def stop_marked_workers(attempt):
             try: os.kill(pid, signal.SIGKILL)
             except ProcessLookupError: pass
         time.sleep(0.1)
+    cleanup_error("marked worker PIDs still present after SIGKILL: %s" % found)
     return False
 
 last_work = time.monotonic()
@@ -105,7 +137,7 @@ while not stopping:
         env = dict(os.environ, ZEVO_TICKET_ID=request["ticket_id"], ZEVO_RUN_ID=request["run_id"],
                    ZEVO_GPU_ATTEMPT=request_path.stem)
         with open(log_out, "a") as out, open(log_err, "a") as err:
-            child = subprocess.Popen(["bash", str(script)], cwd=request["cwd"],
+            child = subprocess.Popen(workload_command(script), cwd=request["cwd"],
                                      env=env, stdout=out, stderr=err, start_new_session=True)
             while child.poll() is None:
                 if stopping or (root / "cancel" / request_path.stem).exists():
@@ -129,7 +161,11 @@ while not stopping:
     if not stop_slurm_steps() or not stop_marked_workers(request_path.stem):
         # Do not publish a reusable outcome if remote workers might survive.
         # Ending the batch job makes Slurm release the entire allocation.
-        print("Zevo: worker cleanup unconfirmed; ending allocation", file=sys.stderr)
+        diagnostic = root / ("cleanup-failure-" + request_path.name)
+        diagnostic.write_text(json.dumps({"workload_exit_code": rc, "workload_error": error,
+                                          "cleanup_confirmed": False}))
+        print("Zevo: worker cleanup unconfirmed; workload exit=%s; ending allocation" % rc,
+              file=sys.stderr, flush=True)
         sys.exit(125)
     temporary = output_path.with_suffix(".tmp")
     temporary.write_text(json.dumps({"exit_code": rc, "error": error}))
@@ -163,13 +199,23 @@ async def read_controller_headers(info, directory):
 
 
 def controller_script(stage_script: str, directory: str, *, idle_seconds: int = 1800, single_workload: bool = False, env_setup: str = "") -> str:
-    """Use the validated allocation envelope and initialize its Python environment."""
-    directives = [line for line in stage_script.splitlines() if line.startswith("#SBATCH")]
+    """Run the controller on the host; container directives belong to each step."""
+    from zevo.engine.run.remote_jobs import _slurm_cli_bootstrap_command
+
+    directives = [line for line in stage_script.splitlines() if line.startswith("#SBATCH")
+                  and not re.match(r"#SBATCH\s+--container", line)]
+    containerized = bool(re.search(r"^#SBATCH\s+--container", stage_script, re.M))
+    # Container-specific setup can reference paths that are unavailable on the
+    # host. The original workload script still executes that setup in its step.
+    controller_setup = "" if containerized else env_setup
+    bootstrap = _slurm_cli_bootstrap_command()
     encoded = base64.b64encode(CONTROLLER_SOURCE.encode()).decode()
     program = f"import base64;exec(base64.b64decode({encoded!r}))"
     return "\n".join([
-        "#!/bin/bash", *directives, "set -e", env_setup,
+        "#!/bin/bash", *directives, "set -e", controller_setup,
         "command -v python3 >/dev/null || { echo 'allocation controller requires python3 after env_setup' >&2; exit 127; }",
+        bootstrap,
+        "command -v srun >/dev/null || { echo 'allocation controller requires host srun' >&2; exit 127; }",
         "exec python3 -c " + shlex.quote(program) + " " + shlex.quote(directory)
         + " " + str(idle_seconds) + " " + str(int(single_workload)), "",
     ])
@@ -413,6 +459,8 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
         raise ValueError(f"controller returned invalid job id: {job_id!r}")
     return job_id, {
         "controller_script_snapshot": "\n".join(line for line in controller_body.splitlines() if line.startswith("#SBATCH")),
+        "controller_workload_launch": ((owner.meta or {}).get("controller_workload_launch", "legacy_bash")
+                                       if owner is not None else "host_srun_v1"),
         "allocation_walltime": walltime,
         "controller_directory": directory,
         "controller_outcome_path": outcome,

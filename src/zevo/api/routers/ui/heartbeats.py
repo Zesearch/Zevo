@@ -74,6 +74,7 @@ class HeartbeatDTO(BaseModel):
     # heartbeat so the audit record never depends on mutable display state.
     operation: str = ""
     activation_phase: str = ""
+    execution_phase: str = ""
     # A compact, UI-safe projection of an Orchestrator result. The Timeline
     # needs the real action/child to represent sequential supervision.
     action: str = ""
@@ -111,6 +112,7 @@ def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict 
         estimated_cost_usd=float(h.estimated_cost_usd or 0.0),
         operation=str(h.operation or output.get("operation") or ""),
         activation_phase=str(h.activation_phase or ""),
+        execution_phase=str((h.resolved_config or {}).get("execution_phase") or ""),
         action=str(output.get("action") or "") if h.agent_id == "orchestrator" else "",
         action_summary=str(output.get("summary") or "") if h.agent_id == "orchestrator" else "",
         child_ticket_id=child_id if h.agent_id == "orchestrator" else "",

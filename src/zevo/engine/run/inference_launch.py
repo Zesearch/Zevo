@@ -112,12 +112,15 @@ def render(source, inp):
     return "\n".join(lines) + "\n"
 
 
-def effective_snapshot(source, controller_body):
+def effective_snapshot(source, controller_body, workload_launch="legacy_bash"):
     """Use the environment that actually ran, including retained allocations.
 
     A workload's SBATCH container directives are inert when an existing
     controller executes it with bash. Do not activate those directives on replay.
     """
+    if workload_launch == "host_srun_v1":
+        # New host controllers execute these directives on the workload step.
+        return source
     pattern = r"^#SBATCH\s+--container-[\w-]+(?:=|\s|$)"
     directives = [line for line in controller_body.splitlines() if re.match(pattern, line)]
     lines = [line for line in source["body"].splitlines() if not re.match(pattern, line)]
@@ -174,7 +177,7 @@ async def verified_existing_launch(session, row, owner):
             headers = await read_controller_headers(info, meta["controller_directory"])
             if headers is None:
                 continue
-            return effective_snapshot(source, headers)
+            return effective_snapshot(source, headers, meta.get("controller_workload_launch", "legacy_bash"))
         except (OSError, ValueError, KeyError):
             continue
     return None
@@ -269,9 +272,13 @@ async def prepare_launch(session, run, ticket, inp):
             continue
         if (owner.payload or {}).get("base_model") != inp.base_model:
             continue
-        if (row.meta or {}).get("scheduler_state") != "COMPLETED" or not (row.meta or {}).get("submission_committed"):
+        if not (row.meta or {}).get("submission_committed"):
             continue
-        source = (row.meta or {}).get("inference_launch")
+        # A validated inference can survive controller cleanup failure. For a
+        # non-COMPLETED scheduler row require the accepted result and both
+        # execution hashes, never a submitted draft snapshot alone.
+        source = ((row.meta or {}).get("inference_launch")
+                  if (row.meta or {}).get("scheduler_state") == "COMPLETED" else None)
         if not source:
             source = await verified_existing_launch(session, row, owner)
         if not source:

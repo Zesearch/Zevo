@@ -1,3 +1,4 @@
+import { executionPhase } from "../lib/activationPhase";
 import { GenerationReport } from "../components/GenerationReport";
 import { trainingActivity } from "../lib/trainingTelemetry";
 import { useEffect, useMemo, useState } from "react";
@@ -157,7 +158,7 @@ export function TicketDetailPage() {
           : "Run Candidate Inference",
       release: "Release Resources",
     };
-    const phase = (h.activation_phase || "").toLowerCase();
+    const phase = executionPhase(h).toLowerCase();
     const inferenceName = tk?.lane === "held_out_test"
       ? "Held-Out Inference"
       : tk?.payload?.model_source === "base_model"
@@ -194,6 +195,7 @@ export function TicketDetailPage() {
     } else if (phase === "continue") {
       activationLabel = `Continue ${tk?.agent_id || "Stage"}`;
     }
+    if (h.activation_phase === "repair" && h.execution_phase) activationLabel += " · Repair";
     if (tk?.agent_id === "train" && h.id === heartbeats[0]?.id) {
       activationLabel = trainingActivity(tk.execution_events, tk.mid_training_validation, tk.status,
         runInstructions.some((item) => instructionBlocks(item.status))) || activationLabel;

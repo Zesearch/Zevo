@@ -6,6 +6,8 @@ export function heartbeatGroups(chronological: HeartbeatDTO[]): HeartbeatDTO[][]
   for (const heartbeat of chronological) {
     const previous = groups.at(-1);
     if (heartbeat.activation_phase === "repair" && previous?.[0].ticket_id === heartbeat.ticket_id
+        && (!heartbeat.execution_phase || !previous.at(-1)?.execution_phase
+          || heartbeat.execution_phase === previous.at(-1)?.execution_phase)
         && previous[0].mid_training?.request_id === heartbeat.mid_training?.request_id) {
       previous.push(heartbeat);
     } else {

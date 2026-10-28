@@ -450,3 +450,33 @@ async def test_missing_reference_allows_fresh_draft_and_preserves_it(tmp_path):
                 await prepare_launch(session, run, ticket, inp)
     finally:
         await engine.dispose()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('verified', [False, True])
+async def test_failed_controller_requires_verified_artifacts_for_script_reuse(tmp_path, monkeypatch, verified):
+    from unittest.mock import AsyncMock
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from zevo.db import Base, Run, Ticket, InfraInstance
+    from zevo.engine.run import inference_launch
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    old = input_for(tmp_path)
+    new = input_for(tmp_path, 'infer-2', '/checkpoint')
+    new.model_copy = lambda *, update: SimpleNamespace(**{**vars(new), **update})
+    source = snapshot(old, successful_body(old))
+    verifier = AsyncMock(return_value=source if verified else None)
+    monkeypatch.setattr(inference_launch, 'verified_existing_launch', verifier)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        run = Run(id='run', metric='accuracy')
+        owner = Ticket(id=old.ticket_id, run_id='run', agent_id='inference', status='succeeded', lane='optimization', payload={'base_model':'org/model'})
+        target = Ticket(id=new.ticket_id, run_id='run', agent_id='inference', status='queued', lane='optimization')
+        job = InfraInstance(id='source-job', run_id='run', ticket_id=owner.id, provider='cluster', instance_id='123',
+            meta={'scheduler_state':'FAILED', 'submission_committed':True, 'inference_launch': source})
+        session.add_all([run, owner, target, job])
+        await session.commit()
+        result = await inference_launch.prepare_launch(session, run, target, new)
+        assert result.slurm_launch_reuse['mode'] == ('reuse' if verified else 'unavailable')
+        verifier.assert_awaited()
+        assert job.meta['scheduler_state'] == 'FAILED'
+    await engine.dispose()

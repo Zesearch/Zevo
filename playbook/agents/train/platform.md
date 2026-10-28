@@ -439,6 +439,21 @@ training plan when they succeed.
    do not validate restore. Report unsupported state explicitly and repair the
    resume path rather than substituting a weights-only restart.
 
+Avoid redundant initialization around this required restore. Keep the restored
+Trainer alive and continue the remaining plan in the same process; do not exit
+a successful restore solely to launch a third Trainer. A fresh distributed
+process for the restore is allowed when the framework requires it, but that
+process must continue training after verification. Do not initialize a second
+full model merely for preflight or re-probe the unchanged rollout backend on
+every resume. Use bounded metadata/config/import checks first; preserve verified
+backend/environment evidence and prepared data when their identities match.
+If the model, configuration, runtime, device architecture, or backend changes,
+revalidate the affected assumptions explicitly rather than trusting stale evidence.
+Emit separate model-loading, checkpoint-restoring and training phases with
+elapsed time. A successful startup-validation record must match the realized
+configuration before a later resume can skip the initial two-step validation;
+never restart those steps or reset the schedule on a valid continuation.
+
 Perform this save/restore validation once at startup for the realized training
 configuration. Later recovery checkpoints follow the configured rolling
 retention policy and do not each require a validation restart. When recovering

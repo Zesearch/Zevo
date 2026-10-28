@@ -85,7 +85,9 @@ config or prediction checks.
 For an assigned suite, keep each member in its own `work_dir` with its own
 `inference_config.yaml`, `predictions.csv`, and
 `generation_diagnostics.json`. Initialize the tokenizer and model engine once,
-then process the primary member followed by `suite_members` in order. All
+then process the primary member followed by `suite_members` in order. For new
+select-mode scripts, implement the resident adapter interface in Platform so
+the system runner can retain that engine through calibration and generation. All
 member configs must share the exact model/backend/tokenizer/chat-template
 identity and vLLM `llm_kwargs`; prompt mapping, decoding controls, and output
 schema remain member-specific. Emit progress before and after every member.
