@@ -273,6 +273,7 @@ export type HeartbeatDTO = {
   operation: string;
   /** submit | collect | repair | continue for multi-activation work. */
   activation_phase: string;
+  execution_phase?: string;
   /** Compact Orchestrator result used to place sequential actions on
    * the Run Timeline. Empty for Specialist heartbeats. */
   action: string;

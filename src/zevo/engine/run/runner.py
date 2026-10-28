@@ -4321,7 +4321,8 @@ async def _submit_validated_slurm_stage(
         from zevo.engine.run.inference_launch import effective_snapshot
         controller_body = controller_meta.get("controller_script_snapshot")
         if controller_body:
-            launch_snapshot = effective_snapshot(launch_snapshot, controller_body)
+            launch_snapshot = effective_snapshot(launch_snapshot, controller_body,
+                controller_meta.get("controller_workload_launch", "legacy_bash"))
         else:
             # Submission can proceed, but missing allocation evidence cannot
             # be advertised to later tickets as a verified replay template.
@@ -5003,13 +5004,17 @@ async def run_ticket(
     elif isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled:
         hb.activation_phase = str(slurm_contract.phase or "")
 
+    if isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled:
+        hb.resolved_config = {**(hb.resolved_config or {}),
+                              "execution_phase": str(slurm_contract.phase or "")}
+
     if tk.agent_id == "inference" and status_at_pickup != "repairing":
         from zevo.engine.run.remeasurement import active_attempt
         attempt = active_attempt(run, tk.id)
         if attempt:
             hb.activation_phase = ("remeasure_collect" if getattr(slurm_contract, "phase", "") == "collect"
                                    else "remeasure")
-            hb.resolved_config = {"measurement_revision": attempt["revision"]}
+            hb.resolved_config = {**(hb.resolved_config or {}), "measurement_revision": attempt["revision"]}
 
     if tk.agent_id == "orchestrator" and hb.activation_phase != "instruction":
         from zevo.engine.run.adaptive_training import activation_validation_context
@@ -5653,8 +5658,8 @@ async def run_ticket(
                         select(HeartbeatRun).where(HeartbeatRun.id == heartbeat_id)
                     )).scalar_one_or_none()
                     if live_hb is not None:
-                        live_hb.resolved_config = {**config, **({"mid_training": live_hb.resolved_config["mid_training"]}
-                            if (live_hb.resolved_config or {}).get("mid_training") else {})}
+                        live_hb.resolved_config = {**config, **{key: value for key, value in (live_hb.resolved_config or {}).items()
+                            if key in {"mid_training", "execution_phase", "measurement_revision"}}}
                 await live_session.commit()
             for row in rows:
                 row.pop("_live_inflight", None)
@@ -5834,8 +5839,8 @@ async def run_ticket(
             continue
         session.add(ExecutionEvent(ticket_id=tk.id, heartbeat_id=heartbeat_id, **values))
     if config_rows:
-        hb.resolved_config = {**dict(config_rows[-1]["extras"]), **({"mid_training": hb.resolved_config["mid_training"]}
-            if (hb.resolved_config or {}).get("mid_training") else {})}
+        hb.resolved_config = {**dict(config_rows[-1]["extras"]), **{key: value for key, value in (hb.resolved_config or {}).items()
+            if key in {"mid_training", "execution_phase", "measurement_revision"}}}
 
     # Did the measured stage go looking at its grader?
     #
@@ -6856,6 +6861,11 @@ async def run_ticket(
         _set_current_ticket_outcome_text(tk, status=status, summary=summary)
         if status in ("succeeded", "degraded"):
             _apply_run_score_monitor(run, tk, output, artifact_meta)
+        if (not cancelled_by_user and status == "succeeded"
+                and isinstance(output, InferenceResult) and isinstance(inp, InferenceTaskInput)):
+            from zevo.engine.run.inference_completion import record_completion
+            await record_completion(session, ticket=tk, heartbeat=hb, inp=inp, result=output,
+                primary_name=str(artifact_meta.get("suite_member_name") or inp.test_set_name or "Validation"))
         session.add(HeartbeatResult(
             ticket_id=tk.id, heartbeat_id=heartbeat_id, agent_id=tk.agent_id,
             status=status, output=output.model_dump(),

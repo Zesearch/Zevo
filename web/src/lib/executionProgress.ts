@@ -18,10 +18,10 @@ export function activationExecution(events: ExecutionEventDTO[], heartbeat?: Hea
     || event.ts >= heartbeat.started_at);
   const selected = latestExecution(own);
   const identity = selected.at(-1)?.extras?.execution_id;
-  if (identity) return available.filter((event) => event.extras?.execution_id === identity)
+  if (identity) return events.filter((event) => event.extras?.execution_id === identity)
     .sort((a, b) => a.ts.localeCompare(b.ts));
   if (selected.length) return selected;
-  return ["collect", "continue", "resume"].includes(heartbeat.activation_phase)
+  return ["collect", "continue", "resume"].includes(heartbeat.execution_phase || heartbeat.activation_phase)
     ? latestExecution(available) : [];
 }
 
@@ -56,4 +56,20 @@ export function latestBenchmarkEvent(events: ExecutionEventDTO[]): ExecutionEven
   return [...events].reverse().find((event) =>
     typeof event.extras?.benchmark_name === "string" && !!event.extras.benchmark_name
     || Array.isArray(event.extras?.active_benchmarks) && event.extras.active_benchmarks.length > 0);
+}
+
+/** Preparation is displayed without inventing a percentage before generation. */
+export function inferencePreparation(events: ExecutionEventDTO[]) {
+  const ordered = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  if (ordered.some(e => e.extras?.benchmark_complete === true || /^generat/.test(e.phase || ""))) return null;
+  const event = ordered.at(-1);
+  if (!event) return null;
+  const phase = event.phase || "";
+  const label = /calibrat/.test(phase) ? "Calibrating generation length"
+    : /compil|warmup/.test(phase) ? "Warming up inference"
+    : /load|worker|model/.test(phase) ? "Loading model"
+    : /preflight|config|setup|environment/.test(phase) ? "Checking environment"
+    : "Preparing inference";
+  const start = ordered.find(e => e.phase === phase)?.ts || event.ts;
+  return { label, startedAt: start };
 }

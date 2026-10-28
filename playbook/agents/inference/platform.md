@@ -96,6 +96,61 @@ Size `#SBATCH --cpus-per-task` and `--mem` for simultaneous replicas using the
 site limits and Infrastructure host-memory envelope. If host RAM/CPU can only
 support one replica, run one even if a whole-node minimum reserves more GPUs.
 
+### Model lifetime for calibration and generation
+
+For new `configuration_mode=select` generation implementations, use the system
+parallel runner's `--resident --calibrate` path, including a one-GPU/one-member
+suite. Do not run a separate calibration model process and then start fresh
+measured workers. The runner loads each replica once, assigns each benchmark's
+whole system-selected calibration sample to one worker, checks all reports,
+and releases those same replicas for measured generation only after every
+benchmark passes. Calibration outputs remain separate and never count as
+measured rows or progress.
+
+Make `predict.py` import-safe (CLI execution under `if __name__ == "__main__"`)
+and implement these functions using the same rendering/generation code as its CLI:
+
+- `load_engine(model: str, config: dict) -> engine`: initialize the tokenizer and
+  model once, honoring the validated initialization envelope.
+- `predict_member(engine, member: dict, config: dict, *, progress) -> dict`:
+  use the supplied engine; render from this config; write `member["output"]`
+  and `member["diagnostics"]` for `member["questions"]` using the exact sample
+  submission columns; return `name`, `n_rows`, `n_requests`, `n_unparseable`.
+  Call `progress(completed_rows, total_rows)` for measured progress. Do not
+  print separate progress markers, load another model, or tear down the engine
+  in this function. It is called for both samples and measured shards.
+- Optional `close_engine(engine)`: release resources once, after all work.
+
+Add `calibration_configs: [<absolute-candidate-YAML-path>, ...]` to each suite
+member (1–4 candidates in increasing budget order). Validate all candidates
+with `config_validation_command` before GPU work. Each member's candidates
+may differ only in `measurement.max_new_tokens`; initialize the member's
+`config` path with the first candidate. Use separate immutable candidate files.
+All members and candidates must share a model/tokenizer/backend initialization
+identity. Size and validate one context/memory envelope for the largest planned
+candidate before loading. Do not silently alter a pinned context or memory plan.
+If the envelope genuinely needs to change, stop with an explicit initialization
+mismatch and prepare a new validated execution; never reuse an incompatible
+engine or reload for every sampling-only adjustment.
+
+```
+python zevo_parallel_inference.py --resident --calibrate \
+  --predict predict.py --model MODEL_PATH --suite suite.json \
+  --summary suite_summary.json --ticket-id TICKET_ID \
+  --allocated-gpus GPU_COUNT --gpus-per-worker TENSOR_PARALLEL_SIZE \
+  --max-workers RESOURCE_PLAN_REPLICAS
+```
+
+Copy `zevo_length_calibration.py` beside the system runner. This path invokes
+its unchanged sample/check/validate functions inside the worker and parent;
+do not wrap it with `length_calibration.py run` before calibration exists.
+A failed candidate's diagnostics remain in `resident-calibration/`. Exhausting
+the candidate ladder blocks all measured work; inspect actual stop/output
+behavior and use the existing evidence-based waiver protocol rather than
+bypassing the gate. Existing scripts and frozen `reuse` work orders retain their
+CLI path; compatible resident adapters may use `--resident` without
+`--calibrate` and must not redo calibration or mutate the frozen YAMLs.
+
 For useful parallel work and `slurm_job.num_gpus >= 2 *
 recommended_gpus_per_replica`, keep the YAML
 `implementation_config.llm_kwargs.tensor_parallel_size` at the smallest
@@ -116,8 +171,14 @@ python zevo_parallel_inference.py --predict predict.py --model MODEL_PATH \
 ```
 
 Use absolute paths in the real script. The helper isolates each worker's GPUs,
-HOME, temporary directory, and writable compilation caches (including
-FlashInfer, Triton, TorchInductor, CUDA and vLLM), splits large prepared CSV benchmarks when useful,
+HOME and temporary directory. Compilation caches (FlashInfer, Triton,
+TorchInductor, CUDA and vLLM) persist under `ZEVO_INFERENCE_CACHE_ROOT`, or
+beside `HF_HOME` when configured. Cache keys isolate users, model/engine settings,
+Python environment, library versions, GPU architecture and driver. Each worker
+holds an exclusive cache-slot lock until shutdown; unknown environments or
+unavailable slots fall back to private temporary caches without waiting.
+An existing cache directory does not guarantee every kernel is a cache hit.
+The helper splits large prepared CSV benchmarks when useful,
 merges results in original row order, and marks each Benchmark complete as
 soon as its shard artifacts are validated, even while a replica continues with
 other Benchmarks. The helper emits `benchmark_complete=true` after validating the merged outputs.
@@ -454,8 +515,9 @@ is CSV and is a separate input to prediction. For each member:
    and questions hashes, sample coverage and finish reasons; a passed flag alone
    is not acceptance evidence. Do not change the YAML after its successful check.
 
-Launch the measured command through the system gate, including single-member
-and non-cluster workloads:
+The resident path above performs the same system gate in-process, including
+single-member and non-cluster workloads. For a historical non-resident script
+that already has calibration evidence, launch measured work through:
 
 ```
 python zevo_length_calibration.py run --suite suite.json -- python predict.py ...

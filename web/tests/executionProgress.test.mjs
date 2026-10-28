@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { transformWithEsbuild } from 'vite';
 const source = readFileSync(new URL('../src/lib/executionProgress.ts', import.meta.url), 'utf8');
 const { code } = await transformWithEsbuild(source, 'execution.ts', { loader: 'ts' });
-const { latestBenchmarkEvent, activationExecution, benchmarkCounts, latestExecution } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+const { inferencePreparation, latestBenchmarkEvent, activationExecution, benchmarkCounts, latestExecution } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const hb = (id, hour, phase) => ({id, started_at: `2026-10-26T${hour}:00:00Z`, activation_phase: phase});
 const event = (hour, heartbeat, execution, name, complete = false) => ({ts: `2026-10-26T${hour}:10:00Z`, heartbeat_id: heartbeat,
   phase: 'generate', extras: {execution_id: execution, benchmark_name: name, benchmark_total: 3, benchmark_complete: complete}});
@@ -53,4 +53,21 @@ test('benchmark name survives output writing and completion events', () => {
   const output = {...generation, phase: 'write_outputs', extras: {execution_id: 'first'}};
   assert.equal(latestBenchmarkEvent([generation, output]), generation);
   assert.equal(latestBenchmarkEvent([output]), undefined);
+});
+
+test('verified collect fills the originating execution without leaking a retry', () => {
+  const activations = [hb('a', '10', 'submit'), {...hb('b', '11', 'repair'), execution_phase: 'collect'}];
+  const events = [event('10', 'a', 'first', 'A', true), event('11', 'a', 'first', 'B', true),
+    event('11', 'a', 'first', 'C', true), event('12', 'c', 'second', 'D', true)];
+  assert.deepEqual(benchmarkCounts(activationExecution(events, activations[0], activations)), {completed: 3, total: 3});
+  assert.deepEqual(benchmarkCounts(activationExecution(events.slice(0, 3), activations[1], activations)), {completed: 3, total: 3});
+});
+
+
+test('preparation reports phases without fabricating generation progress', () => {
+  const loading = {...event('10', 'a', 'first', ''), phase: 'load_model'};
+  assert.equal(inferencePreparation([loading]).label, 'Loading model');
+  const calibration = {...loading, ts: '2026-10-26T10:15:00Z', phase: 'length_calibration'};
+  assert.deepEqual(inferencePreparation([loading, calibration]), {label: 'Calibrating generation length', startedAt: calibration.ts});
+  assert.equal(inferencePreparation([loading, event('11', 'a', 'first', 'A')]), null);
 });

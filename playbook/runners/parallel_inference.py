@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
@@ -139,25 +140,106 @@ def _allocate(parts: list[Part], worker_count: int) -> list[list[Part]]:
     return assigned
 
 
-def _worker_environment(base: dict[str, str], root: Path, devices: list[str]) -> dict[str, str]:
+def _cache_signature(model: str, config: dict) -> str | None:
+    """Discover compatibility without importing torch or initializing CUDA."""
+    import hashlib
+    import importlib.metadata
+    import platform
+    try:
+        gpu = subprocess.run(['nvidia-smi', '--query-gpu=name,compute_cap,driver_version',
+                              '--format=csv,noheader'], capture_output=True, text=True, timeout=5)
+        if gpu.returncode or not gpu.stdout.strip():
+            return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    versions = {}
+    for package in ('torch', 'vllm', 'triton', 'flashinfer-python', 'nvidia-cutlass-dsl', 'transformers'):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = 'absent'
+    identity = {'schema': 1, 'uid': os.getuid(), 'python': sys.version,
+                'environment': sys.prefix, 'architecture': platform.machine(),
+                'gpu': sorted(set(gpu.stdout.strip().splitlines())), 'packages': versions,
+                'model': model, 'engine': _engine_identity(config)}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
+
+
+class _CacheSlots(dict):
+    def __init__(self):
+        super().__init__()
+        self.fds = {}
+
+
+@contextmanager
+def _cache_slots(base: dict[str, str], model: str, config: dict, workers: int):
+    """Hold exclusive cache leases until every worker has shut down.
+
+    Contention or an unknown GPU/runtime falls back to job-private caches.
+    There is no waiting on another run and no deletion of shared artifacts.
+    """
+    import fcntl
+    root = base.get('ZEVO_INFERENCE_CACHE_ROOT')
+    if not root and base.get('HF_HOME'):
+        root = str(Path(base['HF_HOME']).expanduser().parent / 'inference-runtime-cache')
+    slots = _CacheSlots()
+    locks = []
+    try:
+        signature = _cache_signature(model, config) if root else None
+        if root and signature:
+            directory = Path(root).expanduser().resolve() / f'uid-{os.getuid()}' / signature
+            try:
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                for worker in range(workers):
+                    for index in range(32):
+                        slot = directory / f'slot-{index:02d}'
+                        slot.mkdir(exist_ok=True, mode=0o700)
+                        lock = (slot / '.lease').open('a+')
+                        try:
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except OSError:
+                            lock.close()
+                            continue
+                        locks.append(lock)
+                        reused = (slot / '.initialized').exists()
+                        print(f"[cache] worker {worker}: {'existing' if reused else 'new'} isolated cache slot {slot}", flush=True)
+                        (slot / '.initialized').touch()
+                        slots[worker] = slot
+                        slots.fds[worker] = lock.fileno()
+                        break
+            except OSError as exc:
+                print(f'[cache] persistent cache unavailable: {exc}; remaining workers use temporary caches', flush=True)
+        if len(slots) < workers:
+            print(f'[cache] {workers - len(slots)} worker(s) use temporary caches (no compatible free persistent slot)', flush=True)
+        yield slots
+    finally:
+        for lock in locks:
+            lock.close()
+
+
+def _worker_environment(base: dict[str, str], root: Path, devices: list[str],
+                        cache: Path | None = None) -> dict[str, str]:
     env = dict(base)
     env["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
-    for key, suffix in (
-        ("TMPDIR", ""), ("TMP", ""), ("TEMP", ""),
-        # Some first-use compilers honor XDG while FlashInfer releases have
-        # also used Path.home()/.cache directly. Give every replica both a
-        # distinct HOME and explicit cache roots so two cold starts can never
-        # contend on the same downloader/JIT lock.
-        ("HOME", "home"), ("XDG_CACHE_HOME", "home/.cache"),
-        ("FLASHINFER_CACHE_DIR", "home/.cache/flashinfer"),
-        ("TRITON_CACHE_DIR", "triton"),
-        ("TORCHINDUCTOR_CACHE_DIR", "inductor"),
-        ("CUDA_CACHE_PATH", "cuda"), ("VLLM_CACHE_ROOT", "vllm"),
-        ("OUTLINES_CACHE_DIR", "outlines"),
-    ):
+    # IPC and HOME remain private. Only compiled/runtime caches can persist.
+    for key, suffix in (("TMPDIR", ""), ("TMP", ""), ("TEMP", ""), ("HOME", "home")):
         location = root / suffix
         location.mkdir(parents=True, exist_ok=True)
         env[key] = str(location)
+    cache_root = cache or root
+    for key, suffix in (
+        ("XDG_CACHE_HOME", "home/.cache"),
+        ("FLASHINFER_CACHE_DIR", "home/.cache/flashinfer"),
+        ("TRITON_CACHE_DIR", "triton"), ("TORCHINDUCTOR_CACHE_DIR", "inductor"),
+        ("CUDA_CACHE_PATH", "cuda"), ("VLLM_CACHE_ROOT", "vllm"),
+        ("OUTLINES_CACHE_DIR", "outlines"),
+    ):
+        location = cache_root / suffix
+        location.mkdir(parents=True, exist_ok=True)
+        env[key] = str(location)
+    if cache is not None:
+        # Some FlashInfer versions use Path.home() instead of their env knob.
+        (root / "home/.cache").symlink_to(cache / "home/.cache", target_is_directory=True)
     if len(env["TMPDIR"]) > 80:
         raise ValueError("worker TMPDIR is too long for vLLM IPC sockets")
     return env
@@ -212,12 +294,135 @@ def _merge(member: dict, parts: list[Part], expected: int) -> int:
     return len(records)
 
 
+def _load_config(path: str) -> dict:
+    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+
+
+def _engine_identity(config: dict) -> dict:
+    # Prompt mappings and sampling parameters do not construct the model. All
+    # engine/tokenizer settings must agree before sharing a loaded replica.
+    return {key: config.get(key) for key in (
+        "base_model", "generation_backend", "tokenizer_source",
+        "chat_template_source", "chat_template_hash", "template_kwargs", "special_token_ids",
+    )} | {"implementation_config": {
+        key: value for key, value in config.get("implementation_config", {}).items()
+        if key not in {"raw_output_column"}
+    }}
+
+
+def _calibration_helper():
+    # The engine copies this exact standalone helper next to the runner.
+    import importlib.util
+    path = Path(__file__).with_name("zevo_length_calibration.py")
+    spec = importlib.util.spec_from_file_location("zevo_resident_calibration", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("system length calibration helper is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _resident_worker(predict: str, model: str, manifest: str, summary: str,
+                     ticket: str, gate: str, calibrate: bool) -> int:
+    """Load once, calibrate assigned whole benchmarks, then generate shards."""
+    import importlib.util
+    members = json.loads(Path(manifest).read_text())["members"]
+    spec = importlib.util.spec_from_file_location("zevo_predict_adapter", predict)
+    if spec is None or spec.loader is None:
+        raise ValueError("predict module is unavailable")
+    adapter = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = adapter
+    spec.loader.exec_module(adapter)
+    if not callable(getattr(adapter, "load_engine", None)) or not callable(getattr(adapter, "predict_member", None)):
+        raise ValueError("resident predict.py requires load_engine and predict_member")
+    engine = adapter.load_engine(model, _load_config(members[0]["config"]))
+    helper = _calibration_helper() if calibrate else None
+    try:
+        if calibrate:
+            for member in members:
+                if not member.get("_calibration_owner"):
+                    continue
+                questions = member["_full_questions"]
+                if _load_config(member["config"]).get("measurement", {}).get("inference_config", {}).get("scoring_mode") == "option_loglikelihood":
+                    continue
+                # Reuse accepted evidence on a retry, without rerunning samples.
+                try:
+                    helper.validate(member["config"], questions)
+                    continue
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+                fields, rows, _ = helper.sample_rows(questions)
+                sample_root = Path(member["config"]).parent / "resident-calibration"
+                sample_root.mkdir(parents=True, exist_ok=True)
+                sample_path = sample_root / "questions.csv"
+                _write_csv(sample_path, fields, rows)
+                accepted = False
+                for index, candidate in enumerate(member["calibration_configs"]):
+                    cfg = _load_config(candidate)
+                    # Only the selected owner's worker writes the final YAML.
+                    Path(member["config"]).write_bytes(Path(candidate).read_bytes())
+                    sample = {**member, "questions": str(sample_path),
+                              "output": str(sample_root / f"predictions-{index}.csv"),
+                              "diagnostics": str(sample_root / f"diagnostics-{index}.json")}
+                    _phase(ticket, "length_calibration")
+                    adapter.predict_member(engine, sample, cfg, progress=lambda step, total: None)
+                    try:
+                        helper.check(member["config"], questions, sample["diagnostics"], sample["output"])
+                        accepted = True
+                        break
+                    except ValueError as exc:
+                        # Malformed artifacts must not be mistaken for a short budget.
+                        if not str(exc).startswith("length calibration failed:"):
+                            raise
+                        print(f"[calibration] {member['name']} candidate {index + 1}: {exc}", flush=True)
+                if not accepted:
+                    raise ValueError(f"length calibration exhausted for {member['name']}; inspect evidence before changing the plan")
+        print("__ZEVO_RESIDENT_READY__", flush=True)
+        # Parent validates every full benchmark before releasing any shard.
+        while not Path(gate).exists():
+            time.sleep(0.1)
+        summaries = []
+        for index, member in enumerate(members, 1):
+            def progress(step, total):
+                _emit(ticket, {"step": step, "total": total,
+                               "benchmark_index": index, "benchmark_total": len(members)})
+            result = adapter.predict_member(engine, member, _load_config(member["config"]), progress=progress)
+            summaries.append(result)
+        _atomic_json(Path(summary), {"members": summaries})
+        return 0
+    finally:
+        close = getattr(adapter, "close_engine", None)
+        if callable(close):
+            close(engine)
+
+
 def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
-        allocated_gpus: int, gpus_per_worker: int, max_workers: int | None = None) -> int:
+        allocated_gpus: int, gpus_per_worker: int, max_workers: int | None = None,
+        resident: bool = False, calibrate: bool = False) -> int:
     with open(suite, encoding="utf-8") as handle:
         members = json.load(handle)["members"]
     if not members:
         raise ValueError("inference suite is empty")
+    if calibrate and not resident:
+        raise ValueError("in-process calibration requires --resident")
+    if resident:
+        identity = _engine_identity(_load_config(members[0]["config"]))
+        for member in members:
+            candidates = member.get("calibration_configs", []) if calibrate else []
+            if calibrate and not 1 <= len(candidates) <= 4:
+                raise ValueError("each calibration member requires 1–4 prevalidated candidate configs")
+            for path in [member["config"], *candidates]:
+                if _engine_identity(_load_config(path)) != identity:
+                    raise ValueError("resident configs change engine initialization; prepare a compatible context/memory envelope or rebuild explicitly")
+            if calibrate:
+                baseline = _load_config(candidates[0])
+                for path in candidates:
+                    candidate = _load_config(path)
+                    left, right = json.loads(json.dumps(baseline)), json.loads(json.dumps(candidate))
+                    left.get("measurement", {}).pop("max_new_tokens", None)
+                    right.get("measurement", {}).pop("max_new_tokens", None)
+                    if left != right:
+                        raise ValueError("resident calibration candidates may change only measurement.max_new_tokens")
     identities = [str(member.get("benchmark_id") or "").strip() for member in members]
     if any(not identity for identity in identities) or len(set(identities)) != len(identities):
         raise ValueError("inference suite requires a distinct benchmark_id for every member")
@@ -253,7 +458,8 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
         flush=True,
     )
     _phase(ticket, "setup")
-    with tempfile.TemporaryDirectory(prefix="zevo-inf-", dir=os.environ.get("TMPDIR")) as scratch:
+    with tempfile.TemporaryDirectory(prefix="zevo-inf-", dir=os.environ.get("TMPDIR")) as scratch, \
+            _cache_slots(os.environ, model, _load_config(members[0]["config"]), workers) as cache_slots:
         root = Path(scratch)
         parts, counts, complete = _partitions(members, workers, root)
         already_done_rows = sum(counts[index] for index in complete)
@@ -338,16 +544,22 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
         for index in sorted(complete):
             commit_member(index)
         _phase(ticket, "load_model")
+        ready_workers: set[int] = set()
+        gate = root / "generation-ready"
+        helper = _calibration_helper() if calibrate else None
         try:
             for index, batch in active:
                 worker_root = root / f"w{index}"
                 env = _worker_environment(
                     os.environ, worker_root,
                     mask[index * gpus_per_worker:(index + 1) * gpus_per_worker],
+                    cache=cache_slots.get(index),
                 )
                 worker_members = [
                     {**part.member, "questions": part.questions,
-                     "output": part.output, "diagnostics": part.diagnostics}
+                     "output": part.output, "diagnostics": part.diagnostics,
+                     "_full_questions": part.member["questions"],
+                     "_calibration_owner": index == min(owners[part.member_index])}
                     for part in batch
                 ]
                 manifest = root / f"worker-{index}.json"
@@ -356,9 +568,17 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                 command = [sys.executable, predict, "--model", model,
                            "--suite", str(manifest), "--summary", str(worker_summary),
                            "--ticket-id", ticket]
+                if resident:
+                    command = [sys.executable, str(Path(__file__).resolve()),
+                               "--resident-worker", "--predict", str(Path(predict).resolve()),
+                               "--model", model, "--suite", str(manifest),
+                               "--summary", str(worker_summary), "--ticket-id", ticket,
+                               "--generation-gate", str(gate)] + (["--calibrate"] if calibrate else [])
                 proc = subprocess.Popen(
                     command, env=env, stdout=subprocess.PIPE, stderr=None,
                     text=True, bufsize=1,
+                    # Keep the lease if the parent dies before this worker.
+                    pass_fds=((cache_slots.fds[index],) if index in cache_slots.fds else ()),
                 )
                 processes.append((index, proc, batch))
 
@@ -403,8 +623,20 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                                 and owners[member_index] <= successful_workers):
                             commit_member(member_index)
                     continue
+                if resident and line == "__ZEVO_RESIDENT_READY__":
+                    ready_workers.add(worker)
+                    if len(ready_workers) == len(active):
+                        if calibrate:
+                            for member in members:
+                                cfg = _load_config(member["config"])
+                                if cfg.get("measurement", {}).get("inference_config", {}).get("scoring_mode") != "option_loglikelihood":
+                                    helper.validate(member["config"], member["questions"])
+                        gate.touch()
+                    continue
                 if not line.startswith("__PROGRESS__:"):
-                    if not line.startswith("__PHASE__:"):
+                    if line.startswith("__PHASE__:") and resident and "length_calibration@" in line:
+                        _phase(ticket, "length_calibration")
+                    elif not line.startswith("__PHASE__:"):
                         print(f"[worker {worker}] {line}", flush=True)
                     continue
                 try:
@@ -485,18 +717,25 @@ def main() -> int:
     parser.add_argument("--suite", required=True)
     parser.add_argument("--summary", required=True)
     parser.add_argument("--ticket-id", required=True)
-    parser.add_argument("--allocated-gpus", required=True, type=int)
-    parser.add_argument("--gpus-per-worker", required=True, type=int)
+    parser.add_argument("--allocated-gpus", type=int, default=1)
+    parser.add_argument("--gpus-per-worker", type=int, default=1)
     parser.add_argument("--max-workers", type=int,
                         help="Replica limit from the CPU/RAM and GPU resource plan")
+    parser.add_argument("--resident", action="store_true", help="Reuse loaded engines across calibration and generation")
+    parser.add_argument("--calibrate", action="store_true", help="Gate generation on in-process length calibration")
+    parser.add_argument("--resident-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--generation-gate", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
+        if args.resident_worker:
+            return _resident_worker(args.predict, args.model, args.suite, args.summary,
+                                    args.ticket_id, args.generation_gate, args.calibrate)
         return run(
             predict=args.predict, model=args.model, suite=args.suite,
             summary=args.summary, ticket=args.ticket_id,
             allocated_gpus=args.allocated_gpus,
             gpus_per_worker=args.gpus_per_worker,
-            max_workers=args.max_workers,
+            max_workers=args.max_workers, resident=args.resident, calibrate=args.calibrate,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"[parallel] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
