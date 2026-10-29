@@ -97,7 +97,8 @@ def test_release_boundary(mode, state, expected):
     ('per_submission', 'train-1', False, 'RUNNING'),
     ('per_submission', 'train-1', False, 'COMPLETING'), ('per_run', 'infer-1', False, False),
 ])
-async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mode, next_ticket, reuses, live):
+@pytest.mark.parametrize("retirement_failure", [False, True])
+async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mode, next_ticket, reuses, live, retirement_failure):
     from zevo.engine.run import remote_jobs
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
@@ -132,6 +133,25 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
         kwargs = dict(run=run, ticket=ticket, contract=contract,
             info=SimpleNamespace(cluster=SimpleNamespace(workdir='/remote', env_setup='export SITE_SLURM=1'), resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=4)),
             heartbeat_id='h2', sha256='digest')
+        publication = {"attempted": False}
+        kwargs["publication"] = publication
+        if retirement_failure and (live == 'missing' or not live):
+            from sqlalchemy import event
+            from sqlalchemy.exc import DBAPIError
+            class Deadlock(Exception):
+                sqlstate = '40P01'
+            def fail_retirement(conn, cursor, statement, parameters, context, executemany):
+                if statement.startswith('UPDATE infra_instances'):
+                    raise DBAPIError(statement, parameters, Deadlock('retirement deadlock'))
+            event.listen(engine.sync_engine, 'before_cursor_execute', fail_retirement)
+            with pytest.raises(DBAPIError):
+                async with session.begin_nested():
+                    await submit_workload(session, **kwargs)
+            assert not publication['attempted']
+            assert not any('sbatch --parsable' in c for c in commands)
+            event.remove(engine.sync_engine, 'before_cursor_execute', fail_retirement)
+            await session.refresh(owner)
+            assert owner.released_at is None
         if mode == 'per_run' and live in ('COMPLETING', 'UNKNOWN'):
             with pytest.raises(ValueError, match='not reusable or terminal'):
                 await submit_workload(session, **kwargs)

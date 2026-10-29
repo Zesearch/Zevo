@@ -4224,6 +4224,49 @@ async def _submit_validated_slurm_stage(
     inp: BaseModel,
     heartbeat_id: str,
 ) -> InfraInstance:
+    """Recover pre-publication deadlocks without rerunning the agent or sbatch.
+
+    A savepoint isolates submission writes from result processing. PostgreSQL
+    deadlocks abort the statement's transaction: merely catching the exception
+    leaves refresh()/failure handling unusable until that savepoint rolls back.
+    Never replay once the remote command may have published a workload.
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    for attempt in range(3):
+        publication = {"attempted": False}
+        try:
+            async with session.begin_nested():
+                return await _submit_validated_slurm_stage_once(
+                    session, run=run, ticket=ticket, inp=inp,
+                    heartbeat_id=heartbeat_id, publication=publication,
+                )
+        except DBAPIError as exc:
+            # begin_nested can itself fail while flushing caller-owned writes.
+            # Do not silently discard those writes and pretend submission worked.
+            if not session.is_active:
+                raise
+            code = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            if code != "40P01" or publication["attempted"] or attempt == 2:
+                raise
+            await session.refresh(run)
+            await session.refresh(ticket)
+            if run.status in TERMINAL_RUN_STATUSES or ticket.status == "cancelled":
+                raise ValueError("Slurm submission cancelled while retrying allocation update") from exc
+            _warn("slurm_submission_deadlock_retry",
+                  RuntimeError(f"heartbeat={heartbeat_id} retry={attempt + 1}/2 before remote publication"))
+            await asyncio.sleep(0.1 * (attempt + 1))
+
+
+async def _submit_validated_slurm_stage_once(
+    session: AsyncSession,
+    *,
+    run: Run,
+    ticket: Ticket,
+    inp: BaseModel,
+    heartbeat_id: str,
+    publication: dict,
+) -> InfraInstance:
     """Commit one prepared cluster stage after its typed result validates.
 
     The Agent prepares and uploads the files.  The engine owns the irreversible
@@ -4310,7 +4353,7 @@ async def _submit_validated_slurm_stage(
         launch_snapshot = snapshot(inp, Path(contract.script_path).read_text())
     job_id, controller_meta = await submit_workload(
         session, run=run, ticket=ticket, contract=contract, info=info,
-        heartbeat_id=heartbeat_id, sha256=local_script_sha256,
+        heartbeat_id=heartbeat_id, sha256=local_script_sha256, publication=publication,
     )
 
     if launch_snapshot:
@@ -6814,6 +6857,11 @@ async def run_ticket(
                     heartbeat_id=heartbeat_id,
                 )
             except Exception as exc:  # submission is part of the stage result
+                if not session.is_active:
+                    await session.rollback()
+                await session.refresh(run)
+                await session.refresh(tk)
+                await session.refresh(hb)
                 status = "failed"
                 summary = f"validated Slurm stage could not be submitted: {exc}"[:2000]
                 error_message = summary

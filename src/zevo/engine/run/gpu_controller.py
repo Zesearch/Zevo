@@ -332,7 +332,7 @@ def _checkpoint_allocation_handoff(run, ticket, consumer, train):
     )
 
 
-async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id, sha256):
+async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id, sha256, publication=None):
     """Reuse a healthy owned allocation or submit one finite controller job."""
     from sqlalchemy import select
     from zevo.db import InfraInstance, Run, Ticket
@@ -451,6 +451,11 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             controller_body = await read_controller_headers(info, directory) or ""
     else:
         controller_body = wrapper
+    # Force retirement writes before any external side effect. A deadlock here
+    # is safely retryable; after publishing, an SSH failure is ambiguous.
+    await session.flush()
+    if publication is not None:
+        publication["attempted"] = True
     result = await _ssh(info, _slurm_login_command(command), timeout_seconds=30)
     if not result.get("ok"):
         raise ValueError("controller submission failed: " + str(result.get("error") or result.get("stdout")))
