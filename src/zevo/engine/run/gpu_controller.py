@@ -332,7 +332,7 @@ def _checkpoint_allocation_handoff(run, ticket, consumer, train):
     )
 
 
-async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id, sha256):
+async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id, sha256, publication=None, continuation=None):
     """Reuse a healthy owned allocation or submit one finite controller job."""
     from sqlalchemy import select
     from zevo.db import InfraInstance, Run, Ticket
@@ -394,6 +394,17 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
                 continue
             if not _checkpoint_allocation_handoff(run, ticket, consumer, train):
                 raise ValueError("retained allocation is busy with another stage")
+        if continuation and continuation.get("source_job_id") == row.instance_id:
+            # The worker already yielded for walltime. Do not send it back into
+            # the same exhausted window. Release this idle owned controller;
+            # keep its row live until the watcher confirms actual termination.
+            # active_consumers was checked above, so no other stage is killed.
+            if publication is not None:
+                publication["attempted"] = True
+            release = await _ssh(info, upload_text_command(meta["controller_directory"] + "/release", "walltime continuation"))
+            if not release.get("ok"):
+                raise ValueError("could not release exhausted allocation for continuation")
+            break
         owner = row
         break
     directory = ((owner.meta or {})["controller_directory"] if owner is not None
@@ -451,6 +462,11 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             controller_body = await read_controller_headers(info, directory) or ""
     else:
         controller_body = wrapper
+    # Force retirement writes before any external side effect. A deadlock here
+    # is safely retryable; after publishing, an SSH failure is ambiguous.
+    await session.flush()
+    if publication is not None:
+        publication["attempted"] = True
     result = await _ssh(info, _slurm_login_command(command), timeout_seconds=30)
     if not result.get("ok"):
         raise ValueError("controller submission failed: " + str(result.get("error") or result.get("stdout")))

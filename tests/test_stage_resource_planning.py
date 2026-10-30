@@ -456,6 +456,21 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert asyncio.run(contract("inference")).phase == "submit"
     job_row.meta.update({"execution_attempt": 2, "retry_of_bookkeeping_row_id": "request-0", "retry_of_job_id": "12344"})
     assert asyncio.run(contract("inference")).phase == "collect"  # authorization was for attempt 1 only
+    # Walltime is an execution continuation even when exit=0 and repair budget
+    # is exhausted. It must receive a new submit contract on the same ticket.
+    ticket.agent_id = "train"
+    ticket.status = "queued"
+    ticket.repair_attempts = runner.MAX_REPAIR_ATTEMPTS + 1
+    job_row.meta["training_continuation"] = {
+        "verified": True, "source_resource_id": job_row.id, "ticket_id": ticket.id,
+    }
+    continued = asyncio.run(contract())
+    assert continued.phase == "submit"
+    assert continued.attempt == 3
+    assert continued.retry_of_bookkeeping_row_id == job_row.id
+    assert continued.previous_execution["scheduler_state"] == "COMPLETED"
+    job_row.meta.pop("training_continuation")
+    ticket.status = "repairing"
     job_row.meta["scheduler_state"] = "FAILED"
 
     job_row.meta.update({

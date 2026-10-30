@@ -40,7 +40,26 @@ class TrainExecutionContract(BaseModel):
     )
 
 
+class TrainingContinuation(BaseModel):
+    """Full-state walltime continuation; never a new training experiment."""
+    model_config = ConfigDict(extra="forbid")
+    reason: Literal["walltime"] = "walltime"
+    checkpoint_path: str = Field(min_length=1)
+    plan_path: str = Field(min_length=1)
+    completed_steps: int = Field(ge=1)
+    planned_steps: int = Field(gt=1)
+    config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def incomplete(self):
+        if self.completed_steps >= self.planned_steps:
+            raise ValueError("continuation requires an incomplete training plan")
+        return self
+
+
 class TrainTaskInput(AgentTaskInput):
+    continuation: TrainingContinuation | None = Field(
+        None, description="Engine-verified full-state resume point. Preserve the exact config and full plan; restore optimizer, scheduler, RNG and sampler position before continuing.")
     operation: Literal["train"] = "train"
     run_id: str = Field(min_length=1)
     iteration: int = Field(ge=1)
@@ -317,6 +336,8 @@ class TrainingDiagnostics(BaseModel):
 
 
 class TrainResult(AgentResult):
+    continuation: TrainingContinuation | None = Field(
+        None, description="For deferred terminal-job collect only: request another finite job from a complete resumable state, even if the prior job exited 0. Do not claim a final checkpoint.")
     status: Literal["succeeded", "deferred", "failed"]
     operation: Literal["train"] = "train"
 
@@ -356,6 +377,8 @@ class TrainResult(AgentResult):
 
     @model_validator(mode="after")
     def require_success_artifacts(self) -> "TrainResult":
+        if self.continuation and (self.status != "deferred" or self.checkpoint_path or self.intermediate_checkpoints):
+            raise ValueError("continuation requires deferred with no final/branch checkpoint claims")
         if self.status == "succeeded" and not (
             self.train_config_path
             and self.train_script_path

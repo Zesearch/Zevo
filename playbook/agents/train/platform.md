@@ -194,15 +194,32 @@ checkpoint already exists and its training-completion record validates, report i
 instead of running training again. Report a specific failure when the work order
 cannot be repaired. The engine owns the repair limit and resource lifetime.
 
-If the finite job approaches site walltime before the unchanged training plan
-completes, a graceful pre-walltime hook must save a full resumable trainer state.
-After the backend reports `TIMEOUT`, verify that exact state. This same Train
-Ticket may then update the audited script only to resume from it, submit one new
-finite job, register a new row, and return `deferred` again. This is execution
-continuation, not a new iteration or method/data/model decision. Every JOBID and
-queue interval remains distinct. Fail visibly if the state is weights-only,
-corrupt, absent, the queue deadline expires, or the remaining Run budget cannot
-finish; never use a weights-only branch for optimizer-exact resume.
+If a finite job approaches site walltime before the unchanged training plan
+completes, save a full resumable trainer state on durable shared storage. A
+normal graceful stop may exit 0: `COMPLETED` describes this workload, not the
+whole training plan. During terminal `collect`, return `status="deferred"`
+with `continuation` containing `reason="walltime"`, absolute remote
+`checkpoint_path` and `plan_path`, `completed_steps`, `planned_steps`, and the
+unchanged YAML's `config_sha256`. Supply the local executed `train_config_path`.
+Leave final `checkpoint_path` and `intermediate_checkpoints` empty. The backend
+verifies the frozen plan, progress, configuration and full-state file inventory,
+then queues a new submit activation on this SAME ticket, without a repair count
+or an Orchestrator experiment change. Never wait on the old terminal job or
+change exit codes solely to force repair.
+
+When input `continuation` is present, it is the engine-verified resume contract.
+Preserve the training configuration bytes, full planned horizon and parent/data
+bindings. Adapt only the launch paths to the new attempt and restore the exact
+checkpoint's optimizer, scheduler, RNG, trainer/sampler position and any custom
+selection ledger. Verify the actual restored global step and state before the
+next scheduled update. Do not redo startup training steps, restart from the
+parent, shorten the plan to fit one allocation, or publish a partial checkpoint
+as the final model. The engine requests a fresh window instead of reusing the
+allocation that triggered the walltime stop. Only a fully completed plan may
+return `succeeded`. Corrupt/missing/weights-only state must fail explicitly.
+Standard Transformers/TRL full-state layouts (including sharded weights) are
+verified automatically; unsupported optimizer-state layouts need an explicit
+backend verifier rather than bypassing the check.
 
 ## Parent chain
 

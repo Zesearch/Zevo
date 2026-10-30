@@ -893,13 +893,15 @@ async def _slurm_stage_job_contract(
     requested_gpus = await requested_slurm_gpus(session, ticket.id) if cluster and session is not None else 0
     from zevo.engine.run.adaptive_training import checkpoint_resume_authorized
     checkpoint_resume = checkpoint_resume_authorized(run, ticket, job_row)
+    from zevo.engine.run.training_continuation import authorized as continuation_authorized
+    walltime_resume = continuation_authorized(ticket, job_row)
     repair_submission = bool(
         cluster
         and job_row is not None
         and prior_state in _SLURM_TERMINAL_STATES
         and (
             restart_instruction_id or measurement_restart
-            or checkpoint_resume
+            or checkpoint_resume or walltime_resume
             or (
                 str(getattr(ticket, "status", "")) == "repairing"
                 and (prior_state != "COMPLETED" or (stage == "train" and meta.get("training_completion_repair"))
@@ -1147,7 +1149,16 @@ async def _build_train_input(
         run=run, ticket=ticket, work_dir=work_dir, filename="train.sbatch",
         device_info_path=device_info_path, session=session, stage="train",
     )
+    continuation = None
+    if slurm_job.phase == "submit" and slurm_job.attempt > 1:
+        prior = await _latest_slurm_resource_request(session, ticket)
+        from zevo.engine.run.training_continuation import authorized
+        if authorized(ticket, prior):
+            from zevo.contracts.train import TrainingContinuation
+            proof = prior.meta["training_continuation"]
+            continuation = TrainingContinuation(**{key: proof[key] for key in TrainingContinuation.model_fields})
     return TrainTaskInput(
+        continuation=continuation,
         ticket_id=ticket.id,
         **_customization_kwargs(ticket.customization or {}),
         run_context=context,
@@ -4224,6 +4235,49 @@ async def _submit_validated_slurm_stage(
     inp: BaseModel,
     heartbeat_id: str,
 ) -> InfraInstance:
+    """Recover pre-publication deadlocks without rerunning the agent or sbatch.
+
+    A savepoint isolates submission writes from result processing. PostgreSQL
+    deadlocks abort the statement's transaction: merely catching the exception
+    leaves refresh()/failure handling unusable until that savepoint rolls back.
+    Never replay once the remote command may have published a workload.
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    for attempt in range(3):
+        publication = {"attempted": False}
+        try:
+            async with session.begin_nested():
+                return await _submit_validated_slurm_stage_once(
+                    session, run=run, ticket=ticket, inp=inp,
+                    heartbeat_id=heartbeat_id, publication=publication,
+                )
+        except DBAPIError as exc:
+            # begin_nested can itself fail while flushing caller-owned writes.
+            # Do not silently discard those writes and pretend submission worked.
+            if not session.is_active:
+                raise
+            code = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            if code != "40P01" or publication["attempted"] or attempt == 2:
+                raise
+            await session.refresh(run)
+            await session.refresh(ticket)
+            if run.status in TERMINAL_RUN_STATUSES or ticket.status == "cancelled":
+                raise ValueError("Slurm submission cancelled while retrying allocation update") from exc
+            _warn("slurm_submission_deadlock_retry",
+                  RuntimeError(f"heartbeat={heartbeat_id} retry={attempt + 1}/2 before remote publication"))
+            await asyncio.sleep(0.1 * (attempt + 1))
+
+
+async def _submit_validated_slurm_stage_once(
+    session: AsyncSession,
+    *,
+    run: Run,
+    ticket: Ticket,
+    inp: BaseModel,
+    heartbeat_id: str,
+    publication: dict,
+) -> InfraInstance:
     """Commit one prepared cluster stage after its typed result validates.
 
     The Agent prepares and uploads the files.  The engine owns the irreversible
@@ -4237,6 +4291,27 @@ async def _submit_validated_slurm_stage(
     if contract.phase != "submit":
         raise ValueError("engine Slurm commit is valid only during submit phase")
     previous = await _latest_slurm_resource_request(session, ticket)
+    from zevo.engine.run.training_continuation import authorized as continuation_authorized
+    walltime_resume = continuation_authorized(ticket, previous)
+    resume_proof = dict((previous.meta or {}).get("training_continuation") or {}) if walltime_resume else {}
+    training_digest = ""
+    if isinstance(inp, TrainTaskInput):
+        training_digest = hashlib.sha256(Path(contract.script_path).with_name("train_config.yaml").read_bytes()).hexdigest()
+        if walltime_resume and training_digest != resume_proof["config_sha256"]:
+            raise ValueError("walltime continuation must preserve the frozen training configuration")
+        if walltime_resume:
+            from types import SimpleNamespace
+            from zevo.contracts.train import TrainingContinuation
+            from zevo.engine.run.training_continuation import verify_request
+            expected = {key: resume_proof[key] for key in TrainingContinuation.model_fields}
+            if inp.continuation is None or inp.continuation.model_dump() != expected:
+                raise ValueError("submit input lost or changed its verified resume binding")
+            # Check again immediately before allocation: shared state may have
+            # been removed or altered while this activation prepared its script.
+            await verify_request(session, ticket,
+                inp.model_copy(update={"slurm_job": SlurmStageJobContract.model_validate(contract.previous_execution)}),
+                SimpleNamespace(continuation=inp.continuation,
+                    train_config_path=str(Path(contract.script_path).with_name("train_config.yaml"))), previous)
     if contract.attempt == 1:
         if previous is not None:
             raise ValueError("a Slurm resource request already exists for this Ticket")
@@ -4261,7 +4336,7 @@ async def _submit_validated_slurm_stage(
         if (previous_state not in _SLURM_TERMINAL_STATES
             or (previous_state == "COMPLETED" and not contract.restart_instruction_id and not measurement_restart
                 and not (ticket.agent_id == "train" and (previous_meta.get("training_completion_repair")
-                    or checkpoint_resume))
+                    or checkpoint_resume or walltime_resume))
                 and not (ticket.agent_id == "inference" and execution_retry_authorized(previous_meta)))):
             raise ValueError("Slurm replacement requires the prior workload to be terminal")
         if int(previous_meta.get("execution_attempt") or 1) + 1 != contract.attempt:
@@ -4288,7 +4363,7 @@ async def _submit_validated_slurm_stage(
         if (
             previous_implementation_sha256
             and previous_implementation_sha256 == implementation_sha256
-            and not measurement_restart and not checkpoint_resume
+            and not measurement_restart and not checkpoint_resume and not walltime_resume
             and not (ticket.agent_id == "inference" and execution_retry_authorized(previous.meta or {}))
         ):
             raise ValueError(
@@ -4310,7 +4385,8 @@ async def _submit_validated_slurm_stage(
         launch_snapshot = snapshot(inp, Path(contract.script_path).read_text())
     job_id, controller_meta = await submit_workload(
         session, run=run, ticket=ticket, contract=contract, info=info,
-        heartbeat_id=heartbeat_id, sha256=local_script_sha256,
+        heartbeat_id=heartbeat_id, sha256=local_script_sha256, publication=publication,
+        continuation=resume_proof,
     )
 
     if launch_snapshot:
@@ -4353,6 +4429,8 @@ async def _submit_validated_slurm_stage(
             "retry_of_job_id": contract.retry_of_job_id,
             "script_sha256": local_script_sha256,
             "implementation_sha256": implementation_sha256,
+            **({"training_config_sha256": training_digest} if training_digest else {}),
+            **({"resumed_from": resume_proof} if resume_proof else {}),
             **({"inference_launch": launch_snapshot, "inference_launch_reuse": inp.slurm_launch_reuse, "frozen_reuse_artifacts": inp.frozen_reuse_artifacts} if launch_snapshot else {}),
             **controller_meta,
         },
@@ -5993,6 +6071,7 @@ async def run_ticket(
     artifact_meta: dict = {}
     deferred_stage_row: InfraInstance | None = None
     prepared_slurm_submission = False
+    pending_continuation = None
     await session.refresh(tk)
     cancelled_by_user = tk.status == "cancelled"
     if output is None or error_message:
@@ -6170,6 +6249,8 @@ async def run_ticket(
                 stage_row = await _latest_slurm_resource_request(session, tk)
                 deferred_stage_row = stage_row
                 if inp.slurm_job.phase == "submit":
+                    if isinstance(output, TrainResult) and output.continuation:
+                        runtime_contract_mismatches["training_continuation"] = {"declared": "terminal collect only", "reported": "continuation request during submit"}
                     if inp.slurm_job.attempt == 1 and stage_row is None:
                         # The Agent has only prepared/uploaded the first stage.
                         # The engine submits it after every Result/config/script
@@ -6227,6 +6308,12 @@ async def run_ticket(
                             (stage_row.meta or {}).get("gpus_per_node") or 0
                         ),
                     }
+                elif isinstance(output, TrainResult) and output.continuation:
+                    from zevo.engine.run.training_continuation import verify_request
+                    try:
+                        pending_continuation = await verify_request(session, tk, inp, output, stage_row)
+                    except (OSError, ValueError, KeyError, TypeError) as exc:
+                        runtime_contract_mismatches["training_continuation"] = {"declared": "verified full-state unchanged plan", "reported": str(exc)}
                 elif problem := _deferred_collect_problem(inp.slurm_job, stage_row):
                     runtime_contract_mismatches["deferred_status"] = problem
             if isinstance(output, TrainResult) and isinstance(inp, TrainTaskInput):
@@ -6814,6 +6901,11 @@ async def run_ticket(
                     heartbeat_id=heartbeat_id,
                 )
             except Exception as exc:  # submission is part of the stage result
+                if not session.is_active:
+                    await session.rollback()
+                await session.refresh(run)
+                await session.refresh(tk)
+                await session.refresh(hb)
                 status = "failed"
                 summary = f"validated Slurm stage could not be submitted: {exc}"[:2000]
                 error_message = summary
@@ -7122,7 +7214,11 @@ async def run_ticket(
                         ),
                     ))
 
-    if not cancelled_by_user and status == "deferred" and deferred_stage_row is not None:
+    if not cancelled_by_user and status == "deferred" and pending_continuation is not None:
+        deferred_stage_row.meta = {**dict(deferred_stage_row.meta or {}), "training_continuation": pending_continuation}
+        tk.status = "queued"
+        hb.activation_phase = "continue"
+    elif not cancelled_by_user and status == "deferred" and deferred_stage_row is not None:
         # This is the ownership boundary: all local configuration/script
         # checks and the durable JOBID/status-path registration have passed.
         # Only now may the deterministic watcher stream or poll this job.
@@ -7198,6 +7294,9 @@ async def run_ticket(
                 )
 
     hb.finished_at = datetime.now(timezone.utc)
+    if status == "deferred" and pending_continuation is not None and not cancelled_by_user:
+        from zevo.engine.run.training_continuation import queue_continuation
+        await queue_continuation(session, tk, hb, deferred_stage_row, pending_continuation)
     await session.commit()
 
     if status == "deferred" and not cancelled_by_user:

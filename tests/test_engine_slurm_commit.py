@@ -21,7 +21,7 @@ from zevo.engine.run.runner import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry'])
+@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry', 'walltime'])
 async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, mode) -> None:
     remeasure = mode != "repair"
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -151,6 +151,12 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
 
         if mode == "collect_retry":
             row.meta = {**row.meta, "inference_execution_retry": {"execution_attempt": 1, "reason": "prediction output lost after job completed"}}
+        elif mode == "walltime":
+            row.meta = {**row.meta, "training_continuation": {
+                "source_resource_id": row.id, "source_job_id": row.instance_id,
+                "ticket_id": ticket.id, "verified": True,
+                "config_sha256": "a" * 64, "completed_steps": 15, "planned_steps": 450,
+            }}
         elif mode == "checkpoint":
             row.meta = {**row.meta, "checkpoint_yield": "request", "checkpoint_resume": "request"}
             run.lifecycle = {"adaptive_checkpoints": {"request": {
@@ -270,3 +276,68 @@ def test_deferred_collect_rearms_watcher_without_rewriting_submission(state):
     # COMPLETED covers the job finishing between result validation and publication.
     assert _return_slurm_collect_to_watcher(row, heartbeat_id="collect-hb") == state
     assert row.meta == {**original, "watcher_handoff_heartbeat_id": "collect-hb"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fault', ['deadlock', 'persistent', 'after_publish', 'other_sql'])
+async def test_submission_savepoint_recovers_without_replaying_remote_work(monkeypatch, fault):
+    from sqlalchemy import event, select
+    from sqlalchemy.exc import DBAPIError
+    from zevo.engine.run import runner
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    calls, published, failures = [], [], []
+
+    class DatabaseFault(Exception):
+        sqlstate = '40P01' if fault != 'other_sql' else '23505'
+
+    def fail_flush(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith('UPDATE infra_instances') and (not failures or fault == 'persistent'):
+            failures.append(statement)
+            raise DBAPIError(statement, parameters, DatabaseFault('injected failure'))
+
+    async def submit_once(session, *, run, ticket, publication, **kwargs):
+        calls.append(1)
+        owner = await session.get(InfraInstance, 'expired-owner')
+        assert owner.status == 'ready'
+        if fault == 'after_publish':
+            publication['attempted'] = True
+            published.append('job')
+        owner.status = 'released'
+        await session.flush()  # failed ORM flush really poisons the savepoint
+        publication['attempted'] = True
+        published.append('job')
+        return owner
+
+    monkeypatch.setattr(runner, '_submit_validated_slurm_stage_once', submit_once)
+    async with Session() as session:
+        run = Run(id='expiry-run', task_name='task', status='running', metric='accuracy')
+        ticket = Ticket(id='expiry-ticket', run_id=run.id, agent_id='inference', status='running')
+        session.add_all([run, ticket, InfraInstance(
+            id='expired-owner', run_id=run.id, ticket_id=ticket.id,
+            instance_id='old-job', provider='cluster', status='ready',
+        )])
+        await session.commit()
+        ticket.summary = 'agent already prepared the script'
+        event.listen(engine.sync_engine, 'before_cursor_execute', fail_flush)
+        kwargs = dict(run=run, ticket=ticket, inp=None, heartbeat_id='same-activation')
+        if fault == 'deadlock':
+            row = await runner._submit_validated_slurm_stage(session, **kwargs)
+            assert row.status == 'released'
+            assert len(calls) == 2
+            assert published == ['job']
+        else:
+            with pytest.raises(DBAPIError):
+                await runner._submit_validated_slurm_stage(session, **kwargs)
+            assert len(calls) == (3 if fault == 'persistent' else 1)
+            assert published == (['job'] if fault == 'after_publish' else [])
+        # Caller can finish the heartbeat instead of hitting PendingRollbackError.
+        await session.refresh(ticket)
+        assert ticket.summary == 'agent already prepared the script'
+        ticket.status = 'waiting_external' if fault == 'deadlock' else 'failed'
+        await session.commit()
+        assert await session.scalar(select(Ticket.status).where(Ticket.id == ticket.id)) == ticket.status
+    await engine.dispose()
