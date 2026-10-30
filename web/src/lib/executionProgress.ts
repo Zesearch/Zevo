@@ -1,4 +1,4 @@
-import type { ExecutionEventDTO, HeartbeatDTO } from "./api";
+import type { ExecutionEventDTO, HeartbeatDTO, InfraInstanceDTO } from "./api";
 
 /** Markers use second-resolution timestamps. Preserve stdout order within
  * an execution even when the API returns tied rows in a different order. */
@@ -24,13 +24,46 @@ export function latestExecution(events: ExecutionEventDTO[]): ExecutionEventDTO[
   return identity ? ordered.filter((event) => event.extras?.execution_id === identity) : ordered;
 }
 
+/** Match the selected activation to a concrete workload, even before it emits logs. */
+export function activationWorkload(instances: InfraInstanceDTO[], ticketId: string,
+  heartbeat?: HeartbeatDTO, activations: HeartbeatDTO[] = []): InfraInstanceDTO | undefined {
+  if (!heartbeat) return undefined;
+  const started = Date.parse(heartbeat.started_at);
+  const next = Math.min(...activations.map(h => Date.parse(h.started_at)).filter(time => time > started));
+  const collects = ["collect", "continue", "resume"].includes(heartbeat.execution_phase || heartbeat.activation_phase);
+  return instances.filter(row => row.ticket_id === ticketId && row.instance_id
+    && (row.meta?.resource_request || row.meta?.stage_job)
+    && !row.meta?.superseded_by_instruction_id
+    && Date.parse(row.created_at) < next
+    && (collects || Date.parse(row.created_at) >= started))
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+}
+
+/** Resource state is authoritative even if the worker never emitted an exit marker. */
+export function workloadCanProgress(workload?: InfraInstanceDTO): boolean {
+  if (!workload) return true;
+  const state = String(workload.meta?.scheduler_state || "").trim().toUpperCase().split(/\s+/)[0].replace(/\+$/, "");
+  if (workload.released_at || ["released", "failed"].includes(workload.status)) return false;
+  if (workload.provider === "cluster") return state === "RUNNING";
+  return workload.status === "ready";
+}
+
 /** Bound history before the next activation; collect/continue can refer to the
  * same remote execution, while a repair with no workload must not inherit it. */
 export function activationExecution(events: ExecutionEventDTO[], heartbeat?: HeartbeatDTO,
-  activations: HeartbeatDTO[] = []): ExecutionEventDTO[] {
+  activations: HeartbeatDTO[] = [], workload?: InfraInstanceDTO): ExecutionEventDTO[] {
   if (!heartbeat) return [];
   const next = [...activations].sort((a, b) => a.started_at.localeCompare(b.started_at))
     .find((item) => item.started_at > heartbeat.started_at);
+  if (workload) {
+    // A continuation may have no events yet. Never substitute the old job's
+    // events, even when the same Slurm allocation/job ID is reused.
+    return events.filter(event => event.extras?.execution_id === workload.id
+      || (!event.extras?.execution_id && Date.parse(event.ts) >= Date.parse(workload.created_at)
+        && (!next || Date.parse(event.ts) < Date.parse(next.started_at))
+        && (!workload.released_at || Date.parse(event.ts) <= Date.parse(workload.released_at))))
+      .sort(compareEvents);
+  }
   const available = events.filter((event) => !next || event.ts < next.started_at);
   const own = available.filter((event) => event.heartbeat_id === heartbeat.id
     || event.ts >= heartbeat.started_at);

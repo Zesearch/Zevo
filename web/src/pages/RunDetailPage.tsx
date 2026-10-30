@@ -1,7 +1,7 @@
 import { ExecutionPhase } from "../components/ExecutionPhase";
 import { executionPhase } from "../lib/activationPhase";
 import { GenerationReport } from "../components/GenerationReport";
-import { latestBenchmarkEvent, activationExecution, executionPhase as workloadPhase } from "../lib/executionProgress";
+import { latestBenchmarkEvent, activationExecution, activationWorkload, workloadCanProgress, executionPhase as workloadPhase } from "../lib/executionProgress";
 import { measurementProgress } from "../lib/measurementProgress";
 import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
 import { isMidTrainingActivation, midTrainingActivationLabel, midTrainingActionLabel } from "../lib/midTrainingActivations";
@@ -1093,12 +1093,14 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
     && !!instance.instance_id
     && !!instance.meta?.resource_request,
   );
+  const selectedWorkload = activationWorkload(infraInstances, ticketId, picked, chronological);
   const inferenceEvents = activationExecution(t.execution_events.filter(
-    (event) => event.extras?.execution_purpose === "workload"), picked, chronological);
+    (event) => event.extras?.execution_purpose === "workload"), picked, chronological, selectedWorkload);
   const phaseEvents = activationExecution(t.execution_events.filter(
-    (event) => !event.extras?.execution_purpose || event.extras.execution_purpose === "workload"), picked, chronological);
+    (event) => !event.extras?.execution_purpose || event.extras.execution_purpose === "workload"), picked, chronological, selectedWorkload);
   const phaseActive = !!picked && picked.id === chronological.at(-1)?.id
-    && (!!activeResourceRequest || picked.is_live) && !paused && !needsInput;
+    && (!!activeResourceRequest || picked.is_live) && !paused && !needsInput
+    && workloadCanProgress(selectedWorkload);
   const nextActivation = chronological.find((item) => picked && item.started_at > picked.started_at);
   const attemptStart = t.measurement_attempt?.started_at;
   const useCurrentAttempt = !!picked && !!attemptStart
@@ -1106,8 +1108,8 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
     && (inferenceEvents.length > 0
       ? inferenceEvents.every((event) => Date.parse(event.ts) >= Date.parse(attemptStart))
       : Date.parse(attemptStart) >= Date.parse(picked.started_at));
-  const currentTrainingActivity = t.agent_id === "train"
-    ? trainingActivity(t.execution_events, t.mid_training_validation, t.status, paused || needsInput) : null;
+  const currentTrainingActivity = t.agent_id === "train" && workloadCanProgress(selectedWorkload)
+    ? trainingActivity(phaseEvents, t.mid_training_validation, t.status, paused || needsInput) : null;
   const activations = midTrainingTicketId ? midActivations : t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : chronological;
   return (
     <Bezel className="overflow-hidden">
@@ -1184,7 +1186,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
             </div>
           )}
           <GenerationReport report={t.generation_report} />
-          <ExecutionPhase events={t.agent_id === "inference" ? inferenceEvents : phaseEvents} agent={t.agent_id} active={phaseActive} />
+          <ExecutionPhase events={t.agent_id === "inference" ? inferenceEvents : phaseEvents} agent={t.agent_id} active={phaseActive} workload={selectedWorkload} />
           <BenchmarkStageProgress ticket={t} events={inferenceEvents} useCurrentAttempt={useCurrentAttempt} active={phaseActive} />
           {t.agent_id === "evaluation" && (
             <EvaluationProgress events={t.execution_events} heartbeat={picked} activations={chronological} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />

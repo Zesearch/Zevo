@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { transformWithEsbuild } from 'vite';
 const source = readFileSync(new URL('../src/lib/executionProgress.ts', import.meta.url), 'utf8');
 const { code } = await transformWithEsbuild(source, 'execution.ts', { loader: 'ts' });
-const { executionPhase, phaseLabel, inferencePreparation, latestBenchmarkEvent, activationExecution, benchmarkCounts, latestExecution } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+const { executionPhase, phaseLabel, inferencePreparation, latestBenchmarkEvent, activationExecution, benchmarkCounts, latestExecution, activationWorkload, workloadCanProgress } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const hb = (id, hour, phase) => ({id, started_at: `2026-10-26T${hour}:00:00Z`, activation_phase: phase});
 const event = (hour, heartbeat, execution, name, complete = false) => ({ts: `2026-10-26T${hour}:10:00Z`, heartbeat_id: heartbeat,
   phase: 'generate', extras: {execution_id: execution, benchmark_name: name, benchmark_total: 3, benchmark_complete: complete}});
@@ -133,4 +133,60 @@ test('inference exposes output saving after generation without resurrecting comp
   const saving = {...event('11', 'a', 'first', ''), event_type: 'phase', phase: 'write_outputs'};
   assert.equal(executionPhase([generate, saving], 'inference').label, 'Saving outputs');
   assert.equal(executionPhase([generate, saving, {...saving, ts: '2026-10-26T12:00:00Z', phase: 'done'}], 'inference'), null);
+});
+
+const workload = (id, hour, state = 'RUNNING', job = 'shared-allocation') => ({
+  id, ticket_id: 'train', instance_id: job, provider: 'cluster', status: 'ready',
+  created_at: `2026-10-26T${hour}:00:00Z`, released_at: null,
+  meta: {resource_request: true, scheduler_state: state},
+});
+
+test('continuation waiting on a new job cannot inherit the previous training timer', () => {
+  const activations = [hb('original', '09', 'submit'), hb('resume', '12', 'submit'),
+    {...hb('collect', '13', 'continue'), execution_phase: 'collect'}];
+  const old = {...workload('old', '09', 'COMPLETED'), released_at: '2026-10-26T11:00:00Z'};
+  // ready_at can refer to the parent allocation; scheduler state still wins.
+  const queued = {...workload('new', '12', 'PENDING'), ready_at: '2026-10-26T08:00:00Z'};
+  const training = {...event('10', 'original', 'old', ''), phase: 'train', event_type: 'phase'};
+  const selected = activationWorkload([old, queued], 'train', activations[2], activations);
+  assert.equal(selected.id, 'new');
+  assert.equal(workloadCanProgress(selected), false);
+  assert.deepEqual(activationExecution([training], activations[2], activations, selected), []);
+  // Replayed historical timestamps/heartbeat IDs must not resurrect the old job.
+  const replay = {...training, heartbeat_id: 'collect', extras: {}};
+  assert.deepEqual(activationExecution([training, replay], activations[2], activations, selected), []);
+  queued.meta.scheduler_state = 'RUNNING';
+  assert.equal(workloadCanProgress(queued), true);
+  assert.equal(executionPhase(activationExecution([training], activations[2], activations, queued), 'train'), null);
+  const resumed = {...event('14', 'collect', 'new', ''), phase: 'training', event_type: 'phase'};
+  const scoped = activationExecution([training, replay, resumed], activations[2], activations, queued);
+  assert.equal(executionPhase(scoped, 'train').startedAt, resumed.ts);
+  assert.equal(training.ts, '2026-10-26T10:10:00Z'); // historical progress remains intact
+});
+
+test('finished or suspended workloads never keep a live phase timer without an exit event', () => {
+  for (const state of ['COMPLETED', 'TIMEOUT', 'FAILED', 'CANCELLED+', 'OUT_OF_MEMORY', 'PREEMPTED', 'SUSPENDED']) {
+    assert.equal(workloadCanProgress(workload('job', '10', state)), false, state);
+  }
+  assert.equal(workloadCanProgress({...workload('job', '10'), released_at: '2026-10-26T11:00:00Z'}), false);
+  assert.equal(workloadCanProgress({...workload('job', '10'), status: 'failed'}), false);
+});
+
+test('historical selection and new submit activations cannot bind a different workload', () => {
+  const activations = [hb('first', '09', 'submit'), hb('retry', '12', 'submit'), hb('collect', '14', 'collect')];
+  const old = workload('old', '10', 'COMPLETED');
+  const next = workload('new', '13');
+  assert.equal(activationWorkload([next, old], 'train', activations[0], activations).id, 'old');
+  assert.equal(activationWorkload([old], 'train', activations[1], activations), undefined);
+  assert.equal(activationWorkload([old, next], 'train', activations[2], activations).id, 'new');
+  assert.equal(activationWorkload([{...next, ticket_id: 'other'}], 'train', activations[2], activations), undefined);
+});
+
+
+test('legacy events without execution IDs cannot leak from a later retry into history', () => {
+  const activations = [hb('original', '09', 'submit'), hb('retry', '12', 'submit')];
+  const old = workload('old', '10', 'COMPLETED');
+  const first = {...event('10', 'original', undefined, ''), event_type: 'phase', phase: 'train'};
+  const later = {...event('13', 'retry', undefined, ''), event_type: 'phase', phase: 'train'};
+  assert.deepEqual(activationExecution([first, later], activations[0], activations, old), [first]);
 });
