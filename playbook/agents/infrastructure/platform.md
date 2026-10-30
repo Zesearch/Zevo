@@ -556,22 +556,38 @@ workload rather than spending allocation time on initial CPU-only planning.
 
 ## Whole-run allocation duration
 
-For `per_run`, set `estimated_run_hours` for the entire planned run, including
-Data, model loading, baseline/evaluation, training and all planned iterations.
-Use dataset sizes, throughput measurements or comparable runs; record assumptions
-and uncertainty in `runtime_estimate_evidence`. Set `runtime_buffer_hours` for
-repairs, preparation and stage handoffs (normally 25% of the estimate; justify
-larger uncertainty allowances). Do not double-count preparation in the buffer.
-Probe the selected partition, QoS/account and provider limits; record the smallest
-applicable limit in `platform_max_runtime_hours` and the commands/results in
-`platform_runtime_limit_evidence`. Null means unknown or unlimited, not a known
-limit of zero; explicitly explain which applies. Never assume a universal 14 days.
+For `per_run`, use the engine-owned
+`run_context.iteration_horizon.continuous_optimization` flag. It is true for
+full/customized/auto optimization with no iteration limit, and false for a
+single-stage task or a bounded iteration budget. Do not invent a two-iteration
+horizon for an unlimited Run.
 
-Requested duration = min(estimated_run_hours + runtime_buffer_hours,
-platform_max_runtime_hours if known, user max_runtime_hours if nonzero).
-The backend applies this formula to per-run Slurm submissions and persists it
-in allocation metadata. `time_limit_hours` remains the compatible stage/provider
-request field: derive it from the same policy for provisioning, respecting provider
-precision without exceeding caps. Do not select the platform maximum by default.
-If the estimate exceeds a cap, explain the need for checkpoint/continuation.
-Existing artifacts without the new estimate preserve their previous time budget.
+- Continuous optimization: request the effective maximum duration of the
+  **selected** partition/QoS/account, capped by the user's remaining runtime
+  budget when present. Do not switch QoS to obtain a longer maximum.
+- Finite work: set `estimated_run_hours` for the known remaining work, including
+  Data, model loading, evaluation and the bounded training iterations. Add
+  `runtime_buffer_hours` for uncertainty (normally 25%, with rationale).
+  Cap the sum by the platform limit and the user's remaining runtime budget.
+
+Probe scheduler limits and record their smallest applicable value in
+`platform_max_runtime_hours`, with commands/results in
+`platform_runtime_limit_evidence`. A continuous Run requires a verified finite
+limit; missing/unknown limits must be discovered, not replaced with an invented
+maximum or a guessed two-round estimate. If the site has no finite maximum,
+obtain an explicit finite allocation policy instead of requesting infinity.
+Never assume a universal 14 days. For finite work only, legacy artifacts without
+an estimate retain their `time_limit_hours` request subject to current caps.
+
+The backend chooses this policy from the Run at each new per-run Slurm
+allocation and records the policy, cap evidence and requested minutes in
+allocation metadata. It computes the remaining user budget at submission,
+excluding queue wait according to the normal Run budget rules; zero remaining
+time under a positive user limit means exhausted, not unlimited. Round down at
+caps so a request never exceeds the permitted duration.
+
+`time_limit_hours` remains the compatible stage/provider request field; derive
+it from the same policy. An existing allocation's deadline does not change.
+Release early when work finishes; use verified saved progress and a new
+allocation when work remains at expiry. Per-stage submissions still use their
+finite stage plan.

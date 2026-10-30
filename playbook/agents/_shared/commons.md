@@ -430,3 +430,24 @@ lesson was learned. It must contain a concise update when the Agent recovered
 from an error through reflection and the verified correction is likely to help
 one of its later Tickets in this Run. Do not print prose, a second JSON object,
 or another message after the result.
+
+## Phase reporting for every stage
+
+Every long-running stage, including Data, Infrastructure, Evaluation and Registry,
+reports its actual phase at transitions and measured progress during long loops.
+Use the system `stage_resume_helper_path` (`zevo_stage_resume.py`) `phase` and
+`progress` functions, or the equivalent ticket-stamped markers above. Upload the
+helper beside the other runtime helpers for remote work. Emit from the real
+workload stdout, not only the agent transcript. Do not leave a previous saving
+phase active during generation, copying, scoring, or waiting. A phase is an
+observation, never a claim that the Ticket passed artifact validation.
+
+Data and Inference must retain bounded completed batches in durable ticket-owned
+storage across allocation changes. Use `ZEVO_STAGE_RESUME_ROOT` when supplied;
+otherwise use `<persistent-ticket-dir>/.zevo-resume`, never job TMPDIR or a shared
+model cache. Preserve this directory during cleanup and retries. The helper's
+exit code 75 means saved progress needs a new allocation; report the interrupted
+workload honestly, never success. The engine retires that allocation and uses its
+bounded repair path to submit again. TIMEOUT/PREEMPTED recovery may repeat the
+unchanged Data/Inference implementation; ordinary code failures still require a
+repair. Train continues to use its verified full-state checkpoint contract.

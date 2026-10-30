@@ -1094,6 +1094,16 @@ async def _build_train_input(
             "work_dir": str(PurePosixPath(latest["request"]["checkpoint"]).parent),
             "instruction": "Relaunch the same controller with its existing ledger, train command and full plan. Do not reset state, change configuration or run inference/scoring. It consumes the saved metrics and decision, resumes full optimizer state or publishes the selected best checkpoint."}
     iteration = int(ticket.iteration or 0)
+    from zevo.engine.method.branch import active_training_method, method_branch_problem
+    active_method = active_training_method(run.history or [], before_iteration=iteration)
+    branch_problem = method_branch_problem(
+        active_method,
+        str((payload.get("configuration_suggestions") or {}).get("training_method") or ""),
+        pin=str(payload.get("training_method_pin") or ""),
+        transition=payload.get("branch_transition"),
+    )
+    if branch_problem:
+        raise ValueError(branch_problem)
     parent_model = payload.get("model_source") == "checkpoint"
     wandb_values = {
         "WANDB_API_KEY": os.environ.get("WANDB_API_KEY", "").strip(),
@@ -1221,6 +1231,7 @@ async def _build_train_input(
             input_path(inputs, "parent_train_config") if parent_model else ""
         ),
         branch_transition=dict(payload.get("branch_transition") or {}),
+        active_training_method=active_method,
         training_method_pin=str(payload.get("training_method_pin") or ""),
         method_config_pins=dict(payload.get("method_config_pins") or {}),
         loss_objective_pins=dict(payload.get("loss_objective_pins") or {}),
@@ -1843,7 +1854,10 @@ def _stage_gpu_runtime_helper(inp: BaseModel, work_dir: str) -> BaseModel:
         return inp
     helper_path = Path(work_dir) / "zevo_gpu_runtime.py"
     shutil.copyfile(REPO_ROOT / "playbook/runners/gpu_runtime.py", helper_path)
-    return inp.model_copy(update={"gpu_runtime_helper_path": str(helper_path)})
+    resume_path = Path(work_dir) / "zevo_stage_resume.py"
+    shutil.copyfile(REPO_ROOT / "playbook/runners/stage_resume.py", resume_path)
+    return inp.model_copy(update={"gpu_runtime_helper_path": str(helper_path),
+                                  "stage_resume_helper_path": str(resume_path)})
 
 
 async def _build_input(
@@ -1994,6 +2008,7 @@ async def _build_specialist_context(
     # An auto Run has no metric until its scoping Ticket derives one; showing
     # the column default here would read as a decision already made.
     scoring_pending = not bool(getattr(run, "scoring_settled", True))
+    from zevo.engine.run.gpu_controller import is_continuous_optimization
     context: dict = {
         "task_objective": run.task_objective,
         "agent_objective": run.agent_objective,
@@ -2035,6 +2050,7 @@ async def _build_specialist_context(
             "runtime_projection_basis": budget.runtime_projection_basis,
         },
         "iteration_horizon": {
+            "continuous_optimization": is_continuous_optimization(run),
             "budget": int(run.iteration_budget or 0),
             "completed": int(run.iterations_completed or 0),
             "remaining": max(
@@ -2385,7 +2401,7 @@ def _validate_specialist_yaml(
                     )
         return config.model_dump(mode="json")
 
-    if isinstance(result, TrainResult) and result.status == "succeeded":
+    if isinstance(result, TrainResult) and result.status in {"succeeded", "deferred"}:
         if not Path(result.train_config_path).is_absolute():
             raise ValueError("train_config_path must be absolute")
         config = load_train_config(result.train_config_path)
@@ -2447,7 +2463,7 @@ def _validate_specialist_yaml(
             raise ValueError("adaptive Validation decisions cannot be combined with trainer loss early stopping")
         if config.training.adaptive_evaluation != inp.adaptive_mid_training_evaluation:
             raise ValueError("train_config adaptive_evaluation must match the Run switch")
-        if inp.adaptive_mid_training_evaluation and not result.adaptive_training_report_path:
+        if result.status == "succeeded" and inp.adaptive_mid_training_evaluation and not result.adaptive_training_report_path:
             raise ValueError("adaptive training must return its checkpoint Validation report")
         current_inference_config_sha256 = file_sha256(inp.inference_config_path)
         if current_inference_config_sha256 != inp.expected_inference_config_sha256:
@@ -2483,15 +2499,14 @@ def _validate_specialist_yaml(
                     "a user-pinned training method requires "
                     "method_diversity_status=user_pinned"
                 )
-        elif inp.iteration == 1:
+        elif not inp.active_training_method:
             if config.method_diversity_status != "initial":
                 warnings.append(
                     "the first unpinned Train iteration requires "
                     "method_diversity_status=initial"
                 )
-        elif inp.parent_train_config_path:
-            previous = load_train_config(inp.parent_train_config_path)
-            if config.training_method != previous.training_method:
+        else:
+            if config.training_method != inp.active_training_method:
                 suggested_method = str(
                     inp.configuration_suggestions.get("training_method") or ""
                 ).strip().lower()
@@ -2500,14 +2515,13 @@ def _validate_specialist_yaml(
                         "an unpinned method may change only when the Orchestrator "
                         "explicitly selects the next exhausted-search branch"
                     )
-                transition_level = str(
-                    (inp.branch_transition or {}).get("level") or "none"
+                from zevo.engine.method.branch import method_branch_problem
+                problem = method_branch_problem(
+                    inp.active_training_method, config.training_method,
+                    transition=inp.branch_transition,
                 )
-                if transition_level not in {"method", "base_model"}:
-                    raise ValueError(
-                        "an unpinned method change requires an engine-validated "
-                        "method/base_model branch_transition"
-                    )
+                if problem:
+                    raise ValueError(problem)
                 if config.method_diversity_status != "varied":
                     warnings.append(
                         "an exhausted-branch method change requires "
@@ -2539,72 +2553,71 @@ def _validate_specialist_yaml(
             if key in type(config.training).model_fields and getattr(config.training, key) != value:
                 raise ValueError(f"train_config.yaml violates pinned training.{key}")
         retention = config.training.checkpoint_retention
-        intermediates = list(result.intermediate_checkpoints or [])
-        if retention.strategy == "none" and intermediates:
+        if (retention.strategy != "none" and inp.slurm_job.enabled
+                and config.training.implementation_config.get("save_only_model") is not False):
             raise ValueError(
-                "TrainResult declared intermediate checkpoints while "
-                "training.checkpoint_retention.strategy=none"
+                "finite Slurm checkpoint retention requires realized "
+                "training.implementation_config.save_only_model=false so "
+                "walltime continuation preserves optimizer, scheduler, "
+                "scaler, RNG, and Trainer state"
             )
-        if retention.strategy != "none":
-            if not intermediates:
+        if result.status == "succeeded":
+            intermediates = list(result.intermediate_checkpoints or [])
+            if retention.strategy == "none" and intermediates:
                 raise ValueError(
-                    "configured checkpoint retention produced no verified "
-                    "intermediate checkpoints"
+                    "TrainResult declared intermediate checkpoints while "
+                    "training.checkpoint_retention.strategy=none"
                 )
-            if len(intermediates) > retention.max_intermediate_checkpoints:
-                raise ValueError(
-                    "TrainResult exceeds checkpoint_retention.max_intermediate_checkpoints"
-                )
-            realized_save_only_model = config.training.implementation_config.get(
-                "save_only_model"
-            )
-            if inp.slurm_job.enabled and realized_save_only_model is not False:
-                raise ValueError(
-                    "finite Slurm checkpoint retention requires realized "
-                    "training.implementation_config.save_only_model=false so "
-                    "walltime continuation preserves optimizer, scheduler, "
-                    "scaler, RNG, and Trainer state"
-                )
-        seen_intermediate_paths: set[str] = set()
-        final_checkpoint = Path(result.checkpoint_path)
-        if not final_checkpoint.is_absolute():
-            raise ValueError("checkpoint_path must be absolute")
-        for checkpoint in intermediates:
-            if checkpoint.path in seen_intermediate_paths:
-                raise ValueError("intermediate checkpoint paths must be unique")
-            seen_intermediate_paths.add(checkpoint.path)
-            candidate = Path(checkpoint.path)
-            if not candidate.is_absolute():
-                raise ValueError("intermediate checkpoint paths must be absolute")
-            if (
-                candidate == final_checkpoint
-                or final_checkpoint in candidate.parents
-                or candidate in final_checkpoint.parents
-                or final_checkpoint.parent not in candidate.parents
-            ):
-                raise ValueError(
-                    "intermediate checkpoints must live in a separate subtree "
-                    "beside the final model, never inside it or around it"
-                )
-            if retention.strategy == "steps" and (
-                checkpoint.step < 1 or checkpoint.step % retention.save_steps != 0
-            ):
-                raise ValueError(
-                    "a step-retained checkpoint must match checkpoint_retention.save_steps"
-                )
-            if retention.strategy == "epoch" and checkpoint.epoch <= 0:
-                raise ValueError("an epoch-retained checkpoint requires epoch > 0")
-            if result.checkpoint_is_remote:
-                if inp.ticket_id not in checkpoint.path:
+            if retention.strategy != "none":
+                if not intermediates:
                     raise ValueError(
-                        "a remote intermediate checkpoint path must contain ticket_id"
+                        "configured checkpoint retention produced no verified "
+                        "intermediate checkpoints"
                     )
-            else:
-                problem = _artifact_problem(checkpoint.path)
-                if problem:
+                if len(intermediates) > retention.max_intermediate_checkpoints:
                     raise ValueError(
-                        f"intermediate checkpoint is {problem}: {checkpoint.path}"
+                        "TrainResult exceeds checkpoint_retention.max_intermediate_checkpoints"
                     )
+            seen_intermediate_paths: set[str] = set()
+            final_checkpoint = Path(result.checkpoint_path)
+            if not final_checkpoint.is_absolute():
+                raise ValueError("checkpoint_path must be absolute")
+            for checkpoint in intermediates:
+                if checkpoint.path in seen_intermediate_paths:
+                    raise ValueError("intermediate checkpoint paths must be unique")
+                seen_intermediate_paths.add(checkpoint.path)
+                candidate = Path(checkpoint.path)
+                if not candidate.is_absolute():
+                    raise ValueError("intermediate checkpoint paths must be absolute")
+                if (
+                    candidate == final_checkpoint
+                    or final_checkpoint in candidate.parents
+                    or candidate in final_checkpoint.parents
+                    or final_checkpoint.parent not in candidate.parents
+                ):
+                    raise ValueError(
+                        "intermediate checkpoints must live in a separate subtree "
+                        "beside the final model, never inside it or around it"
+                    )
+                if retention.strategy == "steps" and (
+                    checkpoint.step < 1 or checkpoint.step % retention.save_steps != 0
+                ):
+                    raise ValueError(
+                        "a step-retained checkpoint must match checkpoint_retention.save_steps"
+                    )
+                if retention.strategy == "epoch" and checkpoint.epoch <= 0:
+                    raise ValueError("an epoch-retained checkpoint requires epoch > 0")
+                if result.checkpoint_is_remote:
+                    if inp.ticket_id not in checkpoint.path:
+                        raise ValueError(
+                            "a remote intermediate checkpoint path must contain ticket_id"
+                        )
+                else:
+                    problem = _artifact_problem(checkpoint.path)
+                    if problem:
+                        raise ValueError(
+                            f"intermediate checkpoint is {problem}: {checkpoint.path}"
+                        )
         script_path = Path(result.train_script_path)
         if not script_path.is_absolute():
             raise ValueError("train_script_path must be absolute")
@@ -2665,6 +2678,30 @@ def _python_memory_helper_problem(path: str) -> str:
         "vLLM predict.py must import and call the system-owned "
         "zevo_inference_memory.gpu_memory_utilization helper"
     )
+
+
+def _python_stage_resume_problem(path: str) -> str:
+    """New generated Data/custom Inference jobs must call the durable batch helper."""
+    try:
+        tree = ast.parse(Path(path).read_text(), filename=path)
+    except (OSError, SyntaxError) as exc:
+        return f"cannot inspect resumable stage implementation: {exc}"
+    functions, modules = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "zevo_stage_resume":
+            functions.update(item.asname or item.name for item in node.names if item.name == "run_batches")
+        elif isinstance(node, ast.Import):
+            modules.update(item.asname or item.name for item in node.names if item.name == "zevo_stage_resume")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        call = node.func
+        if isinstance(call, ast.Name) and call.id in functions:
+            return ""
+        if (isinstance(call, ast.Attribute) and call.attr == "run_batches"
+                and isinstance(call.value, ast.Name) and call.value.id in modules):
+            return ""
+    return "Data/custom Inference must import and call zevo_stage_resume.run_batches to preserve completed work"
 
 
 def _python_checkpoint_helper_problem(path: str) -> str:
@@ -2839,6 +2876,13 @@ def _slurm_stage_result_problem(
         commands = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
         if not any(name in commands for name in runtime_launchers):
             return "GPU workload must launch through zevo_gpu_runtime.py or a system runner that invokes it"
+    if (contract.phase == "submit" and getattr(inp, "stage_resume_helper_path", "")
+            and executable_name in {"prepare_data.py", "predict.py"}):
+        commands = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+        if not (executable_name == "predict.py" and "zevo_parallel_inference.py" in commands):
+            resume_problem = _python_stage_resume_problem(str(path.with_name(executable_name)))
+            if resume_problem:
+                return resume_problem
     if executable_name == "train.py":
         if not configuration_path:
             return "cluster Train must report train_config_path before submission handoff"
@@ -4365,6 +4409,7 @@ async def _submit_validated_slurm_stage_once(
             and previous_implementation_sha256 == implementation_sha256
             and not measurement_restart and not checkpoint_resume and not walltime_resume
             and not (ticket.agent_id == "inference" and execution_retry_authorized(previous.meta or {}))
+            and not resumable_stage_interruption(ticket, previous)
         ):
             raise ValueError(
                 "a failed Slurm job may be re-executed only after its generated "
@@ -4680,6 +4725,16 @@ async def _escalate_stored_payload_validation_failure(
             ),
         )
     raise StoredPayloadValidationError(note) from exc
+
+
+def resumable_stage_interruption(ticket, row) -> bool:
+    """Allow unchanged Data/Inference code after allocation loss, within repair limits."""
+    if row is None or ticket.agent_id not in {"data", "inference"}:
+        return False
+    meta = row.meta or {}
+    state = str(meta.get("scheduler_state") or "").split("+")[0].split(" ")[0]
+    code = str(meta.get("scheduler_exit_code") or "").split(":")[0]
+    return state in {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "BOOT_FAIL"} or (state == "FAILED" and code == "75")
 
 
 async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket) -> bool:
@@ -6182,9 +6237,9 @@ async def run_ticket(
                 "declared": tk.id,
                 "reported": reported_ticket_id or "<missing>",
             }
-        if status in ("succeeded", "degraded") and isinstance(
+        if (status in ("succeeded", "degraded") and isinstance(
             output, (InferenceResult, TrainResult),
-        ):
+        )) or (status == "deferred" and isinstance(output, TrainResult)):
             advisory_warnings: list[str] = []
             try:
                 realized_configuration = _validate_specialist_yaml(

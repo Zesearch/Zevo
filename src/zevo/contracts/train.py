@@ -227,6 +227,9 @@ class TrainTaskInput(AgentTaskInput):
         ),
     )
 
+    active_training_method: str = Field(
+        "", description="Engine-resolved method of the latest measured round before this Ticket; independent of the selected parent checkpoint.",
+    )
     training_method_pin: str = ""
     method_config_pins: dict[str, Any] = Field(default_factory=dict)
     loss_objective_pins: dict[str, Any] = Field(default_factory=dict)

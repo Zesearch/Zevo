@@ -21,9 +21,11 @@ from zevo.engine.run.runner import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry', 'walltime'])
+@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry', 'walltime', 'data_timeout', 'inference_timeout', 'data_yield', 'inference_yield'])
 async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, mode) -> None:
-    remeasure = mode != "repair"
+    batch_resume = mode.endswith(("_timeout", "_yield"))
+    stage = mode.split("_")[0] if batch_resume else "train"
+    remeasure = mode != "repair" and not batch_resume
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -31,7 +33,7 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
 
     script = tmp_path / "train.sbatch"
     script.write_text("#!/bin/bash\necho validated\n", encoding="utf-8")
-    train_program = tmp_path / "train.py"
+    train_program = tmp_path / {"train": "train.py", "data": "prepare_data.py", "inference": "predict.py"}[stage]
     train_program.write_text("print('validated')\n", encoding="utf-8")
     device = InfrastructureDeviceInfo(
         run_id="run-1",
@@ -77,7 +79,7 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
     status_path = "/remote/run-1/train-1/.zevo-slurm-status"
     contract = SlurmStageJobContract(
         enabled=True,
-        stage="train",
+        stage=stage,
         estimated_gpus=2,
         resource_plan_source="test",
         resource_plan_rationale="test tier",
@@ -106,7 +108,7 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
     async with Session() as session:
         run = Run(id="run-1", task_name="task", status="running", metric="accuracy")
         ticket = Ticket(
-            id="train-1", run_id="run-1", agent_id="inference" if mode == "collect_retry" else "train", status="running",
+            id="train-1", run_id="run-1", agent_id="inference" if mode == "collect_retry" else stage, status="running",
             payload={}, inputs={}, customization={},
         )
         session.add_all([run, ticket])
@@ -149,7 +151,10 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
                 heartbeat_id="heartbeat-2",
             )
 
-        if mode == "collect_retry":
+        if batch_resume:
+            row.meta = {**row.meta, "scheduler_state": "TIMEOUT" if mode.endswith("_timeout") else "FAILED",
+                        "scheduler_exit_code": "0:0" if mode.endswith("_timeout") else "75:0"}
+        elif mode == "collect_retry":
             row.meta = {**row.meta, "inference_execution_retry": {"execution_attempt": 1, "reason": "prediction output lost after job completed"}}
         elif mode == "walltime":
             row.meta = {**row.meta, "training_continuation": {

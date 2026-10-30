@@ -1198,6 +1198,7 @@ def test_train_yaml_copies_prompt_and_records_immediate_parent(tmp_path: Path) -
     assert second_config.method_diversity_status == "user_pinned"
 
     unpinned_input = TrainTaskInput(
+        active_training_method="lora_sft",
         ticket_id="train-r-002",
         run_id="r",
         iteration=2,
@@ -1281,6 +1282,7 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
         "base_model": "Qwen/Qwen3-0.6B-Base",
         "model_source": "checkpoint",
         "parent_selection_rationale": "Continue the active method branch.",
+        "active_training_method": "sft",
         "parent_checkpoint_path": first.checkpoint_path,
         "parent_train_config_path": first.train_config_path,
         "inference_config_path": str(inference_path),
@@ -1301,6 +1303,7 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
         "base_model": "Qwen/Qwen3-0.6B-Base",
         "model_source": "checkpoint",
         "parent_selection_rationale": "Start the next method branch after exhaustion.",
+        "active_training_method": "sft",
         "parent_checkpoint_path": second.checkpoint_path,
         "parent_train_config_path": second.train_config_path,
         "inference_config_path": str(inference_path),

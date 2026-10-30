@@ -136,7 +136,12 @@ while not stopping:
             raise ValueError("workload script changed after validation")
         env = dict(os.environ, ZEVO_TICKET_ID=request["ticket_id"], ZEVO_RUN_ID=request["run_id"],
                    ZEVO_GPU_ATTEMPT=request_path.stem)
+        work = pathlib.Path(request["cwd"])
+        ticket_root = work.parent if work.name.startswith("attempt-") and work.parent.name == request["ticket_id"] else work
+        env["ZEVO_STAGE_RESUME_ROOT"] = str(ticket_root / ".zevo-resume")
         with open(log_out, "a") as out, open(log_err, "a") as err:
+            print("__ATTEMPT__:%s:%s@%s" % (request["ticket_id"], request_path.stem, time.time()), file=out, flush=True)
+            print("__PHASE__:%s:starting_workload@%s" % (request["ticket_id"], time.time()), file=out, flush=True)
             child = subprocess.Popen(workload_command(script), cwd=request["cwd"],
                                      env=env, stdout=out, stderr=err, start_new_session=True)
             while child.poll() is None:
@@ -170,7 +175,7 @@ while not stopping:
     temporary = output_path.with_suffix(".tmp")
     temporary.write_text(json.dumps({"exit_code": rc, "error": error}))
     os.replace(temporary, output_path)
-    if single_workload:
+    if single_workload or rc == 75:
         sys.exit(rc if 0 <= rc <= 255 else 1)
     last_work = time.monotonic()
 '''
@@ -232,11 +237,19 @@ def request_command(*, directory: str, request_id: str, script: str, sha256: str
     )
 
 
-def run_walltime_plan(plan, user_limit_hours=0):
-    """Estimate plus explicit allowance, capped before rounding to Slurm minutes.
+def is_continuous_optimization(run) -> bool:
+    """An unlimited iteration budget is not a finite two-iteration plan."""
+    return (getattr(run, "mode", "full_pipeline") in
+            {"full_pipeline", "customized_pipeline", "auto"}
+            and int(getattr(run, "iteration_budget", 0) or 0) == 0)
 
-    Old artifacts have only time_limit_hours: preserve that already-budgeted
-    value rather than invent an estimate or add a second safety margin.
+
+def run_walltime_plan(plan, user_limit_hours=0, *, continuous=False,
+                      remaining_runtime_hours=None):
+    """Choose a verified ceiling for open-ended runs, an estimate for finite work.
+
+    A positive user limit with zero remaining budget is exhausted, not unlimited.
+    Callers supplying a user limit must compute remaining time at submission.
     """
     estimate = getattr(plan, "estimated_run_hours", None)
     buffer = getattr(plan, "runtime_buffer_hours", None)
@@ -245,21 +258,38 @@ def run_walltime_plan(plan, user_limit_hours=0):
         estimate, buffer = float(plan.time_limit_hours), 0.0
     elif buffer is None:
         buffer = estimate * 0.25
-    requested = estimate + buffer
     platform_cap = getattr(plan, "platform_max_runtime_hours", None)
-    caps = [v for v in (platform_cap, user_limit_hours) if v is not None and v > 0]
+    evidence = getattr(plan, "platform_runtime_limit_evidence", "")
+    if platform_cap is not None and (not math.isfinite(platform_cap) or platform_cap <= 0):
+        raise ValueError("platform walltime limit must be finite and positive")
+    remaining = None
+    if user_limit_hours > 0:
+        remaining = user_limit_hours if remaining_runtime_hours is None else remaining_runtime_hours
+        if not math.isfinite(remaining) or remaining <= 0:
+            raise ValueError("Run runtime budget is exhausted; cannot request another allocation")
+        remaining = min(remaining, user_limit_hours)
+    if continuous:
+        if platform_cap is None or not str(evidence).strip():
+            raise ValueError("continuous optimization requires a verified finite partition/QoS/account walltime limit; refresh Infrastructure discovery")
+        requested = platform_cap
+        policy = "continuous_platform_limit"
+    else:
+        requested = estimate + buffer
+        policy = "finite_estimate_with_buffer"
     if requested <= 0 or not math.isfinite(requested):
-        raise ValueError("a finite positive whole-run runtime estimate is required")
+        raise ValueError("a finite positive allocation duration is required")
+    caps = [v for v in (platform_cap, remaining) if v is not None]
     minutes = math.ceil(requested * 60)
     if caps:
         minutes = min(minutes, math.floor(min(caps) * 60))
     if minutes < 1:
         raise ValueError("runtime cap is below Slurm's one-minute request precision")
-    return dict(estimated_run_hours=estimate, runtime_buffer_hours=buffer,
+    return dict(policy=policy, estimated_run_hours=estimate, runtime_buffer_hours=buffer,
                 platform_max_runtime_hours=platform_cap, user_max_runtime_hours=user_limit_hours,
-                requested_minutes=minutes, legacy_runtime_plan=legacy,
+                remaining_runtime_hours=remaining, requested_minutes=minutes,
+                legacy_runtime_plan=legacy,
                 estimate_evidence=getattr(plan, "runtime_estimate_evidence", ""),
-                platform_limit_evidence=getattr(plan, "platform_runtime_limit_evidence", ""))
+                platform_limit_evidence=evidence)
 
 
 _TERMINAL_ALLOCATION_STATES = frozenset({
@@ -442,7 +472,16 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             memory_gib = max(plan.min_ram_gb, math.ceil(requested_ram))
             cpus_per_task = max(original_cpus, math.ceil(plan.min_cpus / tasks))
             body = re.sub(r"^#SBATCH\s+(?:--(?:mem|mem-per-cpu|cpus-per-task|time)(?:=|\s+)|-[ct]\s*).*\n?", "", body, flags=re.M)
-            walltime = run_walltime_plan(plan, run.max_runtime_hours)
+            remaining = None
+            if run.max_runtime_hours > 0:
+                from zevo.engine.cost.budget import snapshot_for_run
+                budget = await snapshot_for_run(session, run.id)
+                remaining = budget.remaining_runtime_hours
+            walltime = run_walltime_plan(
+                plan, run.max_runtime_hours,
+                continuous=is_continuous_optimization(run),
+                remaining_runtime_hours=remaining,
+            )
             envelope = (f"#SBATCH --mem={memory_gib}G\n"
                         f"#SBATCH --cpus-per-task={cpus_per_task}\n"
                         f"#SBATCH --time={walltime['requested_minutes']}\n")

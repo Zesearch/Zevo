@@ -136,6 +136,9 @@ export function phaseLabel(phase: string, agent: string): string {
     download: "Downloading data", downloading_data: "Downloading data", download_data: "Downloading data",
     generate: agent === "data" ? "Generating training data" : "Generating predictions",
     filter: "Filtering data", filtering: "Filtering data", validating_data_artifacts: "Validating data",
+    starting_workload: "Starting workload", restoring_progress: "Restoring saved progress",
+    checkpointing: "Saving progress", waiting_for_allocation: "Waiting for a new allocation",
+    generating_data: "Generating data",
     writing_artifacts: "Saving artifacts", write_outputs: "Saving outputs",
     loading_predictions: "Loading predictions", scoring: "Scoring predictions", aggregate: "Aggregating results",
   };

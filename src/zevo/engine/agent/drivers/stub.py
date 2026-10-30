@@ -295,17 +295,18 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
         payload.get("training_method_pin") or pins.get("training_method") or ""
     )
     suggested_method = str(suggestions.get("training_method") or "")
+    active_method = str(payload.get("active_training_method") or "")
     if pinned_method:
         method = pinned_method
         diversity_status = "user_pinned"
         method_rationale = "The user pinned the training method for every iteration."
-    elif previous is None:
+    elif not active_method:
         method = suggested_method or "sft"
         diversity_status = "initial"
         method_rationale = "Selected the first method from guidance and available evidence."
     else:
-        method = suggested_method or previous.training_method
-        if method != previous.training_method:
+        method = suggested_method or active_method
+        if method != active_method:
             diversity_status = "varied"
             transition = dict(payload.get("branch_transition") or {})
             exhaustion = str(transition.get("validation_evidence") or "").strip()

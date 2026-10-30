@@ -539,11 +539,11 @@ class InfrastructureResourcePlan(BaseModel):
     )
     time_limit_hours: int = Field(ge=0)
     estimated_run_hours: float | None = Field(default=None, gt=0, allow_inf_nan=False,
-        description="Whole run estimate: preparation, Data, all inference and training iterations; exclude buffer.")
+        description="Finite-work estimate excluding buffer; for continuous optimization this is advisory and must not invent a finite iteration horizon.")
     runtime_buffer_hours: float | None = Field(default=None, ge=0, allow_inf_nan=False,
         description="Additional repair/preparation/handoff allowance; default 25% of estimate.")
     platform_max_runtime_hours: float | None = Field(default=None, gt=0, allow_inf_nan=False,
-        description="Effective verified minimum of partition, QoS, account and provider duration limits; null if unknown/unlimited.")
+        description="Effective verified minimum of selected partition, QoS, account and provider limits. A finite value with evidence is required for continuous per-run allocation; unknown limits require discovery.")
     runtime_estimate_evidence: str = ""
     platform_runtime_limit_evidence: str = ""
     cloud_backend: Literal["", "vastai", "lambda", "aws"] = ""

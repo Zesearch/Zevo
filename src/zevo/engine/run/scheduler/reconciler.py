@@ -710,11 +710,7 @@ async def _ensure_slurm_status_stream(
     heartbeat_id = str(meta.get("submission_heartbeat_id") or "").strip()
     if not heartbeat_id:
         return False
-    telemetry_path = (
-        _slurm_telemetry_path(meta)
-        if ticket.agent_id in {"train", "inference"}
-        else ""
-    )
+    telemetry_path = _slurm_telemetry_path(meta)
     task = asyncio.create_task(
         _stream_slurm_status_events(
             row_id=row.id,
@@ -749,7 +745,7 @@ async def _drain_terminal_telemetry(session: AsyncSession, *, row: InfraInstance
     Use the caller's transaction so progress writes cannot deadlock on Ticket
     rows already modified by this reconcile pass.
     """
-    if meta.get("telemetry_drained") or ticket.agent_id not in {"train", "inference"}:
+    if meta.get("telemetry_drained"):
         return
     path = _slurm_telemetry_path(meta)
     heartbeat_id = str(meta.get("submission_heartbeat_id") or "")

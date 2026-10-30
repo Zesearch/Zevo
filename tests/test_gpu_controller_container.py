@@ -105,3 +105,18 @@ def test_reuse_snapshot_preserves_container_of_host_launched_workload():
     headers = '#SBATCH --nodes=1\n#SBATCH --gres=gpu:4\n'
     assert effective_snapshot(source, headers, 'host_srun_v1') == source
     assert '--container-image' not in effective_snapshot(source, headers)['body']
+
+
+def test_saved_stage_yield_retires_retained_allocation(tmp_path):
+    env = setup(tmp_path)
+    executable(tmp_path / 'bin/squeue', '#!/bin/bash\nexit 0\n')
+    executable(tmp_path / 'bin/scancel', '#!/bin/bash\nexit 0\n')
+    request(tmp_path, 'data-work', '#!/bin/bash\necho "$ZEVO_STAGE_RESUME_ROOT"\nexit 75\n')
+    request(tmp_path, 'later-work', '#!/bin/bash\necho should-not-run\n')
+    result = subprocess.run([sys.executable, '-c', CONTROLLER_SOURCE.replace('"/proc"', repr(str(tmp_path / 'proc'))),
+                             str(tmp_path), '1', '0'], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 75, result.stderr
+    assert json.loads((tmp_path / 'outcomes/data-work.json').read_text())['exit_code'] == 75
+    assert not (tmp_path / 'outcomes/later-work.json').exists()
+    assert str(tmp_path / '.zevo-resume') in (tmp_path / 'data-work.out').read_text()
+    assert '__PHASE__:data-work:starting_workload@' in (tmp_path / 'data-work.out').read_text()

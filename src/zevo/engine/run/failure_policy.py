@@ -67,6 +67,8 @@ _TERMINAL: tuple[tuple[str, re.Pattern[str], str], ...] = (
 HARDWARE_DEFECT_PREFIX = "GPU hardware defect:"
 
 _ORCHESTRATOR: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("method_branch", re.compile(r"upstream method branch conflict:", re.I),
+     "the Orchestrator must correct its method selection or transition evidence"),
     # A defective card is not an implementation defect. Smoke run 5b4a67e0
     # retried inference and training on an A10 with an exhausted row remapper
     # (Xid 48, ~249k uncorrectable ECC errors) for ~40 minutes and ~$10 before
