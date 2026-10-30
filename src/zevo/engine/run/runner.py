@@ -1997,6 +1997,7 @@ async def _build_specialist_context(
     # An auto Run has no metric until its scoping Ticket derives one; showing
     # the column default here would read as a decision already made.
     scoring_pending = not bool(getattr(run, "scoring_settled", True))
+    from zevo.engine.run.gpu_controller import is_continuous_optimization
     context: dict = {
         "task_objective": run.task_objective,
         "agent_objective": run.agent_objective,
@@ -2038,6 +2039,7 @@ async def _build_specialist_context(
             "runtime_projection_basis": budget.runtime_projection_basis,
         },
         "iteration_horizon": {
+            "continuous_optimization": is_continuous_optimization(run),
             "budget": int(run.iteration_budget or 0),
             "completed": int(run.iterations_completed or 0),
             "remaining": max(

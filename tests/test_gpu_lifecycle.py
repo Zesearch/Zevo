@@ -124,7 +124,7 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
         remote_script_path='/remote/train.sh', remote_work_dir='/remote',
         stdout_path='/remote/out', stderr_path='/remote/err')
     async with Session() as session:
-        run = Run(id='run-1', metric='accuracy', gpu_allocation_mode=mode)
+        run = Run(id='run-1', metric='accuracy', gpu_allocation_mode=mode, iteration_budget=2)
         ticket = Ticket(id=next_ticket, run_id=run.id, agent_id='train')
         owner = InfraInstance(id='owner', run_id=run.id, ticket_id='train-1',
             instance_id='123', provider='cluster', gpu_count=8,
@@ -491,3 +491,109 @@ async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(
                 await submit_workload(session, **kwargs)
             assert not any('infer-hb' in command for command in commands)
     await engine.dispose()
+
+
+@pytest.mark.parametrize('mode,iterations,continuous', [
+    ('full_pipeline', 0, True), ('customized_pipeline', 0, True), ('auto', 0, True),
+    ('single_stage', 0, False), ('full_pipeline', 2, False), ('auto', 1, False),
+])
+def test_walltime_policy_uses_real_run_horizon(mode, iterations, continuous):
+    from zevo.engine.run.gpu_controller import is_continuous_optimization
+    assert is_continuous_optimization(SimpleNamespace(mode=mode, iteration_budget=iterations)) is continuous
+
+
+@pytest.mark.parametrize('continuous,cap,user,remaining,minutes', [
+    (True, 24, 0, None, 1440),  # The 88755587 regression: 13.7 + 3.4 must not cap an unlimited run.
+    (True, 168, 0, None, 10080),
+    (False, 168, 0, None, 300),  # A four-hour task does not request seven days.
+    (True, 24, 10, 3, 180),
+    (False, 24, 10, 3, 180),
+    (True, 24, 10, 0.025, 1),  # Never round beyond the remaining cap.
+])
+def test_continuous_and_finite_walltime(continuous, cap, user, remaining, minutes):
+    from zevo.engine.run.gpu_controller import run_walltime_plan
+    plan = SimpleNamespace(estimated_run_hours=13.7 if continuous else 4,
+                           runtime_buffer_hours=3.4 if continuous else None,
+                           time_limit_hours=18, platform_max_runtime_hours=cap,
+                           platform_runtime_limit_evidence='verified selected QoS MaxWall')
+    result = run_walltime_plan(plan, user, continuous=continuous, remaining_runtime_hours=remaining)
+    assert result['requested_minutes'] == minutes
+    assert result['policy'] == ('continuous_platform_limit' if continuous else 'finite_estimate_with_buffer')
+    assert result['remaining_runtime_hours'] == remaining
+
+
+@pytest.mark.parametrize('remaining', [0, -1, 0.001])
+def test_exhausted_runtime_cannot_be_reinterpreted_as_unlimited(remaining):
+    from zevo.engine.run.gpu_controller import run_walltime_plan
+    plan = SimpleNamespace(time_limit_hours=4, platform_max_runtime_hours=24,
+                           platform_runtime_limit_evidence='verified')
+    with pytest.raises(ValueError, match='exhausted|one-minute'):
+        run_walltime_plan(plan, 10, continuous=True, remaining_runtime_hours=remaining)
+
+
+@pytest.mark.parametrize('cap,evidence', [(None, ''), (24, '')])
+def test_unknown_continuous_cap_requires_discovery(cap, evidence):
+    from zevo.engine.run.gpu_controller import run_walltime_plan
+    plan = SimpleNamespace(time_limit_hours=18, platform_max_runtime_hours=cap,
+                           platform_runtime_limit_evidence=evidence)
+    with pytest.raises(ValueError, match='refresh Infrastructure discovery'):
+        run_walltime_plan(plan, continuous=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode,iterations,user,remaining,minutes', [
+    ('full_pipeline', 0, 0, None, 1440),
+    ('full_pipeline', 2, 0, None, 300),
+    ('single_stage', 0, 0, None, 300),
+    ('full_pipeline', 0, 10, 3, 180),
+    ('full_pipeline', 2, 10, 0, None),
+])
+async def test_new_allocation_applies_policy_and_current_remaining_budget(
+        tmp_path, monkeypatch, mode, iterations, user, remaining, minutes):
+    from zevo.engine.run import remote_jobs
+    from zevo.engine.cost import budget
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    commands, budget_reads = [], []
+    async def ssh(info, command, **kwargs):
+        commands.append(command)
+        return {'ok': True, 'stdout': '123\n'}
+    async def snapshot(session, run_id):
+        budget_reads.append(run_id)
+        return SimpleNamespace(remaining_runtime_hours=remaining)
+    monkeypatch.setattr(remote_jobs, '_ssh', ssh)
+    monkeypatch.setattr(budget, 'snapshot_for_run', snapshot)
+    script = tmp_path / 'data.sbatch'
+    script.write_text('#!/bin/bash\n#SBATCH --qos=priority\n#SBATCH --time=18:00:00\nexit 0\n')
+    contract = SimpleNamespace(num_gpus=4, nodes=1, script_path=str(script),
+        remote_script_path='/remote/data.sh', remote_work_dir='/remote',
+        stdout_path='/remote/out', stderr_path='/remote/err')
+    info = SimpleNamespace(cluster=SimpleNamespace(workdir='/remote', env_setup=''),
+        resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=18,
+            estimated_run_hours=4, runtime_buffer_hours=1, platform_max_runtime_hours=24,
+            platform_runtime_limit_evidence='sacctmgr: selected priority MaxWall=24h'))
+    try:
+        async with Session() as session:
+            run = Run(id='run-1', metric='accuracy', gpu_allocation_mode='per_run',
+                      mode=mode, iteration_budget=iterations, max_runtime_hours=user)
+            ticket = Ticket(id='data-1', run_id=run.id, agent_id='data')
+            session.add_all([run, ticket])
+            await session.commit()
+            args = dict(run=run, ticket=ticket, contract=contract, info=info,
+                        heartbeat_id='hb-1', sha256='digest')
+            if minutes is None:
+                with pytest.raises(ValueError, match='budget is exhausted'):
+                    await submit_workload(session, **args)
+                assert not commands
+            else:
+                _, meta = await submit_workload(session, **args)
+                assert meta['allocation_walltime']['requested_minutes'] == minutes
+                wrapper = script.with_name('allocation-controller.sbatch').read_text()
+                assert f'#SBATCH --time={minutes}\n' in wrapper
+                assert '#SBATCH --qos=priority' in wrapper
+                assert len(commands) == 1
+            assert budget_reads == (['run-1'] if user else [])
+    finally:
+        await engine.dispose()
