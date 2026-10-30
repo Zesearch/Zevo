@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
-import { executionPhase } from "../lib/executionProgress";
-import type { ExecutionEventDTO } from "../lib/api";
+import { executionPhase, workloadCanProgress } from "../lib/executionProgress";
+import type { ExecutionEventDTO, InfraInstanceDTO } from "../lib/api";
 
 /** Stage-independent version of the inference phase/elapsed-time card. */
-export function ExecutionPhase({ events, agent, active }: {
-  events: ExecutionEventDTO[]; agent: string; active: boolean;
+export function ExecutionPhase({ events, agent, active, workload }: {
+  events: ExecutionEventDTO[]; agent: string; active: boolean; workload?: InfraInstanceDTO;
 }) {
   const [now, setNow] = useState(Date.now);
-  const phase = executionPhase(events, agent);
+  const phase = workloadCanProgress(workload) ? executionPhase(events, agent) : null;
   useEffect(() => {
     if (!active || !phase) return;
     setNow(Date.now());
