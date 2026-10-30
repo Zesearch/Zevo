@@ -61,6 +61,24 @@ async def test_missing_code_adapter_does_not_schedule_a_repair(session: AsyncSes
 
 
 @pytest.mark.asyncio
+async def test_upstream_method_conflict_is_not_retried_by_train(session: AsyncSession) -> None:
+    session.add(Run(id="r", task_name="t", metric="score", status="running"))
+    ticket = Ticket(id="train-r-013", run_id="r", agent_id="train", status="running")
+    session.add(ticket)
+    await session.flush()
+    retry = await _apply_ticket_failure_policy(
+        session, ticket,
+        error_message="runtime experiment contract violated: configuration_yaml: "
+        "upstream method branch conflict: sft -> rft requires transition evidence",
+    )
+    assert not retry
+    assert ticket.status == "failed"
+    assert ticket.repair_route == "orchestrator"
+    assert not ticket.repair_attempts
+    assert not (await session.execute(select(TicketMessage))).scalars().all()
+
+
+@pytest.mark.asyncio
 async def test_twenty_repairs_stay_on_one_ticket_then_escalate(session: AsyncSession) -> None:
     session.add(Run(
         id="r", task_name="t", agent_objective="t", metric="score", status="running",

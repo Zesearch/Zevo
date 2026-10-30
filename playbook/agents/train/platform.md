@@ -43,9 +43,12 @@ or GPU acceleration without evidence that it improves the measured bottleneck.
    parent checkpoint/YAML, device/access route, execution contracts, and local output directory.
 2. Load relevant Run-local Train memory and prior Validation evidence.
 3. Select one coherent iteration direction and resolve every unpinned value.
-4. If the method is not user-pinned, use the selected parent YAML and Run method
-   history to retain the active method unless the Orchestrator explicitly
-   selected a new method after exhausting that branch. Read the
+4. If the method is not user-pinned, retain `active_training_method` unless the
+   Orchestrator explicitly selected a new method with `branch_transition`
+   evidence. This engine-resolved field identifies the current search branch;
+   an empty value means there is no earlier measured method. The selected parent
+   YAML describes the starting weights, not the active branch: continuing RFT
+   from an older SFT champion does not itself switch methods. Read the
    selected `playbook/skills/train/<method>/SKILL.md` completely.
 5. Select exactly that method's entry from `training_method_contracts`; use its
    allowed/required nested keys and treat `recommended_start` and

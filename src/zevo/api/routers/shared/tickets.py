@@ -872,39 +872,23 @@ async def create_ticket(
                     )
             if body.agent_id == "train" and payload.get("operation") == "train":
                 base_model = str(payload.get("base_model") or "")
-                previous_method = next((
-                    str(row.get("training_method") or "").strip().lower()
-                    for row in reversed(owning_run.history or [])
-                    if isinstance(row, dict)
-                    and row.get("source") == "trained"
-                    and str(row.get("training_method") or "").strip()
-                ), "")
+                from zevo.engine.method.branch import active_training_method, method_branch_problem
+                previous_method = active_training_method(owning_run.history or [])
                 suggested_method = str(
-                    (payload.get("configuration_suggestions") or {}).get(
-                        "training_method"
-                    ) or ""
+                    (payload.get("configuration_suggestions") or {}).get("training_method") or ""
                 ).strip().lower()
-                transition_level = str(
-                    (payload.get("branch_transition") or {}).get("level") or "none"
+                problem = method_branch_problem(
+                    previous_method, suggested_method,
+                    pin=str(payload.get("training_method_pin") or ""),
+                    transition=payload.get("branch_transition"),
                 )
-                if (
-                    previous_method
-                    and suggested_method
-                    and suggested_method != previous_method
-                    and transition_level not in {"method", "base_model"}
-                ):
-                    raise HTTPException(
-                        409,
-                        {
-                            "error": "training method branch changed before exhaustion",
-                            "previous_method": previous_method,
-                            "next_method": suggested_method,
-                            "advice": (
-                                "Retain the active method, or provide a complete "
-                                "method/base_model branch_transition with Validation evidence."
-                            ),
-                        },
-                    )
+                if problem:
+                    raise HTTPException(409, {
+                        "error": "training method branch changed before exhaustion",
+                        "previous_method": previous_method,
+                        "next_method": suggested_method,
+                        "advice": problem,
+                    })
                 baseline_exists = any(
                     isinstance(row, dict)
                     and row.get("source") == "baseline"
