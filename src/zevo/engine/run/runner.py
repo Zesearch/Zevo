@@ -1843,7 +1843,10 @@ def _stage_gpu_runtime_helper(inp: BaseModel, work_dir: str) -> BaseModel:
         return inp
     helper_path = Path(work_dir) / "zevo_gpu_runtime.py"
     shutil.copyfile(REPO_ROOT / "playbook/runners/gpu_runtime.py", helper_path)
-    return inp.model_copy(update={"gpu_runtime_helper_path": str(helper_path)})
+    resume_path = Path(work_dir) / "zevo_stage_resume.py"
+    shutil.copyfile(REPO_ROOT / "playbook/runners/stage_resume.py", resume_path)
+    return inp.model_copy(update={"gpu_runtime_helper_path": str(helper_path),
+                                  "stage_resume_helper_path": str(resume_path)})
 
 
 async def _build_input(
@@ -2667,6 +2670,30 @@ def _python_memory_helper_problem(path: str) -> str:
     )
 
 
+def _python_stage_resume_problem(path: str) -> str:
+    """New generated Data/custom Inference jobs must call the durable batch helper."""
+    try:
+        tree = ast.parse(Path(path).read_text(), filename=path)
+    except (OSError, SyntaxError) as exc:
+        return f"cannot inspect resumable stage implementation: {exc}"
+    functions, modules = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "zevo_stage_resume":
+            functions.update(item.asname or item.name for item in node.names if item.name == "run_batches")
+        elif isinstance(node, ast.Import):
+            modules.update(item.asname or item.name for item in node.names if item.name == "zevo_stage_resume")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        call = node.func
+        if isinstance(call, ast.Name) and call.id in functions:
+            return ""
+        if (isinstance(call, ast.Attribute) and call.attr == "run_batches"
+                and isinstance(call.value, ast.Name) and call.value.id in modules):
+            return ""
+    return "Data/custom Inference must import and call zevo_stage_resume.run_batches to preserve completed work"
+
+
 def _python_checkpoint_helper_problem(path: str) -> str:
     """Require generated Train code to use the checkpoint transaction helper."""
     try:
@@ -2839,6 +2866,13 @@ def _slurm_stage_result_problem(
         commands = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
         if not any(name in commands for name in runtime_launchers):
             return "GPU workload must launch through zevo_gpu_runtime.py or a system runner that invokes it"
+    if (contract.phase == "submit" and getattr(inp, "stage_resume_helper_path", "")
+            and executable_name in {"prepare_data.py", "predict.py"}):
+        commands = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+        if not (executable_name == "predict.py" and "zevo_parallel_inference.py" in commands):
+            resume_problem = _python_stage_resume_problem(str(path.with_name(executable_name)))
+            if resume_problem:
+                return resume_problem
     if executable_name == "train.py":
         if not configuration_path:
             return "cluster Train must report train_config_path before submission handoff"
@@ -4365,6 +4399,7 @@ async def _submit_validated_slurm_stage_once(
             and previous_implementation_sha256 == implementation_sha256
             and not measurement_restart and not checkpoint_resume and not walltime_resume
             and not (ticket.agent_id == "inference" and execution_retry_authorized(previous.meta or {}))
+            and not resumable_stage_interruption(ticket, previous)
         ):
             raise ValueError(
                 "a failed Slurm job may be re-executed only after its generated "
@@ -4680,6 +4715,16 @@ async def _escalate_stored_payload_validation_failure(
             ),
         )
     raise StoredPayloadValidationError(note) from exc
+
+
+def resumable_stage_interruption(ticket, row) -> bool:
+    """Allow unchanged Data/Inference code after allocation loss, within repair limits."""
+    if row is None or ticket.agent_id not in {"data", "inference"}:
+        return False
+    meta = row.meta or {}
+    state = str(meta.get("scheduler_state") or "").split("+")[0].split(" ")[0]
+    code = str(meta.get("scheduler_exit_code") or "").split(":")[0]
+    return state in {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "BOOT_FAIL"} or (state == "FAILED" and code == "75")
 
 
 async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket) -> bool:

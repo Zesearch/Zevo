@@ -417,3 +417,47 @@ For JSONL, iterate physical `\n`-delimited file records—do not use a Unicode
 boundary. Counts must come from format-aware parsing rather than raw line
 counts. Return failure with a specific cause instead of plausible paths or
 guessed counts.
+
+## Durable preparation and generation batches
+
+Long preparation, synthesis and distillation loops must use the supplied
+`stage_resume_helper_path`. Implement a deterministic `process_batch(rows, start)`
+that returns JSON-serializable accepted rows **and** rejection/cursor/statistics
+information, then consume `run_batches` in input order. An empty result is a
+completed batch too. Do not keep the only copy of generated records in memory.
+
+```python
+from zevo_stage_resume import AllocationWindow, run_batches, phase
+window = AllocationWindow()  # actual Slurm end time, with a shutdown reserve
+window.check(ticket_id, estimated_seconds=120)  # before expensive model loading
+for batch in run_batches(
+    ordered_source_rows, process_batch, root=resume_root, ticket=ticket_id,
+    identity=workload_identity, batch_size=128, window=window,
+    phase_name="generating_data",
+):
+    consume_saved_batch(batch)
+phase(ticket_id, "validating_data_artifacts")
+# Validate and atomically publish the final dataset and normal receipt only
+# after all required batches and recipe checks have completed.
+```
+
+`workload_identity` must bind source revision/content hashes and order, recipe,
+teacher/checkpoint revision, decoding and per-row seeds, verifier implementation,
+preparation implementation SHA-256 and output schema. Pin randomness to stable
+source-row identity; keep batch size and ordering stable on retry. The helper
+checksums and atomically fsyncs each completed batch, restores matching batches,
+and checks actual remaining allocation time between batches. Bound each batch
+so it can finish within the shutdown reserve; decrease batch size for slow
+teachers. Include initial startup in your walltime plan. Never reset a fresh
+multi-hour deadline on an almost-expired retained allocation. Do not catch exit
+75 as success or publish a partial dataset as the requested full recipe.
+
+For multi-tier selection, use a separate identity per tier and reconstruct
+counts/selection from persisted batches, including already processed rejected
+questions. Do not resample completed rows after a restart or silently change the
+hard/easy mix. Finished batches remain useful even when a later batch is killed.
+
+For a new cluster submission the engine checks that `prepare_data.py` imports
+and calls `zevo_stage_resume.run_batches`; a comment or an unused import does not
+satisfy the contract. Upload the supplied helper without modifying it. This gate
+runs before submission, not against an already executed immutable workload.

@@ -136,7 +136,12 @@ while not stopping:
             raise ValueError("workload script changed after validation")
         env = dict(os.environ, ZEVO_TICKET_ID=request["ticket_id"], ZEVO_RUN_ID=request["run_id"],
                    ZEVO_GPU_ATTEMPT=request_path.stem)
+        work = pathlib.Path(request["cwd"])
+        ticket_root = work.parent if work.name.startswith("attempt-") and work.parent.name == request["ticket_id"] else work
+        env["ZEVO_STAGE_RESUME_ROOT"] = str(ticket_root / ".zevo-resume")
         with open(log_out, "a") as out, open(log_err, "a") as err:
+            print("__ATTEMPT__:%s:%s@%s" % (request["ticket_id"], request_path.stem, time.time()), file=out, flush=True)
+            print("__PHASE__:%s:starting_workload@%s" % (request["ticket_id"], time.time()), file=out, flush=True)
             child = subprocess.Popen(workload_command(script), cwd=request["cwd"],
                                      env=env, stdout=out, stderr=err, start_new_session=True)
             while child.poll() is None:
@@ -170,7 +175,7 @@ while not stopping:
     temporary = output_path.with_suffix(".tmp")
     temporary.write_text(json.dumps({"exit_code": rc, "error": error}))
     os.replace(temporary, output_path)
-    if single_workload:
+    if single_workload or rc == 75:
         sys.exit(rc if 0 <= rc <= 255 else 1)
     last_work = time.monotonic()
 '''

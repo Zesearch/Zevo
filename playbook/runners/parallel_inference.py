@@ -33,6 +33,14 @@ gpu_runtime = importlib.util.module_from_spec(_runtime_spec)
 _runtime_spec.loader.exec_module(gpu_runtime)
 
 
+_resume_path = Path(__file__).with_name("zevo_stage_resume.py")
+if not _resume_path.is_file():
+    _resume_path = Path(__file__).with_name("stage_resume.py")
+_resume_spec = importlib.util.spec_from_file_location("zevo_stage_resume", _resume_path)
+stage_resume = importlib.util.module_from_spec(_resume_spec)
+_resume_spec.loader.exec_module(stage_resume)
+
+
 csv.field_size_limit(1 << 30)
 
 
@@ -106,6 +114,24 @@ def _atomic_json(path: Path, value: dict) -> None:
     os.replace(target, path)
 
 
+def _identity_matches(member):
+    try:
+        proof = json.loads(Path(member["output"] + ".resume.json").read_text())
+        return (proof["identity"] == member["_identity"]
+                and proof["predictions"] == stage_resume.digest(Path(member["output"]).read_text())
+                and proof["diagnostics"] == stage_resume.digest(Path(member["diagnostics"]).read_text()))
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def _member_identity(member, model, predict):
+    return stage_resume.digest({"model": model, "predict": Path(predict).read_text(),
+                               "config": _load_config(member["config"]),
+                               "questions": Path(member["questions"]).read_text(),
+                               "schema": Path(member["sample_submission"]).read_text(),
+                               "benchmark": member["benchmark_id"]})
+
+
 def _partitions(
     members: list[dict], worker_count: int, root: Path,
 ) -> tuple[list[Part], list[int], set[int]]:
@@ -119,7 +145,7 @@ def _partitions(
         fields, rows = loaded[index]
         if not rows:
             raise ValueError(f"inference benchmark has no question rows: {member['name']}")
-        if _complete(member, len(rows)):
+        if _complete(member, len(rows)) and _identity_matches(member):
             print(f"[parallel] reuse complete benchmark {member['name']}", flush=True)
             complete.add(index)
             continue
@@ -250,26 +276,105 @@ def _calibration_helper():
     return module
 
 
+def _predict_resumable(adapter, engine, member, config, *, model, predict, ticket, progress):
+    """Commit bounded prediction batches, including their complete diagnostics."""
+    fields, rows = _csv_rows(member["questions"])
+    root = os.environ.get("ZEVO_STAGE_RESUME_ROOT") or str(Path(member.get("_resume_root", member["output"])).parent / ".zevo-resume")
+    identity = {"stage": "inference", "model": model, "config": config,
+                "implementation": stage_resume.digest(Path(predict).read_text()),
+                "benchmark": member["benchmark_id"], "questions": stage_resume.digest(rows),
+                "schema": Path(member["sample_submission"]).read_text()}
+    collected, diagnostics, n_unparseable = [], [], 0
+    with tempfile.TemporaryDirectory(prefix="prediction-batch-") as scratch:
+        batch_dir = Path(scratch)
+        def generate(chunk, start):
+            question_path = batch_dir / "questions.csv"
+            _write_csv(question_path, fields, chunk)
+            part = {**member, "questions": str(question_path),
+                    "output": str(batch_dir / "predictions.csv"),
+                    "diagnostics": str(batch_dir / "diagnostics.json"),
+                    "_row_offset": int(member.get("_row_offset", 0)) + start}
+            for key in ("output", "diagnostics"):
+                Path(part[key]).unlink(missing_ok=True)
+            if adapter is not None:
+                result = adapter.predict_member(engine, part, config, progress=lambda step, total: None)
+            else:
+                manifest, summary = batch_dir / "suite.json", batch_dir / "summary.json"
+                _write_json(manifest, {"members": [part]})
+                summary.unlink(missing_ok=True)
+                _phase(ticket, "load_model")
+                with (batch_dir / "predict.log").open("w") as log:
+                    proc = subprocess.Popen([sys.executable, predict, "--model", model, "--suite", str(manifest),
+                                             "--summary", str(summary), "--ticket-id", ticket],
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                    try:
+                        for line in proc.stdout:
+                            log.write(line)
+                            # Batch-local progress cannot be mistaken for shard completion.
+                            if not line.startswith(("__PROGRESS__:", "__ATTEMPT__:")):
+                                print(line, end="", flush=True)
+                        code = proc.wait()
+                    finally:
+                        if proc.poll() is None:
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                                proc.wait()
+                if code:
+                    with (batch_dir / "predict.log").open("rb") as log:
+                        log.seek(max(0, log.seek(0, 2) - 4000))
+                        detail = log.read().decode(errors="replace")
+                    if code == stage_resume.YIELD_EXIT_CODE:
+                        raise SystemExit(code)
+                    raise RuntimeError(f"prediction batch failed ({code}): {detail}")
+                result = json.loads(summary.read_text())["members"][0]
+            if not _complete(part, len(chunk)):
+                raise ValueError("prediction batch is incomplete; refusing to checkpoint")
+            out_fields, predictions = _csv_rows(part["output"])
+            records = json.loads(Path(part["diagnostics"]).read_text())["records"]
+            return {"fields": out_fields, "rows": predictions, "records": records,
+                    "n_unparseable": int(result.get("n_unparseable", 0))}
+        for value in stage_resume.run_batches(rows, generate, root=root, ticket=ticket,
+                                              identity=identity, phase_name="generating", report_progress=False):
+            offset, request_offset = len(collected), len(diagnostics)
+            collected.extend(value["rows"])
+            diagnostics.extend({**record, "row_index": offset + int(record["row_index"]),
+                                "request_index": request_offset + int(record["request_index"])}
+                               for record in value["records"])
+            n_unparseable += value["n_unparseable"]
+            progress(len(collected), len(rows))
+    _phase(ticket, "writing_artifacts")
+    _atomic_csv(Path(member["output"]), value["fields"], collected)
+    _atomic_json(Path(member["diagnostics"]), {"schema_version": 1, "records": diagnostics})
+    return {"name": member["name"], "n_rows": len(collected),
+            "n_requests": len(diagnostics), "n_unparseable": n_unparseable}
+
+
 def _resident_worker(predict: str, model: str, manifest: str, summary: str,
-                     ticket: str, gate: str, calibrate: bool) -> int:
+                     ticket: str, gate: str, calibrate: bool, resident: bool = True) -> int:
     """Load once, calibrate assigned whole benchmarks, then generate shards."""
     import importlib.util
     members = json.loads(Path(manifest).read_text())["members"]
-    spec = importlib.util.spec_from_file_location("zevo_predict_adapter", predict)
-    if spec is None or spec.loader is None:
-        raise ValueError("predict module is unavailable")
-    adapter = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = adapter
-    started = time.monotonic()
-    print("[startup] importing prediction adapter", flush=True)
-    spec.loader.exec_module(adapter)
-    print(f"[startup] adapter import took {time.monotonic() - started:.3f}s", flush=True)
-    if not callable(getattr(adapter, "load_engine", None)) or not callable(getattr(adapter, "predict_member", None)):
-        raise ValueError("resident predict.py requires load_engine and predict_member")
-    started = time.monotonic()
-    print("[startup] loading engine (tokenizer, architecture, weights, compile and warmup)", flush=True)
-    engine = adapter.load_engine(model, _load_config(members[0]["config"]))
-    print(f"[startup] engine ready after {time.monotonic() - started:.3f}s", flush=True)
+    stage_resume.AllocationWindow().check(ticket, estimated_seconds=120)
+    adapter, engine = None, None
+    if resident:
+        spec = importlib.util.spec_from_file_location("zevo_predict_adapter", predict)
+        if spec is None or spec.loader is None:
+            raise ValueError("predict module is unavailable")
+        adapter = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = adapter
+        started = time.monotonic()
+        print("[startup] importing prediction adapter", flush=True)
+        spec.loader.exec_module(adapter)
+        print(f"[startup] adapter import took {time.monotonic() - started:.3f}s", flush=True)
+        if not callable(getattr(adapter, "load_engine", None)) or not callable(getattr(adapter, "predict_member", None)):
+            raise ValueError("resident predict.py requires load_engine and predict_member")
+        started = time.monotonic()
+        print("[startup] loading engine (tokenizer, architecture, weights, compile and warmup)", flush=True)
+        engine = adapter.load_engine(model, _load_config(members[0]["config"]))
+        print(f"[startup] engine ready after {time.monotonic() - started:.3f}s", flush=True)
     helper = _calibration_helper() if calibrate else None
     try:
         if calibrate:
@@ -320,7 +425,8 @@ def _resident_worker(predict: str, model: str, manifest: str, summary: str,
             def progress(step, total):
                 _emit(ticket, {"step": step, "total": total,
                                "benchmark_index": index, "benchmark_total": len(members)})
-            result = adapter.predict_member(engine, member, _load_config(member["config"]), progress=progress)
+            result = _predict_resumable(adapter, engine, member, _load_config(member["config"]),
+                                        model=model, predict=predict, ticket=ticket, progress=progress)
             summaries.append(result)
         _atomic_json(Path(summary), {"members": summaries})
         return 0
@@ -401,6 +507,8 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
             _engine_identity(_load_config(member["config"])) == first_identity for member in members
         ) else ""
         runtime_env = gpu_runtime.prepare_environment(model=model, config_path=shared_config)
+        for member in members:
+            member["_identity"] = _member_identity(member, model, predict)
         parts, counts, complete = _partitions(members, workers, root)
         already_done_rows = sum(counts[index] for index in complete)
         if not parts:
@@ -441,6 +549,12 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                 raise ValueError(
                     f"merged inference artifacts are incomplete for {member['name']}"
                 )
+            member = members[index]
+            _atomic_json(Path(member["output"] + ".resume.json"), {
+                "identity": _member_identity(member, model, predict),
+                "predictions": stage_resume.digest(Path(member["output"]).read_text()),
+                "diagnostics": stage_resume.digest(Path(member["diagnostics"]).read_text()),
+            })
             request_counts[index] = request_count
             committed.add(index)
             _emit(ticket, {
@@ -499,21 +613,22 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                     {**part.member, "questions": part.questions,
                      "output": part.output, "diagnostics": part.diagnostics,
                      "_full_questions": part.member["questions"],
+                     "_resume_root": summary, "_row_offset": part.start,
                      "_calibration_owner": index == min(owners[part.member_index])}
                     for part in batch
                 ]
                 manifest = root / f"worker-{index}.json"
                 worker_summary = root / f"worker-{index}-summary.json"
                 _write_json(manifest, {"members": worker_members})
-                command = [sys.executable, predict, "--model", model,
-                           "--suite", str(manifest), "--summary", str(worker_summary),
-                           "--ticket-id", ticket]
-                if resident:
-                    command = [sys.executable, str(Path(__file__).resolve()),
-                               "--resident-worker", "--predict", str(Path(predict).resolve()),
-                               "--model", model, "--suite", str(manifest),
-                               "--summary", str(worker_summary), "--ticket-id", ticket,
-                               "--generation-gate", str(gate)] + (["--calibrate"] if calibrate else [])
+                command = [sys.executable, str(Path(__file__).resolve()),
+                           "--resident-worker", "--predict", str(Path(predict).resolve()),
+                           "--model", model, "--suite", str(manifest),
+                           "--summary", str(worker_summary), "--ticket-id", ticket,
+                           "--generation-gate", str(gate)]
+                if not resident:
+                    command.append("--batch-cli")
+                if calibrate:
+                    command.append("--calibrate")
                 proc = gpu_runtime.launch(
                     command, profile="inference", model=model, config_path=batch[0].member["config"],
                     env=env, stdout=subprocess.PIPE, stderr=None, text=True, bufsize=1,
@@ -541,6 +656,8 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                     readers_done.add(worker)
                     finished = next(proc for index, proc, _ in processes if index == worker)
                     exit_code = finished.wait()
+                    if exit_code == stage_resume.YIELD_EXIT_CODE:
+                        raise SystemExit(stage_resume.YIELD_EXIT_CODE)
                     if exit_code != 0:
                         raise RuntimeError(
                             f"inference replica {worker} exited with code {exit_code}"
@@ -573,7 +690,7 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                         if text in line and rank > startup_rank:
                             startup_rank = rank
                             _phase(ticket, phase)
-                if resident and line == "__ZEVO_RESIDENT_READY__":
+                if line == "__ZEVO_RESIDENT_READY__":
                     ready_workers.add(worker)
                     if len(ready_workers) == len(active):
                         if calibrate:
@@ -584,8 +701,8 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                         gate.touch()
                     continue
                 if not line.startswith("__PROGRESS__:"):
-                    if line.startswith("__PHASE__:") and resident and "length_calibration@" in line:
-                        _phase(ticket, "length_calibration")
+                    if line.startswith("__PHASE__:"):
+                        print(line, flush=True)
                     elif not line.startswith("__PHASE__:"):
                         print(f"[worker {worker}] {line}", flush=True)
                     continue
@@ -673,13 +790,14 @@ def main() -> int:
                         help="Replica limit from the CPU/RAM and GPU resource plan")
     parser.add_argument("--resident", action="store_true", help="Reuse loaded engines across calibration and generation")
     parser.add_argument("--calibrate", action="store_true", help="Gate generation on in-process length calibration")
+    parser.add_argument("--batch-cli", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--resident-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--generation-gate", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         if args.resident_worker:
             return _resident_worker(args.predict, args.model, args.suite, args.summary,
-                                    args.ticket_id, args.generation_gate, args.calibrate)
+                                    args.ticket_id, args.generation_gate, args.calibrate, not args.batch_cli)
         return run(
             predict=args.predict, model=args.model, suite=args.suite,
             summary=args.summary, ticket=args.ticket_id,

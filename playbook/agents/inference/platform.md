@@ -820,3 +820,29 @@ Submission still validates script structure, lifecycle/resource requirements,
 configuration consistency and the uploaded file hash, then records the exact
 execution snapshot. In `collect` mode preserve that snapshot so reported results
 refer to the workload that actually ran, not a subsequently edited script.
+
+## Durable prediction batches
+
+Upload `stage_resume_helper_path` beside the parallel runner. The system runner
+checkpoints bounded prediction batches and complete generation diagnostics in
+`ZEVO_STAGE_RESUME_ROOT` (or the persistent summary directory's `.zevo-resume`).
+Keep that directory and the persistent output paths across attempts. Prefer the
+resident adapter to keep one model loaded while batching; the CLI adapter is
+also supported but loads once per batch. Model/configuration, questions, schema
+and implementation identities gate reuse. Complete benchmarks additionally have
+checksummed identity receipts; file existence or row count alone is insufficient.
+
+`predict_member` receives batch-local questions and `_row_offset` for the original
+shard position. Return batch-local `row_index` and dense `request_index` values;
+the system merges them into original order, including multiple requests per row.
+Seed sampling from stable question identity, not batch call order. Do not wait
+for the parent to merge a benchmark inside `predict_member` or a CLI invocation.
+Emit progress through the supplied callback; the system only commits a batch
+after validating both predictions and diagnostics. Interrupted batches may be
+recomputed; completed batches must not be discarded or regenerated on retry.
+
+Allocation-window exhaustion exits with 75 after saving completed batches. The
+normal bounded recovery path obtains a fresh allocation; it must not silently
+increase token limits, change decoding, drop questions or mark partial inference
+successful. For a custom runner outside the parallel runner, use the same
+`run_batches` helper and identity/diagnostics requirements explicitly.

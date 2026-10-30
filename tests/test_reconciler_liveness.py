@@ -1255,3 +1255,32 @@ async def test_premature_collect_handoff_survives_completion_and_queues_collect(
     assert ticket.status == 'queued'
     assert job.meta['collect_wakeup_queued'] is True
     assert job.meta['submission_heartbeat_id'] == 'original-submit'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('agent_id', ['data', 'train', 'inference', 'evaluation', 'registry', 'infrastructure'])
+async def test_all_registered_stages_stream_and_drain_phases(session, monkeypatch, agent_id):
+    import asyncio
+    from zevo.engine.run.scheduler import reconciler
+    ticket = Ticket(id=f'{agent_id}-r1-099', run_id='r1', agent_id=agent_id, status='running', payload={})
+    row = InfraInstance(id=f'row-{agent_id}', run_id='r1', ticket_id=ticket.id,
+                        provider='cluster', instance_id='123', status='ready')
+    meta = {'submission_heartbeat_id': 'hb-stage',
+            'status_path': f'/work/{ticket.id}/attempt-1/.zevo-slurm-status',
+            'remote_workdir': f'/work/{ticket.id}/attempt-1',
+            'log_path': f'/work/{ticket.id}/attempt-1/slurm-123.out'}
+    seen = []
+    async def connection(*args):
+        return {'host': 'cluster', 'user': 'user'}
+    async def stream(**kwargs):
+        seen.append(kwargs)
+    monkeypatch.setattr(reconciler, '_slurm_connection', connection)
+    monkeypatch.setattr(reconciler, '_stream_slurm_status_events', stream)
+    run = await session.get(Run, 'r1')
+    assert await reconciler._ensure_slurm_status_stream(row=row, run=run, ticket=ticket,
+                                                       meta=meta, session=session)
+    await asyncio.sleep(0)
+    assert seen[-1]['telemetry_path'] == meta['log_path']
+    await reconciler._drain_terminal_telemetry(session, row=row, run=run, ticket=ticket, meta=meta)
+    assert meta['telemetry_drained'] is True
+    assert seen[-1]['replay_session'] is session

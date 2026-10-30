@@ -101,6 +101,11 @@ test('Data and Train share phase labels without inventing benchmark progress', (
   for (const [agent, phase, label] of [
     ['data', 'generate', 'Generating training data'],
     ['data', 'validating_data_artifacts', 'Validating data'],
+    ['data', 'generating_data', 'Generating data'],
+    ['data', 'checkpointing', 'Saving progress'],
+    ['inference', 'restoring_progress', 'Restoring saved progress'],
+    ['inference', 'waiting_for_allocation', 'Waiting for a new allocation'],
+    ['registry', 'starting_workload', 'Starting workload'],
     ['train', 'loading_model', 'Loading model'],
     ['train', 'loading_checkpoint', 'Restoring checkpoint'],
     ['train', 'saving_model', 'Saving model'],

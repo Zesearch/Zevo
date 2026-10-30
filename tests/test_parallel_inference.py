@@ -29,15 +29,29 @@ print("MASK=" + os.environ["CUDA_VISIBLE_DEVICES"], flush=True)
 print("WORKER_HOME=" + os.environ["HOME"], flush=True)
 print("FLASHINFER_CACHE=" + os.environ["FLASHINFER_CACHE_DIR"], flush=True)
 if os.environ.get("FAKE_FAIL_MASK") == os.environ["CUDA_VISIBLE_DEVICES"]:
-    time.sleep(0.2)
+    if os.environ.get("FAKE_FAIL_AFTER_ARTIFACT"):
+        deadline = time.monotonic() + 10
+        while not os.path.exists(os.environ["FAKE_FAIL_AFTER_ARTIFACT"]):
+            if time.monotonic() > deadline:
+                sys.exit(10)
+            time.sleep(0.01)
+    else:
+        time.sleep(0.2)
     sys.exit(5)
 for index, member in enumerate(members, start=1):
+    if member["name"] == "benchmark 1" and os.environ.get("FAKE_WAIT_FOR_FIRST_COMMIT") == "1":
+        deadline = time.monotonic() + 5
+        while not os.path.exists(os.environ["FAKE_FIRST_MERGED_OUTPUT"]):
+            if time.monotonic() >= deadline:
+                sys.exit(9)  # The runner waited for this worker to finish.
+            time.sleep(0.01)
+        print("FIRST_BENCHMARK_COMMITTED_BEFORE_WORKER_EXIT", flush=True)
     with open(member["questions"], newline="", encoding="utf-8") as handle:
         questions = list(csv.DictReader(handle))
     progress = {"step": len(questions), "total": len(questions),
                 "benchmark_name": member["name"], "benchmark_index": index,
                 "benchmark_total": len(members)}
-    early_progress = index == 1 and os.environ.get("FAKE_EARLY_PROGRESS") == "1"
+    early_progress = member["name"] == "benchmark 0" and os.environ.get("FAKE_EARLY_PROGRESS") == "1"
     if early_progress:
         print("__PROGRESS__:" + args.ticket_id + ":" + json.dumps(progress), flush=True)
         time.sleep(0.2)
@@ -58,13 +72,6 @@ for index, member in enumerate(members, start=1):
         print("__PROGRESS__:" + args.ticket_id + ":" + json.dumps(progress), flush=True)
     summaries.append({"name": member["name"], "n_rows": len(questions),
                       "n_requests": len(records), "n_unparseable": 0})
-    if index == 1 and os.environ.get("FAKE_WAIT_FOR_FIRST_COMMIT") == "1":
-        deadline = time.monotonic() + 5
-        while not os.path.exists(os.environ["FAKE_FIRST_MERGED_OUTPUT"]):
-            if time.monotonic() >= deadline:
-                sys.exit(9)  # The runner waited for this worker to finish.
-            time.sleep(0.01)
-        print("FIRST_BENCHMARK_COMMITTED_BEFORE_WORKER_EXIT", flush=True)
     time.sleep(0.01)
 with open(args.summary, "w", encoding="utf-8") as handle:
     json.dump({"members": summaries}, handle)
@@ -144,8 +151,8 @@ def test_separate_benchmarks_share_one_job_but_use_distinct_gpus(tmp_path: Path)
              if "WORKER_HOME=" in line]
     flashinfer = [line.split("=", 1)[1] for line in output.splitlines()
                   if "FLASHINFER_CACHE=" in line]
-    assert len(homes) == 2 and len(set(homes)) == 2
-    assert len(flashinfer) == 2 and len(set(flashinfer)) == 2
+    assert len(set(homes)) == 2
+    assert len(set(flashinfer)) == 2
     for index, member in enumerate(members):
         with open(member["output"], newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
@@ -167,7 +174,8 @@ def test_completed_benchmark_survives_another_worker_failure(tmp_path: Path) -> 
     predict = tmp_path / "predict.py"
     predict.write_text(FAKE_PREDICT, encoding="utf-8")
     suite = _suite(tmp_path, [1300, 1400])
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="0,1", TMPDIR="/tmp", FAKE_FAIL_MASK="1")
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="0,1", TMPDIR="/tmp", FAKE_FAIL_MASK="1",
+               FAKE_FAIL_AFTER_ARTIFACT=str(tmp_path / "benchmark-0/predictions.csv"))
     result = subprocess.run(
         [sys.executable, str(HELPER), "--predict", str(predict),
          "--model", "unused", "--suite", str(suite),
@@ -237,3 +245,37 @@ def test_replica_limit_is_resource_driven_and_not_capped_at_four(tmp_path: Path)
         member = json.loads(suite.read_text())["members"][0]
         with open(member["output"]) as handle:
             assert [row["id"] for row in csv.DictReader(handle)] == list(map(str, range(16)))
+
+
+def test_interrupted_batches_resume_without_duplicate_predictions(tmp_path):
+    predict = tmp_path / 'predict.py'
+    predict.write_text(FAKE_PREDICT.replace(
+        '    progress = {',
+        '''    with open(os.environ['CALL_LOG'], 'a') as trace:
+        trace.write(questions[0]['id'] + '\\n')
+    if os.environ.get('FAIL_BATCH') == questions[0]['id']:
+        sys.exit(5)
+    progress = {'''))
+    suite = _suite(tmp_path, [300])
+    trace = tmp_path / 'calls.txt'
+    command = [sys.executable, str(HELPER), '--predict', str(predict), '--model', 'unused',
+               '--suite', str(suite), '--summary', str(tmp_path / 'summary.json'),
+               '--ticket-id', 'test-ticket', '--allocated-gpus', '1', '--gpus-per-worker', '1']
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES='0', CALL_LOG=str(trace), TMPDIR='/tmp')
+    first = subprocess.run(command, env={**env, 'FAIL_BATCH': '128'}, capture_output=True, text=True, timeout=30)
+    assert first.returncode != 0
+    member = json.loads(suite.read_text())['members'][0]
+    assert not Path(member['output']).exists()
+    second = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert trace.read_text().splitlines() == ['0', '128', '128', '256']
+    with open(member['output']) as handle:
+        assert [row['id'] for row in csv.DictReader(handle)] == list(map(str, range(300)))
+    records = json.loads(Path(member['diagnostics']).read_text())['records']
+    assert [r['row_index'] for r in records] == list(range(300))
+    assert [r['request_index'] for r in records] == list(range(300))
+    # Full output reuse also requires the configuration identity, not just its row count.
+    Path(member['config']).write_text(Path(member['config']).read_text() + 'seed: 42\n')
+    third = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+    assert third.returncode == 0, third.stdout + third.stderr
+    assert trace.read_text().splitlines()[-3:] == ['0', '128', '256']

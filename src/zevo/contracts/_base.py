@@ -28,6 +28,9 @@ class AgentTaskInput(BaseModel):
             "compute node. CPU-only work does not require it."
         ),
     )
+    stage_resume_helper_path: str = Field(
+        "", description="System phase reporter and durable batch journal. Use for bounded Data/Inference batches; upload beside other runtime helpers."
+    )
     customization: AgentCustomization = Field(default_factory=AgentCustomization)
     run_context: dict[str, Any] = Field(
         default_factory=dict,
