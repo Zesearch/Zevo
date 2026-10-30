@@ -91,6 +91,7 @@ def test_release_boundary(mode, state, expected):
     ('per_stage', 'train-1', True, True), ('per_run', 'infer-1', True, True),
     ('per_stage', 'infer-1', False, True),
     ('per_run', 'infer-1', False, 'missing'),
+    ('per_run', 'train-1', False, 'continuation'),
     ('per_run', 'infer-1', False, 'COMPLETING'),
     ('per_run', 'infer-1', False, 'UNKNOWN'),
     ('per_submission', 'train-1', False, False),
@@ -112,7 +113,7 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
         if "squeue -h" in command:
             if live == 'missing':
                 return dict(ok=False, error='Login banner\nslurm_load_jobs error: Invalid job id specified\n')
-            return dict(ok=True, stdout=(live if isinstance(live, str) else 'RUNNING') + '\n' if live else '')
+            return dict(ok=True, stdout=(live if isinstance(live, str) and live != 'continuation' else 'RUNNING') + '\n' if live else '')
         if 'sacct -n -X' in command:
             return dict(ok=True, stdout='123|TIMEOUT\n')
         return dict(ok=True, stdout='456\n' if 'sbatch --parsable' in command else '123\n')
@@ -135,6 +136,8 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
             heartbeat_id='h2', sha256='digest')
         publication = {"attempted": False}
         kwargs["publication"] = publication
+        if live == "continuation":
+            kwargs["continuation"] = {"source_job_id": "123"}
         if retirement_failure and (live == 'missing' or not live):
             from sqlalchemy import event
             from sqlalchemy.exc import DBAPIError
@@ -163,6 +166,10 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
             assert not any('sbatch --parsable' in c for c in commands)
         else:
             await assert_submission(session, kwargs, reuses, commands, tmp_path, mode)
+            if live == "continuation":
+                assert any('/controller/release' in command for command in commands)
+                assert sum('sbatch --parsable' in command for command in commands) == 1
+                assert owner.released_at is None  # watcher owns terminal confirmation
             if live == 'missing' or not live:
                 assert owner.released_at is not None
                 assert owner.status == 'released'

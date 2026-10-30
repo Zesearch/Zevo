@@ -21,7 +21,7 @@ from zevo.engine.run.runner import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry'])
+@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry', 'walltime'])
 async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, mode) -> None:
     remeasure = mode != "repair"
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -151,6 +151,12 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
 
         if mode == "collect_retry":
             row.meta = {**row.meta, "inference_execution_retry": {"execution_attempt": 1, "reason": "prediction output lost after job completed"}}
+        elif mode == "walltime":
+            row.meta = {**row.meta, "training_continuation": {
+                "source_resource_id": row.id, "source_job_id": row.instance_id,
+                "ticket_id": ticket.id, "verified": True,
+                "config_sha256": "a" * 64, "completed_steps": 15, "planned_steps": 450,
+            }}
         elif mode == "checkpoint":
             row.meta = {**row.meta, "checkpoint_yield": "request", "checkpoint_resume": "request"}
             run.lifecycle = {"adaptive_checkpoints": {"request": {
