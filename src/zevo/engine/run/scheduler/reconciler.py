@@ -426,16 +426,19 @@ async def _slurm_connection(run: Run, session: AsyncSession) -> dict[str, Any] |
 
 def _mark_slurm_job_running(
     *, session: AsyncSession, row: InfraInstance, ticket: Ticket,
-    meta: dict[str, Any], observed_at: datetime,
+    meta: dict[str, Any], observed_at: datetime, stage_event: bool = False,
 ) -> None:
     """Apply a RUNNING observation once, whether streamed or polled."""
     row.status = "ready"
+    # Workload duration and allocation lifetime are independent under per_run.
+    if stage_event or not meta.get("stage_started_at"):
+        meta["stage_started_at"] = observed_at.isoformat()
     # Job-local events use `date -u` and are the most precise start signal.
     # They also correct site `sacct Start` values rendered without an offset
     # and previously interpreted as UTC by the backend.
     row.ready_at = (
         observed_at
-        if bool(meta.get("status_stream_observed"))
+        if stage_event
         else row.ready_at or observed_at
     )
     if ticket.status == "waiting_external":
@@ -501,13 +504,14 @@ async def _record_slurm_status_event(
             if bool(meta.get("submission_committed")):
                 _mark_slurm_job_running(
                     session=session, row=row, ticket=ticket, meta=meta,
-                    observed_at=occurred_at,
+                    observed_at=occurred_at, stage_event=True,
                 )
             else:
                 # The submit activation still owns the Ticket. Only its
                 # resource row becomes visible as running at this point.
                 row.status = "ready"
                 row.ready_at = occurred_at
+                meta["stage_started_at"] = occurred_at.isoformat()
         elif event == "EXITED":
             # The job-local trap knows the process exit code immediately, but
             # sacct remains authoritative for TIMEOUT/PREEMPTED/NODE_FAIL. Ask
@@ -890,6 +894,8 @@ async def _reconcile_slurm_allocation_owners(session: AsyncSession) -> int:
             elif state == "RUNNING":
                 row.status = "ready"
                 row.ready_at = row.ready_at or started or now
+                if started is not None:
+                    meta["allocation_started_at"] = started.isoformat()
         except Exception as exc:
             meta["allocation_monitor_error"] = str(exc)[:1000]
         row.meta = meta
@@ -1041,6 +1047,7 @@ async def _reconcile_slurm_stage_jobs(
                     if reason and reason.lower() not in {"none", "(null)"}:
                         meta["scheduler_reason"] = reason
                     if started_at is not None:
+                        meta["allocation_started_at"] = started_at.isoformat()
                         row.ready_at = row.ready_at or started_at
                 except Exception as exc:  # transient SSH/scheduler failures retry
                     meta["monitor_error"] = str(exc)[:1000]
@@ -1112,7 +1119,7 @@ async def _reconcile_slurm_stage_jobs(
             if committed:
                 _mark_slurm_job_running(
                     session=session, row=row, ticket=ticket, meta=meta,
-                    observed_at=row.ready_at or now,
+                    observed_at=now,
                 )
             else:
                 row.status = "ready"
