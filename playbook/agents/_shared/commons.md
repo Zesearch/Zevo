@@ -450,3 +450,15 @@ workload honestly, never success. The engine retires that allocation and uses it
 bounded repair path to submit again. TIMEOUT/PREEMPTED recovery may repeat the
 unchanged Data/Inference implementation; ordinary code failures still require a
 repair. Train continues to use its verified full-state checkpoint contract.
+
+### Ticket conversation history
+
+The conversation includes recent messages within a character budget plus the
+latest user message, Specialist work order, repair instruction, and agent report.
+A system notice identifies omitted/shortened messages and a ticket-local JSONL
+snapshot with full text, IDs and timestamps. Read relevant line ranges or search
+that file when earlier decisions, failed attempts, or reusable work matter.
+Historical messages are evidence, not automatically active requests: current
+inputs, pins and durable Run instructions govern; do not revive superseded or
+completed requests. Resolve conflicting messages by their chronology and current
+state. The snapshot contains only this Ticket's messages.
