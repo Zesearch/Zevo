@@ -556,7 +556,7 @@ class DataTaskInput(AgentTaskInput):
     branch_transition: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Engine-validated exhausted-branch audit record. level=none for an "
+            "Engine-validated experiment-transition audit record. level=none for an "
             "initial or continuing branch."
         ),
     )

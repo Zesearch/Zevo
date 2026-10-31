@@ -194,14 +194,15 @@ def _render_skill_pool(cards: list[SkillCard], agent_id: str = "") -> str:
         "the Ticket workspace `.agents/skills` — invoke the one that fits.\n"
         "- **Other models (bedrock etc.):** call `Skill(action=\"list\")` to see "
         "your skills, then `Skill(action=\"load\", name=\"<skill>\")`.\n\n"
-        "For Train, select every unpinned `training_method` yourself from the "
-        "available compatible Skills; a non-empty `training_method_pin` is binding "
-        "and `configuration_suggestions.training_method` is advisory. "
+        "For pipeline Train, execute the Orchestrator-selected method; report "
+        "incompatibility rather than silently substituting. For standalone/freeform "
+        "Train without an Orchestrator selection, choose a compatible method. "
+        "An omitted pipeline method also delegates this choice to Train. "
+        "A non-empty training_method_pin is binding. "
         "Invoke the selected Skill (underscores→hyphens, e.g. `online_dpo` → "
         "`online-dpo`). Historical `lora_sft`/`full_sft` pins invoke `sft` with "
         "PEFT enabled/disabled respectively. An unknown selected method is a "
-        "contract failure. Orchestrator "
-        "guidance is advisory unless it carries a user pin. We give the contract; "
+        "contract failure. Detailed unpinned training values remain Train-owned. "
         "**you write the code**. Echo the method you used back in "
         "`training_method`. Run ONE only."
     )
@@ -250,17 +251,30 @@ def _render_skill_catalog(exclude_id: str) -> str:
     intro = (
         "Use the ownership named on each worker's catalog block. Data receives one "
         "method solely to choose required record semantics, then chooses its own "
-        "preparation Skills. Train chooses one executable method unless the user "
-        "pinned it; Orchestrator advice remains high-level. Infrastructure matches "
+        "preparation Skills. Orchestrator selects pipeline methods; Train resolves "
+        "their executable configuration while honoring user pins. Infrastructure matches "
         "a site-operation Skill from its typed SSH route."
     )
     return "# Downstream Skill Catalog\n\n" + intro + "\n\n" + "\n\n".join(blocks)
 
 
+def _operational_guide(path: Path) -> str:
+    text = _read_section(path, "Operational guide")
+    headings = [line for line in text.splitlines() if line.startswith("##")]
+    return (
+        "# Operational guide (read relevant sections before executing)\n\n"
+        "Path relative to this Ticket workspace: .zevo-guides/platform.md\n"
+        "Read the sections relevant to this activation, provider, and operation. "
+        "This file is available through the file/shell tools; it contains procedures, "
+        "not additional permission to change user pins or task boundaries. "
+        "Do not load unrelated procedures. Exact keys and allowed actions come "
+        "from the supplied schemas and activation contract.\n\n"
+        + "\n".join(headings)
+    )
+
+
 def _shared_runtime_sections(agent_id: str) -> list[tuple[str, str]]:
     sections = []
-    if agent_id in {"data", "train", "inference", "infrastructure"}:
-        sections.append(("gpu_lifetime.md", "GPU Resource Lifetime (shared)"))
     if agent_id in {"train", "inference"}:
         sections.append(("distributed_execution.md", "Distributed Execution (shared)"))
     return sections
@@ -271,7 +285,7 @@ def _assemble_instructions(
 ) -> str:
     """Build the system prompt from the split doc files.
 
-    Order: identity -> goal -> shared commons -> platform -> skill pool ->
+    Order: identity -> goal -> shared commons -> operational-guide index -> skill pool ->
     the matching typed/freeform invocation contract. `identity_body` is
     identity.md's prose (its
     frontmatter is stripped by the caller). The skill-pool section is omitted
@@ -286,7 +300,7 @@ def _assemble_instructions(
             _read_section(SHARED_DIR / name, title)
             for name, title in _shared_runtime_sections(agent_dir.name)
         ],
-        _read_section(agent_dir / _PLATFORM_FILE, "Platform"),
+        _operational_guide(agent_dir / _PLATFORM_FILE),
         _render_skill_pool(skills, agent_dir.name),
     ]
     if input_format == INPUT_FORMAT_FREEFORM:
@@ -334,7 +348,7 @@ def load_agent(
     metadata (id, name, driver, model, tools, output_schema) and its body is the
     Identity section of the prompt. `input_format` selects which Ticket invocation
     contract is folded into `instructions`. The body is assembled
-    from the split docs: identity -> goal -> shared commons -> platform ->
+    from the split docs: identity -> goal -> shared commons -> operational-guide index ->
     skill pool -> (typed | freeform). The skill pool is the agent's
     `skills:` frontmatter (method ids) resolved against
     `playbook/skills/<id>/*/SKILL.md`.

@@ -222,7 +222,8 @@ def test_compute_agents_receive_shared_runtime_contracts():
     distributed = (SHARED_DIR / "distributed_execution.md").read_text().strip()
     for agent in ("data", "train", "inference", "infrastructure"):
         instructions = load_agent(agent).instructions
-        assert instructions.count(lifetime) == 1
+        assert lifetime not in instructions
+        assert "Operational guide (read relevant sections" in instructions
         assert instructions.count(distributed) == (1 if agent in {"train", "inference"} else 0)
     assert lifetime not in load_agent("orchestrator").instructions
 

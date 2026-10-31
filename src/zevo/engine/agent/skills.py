@@ -94,6 +94,13 @@ def stage_skills(
 
     Returns the staged skills directory, or None if the Agent has no skills.
     Overwrites any prior staged copy (idempotent across re-wakes)."""
+    # Guides travel with the workspace, including remote OpenShell sandboxes.
+    # Stage even for agents without a Skill pool (e.g. Orchestrator/Registry).
+    guide = REPO_ROOT / "playbook" / "agents" / agent_id / "platform.md"
+    if guide.is_file():
+        guide_dir = Path(workspace_dir) / ".zevo-guides"
+        guide_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(guide, guide_dir / "platform.md")
     dirs = agent_skill_dirs(agent_id)
     if not dirs:
         return None

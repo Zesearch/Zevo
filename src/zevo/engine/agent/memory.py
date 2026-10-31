@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from typing import Any, Iterable
+from pathlib import Path
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,6 +90,35 @@ def applicability_for(run: Run, ticket: Ticket) -> dict[str, str]:
     return {}
 
 
+def memory_environment(run: Run, ticket: Ticket, inp=None) -> dict[str, str]:
+    """Observed activation identity; unknown environments are not assumed equal.
+
+    Explicit constraints can select just the relevant facts. The default
+    snapshot is Ticket-local because device_info does not attest installed
+    Python packages. Cross-Ticket reuse names the necessary observed facts.
+    """
+    facts = {"gpu_provider": str(run.gpu_provider or ""),
+             "generation_backend": str(run.generation_backend or "")}
+    path = getattr(inp, "device_info_path", "") if inp is not None else ""
+    device = {}
+    if path:
+        try:
+            device = json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            pass
+    # DeviceGpuInfo and DeviceCudaInfo are nested in the canonical artifact.
+    for section, keys in {"gpu": ("gpu_name", "gpu_count", "vram_mb"),
+                          "cuda": ("cuda_version", "driver_version")}.items():
+        values = device.get(section) if isinstance(device, dict) else None
+        if isinstance(values, dict):
+            for key in keys:
+                if values.get(key) is not None:
+                    facts[key] = str(values[key])
+    # A hardware probe alone cannot establish that package versions still match.
+    facts["snapshot"] = _fingerprint({"ticket": ticket.id, "device": device})
+    return facts
+
+
 def _applicable(stored: dict[str, Any], current: dict[str, str]) -> bool:
     """An empty stored dimension is general; every concrete one must match."""
     return all(not str(value or "") or current.get(key) == value
@@ -115,6 +145,7 @@ def _view(row: AgentMemoryEntry) -> MemoryEntryView:
 async def load_memory_context(
     session: AsyncSession, *, run: Run, ticket: Ticket,
     current_applicability: dict[str, str] | None = None,
+    current_environment: dict[str, str] | None = None,
 ) -> AgentMemoryContext:
     """Load bounded, relevant memory for one activation.
 
@@ -141,9 +172,13 @@ async def load_memory_context(
         query.order_by(desc(AgentMemoryEntry.created_at)).limit(100)
     )).scalars().all()
 
-    current = current_applicability or applicability_for(run, ticket)
+    current = {**(current_applicability or applicability_for(run, ticket)),
+               **{"environment." + k: v for k, v in (current_environment or memory_environment(run, ticket)).items()}}
     if ticket.agent_id != "orchestrator":
         rows = [row for row in rows if _applicable(row.applies_to or {}, current)]
+    else:
+        rows = [row for row in rows if _applicable(
+            {k: v for k, v in (row.applies_to or {}).items() if k.startswith("environment.")}, current)]
     rows.sort(key=lambda row: (
         _PRIORITY.get(row.kind, 99),
         -(row.created_at.timestamp() if row.created_at else 0),
@@ -212,8 +247,13 @@ async def persist_memory_updates(
     ticket: Ticket,
     updates: Iterable[MemoryUpdate],
     current_applicability: dict[str, str] | None = None,
+    current_environment: dict[str, str] | None = None,
+    source_status: str | None = None,
 ) -> tuple[int, list[str]]:
     """Validate and append worker lessons, superseding matching active keys."""
+    outcome = source_status or ticket.status
+    if outcome in {"cancelled", "deferred", "skipped"}:
+        return 0, []
     if (
         ticket.agent_id == "orchestrator"
         or ticket.lane != "optimization"
@@ -221,7 +261,8 @@ async def persist_memory_updates(
     ):
         return 0, []
 
-    applicable = current_applicability or applicability_for(run, ticket)
+    semantic = current_applicability or applicability_for(run, ticket)
+    environment = current_environment or memory_environment(run, ticket)
     existing = (await session.execute(select(AgentMemoryEntry).where(
         AgentMemoryEntry.run_id == run.id,
         AgentMemoryEntry.agent_id == ticket.agent_id,
@@ -234,6 +275,21 @@ async def persist_memory_updates(
     seen_updates: set[tuple[str, str]] = set()
     for raw in updates:
         update = raw if isinstance(raw, MemoryUpdate) else MemoryUpdate.model_validate(raw)
+        if outcome in {"failed", "repairing"} and (
+            update.verification != "verified" or not update.evidence.strip()
+            or not update.environment.strip()
+            or update.kind not in {"verified_fact", "pitfall", "runtime_finding"}
+            or update.visibility != "agent_local"
+        ):
+            rejected.append(f"{update.kind}/{update.key}: failed work requires verified, scoped agent-local evidence")
+            continue
+        constraints = {item.key: item.value for item in update.environment_constraints}
+        if len(constraints) != len(update.environment_constraints) or any(environment.get(k) != v for k, v in constraints.items()):
+            rejected.append(f"{update.kind}/{update.key}: environment conditions must match observed memory_environment")
+            continue
+        if update.environment and not constraints:
+            constraints = environment
+        applicable = {**semantic, **{"environment." + k: v for k, v in constraints.items()}}
         identity = (update.kind, update.key)
         if identity in seen_updates:
             rejected.append(
@@ -264,7 +320,9 @@ async def persist_memory_updates(
             # Agent results use a strict list of key/value pairs so every LLM
             # provider can enforce the same output schema.  Keep the durable
             # DB/API audit shape unchanged: existing readers consume a mapping.
-            details={item.key: item.value for item in update.details},
+            details={**{item.key: item.value for item in update.details},
+                     "source_status": outcome, "verification": update.verification,
+                     "verification_evidence": update.evidence, "verified_environment": update.environment},
             visibility=update.visibility,
             applies_to=applicable,
             status="active",

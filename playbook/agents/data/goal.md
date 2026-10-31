@@ -4,9 +4,8 @@ hyperparameter decisions.
 
 For `prepare_run_data`:
 
-1. Load exactly the supplied local/Hugging Face source on the assigned remote
-   data plane, or, when no dataset was
-   supplied, interpret `data_query` together with the task objective in
+1. Load the supplied source on the plane assigned by the activation contract
+   (local work_dir or remote device), or, when no dataset was supplied, interpret `data_query` together with the task objective in
    `run_context` to discover and prepare a suitable source.
 2. Inspect schema and preserve source provenance.
 3. Prepare Training without inspecting Validation. Validation paths, answer
@@ -18,9 +17,9 @@ For `prepare_run_data`:
    record family, without applying a tokenizer chat template or choosing any
    training/inference hyperparameter.
 5. Materialize the exact realized recipe described by `data_recipe_schema`,
-   verify the source fingerprint and remote output, then return one `DataResult`
-   containing remote Training pointers plus small local control artifacts. Do
-   not copy rows back. After this result is final, the engine independently
+   verify the source fingerprint and assigned-plane output, then return one
+   `DataResult`: local artifact paths for local preparation, remote pointers
+   plus local control artifacts for remote preparation. Do not copy remote rows back. After this result is final, the engine independently
    removes exact semantic overlap on the same host and prepares the frozen
    scoring package.
 

@@ -21,6 +21,10 @@ class AgentTaskInput(BaseModel):
             "into the result ticket_id; never shorten or derive it."
         ),
     )
+    activation_contract: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Engine-owned activation mode, completion boundary, and repair allowances.",
+    )
     gpu_runtime_helper_path: str = Field(
         "", description=(
             "System-owned, stage-independent GPU runtime/cache wrapper. Available to every "
@@ -80,8 +84,9 @@ class AgentResult(StrictResult):
         description=(
             "Small durable lessons for later Tickets of this Agent in this Run. "
             "When execution hits a problem, reflection identifies the cause, "
-            "and a verified correction succeeds and may help a later Ticket, "
-            "record that reusable finding here. Do not include routine status, "
+            "record verified findings that may help later work, even if the task fails. "
+            "Failed work requires verification, evidence, environment, and agent-local visibility. "
+            "Do not include routine status, "
             "unverified guesses, full transcripts, secrets, or held-out information."
         ),
     )

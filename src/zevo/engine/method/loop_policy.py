@@ -34,7 +34,8 @@ orchestrator, which is told `validation_rows` and asked to judge — see
 is the USER overriding that judgement with their own threshold, not the system
 supplying one.
 
-If none fire → keep iterating. Returns the trigger code + a
+If none fire, another experiment is permitted; the Orchestrator may still stop
+based on expected benefit and cost. Returns the trigger code + a
 human-readable reason the orchestrator includes in its mark_done/
 mark_failed summary.
 """
@@ -43,7 +44,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from zevo.contracts.training_methods import REINFORCEMENT_PROGRESSION, SFT_METHODS
 from zevo.engine.method.score_direction import MetricDirection, best_score, improvement
 
 
@@ -160,120 +160,6 @@ def decide(
 
     return StopDecision(
         should_stop=False, trigger="none",
-        reason="loop should continue: no stop trigger fired",
+        reason="no configured stop trigger fired; the Orchestrator may continue or stop on expected value",
         recommended_action="continue",
-    )
-
-
-# ───────────────────────── method-progression policy ─────────────────────────
-#
-# **Advisory, not the decision** — the same doctrine as `decide` above. The
-# orchestrator (playbook/agents/orchestrator/{goal,platform}.md) owns the actual
-# Method-transition choice and must still record the `branch_transition` audit.
-# This pure function exists so that "should the search progress from SFT to a
-# verifiable-reward method now?" has one place agreed with the prose, rather
-# than being re-derived in an LLM heartbeat.
-#
-# The problem it removes: GRPO/RFT are installed but never reached because the
-# search treats the SFT branch as "not yet exhausted" and reinforcement as a
-# last resort. When a verifiable correctness reward exists, the SOTA move is
-# SFT(+distilled) -> RFT -> GRPO, promoted deliberately *after a reasonable SFT
-# baseline* — not gated behind full SFT-branch exhaustion.
-
-
-@dataclass
-class ProgressionDecision:
-    promote: bool
-    # The single next method to promote ("rft" then "grpo"), or "" when nothing
-    # is promoted. Never a set: the progression is ordered.
-    next_method: str
-    reason: str
-
-
-def reinforcement_progression(
-    *,
-    verifiable_reward_available: bool,
-    method_pinned: bool,
-    active_method: str,
-    sft_iterations_completed: int,
-    min_sft_iterations: int = 1,
-) -> ProgressionDecision:
-    """Whether to promote a verifiable-reward method as the next Method lever.
-
-    Pure function — no DB, no IO. Inputs the orchestrator already holds:
-
-      - `verifiable_reward_available`: the scoring-contract signal surfaced on
-        the supervisor context (a built-in correctness metric implies a +1/0
-        reward). See `zevo.contracts.orchestrator.verifiable_reward_available`.
-      - `method_pinned`: the user hard-pinned `training_method` via
-        `decision_pins`. A pin removes the Method-transition level entirely, so
-        this policy NEVER overrides it (requirement 3).
-      - `active_method`: the current training-method family.
-      - `sft_iterations_completed`: how many SFT-family candidates this Run has
-        already measured on Validation — the evidence of a "reasonable baseline".
-      - `min_sft_iterations`: how many SFT candidates make a baseline reasonable
-        (default 1: at least one measured SFT model).
-
-    Promotion is principled, not forced (requirement 4): it fires only when a
-    verifiable reward exists AND an SFT baseline is established, and when absent
-    the function preserves the existing SFT-branch-exhaustion behavior by
-    declining to promote.
-    """
-    active = (active_method or "").strip().lower()
-
-    # (3) A user method pin freezes the method family: the transition level is
-    # removed and this policy must not override it.
-    if method_pinned:
-        return ProgressionDecision(
-            False, "",
-            "training_method is user-pinned; the Method-transition level is "
-            "removed and reinforcement progression must not override it",
-        )
-
-    # (4) No verifiable reward -> preserve existing behavior: reinforcement stays
-    # gated behind ordinary SFT-branch exhaustion, not promoted here.
-    if not verifiable_reward_available:
-        return ProgressionDecision(
-            False, "",
-            "no verifiable correctness reward for this task; reinforcement "
-            "methods are not promoted (ordinary branch-exhaustion order applies)",
-        )
-
-    # Already on the reinforcement ladder: advance RFT -> GRPO, stop at GRPO.
-    if active == "grpo":
-        return ProgressionDecision(
-            False, "",
-            "already on GRPO, the terminal verifiable-reward lever",
-        )
-    if active == "rft":
-        return ProgressionDecision(
-            True, "grpo",
-            "verifiable reward available and the RFT bridge is established; "
-            "promote GRPO as the next lever (SFT -> RFT -> GRPO)",
-        )
-
-    # On an SFT baseline: promote RFT once the baseline is reasonable, without
-    # waiting for the SFT branch to be fully exhausted.
-    if active in SFT_METHODS:
-        if sft_iterations_completed >= max(1, min_sft_iterations):
-            return ProgressionDecision(
-                True, REINFORCEMENT_PROGRESSION[0],
-                "verifiable reward available and a reasonable SFT baseline is "
-                f"established ({sft_iterations_completed} SFT iteration(s)); "
-                "promote RFT as the next Method lever on the SFT -> RFT -> GRPO "
-                "progression, rather than waiting for full SFT-branch exhaustion",
-            )
-        return ProgressionDecision(
-            False, "",
-            "verifiable reward available but no reasonable SFT baseline yet "
-            f"({sft_iterations_completed}/{max(1, min_sft_iterations)} SFT "
-            "iterations); establish an SFT baseline before promoting RFT/GRPO",
-        )
-
-    # Some other active method (e.g. a preference method): not on the
-    # SFT -> RFT -> GRPO ladder, so this policy does not promote from it.
-    return ProgressionDecision(
-        False, "",
-        f"active method {active!r} is not an SFT baseline; the verifiable-reward "
-        "progression is not applicable from here",
     )

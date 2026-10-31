@@ -30,10 +30,11 @@ def method_branch_problem(
     """The same work-order check at creation, activation and result validation."""
     if pin or not active or not selected or active == selected:
         return ""
-    transition = transition or {}
+    transition = dict(transition or {})
+    transition.setdefault("previous_branch", transition.get("exhausted_branch", ""))
     if transition.get("level") not in {"method", "base_model"} or not all(
         str(transition.get(key) or "").strip()
-        for key in ("next_branch", "exhausted_branch", "validation_evidence")
+        for key in ("next_branch", "previous_branch", "validation_evidence")
     ):
         return (
             f"upstream method branch conflict: {active} -> {selected} requires "

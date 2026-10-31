@@ -205,7 +205,7 @@ def test_claude_cli_uses_shared_render_agent_prompt(blueprint, payload) -> None:
     assert claude_out.startswith("# Test Agent"), "claude prompt missing AGENTS body"
     assert "Ticket payload (DataTaskInput)" in claude_out
     assert '"dataset": "/tmp/x.jsonl"' in claude_out
-    assert "DO THE WHOLE TASK" in claude_out
+    assert "COMPLETE THIS ACTIVATION" in claude_out
     assert "DataResult" in claude_out
     assert "HARD RULES:" in claude_out          # strict_json=True
     assert '"properties"' in claude_out         # claude inlines the schema body

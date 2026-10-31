@@ -68,4 +68,5 @@ async def repeated_without_progress(session, ticket, error):
     count = old.get('count', 0) + 1 if old.get('fingerprint') == fingerprint else 1
     session.add(TicketNotice(ticket_id=ticket.id, code='repair.progress', severity='info',
                             body=json.dumps({'fingerprint': fingerprint, 'count': count})))
-    return count >= 3
+    from zevo.engine.run.failure_policy import MAX_UNCHANGED_FAILURES
+    return count >= MAX_UNCHANGED_FAILURES

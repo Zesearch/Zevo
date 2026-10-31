@@ -141,7 +141,7 @@ def user_request_from_scoping(
 
     Scoring comes only from the ScopingResult. Training-side values come only
     from the immutable Auto request snapshot on the Run, so Auto uses the same
-    L1–L4 ownership ladder as Standard without exposing those choices to the
+    user-pin ownership rules as Standard without exposing those choices to the
     scoping work order.
     """
     pins = dict(run.decision_pins or {})

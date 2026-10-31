@@ -65,6 +65,7 @@ from zevo.providers.aws_ec2 import aws_credentials_present
 from zevo.engine.agent.loader import AgentBlueprint, REPO_ROOT, load_agent
 from zevo.engine.agent.memory import (
     applicability_for,
+    memory_environment,
     load_memory_context,
     persist_memory_updates,
 )
@@ -107,6 +108,7 @@ from zevo.engine.method.score_direction import is_better
 from zevo.engine.run.failure_policy import (
     MAX_PAYLOAD_VALIDATION_ATTEMPTS,
     MAX_REPAIR_ATTEMPTS,
+    MAX_UNCHANGED_FAILURES,
     PAYLOAD_VALIDATION_FAILURE_SIGNATURE,
     classify_failure,
     repair_instruction,
@@ -2491,6 +2493,11 @@ def _validate_specialist_yaml(
                 "train_config.yaml rephrased the Orchestrator's parent selection "
                 "rationale; parent_model and parent_kind still match"
             )
+        selected_method = str(inp.configuration_suggestions.get("training_method") or "").strip().lower()
+        if (not inp.training_method_pin
+                and inp.activation_contract.get("method_selection_owner", "orchestrator") == "orchestrator"
+                and selected_method and config.training_method != selected_method):
+            raise ValueError("train_config.yaml differs from the Orchestrator-selected method")
         if inp.training_method_pin:
             if config.training_method != inp.training_method_pin:
                 raise ValueError("train_config.yaml violates the pinned training method")
@@ -2510,27 +2517,23 @@ def _validate_specialist_yaml(
                 suggested_method = str(
                     inp.configuration_suggestions.get("training_method") or ""
                 ).strip().lower()
-                if suggested_method != config.training_method:
+                if (inp.activation_contract.get("method_selection_owner", "orchestrator") == "orchestrator"
+                        and suggested_method != config.training_method):
                     raise ValueError(
                         "an unpinned method may change only when the Orchestrator "
-                        "explicitly selects the next exhausted-search branch"
+                        "explicitly selects the next experiment method"
                     )
                 from zevo.engine.method.branch import method_branch_problem
                 problem = method_branch_problem(
                     inp.active_training_method, config.training_method,
                     transition=inp.branch_transition,
                 )
-                if problem:
+                if inp.activation_contract.get("method_selection_owner", "orchestrator") == "orchestrator" and problem:
                     raise ValueError(problem)
                 if config.method_diversity_status != "varied":
                     warnings.append(
-                        "an exhausted-branch method change requires "
+                        "a method change records "
                         "method_diversity_status=varied"
-                    )
-                if "exhaust" not in config.method_selection_rationale.lower():
-                    raise ValueError(
-                        "a method-branch transition must record the exhaustion "
-                        "evidence in method_selection_rationale"
                     )
             elif config.method_diversity_status not in {
                 "retained_in_branch", "retained_for_constraints",
@@ -4593,8 +4596,8 @@ async def _apply_ticket_failure_policy(
         if await repeated_without_progress(session, ticket, error_message):
             ticket.status = "failed"
             ticket.repair_route = "terminal" if ticket.lane == "held_out_test" else "orchestrator"
-            ticket.error_message = "Repair stopped after 3 unchanged failures: " + error_message[:1800]
-            ticket.summary = "Repair stopped: no new execution or changed artifacts across 3 failures"
+            ticket.error_message = f"Repair stopped after {MAX_UNCHANGED_FAILURES} unchanged failures: " + error_message[:1800]
+            ticket.summary = f"Repair stopped: no new execution or changed artifacts across {MAX_UNCHANGED_FAILURES} failures"
             return False
     if (
         disposition.route == "self"
@@ -5004,6 +5007,44 @@ async def run_ticket(
             session=session,
             specialist_context=specialist_context,
         )
+        progress_notice = (await session.execute(select(TicketNotice).where(
+            TicketNotice.ticket_id == tk.id, TicketNotice.code == "repair.progress",
+        ).order_by(TicketNotice.created_at.desc()).limit(1))).scalar_one_or_none()
+        try:
+            unchanged_count = int(json.loads(progress_notice.body).get("count", 0)) if progress_notice else 0
+        except (ValueError, TypeError):
+            unchanged_count = 0
+        phase = getattr(getattr(inp, "slurm_job", None), "phase", "")
+        boundary = (
+            "one_decision" if tk.agent_id == "orchestrator" else
+            "submission" if getattr(getattr(inp, "slurm_job", None), "enabled", False) and phase == "submit" else
+            "collection" if getattr(getattr(inp, "slurm_job", None), "enabled", False) and phase == "collect" else
+            "execution"
+        )
+        contract = {
+            "completion_boundary": boundary,
+            "agent": tk.agent_id,
+            "method_selection_owner": (
+                "orchestrator" if tk.agent_id == "train" and tk.input_format == "typed"
+                and run.mode in {"full_pipeline", "customized_pipeline", "auto"}
+                and bool(inp.configuration_suggestions.get("training_method")) else "worker"
+            ),
+            "operation": getattr(inp, "operation", ""),
+            "phase": phase,
+            "gpu_allocation_mode": run.gpu_allocation_mode or "per_stage",
+            "gpu_provider": run.gpu_provider,
+            "repair_route": tk.repair_route or "",
+            "repair_attempts_used": int(tk.repair_attempts or 0),
+            "repair_attempts_remaining": max(0, MAX_REPAIR_ATTEMPTS - int(tk.repair_attempts or 0)),
+            "unchanged_failure_count": unchanged_count,
+            "unchanged_failure_limit": MAX_UNCHANGED_FAILURES,
+            "payload_validation_failure_limit": MAX_PAYLOAD_VALIDATION_ATTEMPTS,
+        }
+        if tk.agent_id == "data" and getattr(inp, "operation", "") == "prepare_run_data":
+            contract["data_plane"] = "remote" if getattr(inp, "device_info_path", "") else "local"
+        contract["memory_environment"] = memory_environment(run, tk, inp)
+        if "activation_contract" in type(inp).model_fields:
+            inp = inp.model_copy(update={"activation_contract": contract})
         inp = _stage_gpu_runtime_helper(inp, work_dir)
         if isinstance(inp, InferenceTaskInput):
             from zevo.engine.run.inference_launch import prepare_launch
@@ -5020,8 +5061,8 @@ async def run_ticket(
 
     # Provider sessions are not durable state.  Inject only the bounded lessons
     # that belong to this Run, Agent, lane, and current semantic identity.
-    # Transient runtime state is deliberately excluded; a new Run always
-    # begins with an empty context.
+    # Environment-dependent lessons additionally match observed runtime conditions;
+    # a new Run always begins with an empty context.
     if hasattr(inp, "memory") and not is_system_runner:
         inp = inp.model_copy(update={
             "memory": await load_memory_context(
@@ -5029,6 +5070,7 @@ async def run_ticket(
                 run=run,
                 ticket=tk,
                 current_applicability=applicability_for(run, tk),
+                current_environment=memory_environment(run, tk, inp),
             ),
         })
 
@@ -7000,7 +7042,7 @@ async def run_ticket(
                     else "skipped"
                 )
                 tk.repair_route = ""
-        if status == "failed" and (tk.error_message or "").startswith("Repair stopped after 3 unchanged failures:"):
+        if status == "failed" and (tk.error_message or "").startswith(f"Repair stopped after {MAX_UNCHANGED_FAILURES} unchanged failures:"):
             summary = tk.error_message
         _set_current_ticket_outcome_text(tk, status=status, summary=summary)
         if status in ("succeeded", "degraded"):
@@ -7240,11 +7282,11 @@ async def run_ticket(
                     ticket_id=tk.id, role=role, path=path, meta=wp_meta,
                 ))
 
-        # Successful workers may report small durable lessons for their own
+        # Workers may report small durable lessons for their own
         # later Tickets in this Run.  The savepoint keeps a memory persistence
         # bug from rolling back an otherwise valid Ticket and its artifacts.
-        # Failed/cancelled outputs never teach the next iteration.
-        if status in ("succeeded", "degraded") and not cancelled_by_user:
+        # Failed work may contribute verified, scoped facts; cancelled work cannot.
+        if status in ("succeeded", "degraded", "failed") and not cancelled_by_user:
             memory_updates = list(getattr(output, "memory_updates", []) or [])
             if memory_updates:
                 try:
@@ -7254,7 +7296,9 @@ async def run_ticket(
                             run=run,
                             ticket=tk,
                             updates=memory_updates,
+                            source_status=status,
                             current_applicability=applicability_for(run, tk),
+                            current_environment=memory_environment(run, tk, inp),
                         )
                 except Exception as exc:  # noqa: BLE001
                     _warn("memory_persist", exc)

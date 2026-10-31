@@ -153,14 +153,12 @@ def test_documented_output_behavior_can_pass_above_target(tmp_path):
     assert result['sample_size'] == 64
 
 
-@pytest.mark.parametrize('invalid', ['one_attempt', 'same_config', 'different_sample',
+@pytest.mark.parametrize('invalid', ['same_config', 'different_sample',
                                     'no_examples', 'not_truncated', 'no_reason'])
 def test_retry_count_alone_cannot_waive_truncation(tmp_path, invalid):
     c, q, d, data = waiver_inputs(tmp_path)
     waiver = data['output_behavior_waiver']
-    if invalid == 'one_attempt':
-        waiver['previous_attempts'].pop()
-    elif invalid == 'same_config':
+    if invalid == 'same_config':
         waiver['previous_attempts'][1]['config_sha256'] = waiver['previous_attempts'][0]['config_sha256']
     elif invalid == 'different_sample':
         waiver['previous_attempts'][0]['sample_row_indices'] = [0]
@@ -248,3 +246,93 @@ def test_malformed_json_questions_rejected(tmp_path, content):
     path.write_text(content)
     with pytest.raises(ValueError):
         sample_rows(path)
+
+
+def test_explicit_policy_is_used_by_prepare_check_and_validate(tmp_path):
+    import yaml
+    c, q, d = inputs(tmp_path, n=100, truncated=0)
+    policy = {"sample_size": 10, "max_truncation_percent": 20, "max_configurations": 2}
+    cfg = yaml.safe_load(c.read_text())
+    cfg["implementation_config"] = {"length_calibration_policy": policy}
+    c.write_text(yaml.safe_dump(cfg))
+    data = json.loads(d.read_text())
+    data['records'] = data['records'][:10]
+    for r in data['records'][:2]:
+        r['finish_reason'] = 'length'
+    d.write_text(json.dumps(data))
+    out = tmp_path / 'sample.csv'
+    main(['prepare', '--config', str(c), '--questions', str(q), '--output', str(out)])
+    assert len(list(csv.DictReader(out.open()))) == 10
+    report = check(c, q, d)
+    validate(c, q)
+    body = json.loads(report.read_text())
+    assert body['policy'] == policy
+    body['policy']['max_truncation_percent'] = 90
+    report.write_text(json.dumps(body))
+    with pytest.raises(ValueError, match='policy'):
+        validate(c, q)
+
+
+@pytest.mark.parametrize('count', [0, 1, 4])
+def test_residual_acceptance_depends_on_evidence_not_retry_count(tmp_path, count):
+    import hashlib
+    c, q, d, data = waiver_inputs(tmp_path)
+    waiver = data['output_behavior_waiver']
+    template = waiver['previous_attempts'][0]
+    waiver['previous_attempts'] = [
+        {**template, 'config_sha256': hashlib.sha256(str(i).encode()).hexdigest()}
+        for i in range(count)
+    ]
+    waiver['resource_constraints'] = 'The declared context limit is reached.'
+    waiver['acceptance_rationale'] = 'Retain visible residual truncation for a like-for-like comparison.'
+    d.write_text(json.dumps(data))
+    check(c, q, d)
+    validate(c, q)
+    waiver['examples'] = []
+    d.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match='examples'):
+        check(c, q, d)
+
+
+@pytest.mark.parametrize('values', [{'sample_size': 0}, {'max_configurations': True},
+                                    {'max_truncation_percent': float('nan')},
+                                    {'max_truncation_percent': 100}, {'unknown': 1}])
+def test_invalid_calibration_policy_is_rejected(tmp_path, values):
+    import yaml
+    from zevo.contracts.length_calibration import calibration_policy
+    p = tmp_path / 'config.yaml'
+    p.write_text(yaml.safe_dump({'implementation_config': {'length_calibration_policy': values}}))
+    with pytest.raises(ValueError):
+        calibration_policy(p)
+
+
+def test_budget_counts_distinct_failed_configs_across_helper_calls(tmp_path):
+    import yaml
+    c, q, d = inputs(tmp_path, truncated=4)
+    cfg = yaml.safe_load(c.read_text())
+    cfg['implementation_config'] = {'length_calibration_policy': {'max_configurations': 2}}
+    c.write_text(yaml.safe_dump(cfg))
+    for _ in range(2):
+        with pytest.raises(ValueError, match='maximum is'):
+            check(c, q, d)
+    cfg['measurement']['max_new_tokens'] = 1024
+    c.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match='maximum is'):
+        check(c, q, d)
+    cfg['measurement']['max_new_tokens'] = 2048
+    c.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match='declared resource budget'):
+        check(c, q, d)
+    assert not c.with_name(REPORT_NAME).exists()
+
+
+def test_policy_cannot_change_after_failed_trial(tmp_path):
+    import yaml
+    c, q, d = inputs(tmp_path, truncated=4)
+    with pytest.raises(ValueError, match='maximum is'):
+        check(c, q, d)
+    cfg = yaml.safe_load(c.read_text())
+    cfg['implementation_config'] = {'length_calibration_policy': {'max_truncation_percent': 20}}
+    c.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match='policy must remain fixed'):
+        check(c, q, d)

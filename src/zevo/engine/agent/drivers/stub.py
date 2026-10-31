@@ -309,11 +309,11 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
         if method != active_method:
             diversity_status = "varied"
             transition = dict(payload.get("branch_transition") or {})
-            exhaustion = str(transition.get("validation_evidence") or "").strip()
+            evidence = str(transition.get("validation_evidence") or "").strip()
             method_rationale = (
-                "The Orchestrator marked the previous method branch exhausted "
-                "and explicitly selected the next compatible method branch."
-                + (f" Validation evidence: {exhaustion}" if exhaustion else "")
+                "The Orchestrator selected a compatible method to test the next hypothesis."
+                + (f" Validation evidence: {evidence}" if evidence else "")
+                + (f" Rationale: {transition['rationale']}" if transition.get("rationale") else "")
             )
         else:
             diversity_status = "retained_in_branch"

@@ -90,7 +90,7 @@ class InferenceTaskInput(AgentTaskInput):
     branch_transition: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Engine-validated exhausted-branch audit record. A later Base-model "
+            "Engine-validated experiment-transition audit record. A later Base-model "
             "baseline carries level=base_model; ordinary executions use none."
         ),
     )
@@ -125,8 +125,10 @@ class InferenceTaskInput(AgentTaskInput):
     length_calibration_helper_path: str = Field(
         "",
         description=(
-            "System helper for new baseline calibration: 64 questions per member "
-            "(all if smaller), target at most 5% length-limited questions. Documented model output behavior may justify a waiver after 2–3 adjustments (see platform.md). Run prepare, "
+            "System helper for baseline calibration. The final YAML may specify "
+            "implementation_config.length_calibration_policy (sample_size, "
+            "max_truncation_percent, max_configurations); historical configs use helper defaults. "
+            "Accept residual truncation only with observed evidence and a rationale. Run prepare, "
             "generate the sample, then check before measured generation; copy "
             "length_calibration.json beside each final config for engine acceptance. "
             "Provisional configuration validation is not freezing."

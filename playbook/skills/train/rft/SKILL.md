@@ -52,12 +52,12 @@ text.
 Follow the Train Agent's shared platform contract. Train the derived set with
 `SFTTrainer`, `SFTConfig`, the system-provided
 `ZevoTrainerTelemetryCallback(ticket_id)`, assistant-only loss, and the actual
-chat template. Default to full-parameter training with
-`method_config.use_peft=false`. Enable PEFT only when the Ticket or an explicit
-user instruction requires LoRA and the realized config records
-`method_config.use_peft=true`. Resolve the SFT phase with the same mode-specific
-rules as the `sft` Skill and the shared PEFT execution contract; do not invoke
-it as an additional method.
+chat template. Choose full-parameter or PEFT execution using the shared
+evidence-based policy. Honor user pins and explicitly record
+`method_config.use_peft`. When PEFT is selected, follow the adapter instructions
+below. Resolve the SFT phase with the same mode-specific rules as the `sft`
+Skill and the shared PEFT execution contract; do not invoke it as an additional
+method.
 
 The original validation set is not an SFT loss dataset because it has no target
 completion. Do not pass `{prompt, reference}` rows to `SFTTrainer` and do not

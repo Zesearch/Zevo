@@ -21,13 +21,15 @@ comparable Inference configuration.
 4. Verify the tokenizer ids for EOS and every single-token response/turn
    terminator used by the selected template. Record them in `stop_token_ids`;
    never rely on a special-token string surviving detokenization.
-5. Before measured Baseline generation, calibrate unpinned generation-length
-   budgets on 64 questions per benchmark (all if fewer), using the real
-   model and serving path. Target at most 5% truncated questions per benchmark; after 2–3 adjustments,
-   documented persistent model output behavior may justify accepting residual truncation;
-   use the supplied length-calibration helper to gate measured generation. Follow platform.md: assess truncation and resource
-   use without labels or scoring, then freeze the selected budget. Keep
-   calibration separate from benchmark predictions and progress.
+5. Before measured Baseline generation, calibrate generation length on a
+   representative questions-only sample using the real model and serving path.
+   Use the helper's calibration policy, optionally configured in
+   `implementation_config.length_calibration_policy`. Choose sample size, target
+   and a bounded configuration budget before calibration; explain changes to
+   defaults and keep the policy fixed across candidates. Accept residual
+   truncation only with observed output evidence, resource constraints, and a
+   reasoned tradeoff. No fixed number of failed attempts is required. Keep
+   calibration separate from scored predictions, then freeze the configuration.
 6. Record every realized field, the exact supported `template_kwargs`, each
    suggestion decision, and a synthetic
    `prompt_example` in `inference_config.yaml` before generation. The example

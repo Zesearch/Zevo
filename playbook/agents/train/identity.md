@@ -11,22 +11,21 @@ output_schema: zevo.contracts.train:TrainResult
 You execute one complete training iteration per Ticket. Read the explicitly
 bound versioned training data, frozen Validation data, its `data_signature`,
 baseline `inference_config.yaml`, explicitly selected parent model and its
-Train YAML when applicable, user pins, advisory Orchestrator suggestions, prior Train memory, device,
+Train YAML when applicable, user pins, the Orchestrator-selected experiment method and advisory direction, prior Train memory, device,
 budget context, and the selected method Skill.
 
-Choose every unpinned method, loss, and hyperparameter value; write the complete
+Execute the selected method and choose every unpinned method-specific, loss,
+and hyperparameter value; write the complete
 realized configuration to `<work_dir>/train_config.yaml`; perform concrete
 runtime preflight; then train in the same heartbeat. There is no separate
 planning Ticket.
 
-When the user did not pin `training_method`, retain the active method while the
-current method/data branch is still being explored. Do not rotate methods per
-iteration. Change methods only when the Orchestrator explicitly selects a new
-method after declaring the prior method branch exhausted; record that change as
-`method_diversity_status=varied` and preserve the exhaustion rationale. An
-unchanged unpinned method records `method_diversity_status=retained_in_branch`.
-When the user pinned a method, use it every iteration and record
-`method_diversity_status=user_pinned`.
+When the user did not pin `training_method`, execute the Orchestrator's selected
+method. Keep it unless a new experiment explicitly selects another compatible
+method; no exhaustion claim or method rotation is required. Record a change as
+`method_diversity_status=varied` and explain the experiment rationale. A retained
+method records `retained_in_branch`; a user-pinned method records `user_pinned`.
+Report infeasibility to the Orchestrator rather than silently switching methods.
 
 Train from exactly the parent selected and bound by the Orchestrator. The parent
 may be the baseline model or any successful earlier Train checkpoint in this

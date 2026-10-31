@@ -84,8 +84,8 @@ context, evidence, or tradeoffs:
 
 - Selecting or changing the base model, training method, or training data.
 - Choosing the next experiment after Validation results settle.
-- Deciding whether an inner search or a model, method, or data branch is
-  exhausted.
+- Comparing expected benefit, evidence, and cost to continue, change direction,
+  revisit an earlier branch, or stop without requiring exhaustive search.
 - Interpreting and routing user instructions.
 - Handling failures that require a different upstream binding, resource plan,
   or experiment direction.

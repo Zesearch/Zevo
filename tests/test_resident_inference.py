@@ -41,7 +41,7 @@ def close_engine(engine):
 '''
 
 
-def run_resident(tmp_path, counts, *, fail_member='', incompatible=False, calibrate=True):
+def run_resident(tmp_path, counts, *, fail_member='', incompatible=False, calibrate=True, candidates=(16, 32), budget=4):
     runtime = tmp_path / 'runtime'
     runtime.mkdir()
     runner = runtime / 'zevo_parallel_inference.py'
@@ -56,10 +56,11 @@ def run_resident(tmp_path, counts, *, fail_member='', incompatible=False, calibr
     members = json.loads(suite.read_text())['members']
     for member in members:
         cfg = {'base_model': 'test', 'measurement': {'max_new_tokens': 16},
-               'implementation_config': {'llm_kwargs': {'tensor_parallel_size': 1}}}
+               'implementation_config': {'llm_kwargs': {'tensor_parallel_size': 1},
+                                         'length_calibration_policy': {'max_configurations': budget}}}
         Path(member['config']).write_text(json.dumps(cfg))
         member['calibration_configs'] = []
-        for n in [16, 32]:
+        for n in candidates:
             cfg['measurement']['max_new_tokens'] = n
             if incompatible and n == 32:
                 cfg['implementation_config']['llm_kwargs']['max_model_len'] = 999
@@ -116,3 +117,16 @@ def test_frozen_reuse_does_not_recalibrate(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert any(e['kind']=='generate' for e in events)
     assert not any(e['kind']=='calibrate' for e in events)
+
+
+def test_declared_budget_allows_more_than_four_candidates(tmp_path):
+    result, events, _ = run_resident(tmp_path, [20], candidates=(8, 12, 16, 24, 32), budget=6)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len([e for e in events if e['kind'] == 'calibrate']) == 5
+
+
+def test_declared_budget_rejects_before_loading(tmp_path):
+    result, events, _ = run_resident(tmp_path, [20], budget=1)
+    assert result.returncode != 0
+    assert 'declared resource budget' in result.stderr
+    assert not events

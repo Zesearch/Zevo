@@ -37,13 +37,13 @@ trainer = ORPOTrainer(
 )
 ```
 
-Do not load a reference model. Default to full-parameter training with
-`method_config.use_peft=false`. Enable PEFT only when the Ticket or an explicit
-user instruction requires LoRA and the realized config records
-`method_config.use_peft=true`. Construct, validate, save, and reload that adapter
-exactly as required by the shared PEFT execution contract. Full-parameter
-training must satisfy the full-SFT memory guard. If the experimental symbols are
-unavailable, fail with the installed version rather than switching objectives.
+Do not load a reference model. Choose full-parameter or PEFT execution using the
+shared evidence-based policy. Honor user pins and explicitly record
+`method_config.use_peft`. When PEFT is selected, follow the adapter instructions
+below. Construct, validate, save, and reload that adapter exactly as required by
+the shared PEFT execution contract. Full-parameter training must satisfy the
+full-SFT memory guard. If the experimental symbols are unavailable, fail with
+the installed version rather than switching objectives.
 
 ## Implement and report the fixed objective
 

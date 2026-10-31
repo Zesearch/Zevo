@@ -1,6 +1,6 @@
 ---
 name: sft
-description: "Supervised fine-tune the selected causal LM on chat, prompt-completion, or plain-text targets. Full-parameter training is the default; enable a LoRA adapter only when the Ticket or an explicit user instruction sets method_config.use_peft=true."
+description: "Supervised fine-tune the selected causal LM on chat, prompt-completion, or plain-text targets. Choose full-parameter or LoRA execution from evidence and resources while honoring user pins."
 ---
 
 # Supervised Fine-Tuning
@@ -8,14 +8,14 @@ description: "Supervised fine-tune the selected causal LM on chat, prompt-comple
 Use `trl.SFTTrainer` for supervised causal-language-model training. The single
 method has two explicit execution modes:
 
-- `method_config.use_peft=false` (default): optimize every model parameter and
+- `method_config.use_peft=false`: optimize every model parameter and
   save a standalone Hugging Face model;
 - `method_config.use_peft=true`: optimize a LoRA adapter and save only the
   adapter plus tokenizer.
 
-Never infer PEFT from model size, GPU count, memory pressure, or a preference
-for a smaller artifact. It requires a Ticket binding or explicit user
-instruction. API reference: https://huggingface.co/docs/trl/sft_trainer
+Choose the mode before launch using model/data evidence, resource fit, and
+expected benefit. Record the tradeoff and honor explicit user pins. Do not
+silently change a running experiment's selected mode. API reference: https://huggingface.co/docs/trl/sft_trainer
 
 For compatibility, a resumed historical `full_sft` Ticket means
 `use_peft=false`, and a historical `lora_sft` Ticket means `use_peft=true`.

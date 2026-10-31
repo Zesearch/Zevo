@@ -20,7 +20,7 @@
 | `training_method` | Required semantic-shape selector for Run data; never a hyperparameter bundle. Empty for private held-out stripping. |
 | `max_training_rows` | Engine-stamped Run cap on prepared Training rows; 0 = no cap. The only authority for a row cap (prose limits are not applied). Selection is allowed at every iteration and must respect this cap. |
 | `recipe_intent` | Exact selection/filter/sampling/weighting/transformation/mapping/seed request for this data version. Empty fields preserve baseline behavior. |
-| `branch_transition` | Engine-validated exhausted-branch record. It may contain scalar score/plateau evidence, never Validation records, examples, fields, or statistics. |
+| `branch_transition` | Engine-validated experiment-transition record. It may contain scalar score/plateau evidence, never Validation records, examples, fields, or statistics. |
 | `data_intent_signature` | Engine-computed identity of source, method, recipe intent, and Data pins/suggestions. Use it to verify the work order; do not echo it in `DataResult`. |
 | `expected_source_fingerprint` | For a local source, the engine-computed bare lowercase 64-character SHA-256. Copy it exactly into `data_recipe.source_fingerprint`; an empty value is permitted only for a remote/acquired source. |
 | `expected_source_identity` | Engine-canonical source lineage. Copy it byte-for-byte into `data_recipe.source_identity`; never convert between container, host, relative, or absolute forms. |

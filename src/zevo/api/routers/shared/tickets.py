@@ -840,8 +840,8 @@ async def create_ticket(
                                 "required_levels": sorted(allowed_levels),
                                 "advice": (
                                     "Keep the active branch, or provide a complete "
-                                    "branch_transition naming the exhausted branch, "
-                                    "its Validation evidence, and the next branch."
+                                    "branch_transition naming the previous branch, "
+                                    "its Validation evidence, the next branch, and the experiment rationale."
                                 ),
                             },
                         )
@@ -882,9 +882,9 @@ async def create_ticket(
                     pin=str(payload.get("training_method_pin") or ""),
                     transition=payload.get("branch_transition"),
                 )
-                if problem:
+                if is_pipeline_request and problem:
                     raise HTTPException(409, {
-                        "error": "training method branch changed before exhaustion",
+                        "error": "training method change requires a decision record",
                         "previous_method": previous_method,
                         "next_method": suggested_method,
                         "advice": problem,
@@ -1127,11 +1127,11 @@ async def create_ticket(
                 ):
                     raise ValueError(
                         "a new Base-model branch requires a complete base_model "
-                        "branch_transition with Validation exhaustion evidence"
+                        "branch_transition with Validation evidence and an experiment rationale"
                     )
                 if not previous_models and transition_level != "none":
                     raise ValueError(
-                        "the initial Base-model selection is not an exhausted-branch transition"
+                        "the initial Base-model selection is not a branch change"
                     )
             elif body.agent_id == "registry":
                 existing_registry = (await db.execute(select(Ticket).where(

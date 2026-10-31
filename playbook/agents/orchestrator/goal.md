@@ -12,7 +12,7 @@ Advance the Run through this strict serial order:
    checkpoint Inference using the exact
    baseline Inference YAML, deterministic Validation Evaluation, private held-out Test,
    then Journal.
-6. Continue with Train N+1, cross an evidenced exhausted-search boundary, or
+6. Continue with Train N+1, select a justified branch change, or
    stop. A Data transition prepares the next Data branch. A Method transition
    selects the next method and then prepares compatible Data when needed. A
    Base-model transition first runs a new Baseline Inference/Evaluation for the
@@ -47,45 +47,23 @@ Rules:
    the realized replacement, not a partial artifact. Do not consume another
    iteration solely for Data recovery; after any Train N exists, preserve its
    bound inputs and put recipe changes in a new iteration.
-6. Search unpinned decisions as a strict nested hierarchy, never as per-iteration
-   randomization: Base model -> Training method -> Training data -> inner
-   training/data-recipe refinements. Keep the current Data source/branch while
-   credible hyperparameter, filtering, subset, weighting, parent-checkpoint, or
-   other inner directions remain. Change Data only after recording evidence that
-   the current Data branch is exhausted. Change an unpinned Method only after
-   the current Method's credible Data branches are exhausted. Change an unpinned
-   Base model only after the current model's credible Method and Data branches
-   are exhausted. A user pin removes that transition level completely. Crossing
-   a boundary must be explicit in the completed Journal `next`, the Orchestrator
-   Ticket completion message, and `SupervisorAction.summary`: name the exhausted
-   branch, cite its Validation evidence, and name the next branch. Do not call a
-   cost/time/iteration cap branch exhaustion; those are Run-level stop guards.
-   Whenever you initially select, switch, or deliberately retain an unpinned
-   method, also state the available or requested supervision signal/record
-   family, why the method fits the task/model/runtime, and why the most relevant
-   alternative family is unsupported or belongs to a later branch. Say that the
-   choice is Zevo-selected rather than user-pinned. Before initial Data, describe
-   requested rather than unobserved source properties.
-   Treat `data_query`, `method_query`, and `model_query` as optional
-   natural-language search guidance, never as exact pins. Use them to choose the
-   initial branch and order later credible branches at the corresponding level.
-   A query does not authorize an incompatible choice or an early hierarchy
-   transition; record why any requested preference cannot be followed.
-   One deliberate exception to "change an unpinned Method only after the current
-   Method's Data branches are exhausted": when the supervisor context reports
-   `verifiable_reward_available: true` (the Validation scoring contract is a
-   built-in correctness check — multiple-choice / exact answer — so a
-   deterministic +1/0 reward is derivable), the verifiable-reward progression
-   SFT(+distilled) -> RFT -> GRPO is a PROMOTED next Method lever once a
-   reasonable SFT baseline exists (at least one SFT candidate measured on
-   Validation), rather than a last resort gated behind full SFT-branch
-   exhaustion. Promote RFT as the bridge, then GRPO with the +1/0 correctness
-   reward. This is a genuine Method transition: still record the
-   `branch_transition` (`level="method"`) with the SFT Validation evidence and
-   the named next method, and still state the supervision-signal rationale. Do
-   not force it — when `verifiable_reward_available` is false, keep the ordinary
-   exhaustion order unchanged; and a user method pin removes this transition
-   level entirely (rule 4), so never promote over a pin.
+6. Choose unpinned experiments from evidence, not a fixed search hierarchy or
+   method sequence. You may refine training, revise Data, change Method or Base
+   model, or revisit an earlier branch whenever that is the best justified next
+   experiment. There is no requirement to exhaust another branch first.
+   For each choice, record the observations, hypothesis, expected benefit,
+   estimated cost/time, and why it is preferable to relevant alternatives in
+   the Journal and completion summary. Record branch changes with
+   `branch_transition`; use its `previous_branch`, `validation_evidence`,
+   `next_branch`, and `rationale` fields. User pins remain binding.
+   Initially select, retain, or change a method based on the available/requested
+   supervision signal and task/model/runtime fit. Do not rotate methods merely
+   for diversity or repeat an identical experiment without a stated purpose.
+   Treat `data_query`, `method_query`, and `model_query` as advisory preferences.
+   `verifiable_reward_available` is evidence about one available reward signal,
+   not a mandate to use reinforcement or to establish SFT first. Other verified
+   training-side reward signals may justify a compatible method; never use
+   held-out Test data or answers for training rewards.
    The initial Data recipe (iteration 0) may select, filter, sample, or weight
    Training rows. Express requested choices in `recipe_intent` and require
    reproducible provenance. Respect the user's typed `max_training_rows` cap
@@ -114,26 +92,20 @@ Rules:
    journal pipeline sequencing, Ticket/Agent activity, contract governance, or
    artifact handling. Apart from the concise planned deltas in `next`, do not
    copy full configuration listings into the Journal.
-9. Normal target attainment, cost/time exhaustion, iteration exhaustion, or an
-   evidenced plateau/repeated regression with no credible materially different
-   next direction ends successfully when a usable model exists. One regression
-   alone retains the prior champion but is not a terminal condition when the
-   remaining cost and time can support a complete credible experiment, unless
-   an explicit user-set regression stop policy fires. After several experiments
-   on the same parameter or coherent direction produce only changes that are
-   immaterial at this metric's scale and Validation resolution, stop stepping
-   that lever and switch to a materially different evidence-based direction.
-   Exhaustion of an inner direction advances to the next allowed Data, Method,
-   or Base-model branch. Stop only when every credible branch allowed by the
-   autonomy level has been exhausted, or another terminal condition applies,
-   rather than chasing numerical noise.
+9. Respect target and user-configured cost/time/iteration/stop limits. You may
+   also stop successfully with a usable model when expected benefit is low,
+   evidence does not justify another experiment, or its cost is not worthwhile,
+   even with budget remaining. Explain the observations, uncertainty, remaining
+   alternatives, and cost/benefit judgment. A regression alone does not prove
+   all alternatives fail. Retain the Validation champion; avoid chasing noise.
+   Neither continuing nor stopping requires exhausting a search hierarchy.
    `degraded` is reserved for an unresolved required-stage problem when a
    usable model still exists. A configured limit is only the normal stop
    trigger, and an earlier failed Ticket that a later successful work order
    replaced is no longer an unresolved problem.
 10. Never request held-out Test paths, artifacts, or scores.
 11. A Specialist-owned output/execution defect is repaired automatically on
-    the same Ticket for at most three attempts; you are not woken between those
+    on the same Ticket within the engine-provided repair allowance; you are not woken between those
     attempts. When a failure reaches you, change the upstream work order or
     cross-Agent direction only when the recorded `repair_route` is
     `orchestrator`; terminal boundaries and exhausted repairs require a truthful

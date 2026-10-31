@@ -22,7 +22,7 @@
 | `parent_selection_rationale` | Orchestrator's evidence-based reason for the selected branch point. |
 | `parent_checkpoint_path` | Empty for a baseline branch; otherwise the selected earlier Run checkpoint. |
 | `parent_train_config_path` | Empty for a baseline branch; otherwise YAML from the same parent Train Ticket. |
-| `branch_transition` | Engine-validated exhausted-branch record. `none` while continuing; a Method change carries its prior branch, Validation evidence, and next branch. |
+| `branch_transition` | Engine-validated experiment-transition record. `none` while continuing; a Method change carries its prior branch, Validation evidence, and next branch. |
 | `training_method_pin` | Binding method when non-empty. |
 | `method_config_pins` | Binding method-owned values. |
 | `loss_objective_pins` | Binding method-valid objective values. |
@@ -34,7 +34,7 @@
 | `work_dir` | Persistent local config/script/log directory. |
 
 `run_context.used_training_methods` and `run_context.validation_history` are
-engine-owned evidence for active-branch retention, exhaustion, and direction
+engine-owned evidence for experiment selection, retention, and direction
 selection. They do not override the user pin, selected parent Train YAML, or
 the current model lineage's Baseline Inference YAML.
 

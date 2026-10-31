@@ -69,8 +69,7 @@ non-empty local directory. When true:
   `ssh.user`, and exactly one of `ssh.key_path` or `ssh.password_path`;
 - inspect the exact remote directory with SSH before copying;
 - copy the selected directory with
-  `python -m zevo.engine.remote_transfer download --recursive` by default, or
-  correctly constructed direct recursive SCP when needed;
+  `python -m zevo.engine.remote_transfer download --recursive` through the selected connection;
 - copy only that checkpoint directory, never its parent run directory.
 
 Validate the staged or local model according to its artifact shape:

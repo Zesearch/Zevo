@@ -70,21 +70,41 @@ class StoredPayload(BaseModel):
 
 
 class SearchBranchTransition(BaseModel):
-    """Explicit audit record for crossing one exhausted autonomy-search level."""
+    """Auditable experiment choice; no prescribed order or exhaustion prerequisite."""
 
     model_config = ConfigDict(extra="forbid")
 
     level: Literal["none", "data", "method", "base_model"] = "none"
-    exhausted_branch: str = ""
+    previous_branch: str = ""
     validation_evidence: str = ""
     next_branch: str = ""
+    rationale: str = Field(
+        "",
+        description=(
+            "Hypothesis, expected benefit, resource cost, and why this experiment is worth trying."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_legacy_transition(cls, value: Any) -> Any:
+        # Historical Tickets remain readable; new schemas expose neutral names.
+        if isinstance(value, dict) and "exhausted_branch" in value:
+            value = dict(value)
+            previous = value.pop("exhausted_branch")
+            if "previous_branch" in value and value["previous_branch"] != previous:
+                raise ValueError("conflicting previous_branch and legacy exhausted_branch")
+            value.setdefault("previous_branch", previous)
+            value.setdefault("rationale", value.get("validation_evidence", ""))
+        return value
 
     @model_validator(mode="after")
     def require_complete_transition(self) -> "SearchBranchTransition":
         values = (
-            self.exhausted_branch.strip(),
+            self.previous_branch.strip(),
             self.validation_evidence.strip(),
             self.next_branch.strip(),
+            self.rationale.strip(),
         )
         if self.level == "none":
             if any(values):
@@ -93,8 +113,8 @@ class SearchBranchTransition(BaseModel):
                 )
         elif not all(values):
             raise ValueError(
-                "a search branch transition requires exhausted_branch, "
-                "validation_evidence, and next_branch"
+                "a search branch transition requires previous_branch, "
+                "validation_evidence, next_branch, and rationale"
             )
         return self
 
@@ -211,7 +231,7 @@ class CreateTicketResponse(BaseModel):
     inputs: dict[str, Any]
     summary: str
     error_message: str
-    repair_attempts: int = Field(0, ge=0, le=20)
+    repair_attempts: int = Field(0, ge=0)
     repair_route: Literal["", "self", "orchestrator", "terminal"] = ""
     created_at: str
     updated_at: str
@@ -738,7 +758,8 @@ def specialist_request_payload_schemas() -> dict[str, Any]:
             },
         },
         "description": (
-            "Optional high-level Train advice. Omit a key to delegate it; "
+            "training_method selects the pipeline experiment method and is binding when supplied; "
+            "direction is advisory. Omit training_method to delegate the choice to Train; "
             "detailed hyperparameters are not accepted here."
         ),
     }
