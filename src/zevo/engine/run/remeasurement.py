@@ -21,7 +21,9 @@ from zevo.contracts.length_calibration import prediction_outputs, repetition_evi
 from zevo.db.models import Run, ScoreEvent, Ticket, TicketNotice, WorkProduct
 
 KEY = "token_budget_remeasurements"
-THRESHOLD = 0.05
+from zevo.contracts.length_calibration import DEFAULT_POLICY, calibration_policy
+
+THRESHOLD = DEFAULT_POLICY["max_truncation_percent"] / 100
 NO_IMPROVEMENT_LIMIT = 2
 MIN_RELATIVE_TRUNCATION_DROP = 0.10
 Batch = dict[str, Any]
@@ -65,7 +67,7 @@ def replay_item(run: Run, ticket_id: str) -> dict:
 
 
 def needs_expansion(item: dict) -> bool:
-    return item["fraction"] > THRESHOLD and not item.get("repetition", {}).get("dominated", False)
+    return item["fraction"] > item.get("truncation_target", THRESHOLD) and not item.get("repetition", {}).get("dominated", False)
 
 
 def active_attempt(run: Run, ticket_id: str) -> dict:
@@ -218,6 +220,8 @@ async def _evidence(session: AsyncSession, run: Run, ticket: Ticket) -> dict[str
             configs = await _products(session, ticket.id, "inference_config", run)
             pred = next((p for p in predictions if (p.meta or {}).get("suite_member_name", primary) == name), None)
             cfg = next((p for p in configs if (p.meta or {}).get("suite_member_name", primary) == name), None)
+            if cfg:
+                evidence[name]["truncation_target"] = calibration_policy(cfg.path)["max_truncation_percent"] / 100
             if pred and cfg:
                 try:
                     config = load_inference_config(cfg.path)
@@ -660,7 +664,7 @@ async def advance(session: AsyncSession, run_id: str) -> None:
                            else "token_ceiling")
                     for name, ev in evidence.items()
                     if name in batch.get("affected", []) and name not in batch.get("rejected_members", {})
-                    and ev["fraction"] > THRESHOLD
+                    and ev["fraction"] > ev.get("truncation_target", THRESHOLD)
                     and (ev.get("repetition", {}).get("dominated")
                          or name in batch.get("stalled_members", {})
                          or (name in batch.get("ceiling_evidence", {}) and not any(
@@ -854,7 +858,7 @@ def validation_generation_reports(run: Run) -> list[dict]:
 
 def record_generation_report(run: Run, ticket: Ticket, evidence: dict, *, batch: dict | None = None) -> None:
     problematic = {name: deepcopy(ev) for name, ev in evidence.items()
-                   if ev.get("fraction", 0) > THRESHOLD}
+                   if ev.get("fraction", 0) > ev.get("truncation_target", THRESHOLD)}
     problematic.update(deepcopy((batch or {}).get("rejected_evidence", {})))
     if not problematic and not batch:
         return

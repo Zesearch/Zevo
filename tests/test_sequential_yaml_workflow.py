@@ -439,7 +439,7 @@ def test_orchestrator_receives_closed_payload_and_binding_authorities() -> None:
     assert registry_lineage["metrics"]["must_evaluate_input"] == "checkpoint"
 
 
-def test_search_branch_transition_requires_complete_exhaustion_evidence() -> None:
+def test_legacy_branch_transition_requires_evidence_and_normalizes() -> None:
     with pytest.raises(ValidationError, match="validation_evidence"):
         SearchBranchTransition(
             level="method",
@@ -453,6 +453,10 @@ def test_search_branch_transition_requires_complete_exhaustion_evidence() -> Non
         next_branch="model B",
     )
     assert transition.level == "base_model"
+    assert transition.previous_branch == "model A with all compatible method/data branches"
+    assert transition.rationale == transition.validation_evidence
+    assert "exhausted_branch" not in transition.model_dump()
+    assert SearchBranchTransition.model_validate(transition.model_dump()) == transition
 
 
 def test_stored_execution_payloads_are_complete_and_closed() -> None:
@@ -1302,7 +1306,7 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
         "iteration": 3,
         "base_model": "Qwen/Qwen3-0.6B-Base",
         "model_source": "checkpoint",
-        "parent_selection_rationale": "Start the next method branch after exhaustion.",
+        "parent_selection_rationale": "Test preference supervision while SFT remains a viable alternative.",
         "active_training_method": "sft",
         "parent_checkpoint_path": second.checkpoint_path,
         "parent_train_config_path": second.train_config_path,
@@ -1312,7 +1316,8 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
         "configuration_suggestions": {"training_method": "dpo"},
         "branch_transition": {
             "level": "method",
-            "exhausted_branch": "sft with supervised data branch A",
+            "previous_branch": "sft with supervised data branch A",
+            "rationale": "Test preference supervision for expected quality gains at similar cost.",
             "validation_evidence": "Validation plateaued across two inner directions.",
             "next_branch": "dpo with compatible preference data",
         },
@@ -1321,10 +1326,49 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
     third_config = load_train_config(third.train_config_path)
     assert third_config.training_method == "dpo"
     assert third_config.method_diversity_status == "varied"
-    assert "exhausted" in third_config.method_selection_rationale.lower()
+    assert "exhaust" not in third_config.method_selection_rationale.lower()
+    assert "preference supervision" in third_config.method_selection_rationale
+
+    # Exercise the production acceptance path, not just the stub: switching
+    # while the old method remains viable needs no magic exhaustion wording.
+    inp = TrainTaskInput.model_construct(
+        iteration=3, dataset_rows=third_config.training.data_selection.source_rows,
+        data_signature="d" * 64, inference_config_path=str(inference_path),
+        expected_inference_config_sha256=file_sha256(inference_path),
+        base_model="Qwen/Qwen3-0.6B-Base", model_source="checkpoint",
+        parent_checkpoint_path=second.checkpoint_path,
+        parent_train_config_path=second.train_config_path,
+        parent_selection_rationale=third_config.parent_selection_rationale,
+        configuration_suggestions={"training_method": "dpo"},
+        active_training_method="sft",
+        branch_transition={"level": "method", "previous_branch": "sft",
+                           "next_branch": "dpo", "validation_evidence": "Measured SFT baseline",
+                           "rationale": "Test preference supervision without exhausting SFT"},
+        activation_contract={"method_selection_owner": "orchestrator"},
+        generation_backend="vllm",
+        execution_contract=TrainExecutionContract(
+            required_environment={"RUN_ID": "r", "TICKET_ID": "train-r-003"},
+            slurm_step_name="zevo-train-r-003",
+        ),
+    )
+    _validate_specialist_yaml(third, inp)
+    _validate_specialist_yaml(third, inp.model_copy(update={
+        "activation_contract": {"method_selection_owner": "worker"},
+        "configuration_suggestions": {}, "branch_transition": {},
+    }))
+    # Freedom to choose does not permit silently ignoring the work order,
+    # user pins, or the selected checkpoint lineage.
+    for overrides, message in [
+        ({"configuration_suggestions": {}}, "explicitly selects"),
+        ({"training_method_pin": "sft"}, "pinned training method"),
+        ({"method_config_pins": {"use_peft": True}}, "pinned method_config"),
+        ({"parent_checkpoint_path": "/other/checkpoint"}, "model chain"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            _validate_specialist_yaml(third, inp.model_copy(update=overrides))
 
 
-def test_peft_capable_stub_method_requires_explicit_opt_in(tmp_path: Path) -> None:
+def test_stub_execution_modes_respect_explicit_user_pins(tmp_path: Path) -> None:
     inference_path = _write_inference_config(tmp_path)
     common = {
         "operation": "train",
@@ -1355,6 +1399,35 @@ def test_peft_capable_stub_method_requires_explicit_opt_in(tmp_path: Path) -> No
     assert load_train_config(explicit_lora_result.train_config_path).method_config == {
         "use_peft": True,
     }
+
+    # The real acceptance path permits either mode when the user did not pin it.
+    # The stub above supplies complete synthetic artifacts for both modes.
+    for result in (default_result, explicit_lora_result):
+        config = load_train_config(result.train_config_path)
+        inp = TrainTaskInput.model_construct(
+            iteration=1, dataset_rows=config.training.data_selection.source_rows,
+            data_signature="d" * 64, inference_config_path=str(inference_path),
+            expected_inference_config_sha256=file_sha256(inference_path),
+            base_model=common["base_model"], model_source="base_model",
+            parent_selection_rationale=common["parent_selection_rationale"],
+            training_method_pin="grpo", method_config_pins={},
+            generation_backend="vllm",
+            execution_contract=TrainExecutionContract(
+                required_environment={"RUN_ID": "r", "TICKET_ID": result.ticket_id},
+                slurm_step_name="zevo-" + result.ticket_id,
+            ),
+        )
+        _validate_specialist_yaml(result, inp)
+        with pytest.raises(ValueError, match="Orchestrator-selected method"):
+            _validate_specialist_yaml(result, inp.model_copy(update={
+                "training_method_pin": "",
+                "activation_contract": {"method_selection_owner": "orchestrator"},
+                "configuration_suggestions": {"training_method": "sft"},
+            }))
+        with pytest.raises(ValueError, match="pinned method_config.use_peft"):
+            _validate_specialist_yaml(result, inp.model_copy(update={
+                "method_config_pins": {"use_peft": not config.method_config["use_peft"]},
+            }))
 
 
 def test_train_input_rejects_broken_iteration_chain(tmp_path: Path) -> None:
@@ -1422,13 +1495,9 @@ def test_evaluation_remains_a_typed_system_stage() -> None:
 def test_nested_configuration_key_contracts_are_explicit() -> None:
     methods = train_method_contracts()
     assert methods["sft"]["method_config"]["allowed_keys"] == ["use_peft"]
-    assert methods["sft"]["method_config"]["default_values"] == {
-        "use_peft": False,
-    }
+    assert methods["sft"]["method_config"]["default_values"] == {}
     assert methods["dpo"]["method_config"]["required_keys"] == ["use_peft"]
-    assert methods["dpo"]["method_config"]["default_values"] == {
-        "use_peft": False,
-    }
+    assert methods["dpo"]["method_config"]["default_values"] == {}
     assert "loss_type" in methods["sft"]["loss_objective_config"][
         "required_realized_keys"
     ]
@@ -1589,3 +1658,33 @@ def test_baseline_acceptance_requires_calibration_for_every_member(tmp_path: Pat
     config_path.with_name("length_calibration.json").unlink()
     member_config.with_name("length_calibration.json").unlink()
     _validate_specialist_yaml(result, inp)
+
+
+@pytest.mark.parametrize("level", ["data", "method", "base_model"])
+def test_experiment_transition_allows_switch_without_exhaustion(level: str) -> None:
+    values = {
+        "level": level,
+        "previous_branch": "A remains promising",
+        "validation_evidence": "A improved from 0.70 to 0.75; B has not been measured.",
+        "next_branch": "B",
+        "rationale": "Compare B at half the compute cost; budget for one measured trial.",
+    }
+    transition = SearchBranchTransition.model_validate(values)
+    assert transition.model_dump() == values
+    # Returning to a previous branch is also a valid evidence-based choice.
+    SearchBranchTransition.model_validate({**values, "previous_branch": "B", "next_branch": "A"})
+    for missing in ("previous_branch", "validation_evidence", "next_branch", "rationale"):
+        with pytest.raises(ValidationError):
+            SearchBranchTransition.model_validate({k: v for k, v in values.items() if k != missing})
+
+
+def test_branch_transition_legacy_alias_cannot_override_new_provenance() -> None:
+    with pytest.raises(ValidationError, match="conflicting"):
+        SearchBranchTransition.model_validate({
+            "level": "method", "previous_branch": "sft", "exhausted_branch": "dpo",
+            "validation_evidence": "Previous result 0.7", "next_branch": "grpo",
+            "rationale": "Test verified rewards within the remaining budget",
+        })
+    schema = SearchBranchTransition.model_json_schema()["properties"]
+    assert "previous_branch" in schema
+    assert "exhausted_branch" not in schema

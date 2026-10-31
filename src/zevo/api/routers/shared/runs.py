@@ -55,6 +55,7 @@ from zevo.db import (
     ScoreEvent,
     SshHost,
     Ticket,
+    TicketMessage,
 )
 from zevo.contracts.tickets import TERMINAL_RUN_STATUSES
 from zevo.engine.observe.run_metrics import (
@@ -1649,6 +1650,7 @@ async def patch_run(
                 # complete Journal and no unresolved worker issue is success.
                 if not issues and not blockers:
                     effective_status = "success"
+        was_terminal = r.status in TERMINAL_RUN_STATUSES
         r.status = effective_status
         if body.status in TERMINAL_RUN_STATUSES:
             extra_issues: list[dict[str, Any]] = []
@@ -1687,6 +1689,20 @@ async def patch_run(
                     dict(r.lifecycle.get("terminal_outcome") or {})
                 )
             r.finished_at = datetime.now(timezone.utc)
+            if not was_terminal:
+                supervisor = next((t for t in terminal_tickets
+                                   if t.agent_id == "orchestrator"
+                                   and (not r.supervisor_ticket_id
+                                        or t.id == r.supervisor_ticket_id)), None)
+                if supervisor is not None:
+                    # Commit the final message with the terminal transition.
+                    # Worker capabilities expire when the Run closes, so the
+                    # supervisor cannot safely POST a later Done message.
+                    detail = r.summary.strip() or r.halted_reason.strip()
+                    db.add(TicketMessage(
+                        ticket_id=supervisor.id, author="orchestrator",
+                        body=f"Done: Run finished with status {effective_status}.\n\n{detail}".rstrip(),
+                    ))
     # Reaching a planned limit is normal completion, not a halt. Keep this
     # invariant even if a later PATCH tries to add a reason to a success.
     if r.status == "success":

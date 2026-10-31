@@ -13,6 +13,12 @@ One heartbeat handles one activation of a Ticket:
 5. POST a `Done:` message.
 6. Emit one final JSON object and exit.
 
+For an Orchestrator closing a Run, the terminal Run PATCH atomically posts
+the final `Done:` message using the Run summary and accepted terminal status.
+Finish instruction updates and all other API work before that PATCH. After
+it succeeds, return `mark_done` or `mark_failed` and exit immediately; do not
+POST another message, read back state, or retry API calls after closure.
+
 Finite cluster Data, Train, and Inference jobs are the exception to step 5. Their
 submission activation POSTs `Waiting:` after the JOBID is registered and
 returns `deferred`; it must never say `Done:`. The backend Scheduler publishes
@@ -22,19 +28,11 @@ publishes `Done:` only after the typed Result and every required artifact have
 passed engine validation. Thus `Done:` always means the stage is genuinely
 complete, never merely submitted or deferred.
 
-When a generated implementation fails in a terminal Slurm job, a repair
-activation may receive `phase="submit"`, `attempt=2`, and the exact superseded
-bookkeeping row and JOBID. Reuse verified work, change the generated implementation,
-upload it to the assigned path, and return `deferred`; the engine verifies that
-the implementation changed and submits one distinct replacement job. It never reuses
-the failed JOBID and permits no third external execution for the same Ticket.
-If a valid committed artifact already exists, report that artifact instead of
-submitting replacement compute.
-
-Every workflow Ticket is one complete execution activation. Inference selects
-its baseline configuration and generates predictions in one heartbeat; Train
-selects its iteration configuration and trains in one heartbeat. Durable YAML
-artifacts are the single authority for realized configuration.
+When execution fails, use the engine-supplied activation contract and repair
+route. The engine owns retry admission, resource lifetime, and submission.
+Reuse verified artifacts and change only what the diagnosis requires. A
+submission and a collection are separate activations of the same Ticket;
+configuration and execution provenance remain durable across them.
 
 The Task fixes metric, direction, evaluator, answer fields, and submission
 shape before Baseline. Baseline Inference fixes the complete model-side
@@ -63,33 +61,23 @@ input, not the engine. Do not open files under the Zevo source tree
 fact you need is genuinely absent from the input, say so in `notes` and
 proceed on the documented default rather than hunting for it.
 
-Do the work once and let the validator be the check. Run each expensive step
+Use relevant operational-guide sections for this activation. Reuse accepted
+evidence when still applicable; add a check when a change or unresolved risk
+requires it. Do the work once and let the validator be the check. Run each expensive step
 (download, generation, training) one time; the supplied validation command and
 the engine's own checks are the acceptance test. Do not re-run a step whose
-output a validator already accepted, and do not add a second verification pass
-of your own on top of a passed validator.
+output a validator already accepted unless a changed input or identified gap
+invalidates that evidence. Explain what a necessary additional check establishes.
 
 Report once. `Starting:`, phase telemetry, and `Done:` are the narration; the
 final JSON is the record. Do not list hashes, byte counts, or per-file
 re-verification in messages when the Result fields already carry them.
 
-Budget your turns. A ticket that stays inside its budget is the normal case:
-
-| Work | Typical turns |
-|---|---|
-| `scope_problem` | 30 |
-| `prepare_run_data` | 35 |
-| Infrastructure provision or release | 20 |
-| Inference, reuse path (`configuration_mode="reuse"`) | 20 |
-| Inference, fresh configuration | 35 |
-| Train | 40 |
-| Registry | 12 |
-| Orchestrator wake | 10 |
-
-Exceeding a budget is not an error, but it is a signal: stop, state in `notes`
-what consumed the extra turns, and finish rather than widening the
-investigation. A repair activation inherits the remaining budget of the
-original; it reuses verified work and fixes only the reported defect.
+Use actual remaining time/cost and observable progress to decide whether to
+continue or report a blocker. Repeated unchanged attempts are not progress.
+The activation contract reports repair allowances and the no-progress limit;
+these are distinct from stored-payload validation failures. Do not invent an
+additional turn-count deadline or claim success merely to finish an activation.
 
 ## Runtime environment
 
@@ -137,7 +125,7 @@ The stored Ticket envelope has one meaning per field:
 
 `repairing` is a non-terminal system state. It means the prior activation
 failed for a defect owned by this Agent and the same Ticket will be activated
-again, at most three times. The system appends an exact `__REPAIR__` message to
+again within the engine-provided repair allowance. The system appends an exact `__REPAIR__` message to
 the Ticket conversation. On that activation, inspect existing files and prior
 evidence first, reuse verified expensive work, and correct only the invalid
 output, generated implementation, command, or artifact. Do not blindly repeat
@@ -222,8 +210,19 @@ paths/scores. Memory is not permission to override strict pins or a reused YAML
 configuration: a recovery may be remembered only when it preserves the
 assigned semantics and outputs.
 Use the same `kind` and `key` to supersede an earlier lesson whose applicability
-is unchanged. Do not emit duplicate `kind`/`key` pairs in one result. Failed or
-cancelled work must return no lessons.
+is unchanged. Do not emit duplicate `kind`/`key` pairs in one result.
+Failed work may report a verified negative fact, pitfall, or runtime finding:
+set `verification=verified`, provide reproduction/verification `evidence` and
+its `environment`, and keep `visibility=agent_local`.
+For environment-dependent lessons, set `environment_constraints` to the necessary
+key/value facts from `activation_contract.memory_environment`. An empty constraint
+list with an environment description stays local to this Ticket, since a device
+probe does not establish unchanged package versions. Explicit observed conditions
+allow reuse across Tickets; unknown conditions do not match. General lessons leave both
+fields empty and remain reusable across environments. Conditions are matched on
+retrieval; environment-scoped lessons supersede only lessons with the same scope. An untested proposed fix
+is not a verified lesson. The engine records the failed source outcome; this
+never changes the task's result. Cancelled work returns no lessons.
 
 ## Portable shell use
 

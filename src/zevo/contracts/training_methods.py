@@ -47,20 +47,6 @@ SELECTABLE_TRAINING_METHODS = frozenset(
     set(METHOD_CONFIG_KEYS) - set(LEGACY_SFT_METHODS)
 )
 
-# Supervised-finetuning family: teaches format and a first pass at reasoning.
-# A reinforcement/verifiable-reward lever is a deliberate next step *after* one
-# of these has established a reasonable baseline (see the orchestrator's
-# reinforcement-progression policy in zevo.engine.method.loop_policy).
-SFT_METHODS = frozenset({"sft", *LEGACY_SFT_METHODS})
-
-# The verifiable-reward progression a SOTA practitioner runs on a task with a
-# deterministic correctness check, IN ORDER, once an SFT baseline exists:
-# SFT(+distilled) -> RFT (rejection-sampling bridge) -> GRPO (online RLVR).
-# Both consume a +1/0 correctness reward derived from the gold answer; RFT is
-# the stable bridge and GRPO the terminal lever. Kept ordered so the policy can
-# name the single next method rather than a set.
-REINFORCEMENT_PROGRESSION = ("rft", "grpo")
-
 # These have one canonical home outside method_config. Prompt and loss fields
 # are run contracts; shared hyperparameters are recorded in the Train YAML.
 # Accepting a second copy here would let a selected Skill silently choose which

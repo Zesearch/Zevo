@@ -10,6 +10,8 @@ ref-resolution + the orchestrator's reactive loop keep working unchanged.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from zevo.contracts.memory import AgentMemoryContext
@@ -19,6 +21,8 @@ class FreeformInput(BaseModel):
     """Uniform worker input for a freeform Ticket."""
 
     model_config = ConfigDict(extra="forbid")
+
+    activation_contract: dict[str, Any] = Field(default_factory=dict)
 
     ticket_id: str = Field(..., description="e.g. 'task-001'.")
     agent_id: str = Field(..., description="The agent this ticket is assigned to (echoed for the agent's convenience).")

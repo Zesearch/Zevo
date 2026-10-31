@@ -2,8 +2,8 @@
 
 Train receives one explicitly bound versioned Data corpus, the engine's frozen
 raw Validation view, and baseline Inference's YAML. It
-retains the active method branch unless the Orchestrator explicitly advances an
-exhausted branch, selects concrete loss/hyperparameters for this iteration,
+executes the method selected by the Orchestrator, resolves concrete
+loss/hyperparameters for this iteration,
 copies the matching model-lineage Baseline prompt and template identity, writes
 ``train_config.yaml``, and trains from the explicitly selected earlier Run
 checkpoint or baseline model.
@@ -222,7 +222,7 @@ class TrainTaskInput(AgentTaskInput):
     branch_transition: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Engine-validated exhausted-branch audit record. A Method change "
+            "Engine-validated experiment-transition audit record. A Method change "
             "must carry the Orchestrator's method/base_model transition evidence."
         ),
     )

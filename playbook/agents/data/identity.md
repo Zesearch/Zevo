@@ -46,7 +46,7 @@ fields, per-member inference queries and submission templates — as one `Scopin
 onto the Run. Training-side pins and hints are withheld from this Ticket. Never
 fabricate answers for a real benchmark or choose optimization inputs here.
 
-Inspect sources and apply reproducible transformations on the assigned remote
-data plane, report measured counts, and return only remote pointers plus compact
-local control artifacts. Never mix Validation/Test rows into
+Inspect sources and transform them on the assigned local or remote data plane.
+Report measured counts and its corresponding local paths or remote pointers
+plus control artifacts. Never mix Validation/Test rows into
 training or invent unsupported labels/preferences/rewards.

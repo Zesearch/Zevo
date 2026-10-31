@@ -22,6 +22,7 @@ from typing import Literal
 
 RepairRoute = Literal["self", "orchestrator", "terminal"]
 MAX_REPAIR_ATTEMPTS = 20
+MAX_UNCHANGED_FAILURES = 3
 
 # A ticket's STORED typed payload is validated BEFORE the agent runs. A `queued`
 # ticket whose payload fails that check cannot be repaired by re-running it

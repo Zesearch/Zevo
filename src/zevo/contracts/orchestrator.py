@@ -65,8 +65,7 @@ BUILTIN_METRICS = frozenset({
 # Overlap/graded metrics (f1, token_f1, bleu, rouge_l) are deliberately excluded
 # — they score partial similarity, not correctness, so a +1/0 verifier would
 # misrepresent them — and a `custom` evaluator is opaque, so it never implies a
-# verifiable reward. This is the signal that promotes the SFT -> RFT -> GRPO
-# progression; see `verifiable_reward_available`.
+# verifiable reward. This is capability evidence, not a method ranking.
 VERIFIABLE_REWARD_METRICS = frozenset({
     "accuracy", "exact_match", "mc_loglikelihood", "accuracy_norm",
 })
@@ -208,35 +207,14 @@ def effective_test_suite(request: "UserRequest") -> list[TaskTestSet]:
 def verifiable_reward_available(metric: str, metric_type: str) -> bool:
     """Whether the scoring contract implies a deterministic correctness reward.
 
-    True only for a built-in metric in `VERIFIABLE_REWARD_METRICS` (an
-    exactly-correct discrete answer). Such tasks can derive a +1/0 GRPO/RFT
-    reward from the same gold answer the metric uses, which is what makes the
-    verifiable-reward progression (SFT -> RFT -> GRPO) a legitimate deliberate
-    lever rather than a last resort. Pure and side-effect free.
+    True only for a built-in metric in `VERIFIABLE_REWARD_METRICS`.
+    This capability may support reward-based methods; it neither requires an
+    SFT baseline nor determines which method to try next. False means the
+    scoring contract alone supplies no verified correctness reward.
     """
     return (metric_type or "").strip().lower() == "builtin" and (
         (metric or "").strip().lower() in VERIFIABLE_REWARD_METRICS
     )
-_CAUSAL_DIAGNOSIS = re.compile(
-    r"(?i)\b(overfit(?:ting)?|under-?produc\w*|format error\w*|"
-    r"verbosity error\w*|hallucinat\w*|memorization)\b"
-)
-_UNCERTAINTY_LANGUAGE = re.compile(
-    r"(?i)\b(possible|possibly|may|might|could|suggests?|consistent with|uncertain)\b"
-)
-
-
-def _require_evidence_language(text: str, *, field: str) -> str:
-    value = str(text or "").strip()
-    if _CAUSAL_DIAGNOSIS.search(value) and not _UNCERTAINTY_LANGUAGE.search(value):
-        raise ValueError(
-            f"{field} makes a causal/model-error diagnosis without deterministic "
-            "error-analysis evidence; report the observed metric trend or mark "
-            "the interpretation explicitly uncertain"
-        )
-    return value
-
-
 class SupervisorTrigger(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["run_created", "ticket_completed"]
@@ -322,6 +300,7 @@ class IterationHistoryEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     iteration: int = Field(ge=0)
     source: Literal["baseline", "trained"]
+    measurement_split: Literal["validation"] = "validation"
     method_ids: list[str] = Field(default_factory=list)
     training_method: str = ""
     base_model: str = ""
@@ -460,7 +439,7 @@ class UserRequest(BaseModel):
         description=(
             "Pinned Train method, e.g. 'sft'. Use '' to let the Train "
             "Agent record Zevo's active Method branch in each train_config.yaml; "
-            "the branch changes only after its nested search is exhausted."
+            "method changes require an evidence-based experiment rationale."
         ),
     )
     method_query: str = Field(
@@ -692,7 +671,7 @@ class AutoUserRequest(BaseModel):
     answer fields, sample submission, Validation contract) is deliberately
     ABSENT: the Data agent's ``scope_problem`` work order derives that contract.
     Data, base model, and training method use the same optional pins and hints
-    as Full Pipeline, preserving the ordinary L1–L4 ownership ladder.
+    as Full Pipeline, preserving user pins and evidence-based experiment ownership.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -940,13 +919,9 @@ class OrchestratePayload(BaseModel):
         The loop optimizes against the Validation metric carried on
         `user_request` (Run setup copies the Validation contract into its
         `metric`/`metric_type`). When that metric is a verifiable correctness
-        check, a +1/0 GRPO/RFT reward is derivable from the gold answer, which
-        promotes the SFT -> RFT -> GRPO progression as a deliberate next Method
-        lever after a reasonable SFT baseline — see
-        playbook/agents/orchestrator/goal.md and the advisory
-        `reinforcement_progression` policy in
-        zevo.engine.method.loop_policy. Derived output only; it never appears in
-        a stored request payload.
+        check, a correctness reward may be available. This is capability
+        evidence only, not a prescribed sequence of methods. Derived output
+        only; it never appears in a stored request payload.
         """
         return verifiable_reward_available(
             self.user_request.metric, self.user_request.metric_type,
@@ -959,6 +934,7 @@ class JournalNarrativeEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     iteration: int = Field(ge=0)
     source: Literal["baseline", "trained"]
+    measurement_split: Literal["validation"] = "validation"
     action: str = Field(
         min_length=1,
         description=(
@@ -993,16 +969,6 @@ class JournalNarrativeEntry(BaseModel):
         ),
     )
 
-    @model_validator(mode="after")
-    def require_validation_evidence(self) -> "JournalNarrativeEntry":
-        if "validation" not in self.result.lower():
-            raise ValueError(
-                "Journal result must label its optimization measurement as Validation"
-            )
-        if re.search(r"(?i)\b(test|held[- ]out)\b", self.result):
-            raise ValueError("the optimization Journal must not claim held-out Test evidence")
-        self.analysis = _require_evidence_language(self.analysis, field="Journal analysis")
-        return self
 
 
 class PatchRunRequest(BaseModel):
@@ -1014,20 +980,6 @@ class PatchRunRequest(BaseModel):
     summary: str | None = None
     halted_reason: str | None = None
     history_entry: JournalNarrativeEntry | None = None
-
-    @field_validator("summary")
-    @classmethod
-    def require_supported_terminal_summary(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        summary = _require_evidence_language(value, field="Run summary")
-        if re.search(r"(?i)\b(improvement|improved|regression|score)\b", summary) and not re.search(
-            r"(?i)\b(validation|test|held[- ]out)\b", summary
-        ):
-            raise ValueError(
-                "Run summary score/improvement statements must say Validation or held-out Test"
-            )
-        return summary
 
     @field_validator("history_entry")
     @classmethod
@@ -1054,6 +1006,7 @@ class OrchestratorTaskInput(OrchestratePayload):
     ticket_id: str = Field(min_length=1)
     iteration: int = Field(ge=0)
     run_id: str = Field(min_length=1)
+    activation_contract: dict[str, Any] = Field(default_factory=dict)
     supervisor_ticket_id: str = Field(min_length=1)
     api_routes: OrchestratorApiRoutes = Field(default_factory=OrchestratorApiRoutes)
     ticket_creation_schema: dict[str, Any] = Field(
@@ -1157,7 +1110,7 @@ class SupervisorAction(StrictResult):
             "Breadcrumb describing this heartbeat. It does not persist the Run "
             "summary; completion must first PATCH /runs/{run_id}. When this "
             "heartbeat crosses a Data, Method, or Base-model search boundary, "
-            "this breadcrumb names the exhausted branch, its Validation evidence, "
+            "this breadcrumb names the previous branch, its Validation evidence, "
             "and the next branch. Initial selection, switching, or explicit "
             "retention of an unpinned method also states the evidence-based "
             "method rationale and that it is Zevo-selected rather than user-pinned."

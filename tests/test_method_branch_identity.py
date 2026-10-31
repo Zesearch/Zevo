@@ -76,7 +76,7 @@ def test_parent_identity_is_still_enforced(tmp_path):
 def test_wrong_specialist_method_is_self_repairable(tmp_path):
     inp, result = case(tmp_path, active="sft")
     inp = inp.model_copy(update={"configuration_suggestions": {"training_method": "sft"}})
-    with pytest.raises(ValueError, match="explicitly selects") as exc:
+    with pytest.raises(ValueError, match="Orchestrator-selected method") as exc:
         _validate_specialist_yaml(result, inp)
     assert classify_failure(str(exc.value), agent_id="train").route == "self"
 
@@ -113,3 +113,15 @@ async def test_invalid_stored_direction_is_rejected_before_resource_planning(mon
             ticket, {"configuration_suggestions": {"training_method": "rft"}},
             {}, str(tmp_path), "vllm", run, None,
         )
+
+
+def test_new_and_historical_transition_fields_share_method_identity():
+    from zevo.contracts.tickets import SearchBranchTransition
+    current = SearchBranchTransition(
+        level='method', previous_branch='sft', next_branch='rft',
+        validation_evidence='Measured SFT baseline',
+        rationale='Compare reinforcement learning while SFT remains viable',
+    )
+    assert not method_branch_problem('sft', 'rft', transition=current.model_dump())
+    historical = SearchBranchTransition.model_validate(TRANSITION)
+    assert not method_branch_problem('sft', 'rft', transition=historical.model_dump())

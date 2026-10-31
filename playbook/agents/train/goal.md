@@ -10,12 +10,15 @@ branch points; this is never a requirement to save every epoch or step.
 3. Resolve values in priority order: strict pins, compatible suggestions,
    selected-parent and Run-history evidence/memory, method Skill, measured runtime/data.
    Empty/zero/missing suggestions delegate the choice.
-4. Select an installed training method and its closed `method_config`. Without
-   a user method pin, prefer a compatible method not used in the immediately
-   prior iteration; repeat only when data/evaluation/model/runtime constraints
-   prevent a sound change, and record the constraint. GKD
-   teacher and Online DPO reward model references must be Hugging Face
-   `owner/model` ids.
+4. In a pipeline, execute the compatible method selected by the Orchestrator
+   or pinned by the user. A standalone/freeform request without an Orchestrator
+   selection delegates the method choice to Train. A pipeline request that omits
+   the method also delegates that choice. Retain or change methods according to that experiment decision, never
+   for diversity alone. If the method cannot run faithfully, report the evidence
+   so the Orchestrator can revise the experiment. Choose unpinned method-specific
+   values and full-parameter versus PEFT execution from evidence, resources, and
+   expected benefit; explain the tradeoff. GKD teacher and Online DPO reward model
+   references must be Hugging Face `owner/model` ids.
 5. Derive the semantic loss contract from method and prompt framing, then fill
    only method-valid objective values.
 6. Copy the complete Baseline prompt/template identity and `template_kwargs`,
@@ -24,18 +27,11 @@ branch points; this is never a requirement to save every epoch or step.
    sequence(s), and loss/context spans, then write and validate
    `train_config.yaml` before training.
 7. Preflight the actual data/method/model/GPU/dependencies, train in the
-   foreground, and verify the expected checkpoint interface. For large or
-   complex training, follow the startup validation in platform.md: real model,
-   real data/sampler, opening optimizer steps, a complete checkpoint save, and
-   actual full-state restore into a recreated Trainer. Verify restored state
-   and the next scheduled optimizer step before continuing the unchanged plan
-   in the same allocation. For a plan already completed by the opening steps,
-   verify restored completion without adding steps. Validate save/restore once
-   at startup, not after every periodic checkpoint. A toy model is not a
-   substitute. Recovery checkpoints carry
-   training state independently of optional branch-point retention. When selective
-   retention would answer a concrete later question or protect against late
-   degradation, record a bounded retention policy and save model weights only.
+   foreground, and verify the expected checkpoint interface. Select startup
+   checks from changed execution paths and actual risk. Reuse applicable prior
+   validation evidence. Establish working full-state recovery when continuation
+   requires it; a weights-only export is insufficient. Record checks and results,
+   then continue the planned execution without repeating unrelated verification.
 
 Only after the complete training configuration is fixed, map the raw records
 at `validation_dataset_path` using `validation_answer_fields` and the same

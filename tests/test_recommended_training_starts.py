@@ -57,15 +57,14 @@ def test_rft_defaults_to_full_parameter_start() -> None:
     assert rft["lora_target_modules"] == []
 
 
-def test_peft_capable_methods_expose_full_parameter_default() -> None:
+def test_peft_mode_is_required_but_has_no_prescribed_default() -> None:
     contracts = train_method_contracts()
     for method in SELECTABLE_TRAINING_METHODS:
         keys = METHOD_CONFIG_KEYS[method]
         defaults = contracts[method]["method_config"]["default_values"]
+        assert defaults == {}
         if "use_peft" in keys:
-            assert defaults == {"use_peft": False}
-        else:
-            assert defaults == {}
+            assert "use_peft" in contracts[method]["method_config"]["required_keys"]
 
 
 def test_lora_adapter_start_surfaces_only_for_peft_capable_methods() -> None:

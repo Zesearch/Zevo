@@ -390,7 +390,13 @@ def _resident_worker(predict: str, model: str, manifest: str, summary: str,
                     continue
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
-                fields, rows, _ = helper.sample_rows(questions)
+                policy = helper.calibration_policy(member["config"])
+                candidates = member["calibration_configs"]
+                if len(candidates) > policy["max_configurations"]:
+                    raise ValueError("calibration candidates exceed the declared resource budget")
+                if any(helper.calibration_policy(candidate) != policy for candidate in candidates):
+                    raise ValueError("calibration candidates must share one sampling/acceptance policy")
+                fields, rows, _ = helper.sample_rows(questions, policy["sample_size"])
                 sample_root = Path(member["config"]).parent / "resident-calibration"
                 sample_root.mkdir(parents=True, exist_ok=True)
                 sample_path = sample_root / "questions.csv"
@@ -449,8 +455,13 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
         identity = _engine_identity(_load_config(members[0]["config"]))
         for member in members:
             candidates = member.get("calibration_configs", []) if calibrate else []
-            if calibrate and not 1 <= len(candidates) <= 4:
-                raise ValueError("each calibration member requires 1–4 prevalidated candidate configs")
+            if calibrate:
+                helper = _calibration_helper()
+                policy = helper.calibration_policy(member["config"])
+                if not candidates or len(candidates) > policy["max_configurations"]:
+                    raise ValueError("calibration candidates exceed the declared resource budget or are empty")
+                if any(helper.calibration_policy(path) != policy for path in candidates):
+                    raise ValueError("calibration candidates must share one sampling/acceptance policy")
             for path in [member["config"], *candidates]:
                 if _engine_identity(_load_config(path)) != identity:
                     raise ValueError("resident configs change engine initialization; prepare a compatible context/memory envelope or rebuild explicitly")

@@ -26,7 +26,7 @@
    model artifact. The source is optional guidance, not a required code match.
    Upload required files to
    a ticket-specific remote directory, using the `remote_transfer` helper by
-   default or correctly constructed direct SCP when needed. Run directly for
+   required connection-aware path. Run directly for
    cloud/instance or use the finite cluster job below.
    On cloud/instance the Python environment is the engine-built profile, not
    one you create: run `bash ~/zevo/env/remote_env.sh ensure infer` over SSH
@@ -56,7 +56,7 @@
 6. Copy back `predict.py`, the execution log, the primary benchmark's
    `predictions.csv` and `generation_diagnostics.json` from its assigned
    directory through the
-   helper or correctly constructed direct SCP. Direct cloud/instance execution
+   helper. Direct cloud/instance execution
    uses `infer.log`; cluster execution preserves the exact successful
    `slurm-<JOBID>.out` and sibling `slurm-<JOBID>.err`, and reports the `.out`
    file as `InferenceResult.log_path`.
@@ -122,7 +122,8 @@ and implement these functions using the same rendering/generation code as its CL
 - Optional `close_engine(engine)`: release resources once, after all work.
 
 Add `calibration_configs: [<absolute-candidate-YAML-path>, ...]` to each suite
-member (1–4 candidates in increasing budget order). Validate all candidates
+member (one or more candidates within the selected `max_configurations` budget,
+in the planned evaluation order). Validate all candidates
 with `config_validation_command` before GPU work. Each member's candidates
 may differ only in `measurement.max_new_tokens`; initialize the member's
 `config` path with the first candidate. Use separate immutable candidate files.
@@ -485,11 +486,17 @@ model context limit, and user resource constraints to choose an initial budget.
 An input-plus-output configuration fitting the context or GPU memory is a
 feasibility check, not evidence that responses can finish within that budget.
 
-Calibrate each supplied benchmark separately on 64 questions, or all questions
-when it has fewer than 64. The target truncation rate is at most 5% per benchmark,
-not a pooled suite average. Count a question as truncated if any of its generation
-requests ends with backend `finish_reason=length`, even if it already contains an
-answer. For 64 questions, three truncated questions meet the target and four require adjustment or the documented exception below.
+Calibrate each supplied benchmark separately with the policy selected before
+calibration. Optional `implementation_config.length_calibration_policy` keys are
+`sample_size`, `max_truncation_percent`, and `max_configurations`; the helper
+supplies defaults when absent. Record the rationale for non-default choices.
+Keep the policy fixed across candidate configs. The configuration budget counts distinct
+YAML configurations checked per benchmark, including failures; identical retries
+do not count again. Keep the helper trial ledger beside the member YAML across
+retries. Both CLI and resident checks use this ledger. Count a question as truncated
+if any request ends with `finish_reason=length`, even if it contains an answer.
+No labels or scores may influence calibration. The policy freezes with the
+accepted inference YAML and applies to subsequent validation of its report.
 
 When `length_calibration_helper_path` is supplied, copy that exact system helper
 to the GPU runtime as `zevo_length_calibration.py`. Use the exact assigned
@@ -497,7 +504,7 @@ to the GPU runtime as `zevo_length_calibration.py`. Use the exact assigned
 substitute a converted file for this identity. The prepared calibration sample
 is CSV and is a separate input to prediction. For each member:
 
-1. Run `python zevo_length_calibration.py prepare --questions <exact-assigned-scoring-set.csv-or-jsonl>
+1. Run `python zevo_length_calibration.py prepare --config <member-config.yaml> --questions <exact-assigned-scoring-set.csv-or-jsonl>
    --output <separate-calibration-questions.csv>`. This selects a reproducible
    length-stratified sample including both tails. Never use labels or scoring.
 2. Validate a provisional YAML with `config_validation_command`, then generate
@@ -518,23 +525,27 @@ is CSV and is a separate input to prediction. For each member:
    increase the unpinned output budget, recompute context and memory settings,
    revalidate the YAML, and repeat on the SAME sample. Check stopping behavior
    too; more tokens do not fix a model that never terminates.
-   Limit this to 2–3 adjustments after the initial attempt. If truncation remains
-   above 5%, inspect actual outputs and verified EOS/stop controls. When repeated
+   Stay within the declared configuration budget. If truncation remains above
+   the target, inspect actual outputs and verified EOS/stop controls. When repeated
    text, continuing after an answer, or failure to terminate explains the residual
    truncation, accept it as model output behavior; do not increase budgets forever.
-   Retry count alone, memory pressure, or a pinned cap does not justify acceptance.
+   Retry count alone is not evidence. A resource limit may justify accepting
+   measured residual truncation when the report explains the tradeoff and
+   demonstrates that the result still supports a meaningful comparison.
    To request this exception, include `output_behavior_waiver` in diagnostics:
-   - `previous_attempts`: 2–3 earlier attempts, each with `config_sha256`,
+   - `previous_attempts`: observed earlier attempts, if any, each with `config_sha256`,
      `questions_sha256`, `sample_row_indices`, complete `records` (same format),
      and `adjustment` describing the change to the next attempt. Preserve this
      evidence from each real attempt; distinct adjusted configs are required.
-   - `reason`: why observed behavior, rather than insufficient budget, explains it.
+   - `reason`: observed behavior and why residual truncation is acceptable.
+   - `resource_constraints` and `acceptance_rationale`: required without prior
+     attempts; describe the limit, alternatives, and comparison tradeoff.
    - `stop_controls_checked`: the EOS/stop checks and findings.
    - `examples`: actual final truncated outputs, each with `request_index`,
      `output_excerpt`, and `observation` explaining the output behavior.
    Re-run `check` with the final config and these diagnostics. Record the residual
    count/rate and reason in the journal; this is accepted residual truncation,
-   not a claim of meeting 5%. Never alter predictions or scores to compensate.
+   not a claim of meeting the configured target. Never alter predictions or scores to compensate.
 4. Only after every member meets the target or has an accepted documented waiver, freeze the final configurations and start the
    full measured Baseline. Preserve each helper-produced `length_calibration.json`
    beside its final YAML and copy both back. The engine verifies the exact config
@@ -585,7 +596,8 @@ and compared candidates; scores across different budgets are not interchangeable
 ### Engine-owned token-budget revisions
 
 After checkpoint inference, the engine checks full-population diagnostics per
-benchmark. More than 5% truncated questions triggers a new measurement revision:
+benchmark. Exceeding the frozen calibration policy's truncation target triggers
+a new measurement revision:
 it doubles only affected members' unpinned `max_new_tokens`, within the existing
 verified context allocation. The triggering checkpoint settles its final budget
 first; only then does the engine replay the baseline and previously compared

@@ -73,8 +73,8 @@ or GPU acceleration without evidence that it improves the measured bottleneck.
    checkpoint transaction, DDP rank-zero save barrier, shard policy, atomic
    rename, or commit marker.
 7. Run concrete dependency/data/model/GPU preflight. Determine whether the
-   mandatory large-or-complex-training startup validation below applies, record its
-   trigger and exact validation plan in `training.implementation_config`, and fail if
+   change/risk-based startup validation below applies, record the affected
+   execution paths, reusable evidence, and validation plan in `training.implementation_config`, and fail if
    the plan cannot exercise the realized runtime path.
    For Cluster, also confirm the realized model/method/checkpoint-saving peak
    fits `device_info.resource_plan.min_ram_gb`; include full serialization and
@@ -82,7 +82,7 @@ or GPU acceleration without evidence that it improves the measured bottleneck.
    Infrastructure plan is undersized rather than risking an OOM during save.
 8. Copy `telemetry_helper_path` beside `train.py`, import its
    `ZevoTrainerTelemetryCallback`, upload local inputs through the `remote_transfer`
-   helper or correctly constructed direct SCP, export every exact
+   helper, export every exact
    `execution_contract.required_environment` entry remotely, and run training
    on the assigned GPU. For cloud/instance, ensure the real trainer and its
    workers inherit `ZEVO_TICKET_ID`; instance also exports the exact leased
@@ -103,7 +103,7 @@ or GPU acceleration without evidence that it improves the measured bottleneck.
    already on the assigned host. When false, retain the ordinary one-time input
    upload behavior.
 9. Verify the remote checkpoint, copy back script/log/config through the helper
-   or correctly constructed direct SCP, and return one `TrainResult`. Direct
+   through the selected connection, and return one `TrainResult`. Direct
    cloud/instance execution uses `train.log`; cluster execution preserves the
    exact successful `slurm-<JOBID>.out` and sibling `slurm-<JOBID>.err`, and
    reports the `.out` file as `TrainResult.log_path`.
@@ -258,13 +258,12 @@ Orchestrator guidance is high-level (`direction` and optionally
 PEFT, loss-objective, and rollout values remain Train-owned unless the user
 pinned or advised them through Customized Pipeline.
 
-Training is full-parameter by default. `sft` uses the same
-`method_config.use_peft` switch as every other PEFT-capable method. Realize
-`use_peft=false` unless the current Ticket binding or an explicit user
-instruction requires LoRA/PEFT; only then realize `use_peft=true`. Memory or GPU
-pressure is not permission to switch to an adapter. Select a fitting
-full-parameter distributed strategy, or fail with the resources the requested
-training requires.
+Choose full-parameter or PEFT execution from the experiment hypothesis, model,
+data, resource fit, and expected benefit. Record the tradeoff and explicitly set
+`method_config.use_peft`. User pins and strict Ticket bindings override this
+choice. Select and validate the mode before launch; do not silently change an
+executing experiment because of memory pressure. Report infeasibility if no
+faithful plan fits. Follow the same shared PEFT contract for every method.
 
 A resumed historical Ticket may still pin `full_sft` or `lora_sft`. Invoke the
 unified `sft` Skill, preserve the historical method id in that Ticket's YAML,
@@ -402,96 +401,31 @@ acceleration package in `training.software_versions`. Real multi-GPU/multi-node
 execution must be validated on actual hardware; the contracts and launch command
 are unit-tested, but a live run confirms rendezvous, sharding, and saving.
 
-### Startup validation within large or complex training
+### Startup validation based on changes and risk
 
-Validate the opening steps within the full training execution when **any** of
-these conditions holds:
+Choose checks for the actual failure modes introduced by this experiment:
+model/architecture, method, data/collator, optimizer, distributed strategy,
+precision, dependency versions, and checkpoint save/restore implementation.
+Record the selected checks and rationale in `training.implementation_config`.
+Use a matching prior validation report when the relevant runtime and execution
+path are unchanged; cite its artifact and explain why it still applies. Model
+size or GPU count alone neither mandates a fixed ritual nor proves safety.
 
-- the verified parent model contains strictly more than 10 billion parameters;
-- the realized backend is FSDP or DeepSpeed ZeRO-2/3;
-- tensor parallelism, sequence parallelism, parameter offload, or optimizer
-  offload is enabled; or
-- the run uses a custom optimizer class, or an optimizer/backend/framework
-  combination that has not completed an optimizer step in the current verified
-  environment.
+For a new or changed execution path, validate the affected opening operations
+on the real workload and assigned hardware. Check finite loss/gradients and
+actual optimizer progress where affected; count those steps toward the planned
+schedule, then continue the same run. Choose the number of checks from the
+behavior being verified rather than a fixed optimizer-step count.
 
-GPU count alone is neither a trigger nor an exemption. Ordinary DDP alone does
-not trigger this rule. Determine parameter count from verified model config or
-weight metadata when the model id does not contain a reliable size hint; do not
-assume an unknown model is small.
-
-These checks use the opening steps of the real training run, with the exact
-parent checkpoint, resolved training configuration, actual training data, and
-production execution path. Check the first operations and continue the same
-training plan when they succeed.
-
-1. Prepare the actual dataset and load the real parent with the declared
-   launcher, topology, precision, optimizer, sharding/offload, and gradient
-   accumulation settings. Exercise the real sampler, dataloader, collator, and
-   method-specific forward/rollout/reward path to produce the first batch.
-   Validate data access against the installed library versions and actual data
-   scale; avoid repeated expensive conversion or full-dataset work per lookup
-   or rank when it can be prepared once and reused.
-2. Complete at least two forward/backward/optimizer steps on the real model.
-   Check finite loss and gradients, optimizer-step advancement, and telemetry.
-   These steps count toward the declared training schedule, preserving its
-   scheduler/warmup horizon, data order, batch size, and sequence length. For a
-   plan shorter than two optimizer steps, validate the steps it contains.
-3. Save an early complete resumable checkpoint through the framework's
-   distributed checkpoint API and supplied checkpoint helper. Include model or
-   adapter, optimizer, scheduler, counters, RNG, and method-specific state needed
-   to resume the same plan. All required ranks must participate. Verify expected
-   files/shards and the helper's commit/integrity checks, and retain the
-   checkpoint for recovery.
-4. Restore that checkpoint through the framework's supported full-state resume
-   path before continuing the plan. Recreate the Trainer and distributed
-   training state, releasing the previous state first; keep the same GPU
-   allocation. Verify restored model/adapter, optimizer, scheduler, global
-   step, RNG, sampler/data position, and method-specific state against the saved
-   checkpoint. Complete the next scheduled optimizer step with finite loss and
-   gradients and confirm that the step counter advances from the saved value.
-   This resumed step counts toward the original schedule; preserve its total
-   steps, warmup, data order, batch size, and sequence length. If the opening
-   steps already completed the entire plan, verify restored completion state
-   without adding an extra optimizer step. Record successful save and restore
-   before marking startup validation complete, then continue with the restored
-   Trainer. File existence checks or continuing the original in-memory Trainer
-   do not validate restore. Report unsupported state explicitly and repair the
-   resume path rather than substituting a weights-only restart.
-
-Avoid redundant initialization around this required restore. Keep the restored
-Trainer alive and continue the remaining plan in the same process; do not exit
-a successful restore solely to launch a third Trainer. A fresh distributed
-process for the restore is allowed when the framework requires it, but that
-process must continue training after verification. Do not initialize a second
-full model merely for preflight or re-probe the unchanged rollout backend on
-every resume. Use bounded metadata/config/import checks first; preserve verified
-backend/environment evidence and prepared data when their identities match.
-If the model, configuration, runtime, device architecture, or backend changes,
-revalidate the affected assumptions explicitly rather than trusting stale evidence.
-Emit separate model-loading, checkpoint-restoring and training phases with
-elapsed time. A successful startup-validation record must match the realized
-configuration before a later resume can skip the initial two-step validation;
-never restart those steps or reset the schedule on a valid continuation.
-
-Perform this save/restore validation once at startup for the realized training
-configuration. Later recovery checkpoints follow the configured rolling
-retention policy and do not each require a validation restart. When recovering
-from a real failure, verify the restored state and continuation again.
-
-Only the initial validation window is bounded; the real data path and full
-training schedule remain intact. Record the trigger, checks, and phase-specific
-timeouts in `training.implementation_config` before submission. Emit actual
-progress and elapsed time for data preparation, first batch, optimizer steps,
-and checkpoint save, restore, and resumed optimizer steps. Use
-finite budgets appropriate to the model/data/checkpoint size and a watchdog
-that detects a blocked batch or step even when the training loop is not
-returning; an `on_step_end` callback alone is insufficient. On failure, capture
-the last operation and per-rank stacks where possible, stop the affected worker
-group, and repair within the engine's limit while retaining healthy resources
-under the GPU resource lifetime rules above. Record measured steps and checks in
-the job log and
-Train result, distinguishing useful partial work from completion of the plan.
+When walltime continuation or recovery is required, establish that complete
+training state can be saved and restored. If there is no applicable verified
+resume evidence, exercise a real checkpoint and framework-supported restore,
+including optimizer, scheduler, RNG, sampler/progress, and method-owned state.
+Retain the evidence for reuse. A weights-only export is not resume evidence.
+Reuse validated artifacts; repeat checks only when changes invalidate them.
+Preserve parent lineage, the frozen measurement contract, user pins, and the
+planned training semantics. Report infeasibility rather than silently changing
+those boundaries.
 
 ### Method branch selection
 
@@ -499,7 +433,7 @@ When `training_method_pin` is non-empty, use exactly that method in every
 iteration; Method transitions do not apply.
 
 Otherwise, identify the data-signal family before the first choice or an
-Orchestrator-authorized exhausted-branch transition:
+Orchestrator-selected method change:
 
 - supervised language-model or prompt-completion rows: `sft` (and GKD only
   with a valid teacher);
@@ -509,14 +443,14 @@ Orchestrator-authorized exhausted-branch transition:
 - unpaired desirable/undesirable labels: `kto`;
 - prompt-only rows plus a supplied Hugging Face reward model: `online_dpo`.
 
-Retain the immediately prior method by default. A different method is valid
-only when `configuration_suggestions.training_method` explicitly names it and
-the Orchestrator has exhausted the prior method's credible data and inner
-training directions. The named methods above are compatibility examples, not a
-prescribed order or round-robin schedule. Do not fabricate preference pairs or
+Execute the method chosen for this experiment. When no new method is selected,
+retain the bound method. A change must be named in
+`configuration_suggestions.training_method` with the Orchestrator's hypothesis
+and supporting evidence. These are compatibility examples, not a prescribed
+order or round-robin schedule. Do not fabricate preference pairs or
 rewards merely to force a change. PPO is not installed in this release; do not
 label another algorithm PPO. Record `retained_in_branch` while continuing and
-`varied` plus the exhaustion rationale when crossing to a new method branch.
+`varied` plus the experiment rationale when crossing to a new method branch.
 
 ## Prompt and loss
 
@@ -554,9 +488,8 @@ placeholder text, without model generation or optimizer steps:
 This check verifies the frozen contract; it must never select or rewrite it. A
 mismatch means repair the rendering/collator implementation or report a real
 tokenizer/version incompatibility. Do not mutate the Inference YAML to make the
-check pass. The mandatory startup validation, when triggered, covers the
-opening steps of actual training, distributed execution, telemetry, and
-checkpoint save, full-state restore, and resumed training as specified above.
+check pass. Risk-based startup checks cover affected training, distributed execution,
+telemetry, and recovery behavior as described above.
 It preserves the frozen
 prompt/template contract; its recovery checkpoint is not by itself the final
 Train result.
@@ -730,11 +663,11 @@ every DDP rank. Prepare/tokenize once before the distributed trainer starts and
 reuse the resulting Ticket-local materialization, or use a framework-supported
 rank-aware cache/barrier so only one rank performs the work. If a selected
 method genuinely requires multiprocessing during one-time preparation, finish
-and shut down that pool before the distributed Trainer starts. For every
-Cluster Trainer, set the realized
-`training.implementation_config.dataloader_num_workers` to integer `0`; the
-Trainer's DDP ranks must load their own batches without child DataLoader
-processes. A repeated `pymp-* Device or resource busy` traceback is a runtime
+and shut down that pool before the distributed Trainer starts. Set
+`training.implementation_config.dataloader_num_workers` from the per-rank
+CPU, memory, and environment plan described in Execution order. Positive workers
+are allowed when that verified plan fits. A repeated
+`pymp-* Device or resource busy` traceback is a runtime
 defect to eliminate, not normal progress output.
 
 The runner materializes `training_diagnostics.json` from the newest concrete

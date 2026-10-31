@@ -59,7 +59,7 @@ class MemoryDetail(BaseModel):
 
 
 class MemoryUpdate(BaseModel):
-    """One durable lesson reported by a successful worker activation."""
+    """One durable lesson with evidence independent of the overall task outcome."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -86,6 +86,13 @@ class MemoryUpdate(BaseModel):
         ),
     )
     visibility: MemoryVisibility = "agent_local"
+    verification: Literal["reported", "verified"] = "reported"
+    evidence: str = Field("", max_length=6000, description="Reproduction or verification evidence; not an untested proposed fix.")
+    environment: str = Field("", max_length=1000, description="Runtime/version/resource conditions under which the finding was verified.")
+    environment_constraints: list[MemoryDetail] = Field(
+        default_factory=list, max_length=16,
+        description="Necessary environment conditions, as key/value pairs from the supplied memory_environment. Omit to retain a Ticket-local environment observation when environment is provided; leave both empty for a general lesson.",
+    )
 
     @field_validator("key")
     @classmethod

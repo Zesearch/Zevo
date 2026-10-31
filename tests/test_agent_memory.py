@@ -188,7 +188,8 @@ async def test_memory_is_isolated_by_run_agent_and_lane(session: AsyncSession) -
 
     own = await load_memory_context(session, run=run_a, ticket=source)
     assert [entry.key for entry in own.entries] == ["allocator"]
-    assert own.entries[0].details == {"probe": "idle"}
+    assert own.entries[0].details["probe"] == "idle"
+    assert own.entries[0].details["source_status"] == "running"
     assert (await load_memory_context(
         session, run=run_b, ticket=other_run,
     )).entries == []
@@ -333,3 +334,93 @@ async def test_terminal_run_is_audit_only(session: AsyncSession) -> None:
         session, run=run, ticket=train, updates=[_update("after_finish")],
     )
     assert (stored, rejected) == (0, [])
+
+
+@pytest.mark.asyncio
+async def test_failed_verified_findings_are_local_and_keep_failure_provenance(session):
+    run = _run('negative-run')
+    ticket = _ticket('negative-source', run.id)
+    ticket.status = 'repairing'
+    sibling = _ticket('next-train', run.id)
+    orchestrator = _ticket('negative-orch', run.id, 'orchestrator')
+    session.add_all([run, ticket, sibling, orchestrator])
+    await session.flush()
+    verified = _update('allocator_limit').model_copy(update={
+        'verification': 'verified', 'evidence': 'Reproduced allocation failure twice with the same inputs.',
+        'environment': 'Verified with the vllm backend on an instance.',
+        'environment_constraints': [MemoryDetail(key='gpu_provider', value='instance'), MemoryDetail(key='generation_backend', value='vllm')],
+    })
+    stored, rejected = await persist_memory_updates(session, run=run, ticket=ticket,
+        source_status='failed', updates=[verified, _update('untested_fix')])
+    assert stored == 1 and len(rejected) == 1
+    await session.flush()
+    context = await load_memory_context(session, run=run, ticket=sibling)
+    assert context.entries[0].details['source_status'] == 'failed'
+    assert context.entries[0].details['verified_environment'] == verified.environment
+    assert not (await load_memory_context(session, run=run, ticket=orchestrator)).entries
+    for patch in [dict(visibility='shared_candidate'), dict(evidence=''), dict(environment=''),
+                  dict(evidence='/private/test.csv'), dict(evidence='password=secret')]:
+        stored, rejected = await persist_memory_updates(session, run=run, ticket=ticket,
+            source_status='failed', updates=[verified.model_copy(update=patch)])
+        assert stored == 0 and rejected
+    assert await persist_memory_updates(session, run=run, ticket=ticket,
+        source_status='cancelled', updates=[verified]) == (0, [])
+
+
+@pytest.mark.asyncio
+async def test_environment_scopes_filter_without_hiding_general_lessons(session):
+    run = _run('scoped-run')
+    source = _ticket('scoped-source', run.id)
+    target = _ticket('scoped-target', run.id)
+    session.add_all([run, source, target])
+    await session.flush()
+    scoped = _update('gpu_limit').model_copy(update={
+        'environment': 'This limit was observed on GPU A.',
+        'environment_constraints': [MemoryDetail(key='gpu_name', value='GPU A')],
+    })
+    general = _update('general', kind='verified_fact')
+    assert await persist_memory_updates(session, run=run, ticket=source,
+        updates=[scoped, general], current_environment={'gpu_name': 'GPU A', 'driver_version': '1'}) == (2, [])
+    same = await load_memory_context(session, run=run, ticket=target,
+        current_environment={'gpu_name': 'GPU A', 'driver_version': '2'})
+    assert {e.key for e in same.entries} == {'gpu_limit', 'general'}
+    changed = await load_memory_context(session, run=run, ticket=target,
+        current_environment={'gpu_name': 'GPU B', 'driver_version': '2'})
+    assert {e.key for e in changed.entries} == {'general'}
+    unknown = await load_memory_context(session, run=run, ticket=target)
+    assert {e.key for e in unknown.entries} == {'general'}
+    scoped_b = scoped.model_copy(update={'environment_constraints': [MemoryDetail(key='gpu_name', value='GPU B')]})
+    await persist_memory_updates(session, run=run, ticket=target, updates=[scoped_b],
+        current_environment={'gpu_name': 'GPU B'})
+    again = await load_memory_context(session, run=run, ticket=source,
+        current_environment={'gpu_name': 'GPU A'})
+    assert {e.key for e in again.entries} == {'gpu_limit', 'general'}
+
+
+@pytest.mark.asyncio
+async def test_unknown_environment_does_not_transfer_between_tickets(session):
+    run = _run('unknown-run')
+    source = _ticket('unknown-source', run.id)
+    target = _ticket('unknown-target', run.id)
+    session.add_all([run, source, target])
+    await session.flush()
+    update = _update('local').model_copy(update={'environment': 'Package-specific observation.'})
+    await persist_memory_updates(session, run=run, ticket=source, updates=[update])
+    assert (await load_memory_context(session, run=run, ticket=source)).entries
+    assert not (await load_memory_context(session, run=run, ticket=target)).entries
+
+
+def test_memory_environment_uses_nested_device_facts_without_routes(tmp_path):
+    from types import SimpleNamespace
+    from zevo.engine.agent.memory import memory_environment
+    run = _run('facts-run')
+    ticket = _ticket('facts-ticket', run.id)
+    path = tmp_path / 'device.json'
+    path.write_text(json.dumps({'gpu': {'gpu_name': 'GPU A', 'gpu_count': 2, 'vram_mb': 24000},
+        'cuda': {'driver_version': '550', 'cuda_version': '12.4'},
+        'ssh': {'password': 'do-not-expose'}}))
+    facts = memory_environment(run, ticket, SimpleNamespace(device_info_path=str(path)))
+    assert facts['gpu_name'] == 'GPU A' and facts['gpu_count'] == '2'
+    assert facts['driver_version'] == '550'
+    assert 'do-not-expose' not in json.dumps(facts)
+    assert 'ssh' not in facts

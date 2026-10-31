@@ -1307,6 +1307,8 @@ def test_run_patch_rejects_engine_owned_facts() -> None:
 @pytest.mark.asyncio
 async def test_supervisor_can_explicitly_finish_its_run() -> None:
     from datetime import datetime, timezone
+    from sqlalchemy import select
+    from zevo.db import TicketMessage
 
     from zevo.api.routers.shared.runs import PatchRunRequest, patch_run
 
@@ -1349,6 +1351,16 @@ async def test_supervisor_can_explicitly_finish_its_run() -> None:
         assert result.summary == "Champion retained."
         assert result.halted_reason == ""
         assert (await db.get(Run, "explicit-success")).halted_reason == ""
+
+        messages = (await db.execute(select(TicketMessage))).scalars().all()
+        assert len(messages) == 1
+        assert messages[0].ticket_id == "orchestrate-explicit-001"
+        assert messages[0].author == "orchestrator"
+        assert messages[0].body == "Done: Run finished with status success.\n\nChampion retained."
+        # Retrying the close through an authorized caller must not duplicate
+        # the completion message; the worker itself loses API access at close.
+        await patch_run("explicit-success", PatchRunRequest(status="success"), db)
+        assert len((await db.execute(select(TicketMessage))).scalars().all()) == 1
 
         updated = await patch_run(
             "explicit-success",
@@ -1561,4 +1573,39 @@ async def test_run_agent_configuration_includes_executed_system_and_registry_rol
         assert roles["evaluation"]["variants"][0]["model"] == "no-llm"
         assert roles["registry"]["variants"][0]["model"] == "claude-opus-5"
         assert len(roles["data"]["variants"]) == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('requested', ['failed', 'success'])
+async def test_terminal_message_commits_only_with_accepted_close(requested):
+    from fastapi import HTTPException
+    from sqlalchemy import select
+    from zevo.db import TicketMessage
+    from zevo.api.routers.shared.runs import PatchRunRequest, patch_run
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    async with Session() as db:
+        db.add(Run(id='closing', metric='accuracy', status='running',
+                   supervisor_ticket_id='supervisor', registry_version_tag='M-closing'))
+        db.add(Ticket(id='supervisor', run_id='closing', agent_id='orchestrator', status='running'))
+        db.add(Ticket(id='child', run_id='closing', agent_id='train', status='running'))
+        await db.commit()
+        request = PatchRunRequest(status=requested, summary='Final explanation.',
+                                  halted_reason='Unable to continue.' if requested == 'failed' else '')
+        if requested == 'success':
+            with pytest.raises(HTTPException) as exc:
+                await patch_run('closing', request, db)
+            assert exc.value.status_code == 409
+            await db.rollback()
+            assert (await db.get(Run, 'closing')).status == 'running'
+            assert not (await db.execute(select(TicketMessage))).scalars().all()
+        else:
+            result = await patch_run('closing', request, db)
+            assert result.status == 'failed'
+            messages = (await db.execute(select(TicketMessage))).scalars().all()
+            assert len(messages) == 1
+            assert messages[0].body == 'Done: Run finished with status failed.\n\nFinal explanation.'
     await engine.dispose()

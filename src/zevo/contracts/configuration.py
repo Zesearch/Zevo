@@ -172,8 +172,11 @@ def train_method_contracts() -> dict[str, Any]:
             "method_config": {
                 "allowed_keys": method_keys,
                 "required_keys": method_required,
-                "default_values": (
-                    {"use_peft": False} if "use_peft" in method_keys else {}
+                "default_values": {},
+                "selection_guidance": (
+                    "Choose unpinned values from the experiment hypothesis, data, "
+                    "model, resource fit, and expected benefit. Explicitly select "
+                    "use_peft where supported; user pins remain binding."
                 ),
                 "value_contracts": {
                     key: (

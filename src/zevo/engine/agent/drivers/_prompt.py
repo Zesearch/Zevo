@@ -47,6 +47,7 @@ def _payload_block(input_payload: BaseModel) -> str:
         f"## Ticket payload ({type(input_payload).__name__})\n\n"
         f"```json\n{input_payload.model_dump_json(indent=2)}\n```"
         + _gpu_runtime_block(input_payload)
+        + _activation_block(input_payload)
     )
 
 
@@ -145,23 +146,40 @@ def _conversation_block(conversation: list[dict] | None) -> str:
 
 
 def _do_the_work_block() -> str:
-    """The anti-fabrication / anti-half-done block. Applied to every
-    driver because every agent benefits from being told NOT to stop
-    after just planning. Particularly important for Claude (drifts toward
-    verbose planning + early exit) and any future model that does the
-    same."""
     return (
-        "\n\n## CRITICAL — DO THE WHOLE TASK IN THIS ONE RESPONSE\n\n"
-        "Execute the entire task NOW, in this single turn: actually run "
-        "the shell commands, read/write the real files, and finish. Do "
-        "NOT stop after merely announcing a plan or saying what you "
-        "'will' do next. A response that ends with only a planning "
-        "sentence (e.g. \"Setting up a plan...\", \"Let me start by...\") "
-        "and no completed work + no final JSON is a HARD FAILURE — the "
-        "harness receives nothing and your ticket fails. Keep going "
-        "until the work is genuinely done and you have printed the JSON "
-        "described below. Never end your turn early."
+        "\n\n## COMPLETE THIS ACTIVATION\n\n"
+        "Perform the work assigned to this activation, not merely announce a plan. "
+        "Use activation_contract and the resolved operation/phase to determine completion. "
+        "A submission returns deferred after the engine accepts its submission artifacts; "
+        "do not wait for the external job. Collect validates assigned outputs without "
+        "launching duplicate work. An Orchestrator wake completes one decision/action. "
+        "Report a real blocker or failure truthfully; always return the typed result. "
+        "Use actual progress and remaining resource budgets, not a fixed turn count."
     )
+
+
+def _activation_block(input_payload: BaseModel) -> str:
+    contract = getattr(input_payload, "activation_contract", {}) or {}
+    mode = contract.get("gpu_allocation_mode", "")
+    parts = []
+    if mode in {"per_run", "per_stage"}:
+        parts.append("Repair on the same healthy retained allocation; the engine owns "
+                     "resource acquisition and release. Replace only when unavailable or unsuitable.")
+        if contract.get("gpu_provider") == "cluster":
+            parts.append("Slurm may reuse the allocation JOBID. Do not cancel the parent allocation yourself.")
+    elif mode == "per_submission":
+        parts.append("Each workload submission receives a fresh allocation; the engine "
+                     "owns submission and release. Preserve recovery state on durable storage.")
+    plane = contract.get("data_plane")
+    if plane == "remote":
+        parts.append("Prepare Training on the assigned remote plane; return remote pointers "
+                     "and local control artifacts, without copying training rows back.")
+    elif plane == "local":
+        parts.append("Prepare Training locally in work_dir; return local artifacts. "
+                     "No GPU host is required for this activation.")
+    if not parts:
+        return ""
+    return "\n\n## Active execution mode\n" + "\n".join(parts)
 
 
 # How much of the JSON Schema may go in the prompt. Generous, because what it

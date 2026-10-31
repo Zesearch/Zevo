@@ -12,6 +12,27 @@ SAMPLE_SIZE = 64
 # Compare integer counts, so exactly 5% passes without floating point drift.
 MAX_TRUNCATION_PERCENT = 5
 REPORT_NAME = "length_calibration.json"
+DEFAULT_POLICY = {"sample_size": SAMPLE_SIZE, "max_truncation_percent": MAX_TRUNCATION_PERCENT,
+                  "max_configurations": 4}
+
+
+def calibration_policy(config: str | Path | None = None) -> dict:
+    """Defaults for historical YAML; explicit choices freeze with new configurations."""
+    import yaml
+    raw = yaml.safe_load(Path(config).read_text()) if config is not None else {}
+    raw = raw or {}
+    values = raw.get("implementation_config", {}).get("length_calibration_policy", {})
+    if not isinstance(values, dict) or set(values) - set(DEFAULT_POLICY):
+        raise ValueError("invalid length_calibration_policy keys")
+    policy = {**DEFAULT_POLICY, **values}
+    for name in ("sample_size", "max_configurations"):
+        if type(policy[name]) is not int or policy[name] < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    target = policy["max_truncation_percent"]
+    if type(target) not in (int, float) or not 0 <= target < 100:
+        raise ValueError("max_truncation_percent must be finite and in [0, 100)")
+    return policy
+
 
 
 REPETITION_RULE = "word8-v1"
@@ -71,7 +92,7 @@ def _sha256(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def sample_rows(questions: str | Path) -> tuple[list[str], list[dict], list[int]]:
+def sample_rows(questions: str | Path, sample_size: int = SAMPLE_SIZE) -> tuple[list[str], list[dict], list[int]]:
     path = Path(questions)
     csv.field_size_limit(1 << 30)
     with path.open(newline="", encoding="utf-8-sig") as handle:
@@ -95,7 +116,9 @@ def sample_rows(questions: str | Path) -> tuple[list[str], list[dict], list[int]
     ordered = sorted(range(len(rows)), key=lambda i: (
         sum(len(str(v)) for k, v in rows[i].items() if k != "id"), i,
     ))
-    size = min(SAMPLE_SIZE, len(rows))
+    if type(sample_size) is not int or sample_size < 1:
+        raise ValueError("sample_size must be positive")
+    size = min(sample_size, len(rows))
     indices = sorted(ordered[i * (len(rows) - 1) // (size - 1)]
                      for i in range(size)) if size > 1 else [0]
     return fields, [rows[i] for i in indices], indices
@@ -127,9 +150,10 @@ def _validate_records(records: list[dict], size: int) -> int:
 
 
 def _accept(evidence: dict, size: int, indices: list[int], config_hash: str,
-            questions_hash: str) -> str:
+            questions_hash: str, policy: dict | None = None) -> str:
+    target = (policy or DEFAULT_POLICY)["max_truncation_percent"]
     count = _validate_records(evidence.get("records"), size)
-    if count * 100 <= size * MAX_TRUNCATION_PERCENT:
+    if count * 100 <= size * target:
         return "within_target"
     outputs = evidence.get("repetition_outputs", {})
     if isinstance(outputs, dict):
@@ -140,12 +164,16 @@ def _accept(evidence: dict, size: int, indices: list[int], config_hash: str,
     if not isinstance(waiver, dict):
         raise ValueError(
             f"length calibration failed: {count}/{size} questions truncated; "
-            "maximum is 5%. Adjust the unpinned budget and repeat the same sample. "
-            "After 2–3 adjustments, documented model output behavior may justify a waiver."
+            f"maximum is {target}%. Adjust the unpinned budget within the calibration "
+            "resource plan, or provide observed evidence and a residual-truncation rationale."
         )
-    attempts = waiver.get("previous_attempts")
-    if not isinstance(attempts, list) or not 2 <= len(attempts) <= 3:
-        raise ValueError("output behavior waiver requires 2–3 previous attempts")
+    attempts = waiver.get("previous_attempts", [])
+    if not isinstance(attempts, list):
+        raise ValueError("previous_attempts must be a list of observed attempts")
+    if not attempts:
+        for key in ("resource_constraints", "acceptance_rationale"):
+            if not isinstance(waiver.get(key), str) or not waiver[key].strip():
+                raise ValueError(f"a waiver without prior attempts requires {key}")
     hashes = {config_hash}
     for attempt in attempts:
         if not isinstance(attempt, dict):
@@ -158,7 +186,7 @@ def _accept(evidence: dict, size: int, indices: list[int], config_hash: str,
         if (attempt.get("questions_sha256") != questions_hash
                 or attempt.get("sample_row_indices") != indices):
             raise ValueError("waiver attempts must use the same questions and sample")
-        if _validate_records(attempt.get("records"), size) * 100 <= size * MAX_TRUNCATION_PERCENT:
+        if _validate_records(attempt.get("records"), size) * 100 <= size * target:
             raise ValueError("waiver requires persistent truncation above target")
         if not isinstance(attempt.get("adjustment"), str) or not attempt["adjustment"].strip():
             raise ValueError("waiver must describe each budget/stop-control adjustment")
@@ -179,10 +207,29 @@ def _accept(evidence: dict, size: int, indices: list[int], config_hash: str,
     return "accepted_output_behavior"
 
 
+def record_configuration(config: str | Path, questions: str | Path, policy: dict) -> None:
+    """Count distinct checked configurations per benchmark, including failed checks.
+
+    Retrying identical bytes consumes no additional configuration. The ledger
+    lives with the member YAML so separate helper invocations share the budget.
+    """
+    path = Path(config).with_name("length_calibration_trials_" + _sha256(questions) + ".json")
+    trials = json.loads(path.read_text()) if path.exists() else {"policy": policy, "configurations": []}
+    if trials["policy"] != policy:
+        raise ValueError("calibration policy must remain fixed across candidates")
+    digest = _sha256(config)
+    if digest not in trials["configurations"]:
+        if len(trials["configurations"]) >= policy["max_configurations"]:
+            raise ValueError("calibration configurations exceed the declared resource budget")
+        trials["configurations"].append(digest)
+        path.write_text(json.dumps(trials, indent=2) + "\n")
+
+
 def check(config: str | Path, questions: str | Path, diagnostics: str | Path,
           predictions: str | Path | None = None) -> Path:
     """Gate measured generation; write evidence after meeting the target or a documented waiver."""
-    _, sample, indices = sample_rows(questions)
+    policy = calibration_policy(config)
+    _, sample, indices = sample_rows(questions, policy["sample_size"])
     report = Path(config).with_name(REPORT_NAME)
     report.unlink(missing_ok=True)  # A failed recheck must invalidate prior evidence.
     evidence = json.loads(Path(diagnostics).read_text(encoding="utf-8"))
@@ -199,10 +246,12 @@ def check(config: str | Path, questions: str | Path, diagnostics: str | Path,
         outputs = prediction_outputs(predictions, records, column, [str(r["id"]) for r in sample])
         limited = {r["row_index"] for r in records if r["finish_reason"] == "length"}
         evidence["repetition_outputs"] = {str(i): outputs[i] for i in limited}
+    record_configuration(config, questions, policy)
     config_hash, questions_hash = _sha256(config), _sha256(questions)
-    acceptance = _accept(evidence, len(indices), indices, config_hash, questions_hash)
+    acceptance = _accept(evidence, len(indices), indices, config_hash, questions_hash, policy)
     report.write_text(json.dumps({
         "schema_version": 1,
+        "policy": policy,
         "config_sha256": _sha256(config),
         "questions_sha256": _sha256(questions),
         "sample_row_indices": indices,
@@ -222,16 +271,19 @@ def check(config: str | Path, questions: str | Path, diagnostics: str | Path,
 def validate(config: str | Path, questions: str | Path) -> None:
     """Recompute acceptance; never trust an agent-authored passed/rate flag."""
     report = json.loads(Path(config).with_name(REPORT_NAME).read_text(encoding="utf-8"))
-    _, _, indices = sample_rows(questions)
+    policy = calibration_policy(config)
+    _, _, indices = sample_rows(questions, policy["sample_size"])
     if not isinstance(report, dict) or report.get("schema_version") != 1:
         raise ValueError("unsupported length calibration report version")
+    if report.get("policy", DEFAULT_POLICY) != policy:
+        raise ValueError("length calibration policy differs from the frozen configuration")
     if report.get("config_sha256") != _sha256(config):
         raise ValueError("length calibration does not match the final configuration")
     if report.get("questions_sha256") != _sha256(questions):
         raise ValueError("length calibration does not match the assigned questions")
     if report.get("sample_row_indices") != indices:
-        raise ValueError("length calibration must use the system-selected 64-row sample")
-    _accept(report, len(indices), indices, _sha256(config), _sha256(questions))
+        raise ValueError("length calibration must use the policy-selected sample")
+    _accept(report, len(indices), indices, _sha256(config), _sha256(questions), policy)
 
 
 def run_measured(suite: str | Path, command: list[str]) -> int:
@@ -260,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--questions", required=True)
     prepare.add_argument("--output", required=True)
+    prepare.add_argument("--config", help="Provisional config carrying the calibration policy")
     gate = sub.add_parser("check")
     gate.add_argument("--config", required=True)
     gate.add_argument("--questions", required=True)
@@ -270,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("workload", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        fields, rows, _ = sample_rows(args.questions)
+        fields, rows, _ = sample_rows(args.questions, calibration_policy(args.config)["sample_size"])
         if Path(args.output).resolve() == Path(args.questions).resolve():
             raise ValueError("calibration output must not overwrite assigned questions")
         with open(args.output, "w", newline="", encoding="utf-8") as handle:

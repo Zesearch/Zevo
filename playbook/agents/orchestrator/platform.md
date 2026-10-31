@@ -11,8 +11,8 @@ that settled Validation contract exactly as for a `full_pipeline` Run, and you
 are woken with a `run_created` trigger. Treat that scoping Ticket as Run Setup,
 not as the Data stage: the pipeline below starts from Data 0 as usual, and the
 settled metric, Validation set, and held-out are immutable. Training data,
-base-model, and method ownership follows the same pins/queries and L1–L4 search
-hierarchy as a `full_pipeline` Run.
+base-model, and method ownership follows the same pins and evidence-based
+experiment decisions as a `full_pipeline` Run.
 
 ```text
 Orchestrator
@@ -30,7 +30,7 @@ Orchestrator
 
 Iteration N >= 1
   -> Orchestrator continues the active model/method/data branch
-     or crosses exactly one evidenced exhausted-search boundary
+     or selects a justified change of data, method, or model
   -> Infrastructure purpose=train only when the prior remote plane is unavailable
   -> Data N on that plane only if the recipe changes; otherwise reuse latest Data
   -> Train N (bind exact data_signature; parent selected from Run history)
@@ -42,9 +42,9 @@ Iteration N >= 1
   -> Orchestrator
   -> Journal N
   -> Orchestrator
-  -> Continue inner search; else next Data; else next Method; else next Base model
+  -> Choose the next experiment by evidence, expected benefit, and cost
   -> A new Base model receives its own Baseline Inference/Evaluation before Train
-  -> Or stop when the permitted hierarchy is exhausted
+  -> Or stop on a configured limit or a justified cost/benefit decision
 
 Stop
   -> Orchestrator creates one Registry for the Validation champion
@@ -286,9 +286,8 @@ pin when present; otherwise use `user_request.method_query`, when present, to
 guide the initial choice and later Method-branch order, then choose an installed
 method compatible with the available source signal. The query is advisory and
 does not override signal, task, model, or runtime compatibility. This starts the
-active Method branch; later Train iterations retain it until the Orchestrator
-has exhausted that Method's credible Data branches and explicitly selects the
-next Method. For an unpinned initial choice, make the selection rationale
+active Method branch; the Orchestrator may retain it or explicitly select a
+compatible alternative with an experiment rationale. For an unpinned initial choice, make the selection rationale
 visible in the Orchestrator Ticket completion message and
 `SupervisorAction.summary`: name the supervision signal the supplied source
 contains or the acquisition request is designed to obtain, explain why the
@@ -309,16 +308,14 @@ from 20% of every sufficiently large Test-suite benchmark and aggregates their
 scores. Small benchmarks remain final-test-only; all retained Test rows stay
 private.
 
-Before every later Train N, continue the active Data branch while credible
-Train-only or recipe-level refinements remain. Learning rate, epochs, batch
+Before every later Train N, choose whether the experiment needs a Data change. Learning rate, epochs, batch
 size, optimizer, or another Train-only change reuses the latest successful Data
 Ticket. Subset selection, filtering, sampling, weighting,
 augmentation/transformation, field mapping, or data seed may create Data N
 inside the same source branch with a non-empty high-level
 `recipe_intent.direction`. Changing the dataset/source/query begins a new Data
-branch and is allowed only after the previous Data branch is evidenced as
-exhausted. A Method transition may also require Data N for its record shape,
-but only after all credible Data branches under the old Method are exhausted.
+branch and requires an experiment rationale. A Method transition may also
+require Data N for its record shape. Neither change requires prior exhaustion.
 Empty/zero detailed fields delegate them to Data. The API rejects an unchanged
 intent signature. For N >= 1, if Data only partially realizes the requested
 recipe, inspect the realized rows before creating Train. Once that Data Ticket
@@ -364,12 +361,11 @@ baseline Inference profile as a data experiment.
 When `base_model` is unpinned, use `user_request.model_query`, when present, to
 guide the initial model and later Base-model branch order. Treat it as advisory:
 the selected model must still satisfy task fit, access/license, runtime, and
-resource evidence, and the current model branch must still be exhausted before
-a switch. Inference checks the actual model/tokenizer/backend, chooses every unpinned
+resource evidence; explain the hypothesis and cost/benefit of a switch. Inference checks the actual model/tokenizer/backend, chooses every unpinned
 prompt, parsing, and decoding value, writes the complete lineage-specific
 `inference_config.yaml`, then generates Validation predictions in the same
 heartbeat. The first model baseline is iteration 0. If an unpinned Base-model
-branch is later exhausted, select the next model at the next Train iteration,
+change is justified, select the next model at the next Train iteration,
 run a new Baseline Inference/Evaluation there, and use that model's YAML for all
 of its candidates. Never reuse one model lineage's inference YAML or checkpoint
 inside another.
@@ -463,7 +459,7 @@ Validation score remains the only champion/Registry selection authority.
 The Orchestrator may suggest only a high-level `training_method` and
 experimental `direction`. On the first Train in an unpinned Method branch,
 select the method explicitly. Later Trains retain it; a different suggestion is
-a Method-branch transition and requires prior exhaustion evidence. Train chooses
+a Method transition and requires an experiment rationale. Train chooses
 all unpinned loss and detailed hyperparameter values, reads the matching model
 lineage's Baseline Inference prompt contract, writes `train_config.yaml`,
 performs its own runtime preflight, and trains from the exact parent.
@@ -573,30 +569,28 @@ second Registry Ticket or resume optimization after this point.
 
 ## Suggestions and memory
 
-### Exhausted-branch transition record
+### Experiment transition record
 
-Every Data, Train, and Inference request schema includes
-`branch_transition`. Leave it at its `level="none"` default for initial
-selection and while continuing the active branch. When crossing a boundary,
-supply all four fields:
+For a Data-source, Method, or Base-model change, supply `branch_transition`:
 
 ```json
 {
   "level": "data | method | base_model",
-  "exhausted_branch": "<the exact branch being left>",
-  "validation_evidence": "<observed Validation plateau/regressions and tried directions>",
-  "next_branch": "<the exact branch being entered>"
+  "previous_branch": "<branch being left>",
+  "validation_evidence": "<observed results and uncertainty>",
+  "next_branch": "<branch being tested>",
+  "rationale": "<hypothesis, expected benefit, estimated cost/time, and why now>"
 }
 ```
 
-A changed source/dataset/query uses `data`. A changed unpinned training method
-uses `method`; include the record on its Data request when reshaping Data and on
-the first Train request that selects the new method. A changed unpinned Base
-model uses `base_model` on its new Baseline Inference request. Outer transitions
-may reset inner branches, but they still name only the one outer boundary being
-crossed. Recipe refinements and hyperparameter/checkpoint changes inside the
-active Data branch are not transitions. The API rejects an unrecorded branch
-change and a transition record that does not correspond to a change.
+Use `level="none"` for initial selection and within-branch refinements. A
+Method change carries the record on Data when reshaping records and on its
+first Train request. A Base-model change carries it on Baseline Inference.
+For coupled changes, use the enclosing scope (`base_model`, then `method`,
+then `data`) and explain every coupled change in the rationale; this describes
+provenance, not an exploration order. The API validates complete records and
+matching changes, not whether a previous branch has been exhausted.
+Historical `exhausted_branch` records remain readable.
 
 For Orchestrator-created Tickets, `configuration_suggestions` may contain a
 high-level `direction` and, for Train, a compatible `training_method` based on
@@ -613,45 +607,17 @@ accepted, adjusted, or self-selected choices in YAML and may store verified
 runtime lessons in Run-local Agent memory. Memory is evidence, not a second
 configuration store and never crosses Runs.
 
-When the user did not pin `training_method`, inspect earlier Train YAML files
-and retain the active method while any credible Data or inner training direction
-remains. Do not use method diversity as a per-iteration objective.
-Preference rows may support alternatives such as DPO/CPO/ORPO; prompt-only
-rows with a trustworthy reward may support GRPO/RLOO/RFT. PPO is not an
-installed Zevo method in this release and must not be claimed or substituted.
-Only after the current Method's Data branches are exhausted may an installed,
-compatible alternative start the next Method branch. If no alternative fits,
-the Method level is exhausted and the search either advances to the next
-unpinned Base model or stops.
-
-Verifiable-reward promotion (the one deliberate exception to "exhaust the
-current Method's Data branches first"): the supervisor context carries
-`verifiable_reward_available`, derived from the Validation scoring contract — it
-is true when the built-in metric checks an exactly-correct discrete answer
-(`accuracy`, `exact_match`, `mc_loglikelihood`/`accuracy_norm`), because a
-deterministic +1/0 correctness reward is then derivable from the same gold
-answer the metric uses. When it is true and a reasonable SFT baseline exists
-(at least one SFT candidate measured on Validation), PROMOTE the progression
-SFT(+distilled) -> RFT -> GRPO as the next Method lever instead of treating
-reinforcement as a last resort: select RFT (the rejection-sampling bridge)
-next, then GRPO with the +1/0 correctness reward (parse the answer, compare to
-the gold option, optional small format reward). This is a real Method
-transition — record `branch_transition` (`level="method"`) naming the SFT
-branch, its Validation evidence, and the promoted next method, and give the
-usual supervision-signal rationale (a trustworthy verifiable reward is present).
-Overlap/graded metrics (`f1`, `token_f1`, `bleu`, `rouge_l`) and any `custom`
-evaluator are NOT verifiable rewards, so `verifiable_reward_available` is false
-for them and the ordinary exhaustion order is preserved unchanged. A
-user-pinned `training_method` removes the Method-transition level completely:
-never promote a reinforcement method over a method pin.
-Every Orchestrator heartbeat that recommends, changes, or explicitly retains an
-unpinned method must put the evidence-based method rationale in its completion
-message and `SupervisorAction.summary`; a method name alone is incomplete.
-
-A user-pinned training method freezes only the method family. It does not imply
-that the training data recipe, sampling/weighting/curriculum, or unpinned
-method-owned training values have no remaining optimization lever. Consider
-evidenced shared memory recommendations before declaring the search exhausted.
+When the user did not pin `training_method`, choose a compatible method based
+on supervision, observed results, the next hypothesis, and resource cost.
+Retaining, changing, and revisiting methods are all valid; method diversity is
+not an objective. Preference rows may support DPO/CPO/ORPO; a verified reward
+may support GRPO/RLOO/RFT. PPO is not installed in this release.
+`verifiable_reward_available` reports whether the built-in scoring contract
+implies a correctness reward. It establishes neither a preferred method nor a
+required SFT baseline. False does not prohibit another independently verified
+training-side reward. Never use held-out Test data to construct training rewards.
+Explain method choices in the completion message and `SupervisorAction.summary`.
+User pins remain binding; other unpinned choices may still be explored.
 
 Parent selection is an Orchestrator lineage decision, not a detailed training
 hyperparameter. Default to the immediately previous checkpoint only for a true
@@ -662,15 +628,13 @@ selected checkpoint and its Train YAML as one atomic provenance pair. The
 current Validation champion is not automatically the parent, and post-hoc
 parent selection is forbidden. Registry does not exist until the loop stops.
 
-When stopping voluntarily, cite the observed Validation trend and the live
-cost/time projection. A single regression supports retaining the prior champion;
-it does not by itself prove overfitting or that every direction is exhausted.
-If a complete round is affordable and a materially different evidence-based
-inner or outer branch remains, continue in hierarchy order: inner training,
-then Data, then Method, then Base model. Stop only when no credible complete
-experiment remains at any level allowed by the pins, or another explicit
-terminal condition applies, including a user-configured regression tolerance
-returned by the stop verdict.
+When stopping voluntarily, cite observed Validation results, uncertainty, and
+expected benefit relative to the live cost/time projection. You may stop with
+budget remaining when no proposed experiment is worth its cost or evidence is
+insufficient to justify further spending. Describe relevant untried alternatives
+without claiming they have all failed. A regression alone does not prove
+that other directions fail. Retain the Validation champion. Respect explicit
+user stop policies; no fixed exploration order or exhaustive search is required.
 Do not say another round fits when either a credible cost estimate exceeds the
 remaining money or a credible duration estimate exceeds the remaining time. If
 both projections say it fits and you still stop, state the evidence-based

@@ -35,10 +35,9 @@ Training Data is versioned inside the Run. Reuse the latest Data Ticket when
 the next direction changes no data semantics. Create a new Data Ticket before
 Train only for a changed subset/filter/sampling/weighting/transformation/mapping,
 method-required shape, or seed. Validation/Test and every measurement artifact
-remain frozen regardless. Keep the current source/query as one Data branch until
-its credible inner refinements are exhausted. Only then may a Zevo-owned Data
-branch change; exhaust Data branches before changing Method, and Method branches
-before changing Base model.
+remain frozen regardless. Choose source, method, and model changes from evidence,
+expected benefit, and cost, without a required ordering or exhaustion claim.
+Record the hypothesis and decision, including when revisiting an earlier branch.
 
 The Specialist records the realized configuration in an artifact:
 

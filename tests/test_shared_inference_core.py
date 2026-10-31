@@ -107,3 +107,36 @@ def test_submit_checks_every_member_before_gpu(tmp_path, config, member_state):
     else:
         assert status == "failed"
         assert "shared inference core validation failed" in summary
+
+
+@pytest.mark.parametrize('phase,status,allowed', [
+    ('collect', 'deferred', True),
+    ('submit', 'deferred', False),
+    ('collect', 'succeeded', False),
+])
+def test_waiting_collect_does_not_claim_or_validate_missing_artifacts(tmp_path, config, phase, status, allowed):
+    from zevo.contracts.inference import InferenceTaskInput, InferenceResult
+    from zevo.contracts.infrastructure import SlurmStageJobContract
+    from zevo.engine.run.runner import _extract_summary_artifact_meta
+    from tests.test_inference_reuse_suggestions import _baseline_kwargs
+
+    inp = InferenceTaskInput(**_baseline_kwargs(
+        tmp_path, shared_inference_core=inference_core(config),
+    ))
+    inp = inp.model_copy(update={'slurm_job': SlurmStageJobContract.model_construct(
+        enabled=True, phase=phase, job_id='123', bookkeeping_row_id='row',
+    )})
+    paths = ({'inference_config_path': str(tmp_path / 'missing.yaml'),
+              'predictions_path': str(tmp_path / 'missing.csv'),
+              'generation_diagnostics_path': str(tmp_path / 'missing.json')}
+             if status == 'succeeded' else {})
+    result = InferenceResult(ticket_id=inp.ticket_id, status=status,
+                             notes='Workload is still running', error_message='', **paths)
+    actual, summary, artifact, metadata = _extract_summary_artifact_meta(
+        result, inp=inp, agent_id='inference', work_dir=str(tmp_path))
+    if allowed:
+        assert actual == 'deferred'
+        assert artifact == '' and metadata == {}
+    else:
+        assert actual == 'failed'
+        assert 'shared inference core validation failed' in summary

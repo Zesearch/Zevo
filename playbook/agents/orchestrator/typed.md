@@ -51,24 +51,14 @@ Exact deltas in the Journal `next` are the concise user-facing proposed plan;
 they do not replace the realized configuration later recorded by the
 Specialist.
 
-Treat Zevo-owned decisions as a nested search, not independent per-iteration
-choices: Base model -> Training method -> Training data -> inner refinements.
-Retain the active branch until its inner space is evidenced as exhausted. A
-boundary-crossing Journal `next` and `SupervisorAction.summary` must name the
-exhausted branch, its Validation evidence, and the next branch. A Data switch
-precedes a Method switch; a Method switch precedes a Base-model switch. User
-pins remove their corresponding switch level.
-
-The three optional query fields in `user_request` guide rather than pin that
-search. `data_query` describes useful sources or preparation preferences,
-`method_query` guides the initial Method and the order of later Method branches,
-and `model_query` guides model constraints and Base-model branch order. Interpret
-them with the task objective and measured evidence. Exact `dataset`,
-`training_method`, and `base_model` fields remain the only pins for these three
-levels. Do not cross a branch boundary early merely to follow a query.
+Choose the next experiment by evidence, expected benefit, and cost. Data,
+method, and model changes have no prescribed order; earlier branches may be
+revisited. Record a changed branch and its hypothesis in `branch_transition`
+and summarize the choice in the Journal and `SupervisorAction.summary`.
+The optional queries guide selection; exact user pins remain binding.
 
 When `training_method` is not user-pinned, the heartbeat that initially selects,
-later switches after exhaustion, or explicitly retains a method must explain the
+later switches, or explicitly retains a method must explain the
 choice in the Orchestrator Ticket completion message and
 `SupervisorAction.summary`. The rationale names the available or requested
 supervision signal, method/task/model/runtime compatibility, the relevant
@@ -97,6 +87,13 @@ Return exactly one `SupervisorAction`:
   execution issues, while reaching a configured limit remains normal;
 - `mark_failed`: you first PATCHed the precise terminal failure;
 - `wait`: a required child is genuinely active or awaiting user input.
+
+Before a terminal PATCH, finish all verification and instruction updates.
+The backend writes the final Ticket completion message in the same transaction
+as the Run's terminal status, using the supplied summary. Use the PATCH response
+as confirmation, then emit the final `SupervisorAction` and exit. Do not make
+any further API calls or POST a separate `Done:` message after the Run closes;
+worker API permissions end at that point.
 
 Emit the standard reading and decision phase markers before the final JSON.
 For `emit_ticket`, `child_ticket_id` must be the non-empty `id` extracted from
