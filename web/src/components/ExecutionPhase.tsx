@@ -17,7 +17,8 @@ export function ExecutionPhase({ events, agent, active, workload }: {
   if (!active || !phase) return null;
   const started = Date.parse(phase.startedAt);
   const elapsed = Number.isFinite(started) ? Math.max(0, Math.floor((now - started) / 1000)) : 0;
+  const duration = `${elapsed >= 3600 ? `${Math.floor(elapsed / 3600)}h ` : ""}${Math.floor(elapsed / 60) % 60}m ${elapsed % 60}s`;
   return <div role="status" className="mb-3 rounded-bezel border border-hair p-3 font-mono text-xs text-slate-300">
-    {phase.label}<span className="ml-3 tabular-nums text-dim">{Math.floor(elapsed / 60)}m {elapsed % 60}s</span>
+    {phase.label}<span className="ml-3 tabular-nums text-dim">{duration}</span>
   </div>;
 }

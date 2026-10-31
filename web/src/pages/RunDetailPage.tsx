@@ -1274,12 +1274,21 @@ function ResourceRequestStatus({ instance }: { instance: InfraInstanceDTO }) {
   const running = !isTerminalResourceRequest(instance)
     && (schedulerState === "RUNNING" || instance.status === "ready" || !!instance.ready_at);
   const pending = !running && !isTerminalResourceRequest(instance);
-  const timerStartedAt = Date.parse(
-    running ? (instance.ready_at || instance.created_at) : instance.created_at,
-  );
+  // Stage timestamps must never inherit the older retained allocation start.
+  const createdAt = Date.parse(instance.created_at);
+  const readyAt = Date.parse(instance.ready_at || "");
+  const stageAt = Date.parse(String(instance.meta.stage_started_at || ""));
+  const legacyStageAt = readyAt >= createdAt ? readyAt : NaN;
+  const timerStartedAt = running
+    ? (Number.isFinite(stageAt) ? stageAt : legacyStageAt)
+    : createdAt;
   const elapsedSeconds = Number.isFinite(timerStartedAt)
     ? Math.max(0, Math.floor((now - timerStartedAt) / 1000))
-    : 0;
+    : null;
+  const allocationStartedAt = Date.parse(String(instance.meta.allocation_started_at || ""));
+  const allocationSeconds = Number.isFinite(allocationStartedAt)
+    ? Math.max(0, Math.floor((now - allocationStartedAt) / 1000))
+    : null;
   const label = running
     ? "Running with resources"
     : instance.provider === "cluster"
@@ -1306,10 +1315,18 @@ function ResourceRequestStatus({ instance }: { instance: InfraInstanceDTO }) {
           </span>
           {label}
         </span>
-        <span className="font-mono text-xs text-slate-300 tabular-nums">
-          <span className="mr-1.5 text-dim">{running ? "running" : "waited"}</span>
-          {fmtDuration(elapsedSeconds)}
-        </span>
+        <div className="text-right font-mono text-xs text-slate-300 tabular-nums">
+          <div title="Time since this stage execution started">
+            <span className="mr-1.5 text-dim">{running ? "running" : "waited"}</span>
+            {elapsedSeconds === null ? "—" : fmtDuration(elapsedSeconds)}
+          </div>
+          {running && instance.provider === "cluster" && (
+            <div className="mt-1 text-[10px] text-dim" title="Total time since the Slurm allocation started, including earlier stages">
+              <span className="mr-1.5">allocation</span>
+              {allocationSeconds === null ? "—" : fmtDuration(allocationSeconds)}
+            </div>
+          )}
+        </div>
       </div>
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.12em] text-dim">
         {instance.instance_id && (
