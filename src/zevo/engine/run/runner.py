@@ -3947,6 +3947,35 @@ async def _trash_unreferenced_failed_remote_data(
     return trashed
 
 
+class DataOutputValidationError(ValueError):
+    """An agent-owned Data artifact can be corrected on the same Ticket."""
+
+
+def _validate_remote_data_output(result: DataResult, inp: DataTaskInput):
+    try:
+        if result.remote_training_package_path or result.remote_data_receipt_path:
+            raise ValueError("Data cannot author engine-owned remote package/receipt")
+        spec = load_remote_dataset_spec(result.remote_dataset_spec_path)
+        if spec.source.dataset_id != inp.dataset:
+            raise ValueError("remote dataset spec id differs from the Data work order")
+        if spec.source.split != (inp.dataset_split or "train"):
+            raise ValueError("remote dataset spec split differs from the Data work order")
+        if spec.source.config != inp.dataset_config:
+            raise ValueError("remote dataset spec config differs from the Data work order")
+        if spec.training_method != inp.training_method:
+            raise ValueError("remote dataset spec training method differs from the work order")
+        recipe = load_data_recipe(result.data_recipe_path)
+        if recipe.source_identity != inp.expected_source_identity:
+            raise ValueError("remote data recipe source identity differs from the work order")
+        if recipe.source_fingerprint != remote_source_fingerprint(spec):
+            raise ValueError(
+                "remote data recipe fingerprint does not bind the immutable Hub revision"
+            )
+    except (ValueError, OSError) as exc:
+        raise DataOutputValidationError(f"Data output validation failed: {exc}") from exc
+    return spec, recipe
+
+
 async def _bind_system_validation_artifacts(
     result: DataResult, *, run: Run, ticket: Ticket, work_dir: str,
     inp: DataTaskInput, session: AsyncSession,
@@ -3986,24 +4015,7 @@ async def _bind_system_validation_artifacts(
     remote_materialization_mode = ""
     remote_control_retries = 0
     if result.remote_dataset_path:
-        if result.remote_training_package_path or result.remote_data_receipt_path:
-            raise ValueError("Data cannot author engine-owned remote package/receipt")
-        spec = load_remote_dataset_spec(result.remote_dataset_spec_path)
-        if spec.source.dataset_id != inp.dataset:
-            raise ValueError("remote dataset spec id differs from the Data work order")
-        if spec.source.split != (inp.dataset_split or "train"):
-            raise ValueError("remote dataset spec split differs from the Data work order")
-        if spec.source.config != inp.dataset_config:
-            raise ValueError("remote dataset spec config differs from the Data work order")
-        if spec.training_method != inp.training_method:
-            raise ValueError("remote dataset spec training method differs from the work order")
-        recipe = load_data_recipe(result.data_recipe_path)
-        if recipe.source_identity != inp.expected_source_identity:
-            raise ValueError("remote data recipe source identity differs from the work order")
-        if recipe.source_fingerprint != remote_source_fingerprint(spec):
-            raise ValueError(
-                "remote data recipe fingerprint does not bind the immutable Hub revision"
-            )
+        spec, recipe = _validate_remote_data_output(result, inp)
         blocked = semantic_record_fingerprints(validation_source)
         blocked.update(str(value) for value in (
             holdout.get("test_semantic_fingerprints") or []
@@ -6279,6 +6291,12 @@ async def run_ticket(
             # transfer, or validation implementation error must become a normal
             # failed Result so the heartbeat and Ticket are committed terminally;
             # allowing it to escape leaves a completed agent displayed as live.
+            except DataOutputValidationError as exc:
+                output = output.model_copy(update={
+                    "status": "failed",
+                    "error_message": str(exc),
+                    "notes": str(exc),
+                })
             except Exception as exc:  # noqa: BLE001
                 message = f"engine could not prepare frozen Validation artifacts: {exc}"
                 output = output.model_copy(update={
