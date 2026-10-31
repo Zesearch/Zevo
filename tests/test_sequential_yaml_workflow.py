@@ -1340,7 +1340,10 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
         parent_train_config_path=second.train_config_path,
         parent_selection_rationale=third_config.parent_selection_rationale,
         configuration_suggestions={"training_method": "dpo"},
-        branch_transition={"level": "method"},
+        active_training_method="sft",
+        branch_transition={"level": "method", "previous_branch": "sft",
+                           "next_branch": "dpo", "validation_evidence": "Measured SFT baseline",
+                           "rationale": "Test preference supervision without exhausting SFT"},
         activation_contract={"method_selection_owner": "orchestrator"},
         generation_backend="vllm",
         execution_contract=TrainExecutionContract(
