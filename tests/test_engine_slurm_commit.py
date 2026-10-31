@@ -346,3 +346,68 @@ async def test_submission_savepoint_recovers_without_replaying_remote_work(monke
         await session.commit()
         assert await session.scalar(select(Ticket.status).where(Ticket.id == ticket.id)) == ticket.status
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_old_cron_wakeup_waits_after_submission_then_terminal_watcher_can_collect(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from zevo.engine.run import runner
+
+    ticket = SimpleNamespace(id='infer-1')
+    row = SimpleNamespace(released_at=None, meta={
+        'submission_committed': True, 'scheduler_state': 'RUNNING',
+    })
+    latest = AsyncMock(return_value=None)
+    monkeypatch.setattr(runner, '_latest_slurm_resource_request', latest)
+    # At enqueue time no submitted job exists yet.
+    assert not await runner._automatic_wakeup_waits_for_slurm(None, ticket, 'cron')
+    # At lock acquisition time submission has completed and GPU work is live.
+    latest.return_value = row
+    for state in ['PENDING', 'RUNNING', 'CONFIGURING', 'COMPLETING', 'UNKNOWN', '']:
+        row.meta['scheduler_state'] = state
+        for source in ['cron', 'handoff', 'assignment', 'reconciler']:
+            assert await runner._automatic_wakeup_waits_for_slurm(None, ticket, source)
+    # Explicit control and the exact watcher event retain their existing gates.
+    for source in ['on_demand', 'retry', 'slurm_watcher']:
+        assert not await runner._automatic_wakeup_waits_for_slurm(None, ticket, source)
+    for state in ['COMPLETED', 'FAILED', 'TIMEOUT']:
+        row.meta['scheduler_state'] = state
+        assert not await runner._automatic_wakeup_waits_for_slurm(None, ticket, 'cron')
+
+
+def test_deferred_collect_rejects_another_workload_in_same_allocation():
+    from types import SimpleNamespace
+    from zevo.engine.run.runner import _deferred_collect_problem
+    contract = SimpleNamespace(phase='collect', bookkeeping_row_id='current', job_id='123')
+    row = SimpleNamespace(id='old', instance_id='123', meta={'scheduler_state': 'RUNNING'})
+    assert _deferred_collect_problem(contract, row) is not None
+
+
+@pytest.mark.asyncio
+async def test_run_ticket_ignores_stale_reminder_without_starting_collect(tmp_path):
+    from sqlalchemy import select
+    from zevo.db import HeartbeatRun
+    from zevo.engine.run.runner import run_ticket
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    async with Session() as session:
+        session.add(Run(id='r', status='running', metric='accuracy'))
+        ticket = Ticket(id='infer-live', run_id='r', agent_id='inference',
+                        lane='held_out_test', status='running', payload={}, inputs={})
+        session.add(ticket)
+        session.add(InfraInstance(
+            id='live-row', provider='cluster', instance_id='123', run_id='r',
+            ticket_id=ticket.id, status='ready', meta={
+                'resource_request': True, 'submission_committed': True,
+                'scheduler_state': 'RUNNING',
+            }))
+        await session.commit()
+        result = await run_ticket(session, ticket_id=ticket.id,
+                                  work_dir_root=str(tmp_path), activation_source='cron')
+        assert result.status == 'running'
+        assert not (await session.execute(select(HeartbeatRun))).scalars().all()
+        assert (await session.get(InfraInstance, 'live-row')).released_at is None
+    await engine.dispose()

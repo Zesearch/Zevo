@@ -2990,6 +2990,14 @@ def _extract_summary_artifact_meta(
     status = getattr(result, "status", "succeeded")
 
     contract = getattr(inp, "slurm_job", None)
+    if (isinstance(result, InferenceResult) and status == "deferred"
+        and isinstance(contract, SlurmStageJobContract)
+        and contract.enabled and contract.phase == "collect"):
+        # Waiting is not an artifact claim. The result-processing path below
+        # verifies the exact registered workload and its live scheduler state
+        # before returning ownership to the watcher. Submit and success still
+        # require the full configuration/script/artifact validation.
+        return status, result.notes, "", {}
     if (status == "succeeded" and isinstance(contract, SlurmStageJobContract)
         and contract.previous_execution):
         inp = inp.model_copy(update={
@@ -4193,10 +4201,10 @@ _SLURM_TERMINAL_STATES = {
 
 def _deferred_collect_problem(contract, row):
     """A premature collect may wait for its exact, still-live workload."""
-    if contract.phase != "collect" or row.id != contract.bookkeeping_row_id:
+    if contract.phase != "collect":
         return None
     state = str((row.meta or {}).get("scheduler_state") or "").strip().upper().split("+")[0].split(" ")[0]
-    if row.instance_id == contract.job_id and state in {"PENDING", "CONFIGURING", "RUNNING", "COMPLETING", "SUSPENDED"}:
+    if row.id == contract.bookkeeping_row_id and row.instance_id == contract.job_id and state in {"PENDING", "CONFIGURING", "RUNNING", "COMPLETING", "SUSPENDED"}:
         return None
     return {
         "declared": "a live registered workload or a newly registered continuation Slurm job",
@@ -4248,6 +4256,25 @@ async def _slurm_watcher_job_is_current(
         and (not payload.get("resource_row_id") or payload["resource_row_id"] == current_job.id)
         # A finished workload can retain its allocation for the next stage.
         and current_state in _SLURM_TERMINAL_STATES
+    )
+
+
+async def _automatic_wakeup_waits_for_slurm(
+    session: AsyncSession, ticket: Ticket, source: str,
+) -> bool:
+    """Recheck queued reminders after submission releases the Ticket lock."""
+    if source not in {"cron", "handoff", "assignment", "reconciler"}:
+        return False
+    row = await _latest_slurm_resource_request(session, ticket)
+    if row is None:
+        return False
+    meta = dict(row.meta or {})
+    state = str(meta.get("scheduler_state") or "").upper().split("+")[0].split(" ")[0]
+    return bool(
+        meta.get("submission_committed")
+        and row.released_at is None
+        and not meta.get("superseded_by_instruction_id")
+        and state not in _SLURM_TERMINAL_STATES
     )
 
 
@@ -4808,6 +4835,8 @@ async def run_ticket(
         await session.commit()
         return tk
     activation_payload = dict(activation_payload or {})
+    if await _automatic_wakeup_waits_for_slurm(session, tk, activation_source):
+        return tk  # The watcher, not an old reminder, owns the live workload.
     if tk.agent_id == "train":
         checkpoints = [stage for stage in (run.lifecycle or {}).get("adaptive_checkpoints", {}).values()
                        if stage["request"]["ticket_id"] == tk.id]
