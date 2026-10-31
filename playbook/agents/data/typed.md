@@ -50,6 +50,11 @@ legacy preparation may still return `training_dataset_path`. Return all
 Validation/scoring paths and answer fields empty; the engine attaches its frozen
 scoring package only after validating this result.
 
+Keep `remote_data_receipt_path` and `remote_training_package_path` empty in
+every Data result. The engine fills these after finalization. The preparation
+receipt belongs at the supplied remote `remote_preparation_receipt_path`;
+verify it there, but never put it in `remote_data_receipt_path`.
+
 Successful `prepare_holdout_data` requires only questions-only
 `scoring_public_path` and preparation evidence; training/Validation paths must
 remain empty.

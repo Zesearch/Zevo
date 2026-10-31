@@ -879,7 +879,8 @@ class DataResult(AgentResult):
     )
     remote_data_receipt_path: str = Field(
         "",
-        description="Local compact receipt copied back after engine finalization.",
+        description=("Engine-owned finalization receipt; Data must return it empty. "
+                     "The remote preparation receipt is a separate file, not this field."),
     )
     remote_training_package_path: str = Field(
         "",
@@ -1012,6 +1013,8 @@ class DataResult(AgentResult):
                 )
             system_owned = [
                 name for name, value in (
+                    ("remote_training_package_path", self.remote_training_package_path),
+                    ("remote_data_receipt_path", self.remote_data_receipt_path),
                     ("validation_source_path", self.validation_source_path),
                     ("validation_answer_fields", self.validation_answer_fields),
                     ("validation_dataset_path", self.validation_dataset_path),

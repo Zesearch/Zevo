@@ -519,7 +519,7 @@ function SummaryColumn({
                     }`} />
                   )}
                   <span
-                    className={`break-words whitespace-pre-wrap ${
+                    className={`min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] ${
                       required
                         ? complete ? "text-slate-200" : "italic text-slate-600"
                         : overridden ? "text-brass-300" : "text-slate-400"
