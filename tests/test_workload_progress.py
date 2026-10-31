@@ -147,7 +147,8 @@ async def test_execution_identity_is_not_inferred_from_agent_claims(db, provider
 
 
 @pytest.mark.asyncio
-async def test_terminal_stdout_replay_recovers_tail_once_and_preserves_phase_order(db, monkeypatch):
+@pytest.mark.parametrize('summary_bytes', [0, 92831, 2 * 1024 * 1024])
+async def test_terminal_stdout_replay_recovers_tail_once_and_preserves_phase_order(db, monkeypatch, summary_bytes):
     import asyncio
     import json
     from types import SimpleNamespace
@@ -172,7 +173,8 @@ async def test_terminal_stdout_replay_recovers_tail_once_and_preserves_phase_ord
     async def spawn(*args, **kwargs):
         calls.append(args[-1])
         stdout = asyncio.StreamReader()
-        stdout.feed_data(''.join(lines).encode())
+        stdout.feed_data(lines[0].encode() + b'x' * summary_bytes + b'\n'
+                         + ''.join(lines[1:]).encode())
         stdout.feed_eof()
         return SimpleNamespace(stdout=stdout, returncode=0,
                                wait=AsyncMock(return_value=0),
@@ -249,3 +251,41 @@ async def test_config_replay_preserves_engine_owned_activation_metadata(db):
     assert heartbeat.resolved_config["measurement_revision"] == "r2"
     assert heartbeat.resolved_config["batch_size"] == 64
     assert "telemetry_sequence" not in heartbeat.resolved_config
+
+
+@pytest.mark.asyncio
+async def test_live_slurm_stream_keeps_progress_after_large_pool_summary(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from zevo.engine.run.scheduler import reconciler as r
+
+    ticket_id = 'train-long-line-001'
+    stdout = asyncio.StreamReader()  # Keep asyncio's real default 64 KiB limit.
+    stdout.feed_data(
+        f'__PHASE__:{ticket_id}:pool_selection@1793399589\n'.encode()
+        + b'x' * 92831 + b'\n'
+        + f'__PHASE__:{ticket_id}:training@1793400403\n'.encode()
+        + f'__PROGRESS__:{ticket_id}:{{"step":460,"total":556,"t":1793414535}}'.encode()
+    )
+    stdout.feed_eof()  # Also preserve the final record without a newline.
+    proc = SimpleNamespace(stdout=stdout, returncode=0,
+                           communicate=AsyncMock(return_value=(b'', b'')))
+    spawn = AsyncMock(return_value=proc)
+    record = AsyncMock()
+    monkeypatch.setattr(r.asyncio, 'create_subprocess_exec', spawn)
+    monkeypatch.setattr(r, '_record_slurm_execution_marker', record)
+
+    await r._stream_slurm_status_events(
+        row_id='execution', job_id='123', ticket_id=ticket_id,
+        heartbeat_id='heartbeat', connection={'host': 'cluster', 'user': 'u', 'key': '/test/key'},
+        status_path='/work/status', telemetry_path='/work/out.log',
+    )
+
+    events = [call.kwargs for call in record.await_args_list]
+    assert [event['kind'] for event in events] == ['phase', 'phase', 'progress']
+    assert [event['payload']['telemetry_sequence'] for event in events] == [1, 2, 3]
+    assert events[-1]['phase'] == 'training'
+    assert events[-1]['payload']['step'] == 460
+    assert events[-1]['payload']['total'] == 556
+    assert all(event['row_id'] == 'execution' for event in events)
