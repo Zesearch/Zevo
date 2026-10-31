@@ -54,6 +54,7 @@ from zevo.engine.observe.run_metrics import incomplete_journal_entries
 from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
 from zevo.engine.run.steering import instruction_gate_active
 from zevo.engine.observe.markers import scan_text
+from zevo.engine.agent.drivers._subprocess_stream import iter_subprocess_lines
 from zevo.engine.ssh_auth import ssh_base_args
 from zevo.providers import resolve_ssh_key
 from zevo.db import (
@@ -609,10 +610,10 @@ async def _stream_slurm_status_events(
                             if replay_session is not None else None)
         if replay_session is not None and (replay_heartbeat is None or replay_heartbeat.ticket_id != ticket_id):
             raise ValueError("terminal telemetry heartbeat does not match ticket")
-        while True:
-            raw = await proc.stdout.readline()
-            if not raw:
-                break
+        # Workload summaries can exceed asyncio's 64 KiB readline limit.
+        # Use the same chunked framing as CLI output for live and terminal
+        # replay, so a large ordinary log record cannot strand later markers.
+        async for raw in iter_subprocess_lines(proc.stdout):
             line = raw.decode("utf-8", errors="replace")
             parsed = _parse_slurm_status_event(
                 line,
