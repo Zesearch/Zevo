@@ -5921,15 +5921,15 @@ async def run_ticket(
     }})
 
     # Load existing conversation messages for this ticket so the agent sees any
-    # prior conversation (e.g. its own previous summary + a follow-up
-    # user message that just woke it). Most-recent N, oldest first.
+    # prior conversation, with protected context and a lossless history snapshot.
     prior_messages = (await session.execute(
-        select(TicketMessage).where(TicketMessage.ticket_id == tk.id).order_by(TicketMessage.created_at)
+        select(TicketMessage).where(TicketMessage.ticket_id == tk.id).order_by(TicketMessage.created_at, TicketMessage.id)
     )).scalars().all()
-    conversation_for_prompt = [
-        {"author": c.author, "body": (c.body or "")[:4000]}
-        for c in prior_messages[-12:]
-    ]
+    from zevo.engine.run.conversation import build_conversation_context
+    conversation_for_prompt = build_conversation_context(
+        prior_messages, agent_id=tk.agent_id,
+        history_path=Path(work_dir) / f"ticket_history_{heartbeat_id}.jsonl",
+    )
     conversation_for_prompt.extend(
         await _run_instruction_context(session, run=run, ticket=tk)
     )

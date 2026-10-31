@@ -99,7 +99,8 @@ def _conversation_block(conversation: list[dict] | None) -> str:
                     "The Run user instructions below are the live requests; "
                     "use these Ticket messages as context."
                     if run_instructions else
-                    "Treat the most recent user message as a live request. "
+                    "Review the latest user message against current state; do not repeat "
+                    "completed requests or revive superseded instructions. "
                     "Acknowledge changes in a POST to /tickets/$TICKET_ID/messages."
                 )
             ),
@@ -110,7 +111,8 @@ def _conversation_block(conversation: list[dict] | None) -> str:
         body = (str(c.get("body") or "")).strip()
         if not body:
             continue
-        lines.append(f"**[{author}]** {body}")
+        identity = f" id={c['id']} at={c.get('created_at', '')}" if c.get("id") else ""
+        lines.append(f"**[{author}{identity}]** {body}")
         lines.append("")
     if run_instructions:
         lines.extend([
