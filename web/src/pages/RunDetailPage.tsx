@@ -355,7 +355,7 @@ function groupByIteration(tickets: TLTicket[]): StageGroup[] {
   // Baseline stage to create. Once a child exists, that child owns the group.
   if (groups.length === 0 && sorted.some((t) => agentIdOf(t) === "orchestrator")) {
     groups.push({
-      key: "baseline", label: "Iteration 0", kind: "baseline", num: 0,
+      key: "baseline", label: "Iteration 0 · baseline", kind: "baseline", num: 0,
       tickets: [], mirror: [],
     });
   }
@@ -1320,19 +1320,20 @@ function ResourceRequestStatus({ instance }: { instance: InfraInstanceDTO }) {
             <span className="mr-1.5 text-dim">{running ? "running" : "waited"}</span>
             {elapsedSeconds === null ? "—" : fmtDuration(elapsedSeconds)}
           </div>
-          {running && instance.provider === "cluster" && (
-            <div className="mt-1 text-[10px] text-dim" title="Total time since the Slurm allocation started, including earlier stages">
-              <span className="mr-1.5">allocation</span>
-              {allocationSeconds === null ? "—" : fmtDuration(allocationSeconds)}
-            </div>
-          )}
+
         </div>
       </div>
-      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.12em] text-dim">
-        {instance.instance_id && (
-          <span>{instance.provider === "cluster" ? "Slurm job" : "Resource"} {instance.instance_id}</span>
-        )}
-        {instance.gpu_count > 0 && <span>{instance.gpu_count} GPU{instance.gpu_count === 1 ? "" : "s"}</span>}
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 font-mono text-[10px] uppercase tracking-[0.12em] text-dim">
+        {[
+          instance.instance_id ? `${instance.provider === "cluster" ? "Slurm job" : "Resource"} ${instance.instance_id}` : "",
+          instance.gpu_count > 0 ? `${instance.gpu_count} GPU${instance.gpu_count === 1 ? "" : "s"}` : "",
+          running && instance.provider === "cluster" ? `allocation ${allocationSeconds === null ? "—" : fmtDuration(allocationSeconds)}` : "",
+        ].filter(Boolean).map((part, index) => (
+          <Fragment key={index}>
+            {index > 0 && <span aria-hidden="true">·</span>}
+            <span>{part}</span>
+          </Fragment>
+        ))}
       </div>
     </div>
   );

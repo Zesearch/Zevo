@@ -234,8 +234,8 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
           return ticket?.lane === "held_out_test" && item.role === "scoring_questions";
         });
         const journal = run.history.find((item) => (
-          group.num === 0
-            ? item.source === "baseline"
+          group.kind === "baseline"
+            ? Number(item.iteration) === group.num && item.source === "baseline"
             : Number(item.iteration) === group.num && item.source !== "baseline"
         )) || run.history.find((item) => Number(item.iteration) === group.num);
         const dataMeta = data?.meta || {};
@@ -340,8 +340,8 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
             <div className="grid grid-cols-1 divide-y divide-hair md:grid-cols-2 xl:grid-cols-5 xl:divide-x xl:divide-y-0">
               <Fact
                 label="Data"
-                value={group.num === 0 ? "—" : `Train ${numberText(dataMeta.training_rows)} · ${datasetName(dataMeta)}`}
-                onClick={group.num > 0 && data ? () => {
+                value={group.kind === "baseline" ? "—" : `Train ${numberText(dataMeta.training_rows)} · ${datasetName(dataMeta)}`}
+                onClick={group.kind !== "baseline" && data ? () => {
                   setPreviewPage(1);
                   setSelection({
                     artifactId: data.id,
@@ -357,8 +357,8 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
               />
               <Fact
                 label="Train method"
-                value={method}
-                onClick={trainParameters.length ? () => setSelection({
+                value={group.kind === "baseline" ? "—" : method}
+                onClick={group.kind !== "baseline" && trainParameters.length ? () => setSelection({
                   title: "Train method",
                   kind: "train",
                   configuration: trainMeta.configuration,

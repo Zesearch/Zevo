@@ -20,17 +20,23 @@ export type MinimalTicket = {
   id: string; agent_id?: string; created_at?: string; status?: string;
   lane?: "optimization" | "held_out_test";
   iteration: number;
+  model_source?: "" | "base_model" | "checkpoint";
 };
 
 /** Use the Ticket envelope's explicit iteration. Agent role and creation order
  *  never infer stage ownership. The one supervisor Ticket spans the run. */
 export function assignIterations(tickets: MinimalTicket[]): Map<string, IterInfo> {
   const map = new Map<string, IterInfo>();
+  const baselineOnly = new Set(tickets.filter(t => t.agent_id === "inference" && t.model_source === "base_model")
+    .map(t => t.iteration).filter(n => !tickets.some(t => t.iteration === n && (
+      t.agent_id === "train" || (t.agent_id === "inference" && t.model_source === "checkpoint")
+    ))));
   for (const t of tickets) {
     const num = Math.max(0, Number(t.iteration));
     const info: IterInfo = num === 0
-      ? { key: "baseline", label: "Iteration 0", kind: "baseline", num }
-      : { key: `iter-${num}`, label: `Iteration ${num}`, kind: "iteration", num };
+      ? { key: "baseline", label: "Iteration 0 · baseline", kind: "baseline", num }
+      : { key: `iter-${num}`, label: `Iteration ${num}${baselineOnly.has(num) ? " · baseline" : ""}`,
+          kind: baselineOnly.has(num) ? "baseline" : "iteration", num };
     map.set(t.id, agentIdOf(t) === "orchestrator" ? { ...info, spansRun: true } : info);
   }
   return map;

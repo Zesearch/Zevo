@@ -105,7 +105,7 @@ export function TicketDetailPage() {
     const buckets = new Map<string, { key: string; label: string; kind: string; items: HeartbeatDTO[] }>();
     // Same seed the shared grouper uses, so the wake tabs here and the blocks
     // on the run view agree on what the first round is called.
-    let cur = { key: "baseline", label: "Iteration 0", kind: "baseline" };
+    let cur = { key: "baseline", label: "Iteration 0 · baseline", kind: "baseline" };
     for (const h of sorted) {
       const child = emittedByHb.get(h.id);
       if (child) {
