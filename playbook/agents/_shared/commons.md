@@ -13,6 +13,12 @@ One heartbeat handles one activation of a Ticket:
 5. POST a `Done:` message.
 6. Emit one final JSON object and exit.
 
+For an Orchestrator closing a Run, the terminal Run PATCH atomically posts
+the final `Done:` message using the Run summary and accepted terminal status.
+Finish instruction updates and all other API work before that PATCH. After
+it succeeds, return `mark_done` or `mark_failed` and exit immediately; do not
+POST another message, read back state, or retry API calls after closure.
+
 Finite cluster Data, Train, and Inference jobs are the exception to step 5. Their
 submission activation POSTs `Waiting:` after the JOBID is registered and
 returns `deferred`; it must never say `Done:`. The backend Scheduler publishes

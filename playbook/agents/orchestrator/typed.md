@@ -88,6 +88,13 @@ Return exactly one `SupervisorAction`:
 - `mark_failed`: you first PATCHed the precise terminal failure;
 - `wait`: a required child is genuinely active or awaiting user input.
 
+Before a terminal PATCH, finish all verification and instruction updates.
+The backend writes the final Ticket completion message in the same transaction
+as the Run's terminal status, using the supplied summary. Use the PATCH response
+as confirmation, then emit the final `SupervisorAction` and exit. Do not make
+any further API calls or POST a separate `Done:` message after the Run closes;
+worker API permissions end at that point.
+
 Emit the standard reading and decision phase markers before the final JSON.
 For `emit_ticket`, `child_ticket_id` must be the non-empty `id` extracted from
 the successful create response. Never return `emit_ticket` after an empty or
