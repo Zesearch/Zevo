@@ -142,14 +142,19 @@ async def test_cluster_submit_only_prepares_then_collect_does_not_rerun(tmp_path
     assert (tmp_path / 'evaluation-bundle.sha256').is_file()
     calls.clear()
     inp.slurm_job = inp.slurm_job.model_copy(update={'phase': 'collect', 'scheduler_state': 'RUNNING'})
-    result = await remote.run_remote(inp, str(tmp_path))
+    events = []
+    result = await remote.run_remote(inp, str(tmp_path), events.append)
+    assert events == []
     assert result.output.status == 'deferred'
     assert calls == []
     inp.slurm_job = inp.slurm_job.model_copy(update={'scheduler_state': 'COMPLETED'})
     expected = EvaluationResult(ticket_id=inp.ticket_id, status='succeeded', metrics_path='/metrics', notes='', error_message='')
     async def collect(*args): return expected
     monkeypatch.setattr(remote, 'collect', collect)
-    result = await remote.run_remote(inp, str(tmp_path))
+    result = await remote.run_remote(inp, str(tmp_path), events.append)
+    assert [e['payload']['phase'] for e in events] == ['completed']
+    assert events[0]['payload']['step'] == events[0]['payload']['total']
+    assert len(events[0]['payload']['completed_benchmarks']) == events[0]['payload']['total']
     assert result.output == expected
     assert calls == []
 
