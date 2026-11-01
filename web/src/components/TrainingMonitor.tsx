@@ -1,5 +1,5 @@
 import { continuousTrainingEvents, isMidTrainingValidationEvent } from "../lib/trainingTelemetry";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
   CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -198,7 +198,10 @@ function MetricChart({ metric, color, data, total }: {
 /** Shared training/inference monitor: every reported numeric metric vs step,
  *  de-duped per step. Rendered identically in the run Timeline and the per-ticket
  *  view so the two never diverge. */
-export function TrainingMonitor({ executionEvents }: { executionEvents: ExecutionEventDTO[] }) {
+export function TrainingMonitor({ executionEvents, renderContainer = (content) => content }: {
+  executionEvents: ExecutionEventDTO[];
+  renderContainer?: (content: ReactNode) => ReactNode;
+}) {
   const [page, setPage] = useState(0);
   const num = (v: unknown) => (typeof v === "number" && isFinite(v) ? v : undefined);
 
@@ -310,7 +313,7 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
   }, [showHistory]);
 
   if (data.length === 0) {
-    return <>{historyControl}</>;
+    return historyControl ? renderContainer(historyControl) : null;
   }
 
   // The last value each metric actually REPORTED, not the values on the last
@@ -324,7 +327,7 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
     }
   }
 
-  return (
+  return renderContainer(
     <div>
       {historyControl}
       <div className="mb-3 flex flex-wrap gap-2 font-mono text-[15px]">
