@@ -644,3 +644,39 @@ def test_inference_stage_contract_uses_prepared_suite_size(tmp_path, monkeypatch
     ))
     assert (contract.num_gpus, contract.estimated_gpus) == (4, 1)
     assert "8 member(s), 16000 known row(s)" in contract.resource_plan_rationale
+
+@pytest.mark.parametrize('stage', ['data', 'train', 'inference', 'evaluation'])
+@pytest.mark.parametrize('state,code,retry', [
+    ('TIMEOUT', '0:0', True), ('PREEMPTED', '0:0', True),
+    ('FAILED', '75:0', True), ('DEADLINE', '0:0', True),
+    ('CANCELLED', '0:15', False),
+])
+def test_allocation_interruption_builds_replacement_contract(tmp_path, monkeypatch, stage, state, code, retry):
+    info = _cluster_info(plan_gpus=4, constraints=_partial_node_constraints())
+    path = tmp_path / 'device_info.json'
+    path.write_text(info.model_dump_json())
+    from zevo.db.models import Run
+    run = Run(id='run-1', gpu_provider='cluster', num_gpus=8, max_queue_wait_hours=24, holdout={})
+    ticket = SimpleNamespace(id='stage-001', run_id='run-1', agent_id=stage,
+        status='repairing', repair_attempts=1, lane='optimization',
+        payload={'base_model': 'org/32B', 'training_method_pin': 'sft'})
+    row = SimpleNamespace(id='previous-row', instance_id='12345', gpu_count=4,
+        status='released', meta={'scheduler_state': state, 'scheduler_exit_code': code,
+            'execution_attempt': 1, 'nodes': 1, 'gpus_per_node': 4,
+            'remote_workdir': '/remote/stage-001/attempt-1',
+            'remote_script': '/remote/stage-001/attempt-1/job.sbatch',
+            'status_path': '/remote/stage-001/attempt-1/status'})
+    async def latest(*_args):
+        return row
+    async def probe(*_args):
+        return SlurmCapacitySnapshot((4,), 4)
+    monkeypatch.setattr(runner, '_latest_slurm_resource_request', latest)
+    monkeypatch.setattr(runner, 'probe_slurm_capacity', probe)
+    contract = asyncio.run(runner._slurm_stage_job_contract(run=run, ticket=ticket,
+        work_dir=str(tmp_path), filename='job.sbatch', device_info_path=str(path),
+        session=None, stage=stage))
+    assert contract.phase == ('submit' if retry else 'collect')
+    assert contract.attempt == (2 if retry else 1)
+    if retry:
+        assert contract.retry_of_job_id == '12345'
+        assert contract.retry_of_bookkeeping_row_id == 'previous-row'

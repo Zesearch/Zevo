@@ -251,6 +251,11 @@ async def run_remote(inp: EvaluationTaskInput, workspace_dir: str, event_sink=No
     if not remote.startswith('/') or any(c in remote for c in '\n\r\0'):
         raise ValueError('remote evaluation requires an absolute work directory')
     local = Path(workspace_dir).resolve()
+    if event_sink is not None:
+        event_sink({"type": "progress", "payload": {
+            "owner": inp.ticket_id, "phase": "suite_start", "step": 0,
+            "total": 1 + len(inp.suite_members), "benchmark_total": 1 + len(inp.suite_members),
+        }})
     contract = inp.slurm_job
     if info.provider == 'cluster' and not contract.enabled:
         raise ValueError('cluster evaluation requires an engine-owned Slurm contract')
@@ -368,9 +373,15 @@ def worker(input_path: Path, output: Path, environment: Path) -> int:
     report = {'schema_version': 1, 'ticket_id': inp.ticket_id,
               'started_at': time.time(), 'status': 'running', 'phases': []}
     atomic_json(output / 'phase-report.json', report)
+    completed_benchmarks = {}
     def event(value):
-        atomic_json(output / 'progress.json', value)
         payload = value.get('payload', {})
+        if payload.get('phase') == 'benchmark_complete':
+            completed_benchmarks[payload.get('benchmark_id') or payload.get('benchmark_name')] = payload.get('benchmark_name')
+        payload = {**payload, 'benchmark_total': 1 + len(inp.suite_members),
+                   'completed_benchmarks': [{'id': key, 'name': name} for key, name in completed_benchmarks.items()]}
+        value = {**value, 'payload': payload}
+        atomic_json(output / 'progress.json', value)
         if value.get('type') == 'phase':
             report['phases'].append({'phase': payload.get('phase', ''), 'at': time.time()})
             atomic_json(output / 'phase-report.json', report)

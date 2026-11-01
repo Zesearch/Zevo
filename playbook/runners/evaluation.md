@@ -79,10 +79,22 @@ only score authority and the Result does not repeat `score`.
 The normal Ticket/Heartbeat surface records phases, Bash command, output,
 status, metrics, wrapper, and log. The runner itself makes no provider call;
 custom scorers may do so as described above.
-For a combined benchmark suite, emit one completion progress marker after each
+For a combined benchmark suite, emit `suite_start` with the full benchmark count
+before scoring, then run at most four independent benchmarks concurrently.
+`ZEVO_EVALUATION_SUITE_WORKERS` in the compute environment can lower this bound
+(for example, to one for a GPU judge); the available CPU count also caps it.
+Do not alter scorer-internal parallelism. Successful benchmark receipts survive
+other members' failures, and the final suite retains its declared order.
+Cancellation stops active scorer process groups and queued members.
+Emit one completion progress marker after each
 member's metrics are validated. The marker carries its exact benchmark name
 and one-based suite position; the dashboard counts these independently of the
-single Evaluation ticket.
+single Evaluation ticket. Remote progress snapshots also carry all completed
+benchmark identities so polling cannot lose parallel completions. Allocation
+interruptions allow unchanged Data, Train, Inference and Evaluation workloads
+to acquire replacement resources within the existing retry budget; user
+cancellations do not authorize retries. Training checkpoint verification and
+benchmark receipt verification still apply.
 
 ## Compute execution
 

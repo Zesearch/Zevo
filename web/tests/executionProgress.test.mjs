@@ -195,3 +195,18 @@ test('legacy events without execution IDs cannot leak from a later retry into hi
   const later = {...event('13', 'retry', undefined, ''), event_type: 'phase', phase: 'train'};
   assert.deepEqual(activationExecution([first, later], activations[0], activations, old), [first]);
 });
+
+test('evaluation exposes the full suite before its first completion', () => {
+  assert.deepEqual(benchmarkCounts([{phase: 'progress', extras: {
+    phase: 'suite_start', benchmark_total: 16, step: 0, total: 16,
+  }}], undefined, 'evaluation'), {completed: 0, total: 16});
+});
+
+test('polled evaluation snapshots preserve parallel completions without double counting', () => {
+  const event = {phase: 'scoring', extras: {phase: 'benchmark_complete', benchmark_total: 16,
+    benchmark_id: 'test:1', benchmark_name: 'B', completed_benchmarks: [
+      {id: 'test:0', name: 'A'}, {id: 'test:1', name: 'B'},
+    ]}};
+  assert.deepEqual(benchmarkCounts([event, event], undefined, 'evaluation'), {completed: 2, total: 16});
+  assert.deepEqual(benchmarkCounts([event], ['A'], 'evaluation'), {completed: 1, total: 1});
+});

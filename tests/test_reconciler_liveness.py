@@ -1284,3 +1284,24 @@ async def test_all_registered_stages_stream_and_drain_phases(session, monkeypatc
     await reconciler._drain_terminal_telemetry(session, row=row, run=run, ticket=ticket, meta=meta)
     assert meta['telemetry_drained'] is True
     assert seen[-1]['replay_session'] is session
+
+@pytest.mark.asyncio
+async def test_remote_evaluation_markers_retain_suite_progress_metadata(session):
+    ticket = Ticket(id='eval-progress', run_id='r1', agent_id='evaluation', status='running', payload={})
+    heartbeat = HeartbeatRun(id='hb-eval-progress', ticket_id=ticket.id, agent_id='evaluation',
+        driver='evaluation_runner', model='', activation_phase='submit',
+        stdout_path='', stderr_path='', error_message='')
+    session.add_all([ticket, heartbeat])
+    await session.commit()
+    for index, phase in enumerate(['suite_start', 'benchmark_complete']):
+        await _persist_slurm_execution_marker(session, ticket_id=ticket.id,
+            heartbeat=heartbeat, kind='progress', phase='scoring', attempt_id='eval-attempt',
+            payload={'phase': phase, 'step': index, 'total': 16, 'benchmark_total': 16,
+                'benchmark_name': 'A' if index else '',
+                'completed_benchmarks': [{'id': 'test:0', 'name': 'A'}] if index else []})
+    await session.flush()
+    rows = (await session.execute(select(ExecutionEvent).where(
+        ExecutionEvent.ticket_id == ticket.id, ExecutionEvent.event_type == 'progress'))).scalars().all()
+    assert {row.extras['phase'] for row in rows} == {'suite_start', 'benchmark_complete'}
+    assert all(row.extras['benchmark_total'] == 16 for row in rows)
+    assert next(row for row in rows if row.extras['phase'] == 'benchmark_complete').extras['completed_benchmarks'] == [{'id': 'test:0', 'name': 'A'}]

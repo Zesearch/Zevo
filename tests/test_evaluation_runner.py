@@ -196,12 +196,12 @@ def test_suite_scores_all_members_inside_one_evaluation_ticket(tmp_path: Path, c
         if event.get("type") == "progress"
         and event.get("payload", {}).get("phase") == "benchmark_complete"
     ]
-    assert completed == ["first", "second"]
-    assert [
+    assert sorted(completed) == ["first", "second"]
+    assert sorted([
         event["payload"]["benchmark_id"] for event in events
         if event.get("type") == "progress"
         and event.get("payload", {}).get("phase") == "benchmark_complete"
-    ] == ["validation:0", "validation:1"]
+    ]) == ["validation:0", "validation:1"]
 
 
 def test_suite_failure_names_the_member(tmp_path: Path) -> None:
@@ -499,3 +499,91 @@ def test_evaluation_without_deadline_can_still_be_cancelled(tmp_path, monkeypatc
     assert cancelled == [True]
     assert result.output.status == 'failed'
     assert not process_registry.cancel(inp.ticket_id)
+
+@pytest.mark.parametrize('fail_first', [False, True])
+def test_suite_bounded_parallelism_preserves_order_and_completed_work(tmp_path, monkeypatch, fail_first):
+    from zevo.contracts.evaluation import EvaluationResult
+    from zevo.engine.agent.drivers.base import DriverRunResult
+    monkeypatch.setenv('ZEVO_EVALUATION_SUITE_WORKERS', '2')
+    if hasattr(__import__('os'), 'sched_getaffinity'):
+        monkeypatch.setattr('os.sched_getaffinity', lambda _: {0, 1, 2, 3})
+    active = 0
+    peak = 0
+    finished = []
+    events = []
+    async def scenario():
+        entered = asyncio.Event()
+        class Driver(EvaluationRunnerDriver):
+            async def run_agent(self, **kwargs):
+                nonlocal active, peak
+                inp = kwargs['input_payload']
+                if inp.suite_members:
+                    return await super().run_agent(**kwargs)
+                active += 1
+                peak = max(peak, active)
+                if active == 2:
+                    entered.set()
+                await asyncio.wait_for(entered.wait(), 2)
+                # Complete primary last to check deterministic publication order.
+                if inp.test_set_name == '0':
+                    await asyncio.sleep(0.01)
+                active -= 1
+                finished.append(inp.test_set_name)
+                path = Path(kwargs['workspace_dir']) / 'metrics.json'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{"score": 1.0}')
+                return DriverRunResult(output=EvaluationResult(ticket_id=inp.ticket_id,
+                    status='failed' if fail_first and inp.test_set_name == '0' else 'succeeded',
+                    metrics_path=str(path), notes='', error_message='broken' if fail_first else ''))
+        common = dict(predictions_path='p', scoring_set='s', sample_submission='p', metric='accuracy', evaluation_script='')
+        inp = EvaluationTaskInput(ticket_id='eval-concurrency', test_set_name='0', **common,
+            suite_members=[EvaluationSuiteMemberInput(name=str(i), **common) for i in range(1, 6)])
+        return await Driver().run_agent(blueprint=None, input_payload=inp,
+            workspace_dir=str(tmp_path), event_sink=events.append)
+    result = asyncio.run(scenario())
+    assert peak == 2
+    assert len(finished) == 6
+    assert finished[0] != '0'
+    assert events[0]['payload']['phase'] == 'suite_start'
+    assert events[0]['payload']['benchmark_total'] == 6
+    if fail_first:
+        assert result.output.status == 'failed'
+        assert result.output.error_message.startswith('0: broken')
+    else:
+        assert [m.name for m in result.output.suite_members] == list(map(str, range(6)))
+
+
+def test_cancel_parallel_suite_stops_scorer_processes(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setenv('ZEVO_EVALUATION_SUITE_WORKERS', '2')
+    predictions = tmp_path / 'p.csv'
+    gold = tmp_path / 's.csv'
+    _write_csv(predictions, [{'id': '1', 'prediction': 'A'}])
+    _write_csv(gold, [{'id': '1', 'answer': 'A'}])
+    script = tmp_path / 'slow.py'
+    script.write_text('import os,sys,time\nfrom pathlib import Path\n'
+                      'Path(sys.argv[3]).with_name("pid").write_text(str(os.getpid()))\n'
+                      'time.sleep(60)\n')
+    common = dict(predictions_path=str(predictions), scoring_set=str(gold),
+        sample_submission=str(predictions), metric='accuracy', answer_fields=['answer'],
+        evaluation_script=str(script), evaluator_sha256=file_sha256(script))
+    inp = EvaluationTaskInput(ticket_id='cancel-suite', test_set_name='a', **common,
+        suite_members=[EvaluationSuiteMemberInput(name='b', **common),
+                       EvaluationSuiteMemberInput(name='c', **common)])
+    async def scenario():
+        task = asyncio.create_task(EvaluationRunnerDriver().run_agent(
+            blueprint=None, input_payload=inp, workspace_dir=str(tmp_path / 'work')))
+        try:
+            async with asyncio.timeout(5):
+                while len(list((tmp_path / 'work').glob('suite/*/pid'))) != 2:
+                    await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    asyncio.run(scenario())
+    pids = list((tmp_path / 'work').glob('suite/*/pid'))
+    assert len(pids) == 2  # The queued third benchmark never started.
+    for pid in pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid.read_text()), 0)

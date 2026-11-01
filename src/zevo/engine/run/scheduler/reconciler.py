@@ -316,6 +316,9 @@ async def _persist_slurm_execution_marker(
         "current_step", "total_steps", "phase",
     }
     extras = {key: value for key, value in payload.items() if key not in reserved}
+    if ticket is not None and ticket.agent_id == "evaluation":
+        # Match direct-driver events: the UI needs the unqualified marker phase.
+        extras["phase"] = str(payload.get("phase") or "")
     benchmark_name = str(payload.get("benchmark_name") or "").strip()
     if benchmark_name:
         name = benchmark_progress_phase(

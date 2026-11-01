@@ -21,7 +21,7 @@ from zevo.engine.run.runner import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry', 'walltime', 'data_timeout', 'inference_timeout', 'data_yield', 'inference_yield'])
+@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry', 'walltime', 'data_timeout', 'inference_timeout', 'data_yield', 'inference_yield', 'train_timeout', 'evaluation_timeout', 'evaluation_yield'])
 async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, mode) -> None:
     batch_resume = mode.endswith(("_timeout", "_yield"))
     stage = mode.split("_")[0] if batch_resume else "train"
@@ -33,7 +33,7 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
 
     script = tmp_path / "train.sbatch"
     script.write_text("#!/bin/bash\necho validated\n", encoding="utf-8")
-    train_program = tmp_path / {"train": "train.py", "data": "prepare_data.py", "inference": "predict.py"}[stage]
+    train_program = tmp_path / {"train": "train.py", "data": "prepare_data.py", "inference": "predict.py", "evaluation": "evaluation-bundle.sha256"}[stage]
     train_program.write_text("print('validated')\n", encoding="utf-8")
     device = InfrastructureDeviceInfo(
         run_id="run-1",
