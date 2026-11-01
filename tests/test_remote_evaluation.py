@@ -279,3 +279,46 @@ def test_container_mounts_do_not_mount_host_root(tmp_path):
     assert '/scratch/eval:/scratch/eval' in mounts
     assert '/projects/user/envs:/projects/user/envs' in mounts
     assert '/:/' not in mounts
+
+
+@pytest.mark.parametrize('root_variable', ['ZEVO_EVALUATION_ROOT', 'ZEVO_HOLDOUT_ROOT'])
+@pytest.mark.parametrize('inherited_root', [None, '/app/data/.holdout'])
+def test_worker_relocates_judge_audits_to_durable_compute_results(tmp_path, monkeypatch, inherited_root, root_variable):
+    import os
+    for key in ['ZEVO_EVALUATION_ROOT', 'ZEVO_HOLDOUT_ROOT']:
+        if inherited_root is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, inherited_root + '/' + key)
+    inp = work(tmp_path)
+    script = tmp_path / 'judge.py'
+    script.write_text(
+        "import json, os, sys\nfrom pathlib import Path\n"
+        f"root = Path(os.environ.get({root_variable!r}, '/app/data/.holdout'))\n"
+        "assert os.environ['ZEVO_EVALUATION_ROOT'] == os.environ['ZEVO_HOLDOUT_ROOT']\n"
+        "audit = root / 'evaluation-audits' / 'alpaca'\n"
+        "audit.mkdir(parents=True, exist_ok=True)\n"
+        "cache = audit / 'calls.txt'\n"
+        "cache.write_text(cache.read_text() + 'x' if cache.exists() else 'x')\n"
+        "Path(sys.argv[3]).write_text(json.dumps({'score': 1, 'audit_root': str(root)}))\n"
+    )
+    inp.evaluation_script = str(script)
+    inp.evaluator_sha256 = remote.digest(script)
+    staging = tmp_path / 'staging'; staging.mkdir()
+    host = tmp_path / 'compute'; host.mkdir()
+    archive = remote.make_bundle(inp, staging, str(host))
+    with tarfile.open(archive) as tar:
+        tar.extractall(host, filter='data')
+    output = host / 'results'
+    # Force two executions to check that the audit location is persistent,
+    # rather than having a cached receipt mask the second scorer invocation.
+    monkeypatch.delenv('ZEVO_EVALUATION_WORKER', raising=False)
+    for _ in range(2):
+        environment = host / '.judge-env.json'; environment.write_text('{}')
+        assert remote.worker(host / 'bundle/input.json', output, environment) == 0
+        metrics = json.loads((output / 'metrics.json').read_text())
+        assert Path(metrics['audit_root']) == output
+        for key in ['ZEVO_EVALUATION_ROOT', 'ZEVO_HOLDOUT_ROOT']:
+            assert os.environ.get(key) == (inherited_root + '/' + key if inherited_root else None)
+        assert not environment.exists()
+    assert (output / 'evaluation-audits/alpaca/calls.txt').read_text() == 'xx'

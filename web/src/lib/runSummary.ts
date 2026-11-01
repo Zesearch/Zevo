@@ -31,7 +31,6 @@ export function scoringSummaryValues(suite: TaskTestSet[], prefix: string): RunS
   });
 }
 export function agentExecutionLabel(driver: string, model: string): string {
-  if (driver === "holdout_data_runner") return "Data preparation";
   if (driver === "evaluation_runner") return "Evaluation runner · no LLM";
   return model === "no-llm" ? "System execution · no LLM" : model;
 }
