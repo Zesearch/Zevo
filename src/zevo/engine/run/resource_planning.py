@@ -18,7 +18,7 @@ from zevo.contracts.infrastructure import (
 )
 
 
-StageKind = Literal["data", "train", "inference"]
+StageKind = Literal["data", "train", "inference", "evaluation"]
 
 # The common range stays easy to understand in the UI and in scheduler logs.
 # Larger jobs continue the same coarse progression instead of pretending that
@@ -250,19 +250,20 @@ def plan_stage_resources(
             use_peft=train_use_peft,
             info=info, constraints=constraints,
         )
-    elif stage == "data":
+    elif stage in {"data", "evaluation"}:
         # Ordinary preparation is CPU-heavy. Some sites nevertheless require a
         # GPU GRES to enter their container/QoS path; start at the smallest tier
         # and let the discovered scheduler minimum raise it (Beta: 1 -> 4).
         estimated = 1
-        estimate_reason = "Data preparation starts at the smallest resource tier"
+        estimate_reason = ("Evaluation scores on CPU within the site's smallest allocation tier"
+                           if stage == "evaluation" else "Data preparation starts at the smallest resource tier")
     else:
         estimated, estimate_reason = _inference_estimate(
             base_model=base_model, info=info, constraints=constraints,
         )
         estimated = max(estimated, inference_gpus_per_replica)
 
-    single_node = stage in {"data", "inference"}
+    single_node = stage in {"data", "inference", "evaluation"}
     if requested_gpus:
         if requested_gpus < estimated or (maximum_gpus and requested_gpus > maximum_gpus):
             raise ValueError(f"requested {requested_gpus} GPUs outside stage requirement {estimated} and Run maximum {maximum_gpus or 'unlimited'}")

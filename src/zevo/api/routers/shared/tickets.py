@@ -1455,7 +1455,7 @@ async def get_ticket(
                               phase=e.phase, current_step=e.current_step,
                               total_steps=e.total_steps, loss=e.loss,
                               extras=(classify_event(e, registrations)
-                                      if t.agent_id in {"train", "inference"}
+                                      if t.agent_id in {"train", "inference", "evaluation"}
                                       else e.extras or {}),
                               ts=e.ts.isoformat() if e.ts else "")
             for e in events

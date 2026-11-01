@@ -195,10 +195,12 @@ async def test_external_repair_preserves_collection_and_enforces_budget(session,
 
 
 @pytest.mark.asyncio
-async def test_unchanged_failures_stop_and_artifact_change_resets(session, tmp_path):
+@pytest.mark.parametrize("agent", ["data", "train", "inference", "evaluation"])
+@pytest.mark.parametrize("lane,route", [("held_out_test", "terminal"), ("optimization", "orchestrator")])
+async def test_unchanged_failures_stop_and_artifact_change_resets(session, tmp_path, agent, lane, route):
     from zevo.db import WorkProduct
     session.add(Run(id="r", task_name="t", metric="score", status="running"))
-    ticket = Ticket(id="infer-r", run_id="r", agent_id="inference", lane="held_out_test", status="running")
+    ticket = Ticket(id="infer-r", run_id="r", agent_id=agent, lane=lane, status="running")
     artifact = tmp_path / "config.yaml"
     artifact.write_text("v1")
     session.add(ticket)
@@ -210,7 +212,8 @@ async def test_unchanged_failures_stop_and_artifact_change_resets(session, tmp_p
     for _ in range(2):
         assert await _apply_ticket_failure_policy(session, ticket, error_message="invalid calibration")
     assert not await _apply_ticket_failure_policy(session, ticket, error_message="invalid calibration")
-    assert ticket.status == "failed" and ticket.repair_route == "terminal"
+    assert ticket.status == "failed" and ticket.repair_route == route
+    assert ticket.repair_attempts == 4
     assert "no new execution" in ticket.summary
 
 
@@ -220,3 +223,65 @@ def test_execution_retry_permission_is_consumed_by_new_attempt():
     assert execution_retry_authorized(meta)
     assert not execution_retry_authorized({**meta, 'execution_attempt': 4})
     assert not execution_retry_authorized({'execution_attempt': 3})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('agent,field', [('data', 'script_path'), ('evaluation', 'evaluation_script')])
+async def test_input_artifact_change_resets_without_work_products(session, tmp_path, agent, field):
+    script = tmp_path / 'script.py'
+    script.write_text('version 1')
+    session.add(Run(id='r', metric='score', status='running'))
+    ticket = Ticket(id='stage', run_id='r', agent_id=agent, lane='optimization', status='running',
+                    payload={'suite_members': [{field: str(script)}]})
+    session.add(ticket)
+    await session.commit()
+    for _ in range(2):
+        assert await _apply_ticket_failure_policy(session, ticket, error_message='same scorer failure')
+    script.write_text('version 2')
+    for _ in range(2):
+        assert await _apply_ticket_failure_policy(session, ticket, error_message='same scorer failure')
+    assert not await _apply_ticket_failure_policy(session, ticket, error_message='same scorer failure')
+    assert ticket.status == 'failed'
+    assert ticket.repair_route == 'orchestrator'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('agent', ['data', 'evaluation'])
+async def test_three_identical_failures_only_schedule_two_repairs(session, agent):
+    session.add(Run(id='r', metric='score', status='running'))
+    ticket = Ticket(id='stage', run_id='r', agent_id=agent, lane='held_out_test', status='running')
+    session.add(ticket)
+    await session.commit()
+    assert await _apply_ticket_failure_policy(session, ticket, error_message='deterministic failure')
+    assert await _apply_ticket_failure_policy(session, ticket, error_message='deterministic failure')
+    assert not await _apply_ticket_failure_policy(session, ticket, error_message='deterministic failure')
+    assert ticket.repair_attempts == 2
+    assert ticket.repair_route == 'terminal'
+    messages = (await session.scalars(select(TicketMessage).where(TicketMessage.ticket_id == ticket.id))).all()
+    assert len(messages) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('agent', ['data', 'evaluation'])
+@pytest.mark.parametrize('change', ['error', 'completed_job_error', 'execution'])
+async def test_changed_error_or_execution_restarts_unchanged_count(session, agent, change):
+    from zevo.db import InfraInstance
+    session.add(Run(id='r', metric='score', status='running'))
+    ticket = Ticket(id='stage', run_id='r', agent_id=agent, lane='optimization', status='running')
+    job = InfraInstance(id='job', run_id='r', ticket_id='stage', provider='cluster',
+                        instance_id='123', status='released', meta={
+                            'scheduler_state': 'COMPLETED' if change == 'completed_job_error' else 'FAILED',
+                            'execution_attempt': 1,
+                        })
+    session.add_all([ticket, job])
+    await session.commit()
+    for _ in range(2):
+        assert await _apply_ticket_failure_policy(session, ticket, error_message='first error')
+    error = 'different error' if 'error' in change else 'first error'
+    if change == 'execution':
+        job.meta = {**job.meta, 'execution_attempt': 2}
+    for _ in range(2):
+        assert await _apply_ticket_failure_policy(session, ticket, error_message=error)
+    assert not await _apply_ticket_failure_policy(session, ticket, error_message=error)
+    assert ticket.repair_route == 'orchestrator'
+    assert ticket.repair_attempts == 4

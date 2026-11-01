@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from zevo.contracts._base import AgentResult, AgentTaskInput
 from zevo.code_benchmarks import CodeExecutionAdapter
+from zevo.contracts.infrastructure import SlurmStageJobContract
 
 
 # ---------- Input ----------
@@ -50,6 +51,10 @@ class EvaluationSuiteMemberResult(BaseModel):
 
 class EvaluationTaskInput(AgentTaskInput):
     """Mirror of orchestrator.EvaluatePayload."""
+
+    device_info_path: str = ""
+    slurm_job: SlurmStageJobContract = Field(default_factory=SlurmStageJobContract)
+    remote_work_dir: str = ""
 
     predictions_path: str = Field(..., description="Path to predictions CSV produced by inference.")
     test_set_name: str = ""
@@ -138,7 +143,7 @@ class EvaluationResult(AgentResult):
     requires a finite numeric top-level `score`. Its scale is task-defined.
     """
 
-    status: Literal["succeeded", "failed"]
+    status: Literal["succeeded", "deferred", "failed"]
 
     metrics_path: str = Field(
         ...,

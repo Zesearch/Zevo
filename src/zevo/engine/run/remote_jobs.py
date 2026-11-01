@@ -186,7 +186,7 @@ async def cancel_ticket_remote_job(
     resize_allocation: bool = False,
 ) -> dict[str, Any]:
     """Stop remote work for one Ticket, never an unrelated device or job."""
-    if ticket.agent_id not in {"data", "train", "inference"}:
+    if ticket.agent_id not in {"data", "train", "inference", "evaluation"}:
         return {"ticket_id": ticket.id, "attempted": False, "reason": "no remote execution"}
     info = await _device_info_for_ticket(db, ticket)
     if info is None:
@@ -194,6 +194,11 @@ async def cancel_ticket_remote_job(
     cluster_row = await _open_cluster_job(db, ticket) if info.provider == "cluster" else None
     if info.provider == "cluster" and resize_allocation:
         cluster_row = await allocation_for_resize(db, ticket) or cluster_row
+    if ticket.agent_id == "evaluation":
+        route = info.cluster or info.instance
+        credentials = str(Path(route.workdir) / _safe_ticket_id(ticket.id) / "evaluation" / ".judge-env.json")
+        # Queued workers cannot run their EXIT trap to remove private credentials.
+        await _ssh(info, "rm -f -- " + shlex.quote(credentials))
     if info.provider == "cluster":
         if cluster_row is None:
             return {

@@ -83,3 +83,59 @@ For a combined benchmark suite, emit one completion progress marker after each
 member's metrics are validated. The marker carries its exact benchmark name
 and one-based suite position; the dashboard counts these independently of the
 single Evaluation ticket.
+
+## Compute execution
+
+Production Evaluation stays a deterministic runner. The engine binds the exact
+Infrastructure route used by the source Inference, including checkpoint and
+held-out evaluations. Missing or released routes fail closed; they never cause
+scoring to fall back to the Zevo service or a cluster login node.
+
+- Cluster: the runner stages `evaluate.sbatch`, the immutable evaluator and its
+  declared inputs. The engine validates and submits through the existing Slurm
+  controller. A retained per-run allocation is reused; evaluation queues behind
+  its current workload. Otherwise the controller obtains a finite allocation.
+  Login handles only staging/submission/status/transfer. Dependency installation,
+  scoring and API judge calls run inside the allocation.
+- Instance/cloud: use the bound SSH compute host. A ticket-marked, locked worker
+  survives a disconnected SSH client; a new activation reconnects to that work.
+  Keep the instance through inference and scoring, releasing at the end of the
+  held-out evaluation chain according to the Run allocation policy.
+- CPU scoring does not launch a GPU runtime. Cluster GPU reservations follow the
+  existing allocation/site minimum (some GPU partitions require a GPU request).
+  This change does not create a separate CPU pool or change score semantics.
+
+The compute route must supply Python, venv/pip, tar and flock, plus the system
+packages required by the Task scorer. Zevo stages its own package and installs
+it in a ticket-local environment on compute. Judge credentials are restricted
+to the Run's resolved model providers, sent over SSH stdin to a private file,
+loaded into the worker scope and removed. Cloud provisioning keys, database
+credentials and service tokens are not forwarded.
+
+Versioned custom scorers which select `/app/data/evaluation-runtimes/<version>`
+retain their original bytes and digest. Their dependency inventory and NLTK
+assets are staged separately. For Slurm these require a configured container
+image: the task-private compatibility directory is mounted at `/app/data`, and
+the matching Python environment is rebuilt on compute. A direct host must
+already supply that frozen interpreter with matching package versions; Zevo
+verifies it without mutating a shared runtime. Other task-specific OS packages
+and absolute-path assets remain requirements of the configured compute
+environment. There is no fallback to the backend when a dependency is absent.
+
+Progress uses the ordinary execution markers, with a durable phase report.
+Results return through the same schema and finite-score checks as local scoring.
+A suite checkpoints completed **benchmarks**, binding each result to its inputs,
+scorer, system runtime and metrics checksum. Reconnects/retries reuse only matching
+receipts. A custom scorer's individual rows are not silently partitioned: its
+aggregation may not be separable. API judge scripts retain their existing
+per-request cache. Receipts require the remote workspace to survive; they cannot
+recover data from a destroyed instance disk.
+
+## Execution duration
+
+Evaluation has no whole-stage execution timeout, for both custom and built-in
+scorers on local, Slurm, and instance/cloud compute. The former
+`ZEVO_EVALUATION_TIMEOUT_SECONDS` and `ZEVO_CODE_EVALUATION_TIMEOUT_SECONDS`
+settings are no longer used. Explicit cancellation and resource-allocation
+wall time still apply. Keep per-problem code execution limits and individual
+API/transport request deadlines; these do not impose a deadline on the suite.

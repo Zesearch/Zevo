@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -43,7 +44,13 @@ async def test_remote_data_output_errors_schedule_repair(monkeypatch, mismatch):
         runner._validate_remote_data_output(result, inp)
     ticket = SimpleNamespace(id='data-r-001', agent_id='data', status='running', repair_attempts=1)
     messages = []
+    # This unit test isolates failure classification; database-backed progress
+    # counting is covered by test_ticket_repair_state for all four stages.
+    from zevo.engine.run import repair_progress
+    progress = AsyncMock(return_value=False)
+    monkeypatch.setattr(repair_progress, 'repeated_without_progress', progress)
     assert await runner._apply_ticket_failure_policy(SimpleNamespace(add=messages.append), ticket, error_message=str(caught.value))
+    progress.assert_awaited_once()
     assert ticket.status == 'repairing'
     assert ticket.repair_attempts == 2
     assert len(messages) == 1

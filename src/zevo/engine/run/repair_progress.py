@@ -13,7 +13,10 @@ from zevo.db import HeartbeatResult, InfraInstance, TicketNotice, WorkProduct
 def _paths(value):
     if isinstance(value, dict):
         for key, child in value.items():
-            if key.endswith('_path') and isinstance(child, str) and child:
+            is_artifact = key.endswith('_path') or key in {
+                'evaluation_script', 'scoring_set', 'sample_submission',
+            }
+            if is_artifact and isinstance(child, str) and child:
                 yield child
             else:
                 yield from _paths(child)
@@ -49,13 +52,20 @@ async def repeated_without_progress(session, ticket, error):
         HeartbeatResult.ticket_id == ticket.id
     ).order_by(HeartbeatResult.created_at.desc()).limit(1))).scalars().all()
     paths = set(_paths(results[0].output)) if results else set()
+    # System Evaluation may fail before publishing any WorkProduct. Its frozen
+    # scorer and inputs (including suite members) are still progress evidence.
+    if ticket.agent_id in {'data', 'evaluation'}:
+        paths.update(_paths(ticket.payload or {}))
     products = (await session.execute(select(WorkProduct).where(
         WorkProduct.ticket_id == ticket.id))).scalars().all()
     paths.update(p.path for p in products if p.path)
     paths.update(str(Path(p).with_name('length_calibration.json')) for p in list(paths) if p.endswith(('.yaml', '.yml')))
     # Rewritten notes and log timestamps are not new validation evidence.
     paths = {p for p in paths if not p.endswith(('.log', '.out', '.err'))}
-    completed = str(meta.get('scheduler_state', '')).upper() == 'COMPLETED'
+    # Train/Inference retain their legacy completed-collection grouping. Data
+    # and Evaluation distinguish different errors even on the same completed job.
+    completed = (ticket.agent_id in {'train', 'inference'}
+                 and str(meta.get('scheduler_state', '')).upper() == 'COMPLETED')
     evidence = {'error': 'completed_collect' if completed else ' '.join(error.split()),
                 'retry_requested': execution_retry_authorized(meta),
                 'job': [job.id, meta.get('execution_attempt'), meta.get('submission_heartbeat_id')] if job else None,

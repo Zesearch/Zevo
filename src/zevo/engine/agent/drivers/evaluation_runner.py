@@ -67,16 +67,6 @@ def _validated_score(metrics_path: Path) -> tuple[dict[str, Any], float]:
     return value, score
 
 
-def _timeout_seconds(*, code_execution: bool = False) -> float:
-    key = (
-        "ZEVO_CODE_EVALUATION_TIMEOUT_SECONDS"
-        if code_execution else "ZEVO_EVALUATION_TIMEOUT_SECONDS"
-    )
-    raw = os.environ.get(key, "14400" if code_execution else "3600")
-    try:
-        return max(1.0, float(raw))
-    except (TypeError, ValueError):
-        return 3600.0
 
 
 def _judge_progress(path: Path, ticket_id: str) -> dict[str, Any] | None:
@@ -109,6 +99,36 @@ class EvaluationRunnerDriver:
     name = "evaluation_runner"
 
     async def run_agent(
+        self, *, blueprint: Any, input_payload: BaseModel, workspace_dir: str,
+        stdout_sink: Callable[[str], None] | None = None,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+        conversation: list[dict[str, Any]] | None = None, max_turns: int = 60,
+        model_override: str = "", sandbox_mode: str = "",
+    ) -> DriverRunResult:
+        kwargs = dict(blueprint=blueprint, input_payload=input_payload,
+            workspace_dir=workspace_dir, stdout_sink=stdout_sink, event_sink=event_sink,
+            conversation=conversation, max_turns=max_turns,
+            model_override=model_override, sandbox_mode=sandbox_mode)
+        inp = input_payload
+        if isinstance(inp, EvaluationTaskInput) and inp.device_info_path:
+            from zevo.engine.remote_evaluation import run_remote
+            return await run_remote(inp, kwargs["workspace_dir"], kwargs.get("event_sink"))
+        # Only the compute worker enables reuse. Ordinary local calls retain
+        # their historical fresh-output contract (including verifier tests).
+        resume = os.environ.get("ZEVO_EVALUATION_WORKER") == "1"
+        receipt = None
+        if resume and isinstance(inp, EvaluationTaskInput) and not inp.suite_members:
+            from zevo.engine.remote_evaluation import EvaluationReceipt
+            receipt = EvaluationReceipt(inp, Path(kwargs["workspace_dir"]))
+            cached = receipt.load()
+            if cached is not None:
+                return DriverRunResult(output=cached, driver=self.name)
+        result = await self._run_local(**kwargs)
+        if receipt is not None and result.output.status == "succeeded":
+            receipt.save(result.output)
+        return result
+
+    async def _run_local(
         self,
         *,
         blueprint: Any,
@@ -453,24 +473,9 @@ class EvaluationRunnerDriver:
                 if event_sink is not None else None
             )
             try:
-                stdout_b, stderr_b = await process_registry.wait_for_active_time(
-                    proc.communicate(),
-                    key=inp.ticket_id,
-                    timeout=_timeout_seconds(
-                        code_execution=bool(inp.code_execution_adapter),
-                    ),
-                )
-            except asyncio.TimeoutError:
-                process_registry.cancel(inp.ticket_id)
-                await proc.wait()
-                message = (
-                    "evaluation script timed out after "
-                    f"{_timeout_seconds(code_execution=bool(inp.code_execution_adapter)):g} "
-                    "seconds"
-                )
-                log_path.write_text(message + "\n", encoding="utf-8")
-                output = _failed(inp.ticket_id, message, f"route={route}")
-                return DriverRunResult(output=output, exit_code=124, driver=self.name)
+                # No whole-evaluation deadline. Cancellation still uses the
+                # registered process group; individual code cases keep limits.
+                stdout_b, stderr_b = await proc.communicate()
             finally:
                 if progress_task is not None:
                     progress_task.cancel()

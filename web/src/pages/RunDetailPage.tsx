@@ -1117,7 +1117,6 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
         <div className="flex items-center gap-2 font-mono text-sm">
           <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? midTrainingActionLabel(picked) : t.id}</Link>
           {!midTrainingTicketId && <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />}
-          {currentTrainingActivity && <span className="text-xs text-sky-300">{currentTrainingActivity}</span>}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
         </div>
         <div className="flex items-center gap-3">

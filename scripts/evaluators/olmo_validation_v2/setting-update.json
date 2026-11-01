@@ -1,0 +1,205 @@
+{
+  "task_id": "b333424a-c8a5-408d-acef-005da446c376",
+  "status": "prepared_not_applied",
+  "preconditions": "All before-values must match. Install verified script before updating settings. Preserve in-flight frozen contracts.",
+  "settings": [
+    {
+      "setting_id": "186094f0-02ec-4046-821f-83236281a375",
+      "setting_name": "L1",
+      "validation_sets": [
+        {
+          "index": 0,
+          "before": {
+            "name": "Math \u00b7 MATH-Hard",
+            "inference_query": "{prompt}\n\nShow your reasoning and conclude with \\boxed{answer}.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Math \u00b7 MATH-Hard",
+            "inference_query": "{prompt}\n\nShow your reasoning and conclude with \\boxed{answer}.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 1,
+          "before": {
+            "name": "Math \u00b7 GSM8K",
+            "inference_query": "{prompt}\n\nShow your reasoning and conclude with \\boxed{answer}.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Math \u00b7 GSM8K",
+            "inference_query": "{prompt}\n\nShow your reasoning and conclude with \\boxed{answer}.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 2,
+          "before": {
+            "name": "Reasoning \u00b7 ARC Challenge",
+            "inference_query": "{prompt}\n\nGive concise reasoning, then finish with Answer: followed by the correct option label exactly as shown.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Reasoning \u00b7 ARC Challenge",
+            "inference_query": "{prompt}\n\nGive concise reasoning, then finish with Answer: followed by the correct option label exactly as shown.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 3,
+          "before": {
+            "name": "Reasoning \u00b7 FOLIO",
+            "inference_query": "{prompt}\n\nUsing only the premises, classify the conclusion: (A) True / entailed, (B) False / its negation is entailed, (C) Uncertain / neither follows. Give concise reasoning and end with Answer: A, B, or C.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Reasoning \u00b7 FOLIO",
+            "inference_query": "{prompt}\n\nUsing only the premises, classify the conclusion: (A) True / entailed, (B) False / its negation is entailed, (C) Uncertain / neither follows. Give concise reasoning and end with Answer: A, B, or C.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 4,
+          "before": {
+            "name": "Coding \u00b7 CodeContests",
+            "inference_query": "{prompt}\n\nReturn a complete executable Python 3 stdin/stdout program in a python code block.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Coding \u00b7 CodeContests",
+            "inference_query": "{prompt}\n\nReturn a complete executable Python 3 stdin/stdout program in a python code block.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 5,
+          "before": {
+            "name": "Coding \u00b7 MBPP",
+            "inference_query": "{prompt}\n\nReturn the complete Python function in a python code block.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Coding \u00b7 MBPP",
+            "inference_query": "{prompt}\n\nReturn the complete Python function in a python code block.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 6,
+          "before": {
+            "name": "Instruction Following \u00b7 Verifiable IF",
+            "inference_query": "{prompt}",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Instruction Following \u00b7 Verifiable IF",
+            "inference_query": "{prompt}",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 7,
+          "before": {
+            "name": "Instruction Following \u00b7 Length & Structure",
+            "inference_query": "{prompt}",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Instruction Following \u00b7 Length & Structure",
+            "inference_query": "{prompt}",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 8,
+          "before": {
+            "name": "Knowledge \u00b7 OpenBookQA",
+            "inference_query": "{prompt}\n\nGive concise reasoning, then finish with Answer: followed by the correct option label exactly as shown.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Knowledge \u00b7 OpenBookQA",
+            "inference_query": "{prompt}\n\nGive concise reasoning, then finish with Answer: followed by the correct option label exactly as shown.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 9,
+          "before": {
+            "name": "Knowledge \u00b7 MMLU Validation",
+            "inference_query": "{prompt}\n\nGive concise reasoning and conclude with Answer: A, B, C, or D.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Knowledge \u00b7 MMLU Validation",
+            "inference_query": "{prompt}\n\nGive concise reasoning and conclude with Answer: A, B, C, or D.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 10,
+          "before": {
+            "name": "Chat \u00b7 Dolly",
+            "inference_query": "{prompt}",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Chat \u00b7 Dolly",
+            "inference_query": "{prompt}",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        },
+        {
+          "index": 11,
+          "before": {
+            "name": "Chat \u00b7 Multi-turn Context",
+            "inference_query": "Continue the conversation in the \"messages\" field. Treat it as ordered role/content messages, preserve every historical user and assistant turn, and generate only the next assistant reply to the final user message. Use conversation_field=\"messages\" with the model chat template; do not wrap the history in a single user message or append the \"prompt\" field. Use system_prompt=\"You are a helpful assistant.\" only when the supplied history has no system message; preserve an existing system message.",
+            "evaluation_script": "/app/data/evaluators/ee/eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332.py",
+            "evaluator_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332"
+          },
+          "after": {
+            "name": "Chat \u00b7 Multi-turn Context",
+            "inference_query": "Continue the conversation in the \"messages\" field. Treat it as ordered role/content messages, preserve every historical user and assistant turn, and generate only the next assistant reply to the final user message. Use conversation_field=\"messages\" with the model chat template; do not wrap the history in a single user message or append the \"prompt\" field. Use system_prompt=\"You are a helpful assistant.\" only when the supplied history has no system message; preserve an existing system message.",
+            "evaluation_script": "/app/data/evaluators/29/29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c.py",
+            "evaluator_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c"
+          },
+          "baseline_action": "rescore_saved_predictions"
+        }
+      ]
+    }
+  ]
+}

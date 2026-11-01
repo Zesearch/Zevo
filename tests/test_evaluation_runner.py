@@ -441,3 +441,61 @@ def test_pipeline_evaluation_carries_frozen_prediction_column(tmp_path: Path, co
     assert result.output.status == "succeeded", result.output.error_message
     metrics = json.loads(Path(result.output.metrics_path).read_text())
     assert metrics["score"] == (1.0 if column == "prediction" else 0.0)
+
+
+def test_evaluation_has_no_whole_stage_timeout(tmp_path, monkeypatch):
+    from zevo.engine.run import process_registry
+
+    async def unexpected_deadline(*args, **kwargs):
+        pytest.fail('Evaluation must not use an active-time deadline')
+
+    monkeypatch.setattr(process_registry, 'wait_for_active_time', unexpected_deadline)
+    monkeypatch.setenv('ZEVO_EVALUATION_TIMEOUT_SECONDS', '0.001')
+    monkeypatch.setenv('ZEVO_CODE_EVALUATION_TIMEOUT_SECONDS', '0.001')
+    predictions = tmp_path / 'predictions.csv'
+    gold = tmp_path / 'gold.csv'
+    _write_csv(predictions, [{'id': '1', 'prediction': 'A'}])
+    _write_csv(gold, [{'id': '1', 'answer': 'A'}])
+    evaluator = tmp_path / 'eval.py'
+    evaluator.write_text("import json,sys,time\ntime.sleep(0.05)\njson.dump({'score':1.0},open(sys.argv[3],'w'))\n")
+    result, _ = _run(EvaluationTaskInput(
+        ticket_id='eval-no-stage-deadline', predictions_path=str(predictions),
+        scoring_set=str(gold), sample_submission=str(predictions),
+        evaluation_script=str(evaluator), evaluator_sha256=file_sha256(evaluator),
+        answer_fields=['answer'], metric='accuracy',
+    ), tmp_path / 'work')
+    assert result.output.status == 'succeeded'
+
+
+def test_evaluation_without_deadline_can_still_be_cancelled(tmp_path, monkeypatch):
+    from zevo.engine.run import process_registry
+    register = process_registry.register
+    cancelled = []
+
+    def register_and_cancel(key, proc):
+        register(key, proc)
+        asyncio.get_running_loop().call_later(0.05, lambda: cancelled.append(process_registry.cancel(key)))
+
+    monkeypatch.setattr(process_registry, 'register', register_and_cancel)
+    predictions = tmp_path / 'predictions.csv'
+    gold = tmp_path / 'gold.csv'
+    _write_csv(predictions, [{'id': '1', 'prediction': 'A'}])
+    _write_csv(gold, [{'id': '1', 'answer': 'A'}])
+    evaluator = tmp_path / 'eval.py'
+    evaluator.write_text('import time\ntime.sleep(60)\n')
+    inp = EvaluationTaskInput(
+        ticket_id='eval-cancel-no-deadline', predictions_path=str(predictions),
+        scoring_set=str(gold), sample_submission=str(predictions),
+        evaluation_script=str(evaluator), evaluator_sha256=file_sha256(evaluator),
+        answer_fields=['answer'], metric='accuracy',
+    )
+
+    async def run():
+        return await asyncio.wait_for(EvaluationRunnerDriver().run_agent(
+            blueprint=None, input_payload=inp, workspace_dir=str(tmp_path / 'work'),
+        ), 5)
+
+    result = asyncio.run(run())
+    assert cancelled == [True]
+    assert result.output.status == 'failed'
+    assert not process_registry.cancel(inp.ticket_id)

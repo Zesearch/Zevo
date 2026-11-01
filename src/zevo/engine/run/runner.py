@@ -839,7 +839,7 @@ async def _build_infra_input(
 async def _slurm_stage_job_contract(
     *, run: Run, ticket: Ticket, work_dir: str, filename: str,
     device_info_path: str, session: AsyncSession,
-    stage: Literal["data", "train", "inference"],
+    stage: Literal["data", "train", "inference", "evaluation"],
     inference_config_path: str = "",
 ) -> SlurmStageJobContract:
     """Stamp a new submission or the newest backend-observed Slurm job."""
@@ -906,7 +906,9 @@ async def _slurm_stage_job_contract(
             or checkpoint_resume or walltime_resume
             or (
                 str(getattr(ticket, "status", "")) == "repairing"
-                and (prior_state != "COMPLETED" or (stage == "train" and meta.get("training_completion_repair"))
+                and ((prior_state != "COMPLETED" and (
+                    stage != "evaluation" or prior_state in {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "BOOT_FAIL"}
+                )) or (stage == "train" and meta.get("training_completion_repair"))
                     or (stage == "inference" and execution_retry_authorized(meta)))
                 and int(getattr(ticket, "repair_attempts", 0) or 0) <= MAX_REPAIR_ATTEMPTS
             )
@@ -1862,6 +1864,32 @@ def _stage_gpu_runtime_helper(inp: BaseModel, work_dir: str) -> BaseModel:
                                   "stage_resume_helper_path": str(resume_path)})
 
 
+async def _bind_evaluation_compute(session, run, ticket, inputs, work_dir, inp):
+    """Inherit the inference's exact compute route, including legacy tickets."""
+    binding = dict(inputs.get("device_info") or {})
+    if not binding:
+        source_id = str((inputs.get("predictions") or {}).get("source_ticket_id") or "")
+        source = await session.get(Ticket, source_id) if source_id else None
+        if source is None or source.run_id != run.id:
+            raise ValueError("Evaluation requires predictions from this Run's compute stage")
+        binding = dict((source.inputs or {}).get("device_info") or {})
+    if not binding:
+        raise ValueError("Evaluation has no compute route; provision resources before scoring")
+    resolved = await resolve_input_bindings(session, run_id=run.id, inputs={"device_info": binding})
+    path = input_path(resolved, "device_info")
+    info = InfrastructureDeviceInfo.model_validate_json(Path(path).read_text())
+    if info.run_id != run.id:
+        raise ValueError("Evaluation device belongs to another Run")
+    ticket.inputs = {**dict(ticket.inputs or {}), "device_info": resolved["device_info"]}
+    contract = await _slurm_stage_job_contract(run=run, ticket=ticket, work_dir=work_dir,
+        filename="evaluate.sbatch", device_info_path=path, session=session, stage="evaluation")
+    route = info.cluster or info.instance
+    # Stable directory: completed benchmark receipts survive Slurm attempts.
+    remote = str(PurePosixPath(route.workdir) / ticket.id / "evaluation")
+    return inp.model_copy(update={"device_info_path": path, "slurm_job": contract,
+                                  "remote_work_dir": remote})
+
+
 async def _build_input(
     *, agent_id: str, ticket: Ticket, payload: dict, inputs: dict,
     work_dir: str,
@@ -1923,13 +1951,15 @@ async def _build_input(
     if agent_id == "evaluation":
         from zevo.engine.run.adaptive_training import is_checkpoint_evaluation, build_checkpoint_evaluation_input
         if is_checkpoint_evaluation(ticket):
-            return await build_checkpoint_evaluation_input(session, run, ticket, work_dir)
-        return _build_evaluation_input(
-            ticket, payload, inputs, work_dir, run,
-            suite_members=await _build_evaluation_suite_members(
-                ticket, payload, inputs, run, session,
-            ),
-        )
+            evaluation_input = await build_checkpoint_evaluation_input(session, run, ticket, work_dir)
+        else:
+            evaluation_input = _build_evaluation_input(
+                ticket, payload, inputs, work_dir, run,
+                suite_members=await _build_evaluation_suite_members(
+                    ticket, payload, inputs, run, session,
+                ),
+            )
+        return await _bind_evaluation_compute(session, run, ticket, inputs, work_dir, evaluation_input)
     if agent_id == "registry":
         registry_input = _build_registry_input(ticket, payload, inputs, work_dir)
         registry_input.model_save_policy = dict((run.lifecycle or {}).get("model_save_policy") or {})
@@ -3005,6 +3035,8 @@ def _extract_summary_artifact_meta(
         })
 
     if isinstance(result, EvaluationResult):
+        if status == "deferred":
+            return status, result.notes, "", {}
         if status == "failed":
             # A deterministic scorer's typed failure is authoritative. Do not
             # replace it with empty notes or metrics from an earlier attempt.
@@ -4296,6 +4328,7 @@ def _slurm_stage_implementation_sha256(contract: SlurmStageJobContract) -> str:
         "data": "prepare_data.py",
         "train": "train.py",
         "inference": "predict.py",
+        "evaluation": "evaluation-bundle.sha256",
     }.get(contract.stage)
     if not executable:
         raise ValueError(f"unsupported Slurm stage implementation: {contract.stage!r}")
@@ -4630,7 +4663,7 @@ async def _apply_ticket_failure_policy(
         ticket.repair_attempts = int(ticket.repair_attempts or 0)
         ticket.repair_route = "terminal"
         return False
-    if disposition.route == "self" and ticket.agent_id in {"train", "inference"}:
+    if disposition.route == "self" and ticket.agent_id in {"data", "train", "inference", "evaluation"}:
         from zevo.engine.run.repair_progress import repeated_without_progress
         if await repeated_without_progress(session, ticket, error_message):
             ticket.status = "failed"
@@ -5253,10 +5286,10 @@ async def run_ticket(
     heartbeat_id = hb.id
 
     direct_execution = None
-    if tk.agent_id in {"train", "inference"} and not (
+    if tk.agent_id in {"train", "inference", "evaluation"} and not (
         isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled
     ):
-        log_name = "train.log" if tk.agent_id == "train" else "infer.log"
+        log_name = {"train": "train.log", "inference": "infer.log", "evaluation": "evaluate.log"}[tk.agent_id]
         direct_execution = await register_execution(
             session, execution_id=heartbeat_id, ticket_id=tk.id,
             heartbeat_id=heartbeat_id, runtime_key=f"{run.gpu_provider}:{run.id}",
@@ -6217,7 +6250,7 @@ async def run_ticket(
         deferred_stage_row = await _latest_slurm_resource_request(session, tk)
         if (
             not cancelled_by_user
-            and tk.agent_id in {"data", "train", "inference"}
+            and tk.agent_id in {"data", "train", "inference", "evaluation"}
             and _slurm_job_was_submitted_by(deferred_stage_row, heartbeat_id)
         ):
             # Submission is already a durable side effect. A malformed
@@ -6377,9 +6410,9 @@ async def run_ticket(
             except (OSError, ValueError) as exc:
                 runtime_contract_mismatches["frozen_reuse_artifacts"] = {"declared": "unchanged bound files", "reported": str(exc)}
         if status == "deferred":
-            if not isinstance(output, (DataResult, TrainResult, InferenceResult)):
+            if not isinstance(output, (DataResult, TrainResult, InferenceResult, EvaluationResult)):
                 runtime_contract_mismatches["deferred_status"] = {
-                    "declared": "Data, Train, or Inference cluster resource request",
+                    "declared": "Data, Train, Inference, or Evaluation cluster resource request",
                     "reported": type(output).__name__,
                 }
             elif not isinstance(
@@ -7117,8 +7150,9 @@ async def run_ticket(
                 for name, role in (
                     ("evaluate.sh", "evaluation_command"),
                     ("evaluate.log", "evaluation_log"),
+                    ("phase-report.json", "phase_report"),
                 ):
-                    candidate = str(Path(work_dir) / name)
+                    candidate = str(Path(output.metrics_path).parent / name)
                     if not _artifact_problem(candidate):
                         items.append((candidate, role, {}))
                 if output.suite_members:

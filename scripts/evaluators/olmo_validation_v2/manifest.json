@@ -1,0 +1,7 @@
+{
+  "old_sha256": "eec6cbd60a40d1d97f3a714f7758994fda4b899904fc6eb48c2c4c3810bb1332",
+  "new_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c",
+  "protocol_revision": "validation-v2-boxed-final-choice",
+  "embedded_reference_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77",
+  "runtime": "/app/data/evaluation-runtimes/olmes-5a51f502-alpaca-cd543a1"
+}
