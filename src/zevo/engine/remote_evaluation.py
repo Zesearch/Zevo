@@ -251,7 +251,7 @@ async def run_remote(inp: EvaluationTaskInput, workspace_dir: str, event_sink=No
     if not remote.startswith('/') or any(c in remote for c in '\n\r\0'):
         raise ValueError('remote evaluation requires an absolute work directory')
     local = Path(workspace_dir).resolve()
-    if event_sink is not None:
+    if event_sink is not None and not (inp.slurm_job.enabled and inp.slurm_job.phase == "collect"):
         event_sink({"type": "progress", "payload": {
             "owner": inp.ticket_id, "phase": "suite_start", "step": 0,
             "total": 1 + len(inp.suite_members), "benchmark_total": 1 + len(inp.suite_members),
@@ -265,6 +265,18 @@ async def run_remote(inp: EvaluationTaskInput, workspace_dir: str, event_sink=No
                 result = EvaluationResult(ticket_id=inp.ticket_id, status='deferred', metrics_path='', error_message='', notes='Waiting for evaluation compute job')
             else:
                 result = await collect(info, remote, local, inp.ticket_id)
+                if result.status == 'succeeded' and event_sink is not None:
+                    members = [(inp.benchmark_id, inp.test_set_name)] + [
+                        (m.benchmark_id, m.name) for m in inp.suite_members
+                    ]
+                    event_sink({'type': 'progress', 'payload': {
+                        'owner': inp.ticket_id, 'phase': 'completed',
+                        'step': len(members), 'total': len(members),
+                        'benchmark_total': len(members), 'active_benchmarks': [],
+                        'completed_benchmarks': [
+                            {'id': identity or name, 'name': name} for identity, name in members
+                        ],
+                    }})
             return DriverRunResult(output=result, driver='evaluation_runner')
         # A direct-host reconnect must not overwrite an active worker's inputs
         # or credentials. The lock is held for the whole remote process tree.

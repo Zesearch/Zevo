@@ -189,8 +189,20 @@ class EvaluationRunnerDriver:
                     "step": 0, "total": len(entries), "benchmark_total": len(entries),
                 }})
 
+            active_benchmarks = {}
+            def publish_active(phase, index, entry):
+                if event_sink is not None:
+                    event_sink({'type': 'progress', 'payload': {
+                        'owner': inp.ticket_id, 'phase': phase,
+                        'benchmark_name': entry[0], 'benchmark_id': entry[1],
+                        'benchmark_index': index + 1, 'benchmark_total': len(entries),
+                        'active_benchmarks': list(active_benchmarks.values()),
+                    }})
+
             async def score_member(index, entry):
                 async with semaphore:
+                    active_benchmarks[index] = entry[0]
+                    publish_active('benchmark_start', index, entry)
                     try:
                         return await execute_member(index, entry)
                     except Exception as exc:
@@ -198,6 +210,9 @@ class EvaluationRunnerDriver:
                             output=_failed(inp.ticket_id, f"{entry[0]}: {exc}"),
                             exit_code=1, driver=self.name,
                         )
+                    finally:
+                        active_benchmarks.pop(index, None)
+                        publish_active('benchmark_finished', index, entry)
 
             async def execute_member(index, entry):
                 name, identity, member_input = entry
