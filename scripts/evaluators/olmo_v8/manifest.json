@@ -1,0 +1,20 @@
+[
+  {
+    "family": "livecodebench",
+    "old_sha256": "98d34c255e247630ab559cf6395b0e9590eca17e04458cf475229eb3eb568681",
+    "new_sha256": "5368b5c4723bb98dfa3c5849dd5cc114727e686663d888a328f933c012080c35",
+    "protocol_revision": "olmo-task-v8"
+  },
+  {
+    "family": "reasoning-knowledge-math",
+    "old_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df",
+    "new_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77",
+    "protocol_revision": "olmo-task-v8"
+  },
+  {
+    "family": "instruction-zebra-alpaca",
+    "old_sha256": "7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b",
+    "new_sha256": "0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514",
+    "protocol_revision": "olmo-task-v8"
+  }
+]

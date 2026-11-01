@@ -125,6 +125,13 @@ while not stopping:
     request_path = pending[0]
     request = json.loads(request_path.read_text())
     output_path = root / "outcomes" / request_path.name
+    if (root / "cancel" / request_path.stem).exists():
+        temporary = output_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"exit_code": 130, "error": "cancelled before execution"}))
+        os.replace(temporary, output_path)
+        if single_workload: sys.exit(130)
+        last_work = time.monotonic()
+        continue
     log_out = request["stdout"].replace("%j", os.environ.get("SLURM_JOB_ID", "local"))
     log_err = request["stderr"].replace("%j", os.environ.get("SLURM_JOB_ID", "local"))
     rc = 125
@@ -348,7 +355,7 @@ def _checkpoint_allocation_handoff(run, ticket, consumer, train):
     request = (ticket.payload or {}).get("mid_training_checkpoint") or {}
     stage = (run.lifecycle or {}).get("adaptive_checkpoints", {}).get(key, {})
     return bool(
-        key and ticket.agent_id == "inference"
+        key and ticket.agent_id in {"inference", "evaluation"}
         and train is not None and train.agent_id == "train"
         and train.status == "waiting_external"
         and train.run_id == run.id and consumer.run_id == run.id
@@ -356,7 +363,7 @@ def _checkpoint_allocation_handoff(run, ticket, consumer, train):
         and request.get("ticket_id") == train.id == consumer.ticket_id
         and stage.get("request") == request
         and stage.get("job_row_id") == consumer.id
-        and stage.get("inference_ticket_id") == ticket.id
+        and stage.get("inference_ticket_id" if ticket.agent_id == "inference" else "evaluation_ticket_id") == ticket.id
         and not stage.get("resume_queued") and not meta.get("checkpoint_resume")
         and meta.get("scheduler_state") == "COMPLETED"
     )
@@ -422,7 +429,13 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
                     and consumer_index > active_consumers.index(current_checkpoint)
                     and (consumer.meta or {}).get("scheduler_state") == "COMPLETED"):
                 continue
-            if not _checkpoint_allocation_handoff(run, ticket, consumer, train):
+            # Evaluation can arrive while the next optimization stage is
+            # already active. Publish it to the controller's serial queue;
+            # never run scoring on login or overlap the active workload.
+            evaluation_queue = ticket.agent_id == "evaluation" or (
+                train is not None and train.agent_id == "evaluation"
+            )
+            if not evaluation_queue and not _checkpoint_allocation_handoff(run, ticket, consumer, train):
                 raise ValueError("retained allocation is busy with another stage")
         if continuation and continuation.get("source_job_id") == row.instance_id:
             # The worker already yielded for walltime. Do not send it back into

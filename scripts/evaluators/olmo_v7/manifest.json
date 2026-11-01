@@ -1,0 +1,14 @@
+[
+  {
+    "family": "reasoning-knowledge-math",
+    "old_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df",
+    "new_sha256": "974ecacd6509f07399fcf1553b39778af633dda5cd5eafbc2be683eee5ed0bc1",
+    "protocol_revision": "olmo-task-v7"
+  },
+  {
+    "family": "instruction-zebra-alpaca",
+    "old_sha256": "7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b",
+    "new_sha256": "73956485cbcca0f0df8a1db0fe4da47c5bdb50033a93b5b0503ffd770b1d22dd",
+    "protocol_revision": "olmo-task-v7"
+  }
+]

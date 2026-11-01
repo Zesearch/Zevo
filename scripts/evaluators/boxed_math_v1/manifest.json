@@ -1,0 +1,26 @@
+[
+  {
+    "family": "math-full",
+    "old_sha256": "2eb0ba45d014190c32a5396f8131007008245f2d9491b723a6ba983b3beada24",
+    "new_sha256": "20da9971d74822b260d02b667042897b5bfb1c3130f620395a078646f3098917",
+    "protocol_revision": "boxed-math-v1"
+  },
+  {
+    "family": "math-full-02",
+    "old_sha256": "d19c530f3278f8940b8a79b2ca507c5819dbf256bd609ce5d5bce01a7b93e59f",
+    "new_sha256": "50b8653f6f49bca5d3cd299823c1e82d0ef76aeafcc522d121fac9d619d6323a",
+    "protocol_revision": "boxed-math-v1"
+  },
+  {
+    "family": "math-full-v2",
+    "old_sha256": "11749fbb9f97ea7a3c38ec48e87141bacb89d68221b662d630fbb167a924fa16",
+    "new_sha256": "1e82def2cee8827ea5f202149adb308be6049d9967a3570df7c46e9cee4b19cc",
+    "protocol_revision": "boxed-math-v1"
+  },
+  {
+    "family": "olmo-task-v5",
+    "old_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df",
+    "new_sha256": "0651de4235754195fe2232f9a1bb4bd3902c6b4ed8281a65a00ba1a044718b0f",
+    "protocol_revision": "boxed-math-v1"
+  }
+]

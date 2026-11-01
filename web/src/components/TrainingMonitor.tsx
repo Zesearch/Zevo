@@ -310,14 +310,7 @@ export function TrainingMonitor({ executionEvents }: { executionEvents: Executio
   }, [showHistory]);
 
   if (data.length === 0) {
-    const phase = scopedEvents[scopedEvents.length - 1]?.phase;
-    return (
-      <div className="text-xs text-dim">
-        {historyControl}
-        No loss readings yet{phase ? `, current phase: ` : "."}
-        {phase && <span className="font-mono text-brass-300">{phase}</span>}
-      </div>
-    );
+    return <>{historyControl}</>;
   }
 
   // The last value each metric actually REPORTED, not the values on the last

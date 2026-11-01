@@ -4,6 +4,12 @@ const PERCENTAGE_SCORE_METRICS = new Set([
   "accuracy", "exact_match", "em", "f1", "f1_micro", "f1_macro", "token_f1",
   "precision", "recall", "bleu", "rouge", "rouge_l", "pass_rate", "win_rate",
   "pass@1", "pass_at_1", "mc_loglikelihood", "accuracy_norm", "suite_average",
+  // Frozen OLMO evaluators declare score_range=[0, 1]. Keep their current
+  // protocol names consistent with the older *_accuracy metric names. Do not
+  // infer a percentage merely because an observed value happens to be <= 1.
+  "validation_score", "exact_match_flex", "prompt_level_strict_acc",
+  "prompt_level_loose_acc", "inst_level_strict_acc", "inst_level_loose_acc",
+  "length_controlled_winrate", "alias_substring_match",
   // These custom model-judge scores average per-row values in [0, 1].
   "pairwise_win_rate_vs_human_reference_model_judge",
   "pairwise_win_rate_vs_reference_model_judge",

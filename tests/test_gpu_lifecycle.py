@@ -286,8 +286,8 @@ async def test_owner_monitor_after_source_ticket_completed(monkeypatch, state, r
     ('cloud', 'optimization', 'succeeded', False),
     ('cloud', 'optimization', 'degraded', False),
     ('instance', 'optimization', 'succeeded', False),
-    # The held-out Inference is the end of that chain: release.
-    ('cloud', 'held_out_test', 'succeeded', True),
+    # Held-out Evaluation now also consumes the instance: keep it until scoring.
+    ('cloud', 'held_out_test', 'succeeded', False),
     # A failed Inference spawns nothing: release.
     ('cloud', 'optimization', 'failed', True),
     # Cluster allocations are controller-owned; the rule does not apply.
@@ -380,7 +380,7 @@ async def test_retained_allocation_accounting_fallback(monkeypatch, queue, accou
     assert len(calls) == (1 if accounting is None else 2)
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('stage', ['train', 'inference', 'data'])
+@pytest.mark.parametrize('stage', ['train', 'inference', 'data', 'evaluation'])
 @pytest.mark.parametrize('status', ['running', 'repairing', 'waiting_external'])
 @pytest.mark.parametrize('released', [True, False])
 async def test_retained_allocation_ignores_only_released_resource_claims(monkeypatch, stage, status, released):
@@ -419,7 +419,7 @@ async def test_retained_allocation_ignores_only_released_resource_claims(monkeyp
                     remote_work_dir='/remote', stdout_path='/out', stderr_path='/err'),
                 info=SimpleNamespace(cluster=SimpleNamespace(env_setup='')),
                 heartbeat_id='next-hb', sha256='digest')
-            if released:
+            if released or stage == 'evaluation':
                 job, submitted = await submit_workload(session, **kwargs)
                 assert job == '123' and submitted['allocation_owner_row_id'] == owner.id
                 assert any('next-hb' in command for command in commands)
@@ -597,3 +597,22 @@ async def test_new_allocation_applies_policy_and_current_remaining_budget(
             assert budget_reads == (['run-1'] if user else [])
     finally:
         await engine.dispose()
+
+
+def test_queued_evaluation_cancel_does_not_start_the_workload(tmp_path):
+    for name in ('requests', 'outcomes', 'cancel'):
+        (tmp_path / name).mkdir()
+    script = tmp_path / 'evaluate.sh'
+    script.write_text('touch scoring-started\n')
+    publish(tmp_path, '01', script)
+    (tmp_path / 'cancel/01').touch()
+    process = subprocess.Popen([sys.executable, '-c', CONTROLLER_SOURCE, str(tmp_path), '1'])
+    try:
+        result = wait_outcome(tmp_path / 'outcomes/01.json', process)
+        assert result['exit_code'] == 130
+        assert not (tmp_path / 'scoring-started').exists()
+        assert process.wait(timeout=5) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()

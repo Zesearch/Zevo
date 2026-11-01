@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from zevo.db import InfraInstance, Run, Ticket
 
-GPU_STAGES = {"train", "inference"}
+GPU_STAGES = {"train", "inference", "evaluation"}
 TERMINAL = {"succeeded", "degraded", "failed", "cancelled", "skipped"}
 
 
@@ -38,15 +38,17 @@ def engine_chain_follows(run: Run, ticket: Ticket) -> bool:
     on a direct host (cloud/instance) releasing here strands the held-out
     Inference: every alarm-clock wake fails with "cloud instance has been
     released; provision a fresh device_info before the next stage" and the
-    Run never ends (smoke run 83f87bfa, 2026-10-01). The held-out Inference's
-    own terminal state is the release point; the Orchestrator provisions
+    Run never ends (smoke run 83f87bfa, 2026-10-01). The held-out Evaluation's
+    terminal state is the release point; the Orchestrator provisions
     before any later stage it decides on, as the per_stage contract says.
     Cluster allocations are controller-owned and unaffected.
     """
     return (
         getattr(run, "gpu_provider", "") != "cluster"
-        and ticket.agent_id == "inference"
-        and getattr(ticket, "lane", "optimization") == "optimization"
+        and (ticket.agent_id == "inference" or (
+            ticket.agent_id == "evaluation"
+            and getattr(ticket, "lane", "optimization") == "optimization"
+        ))
         and ticket.status in {"succeeded", "degraded"}
     )
 

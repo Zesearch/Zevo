@@ -5,7 +5,10 @@ spends again.  This module assigns one of three routes:
 
 ``self``
     The Specialist owns the generated output, script, command, or artifact and
-    gets up to twenty repair activations on the same Ticket.
+    gets up to twenty repair activations on the same Ticket. Data, Train,
+    Inference and Evaluation stop earlier after three failures with unchanged
+    evidence; Data/Evaluation include error text, execution identity and input
+    artifacts in that evidence.
 ``orchestrator``
     The work order/upstream lineage must change.  Re-running the Specialist
     unchanged would be wasteful, so its terminal failure is handed upstream.

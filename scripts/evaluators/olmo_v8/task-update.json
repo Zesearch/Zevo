@@ -1,0 +1,297 @@
+{
+  "task_id": "b333424a-c8a5-408d-acef-005da446c376",
+  "task_name": "Olmo-3.1-32B-Instruct-SFT-judged-v2",
+  "protocol_revision": "olmo-task-v8",
+  "status": "prepared_not_applied",
+  "apply_preconditions": "All before values must still match. Install hash-verified artifacts first; never mutate in-flight frozen contracts.",
+  "test_sets": [
+    {
+      "index": 0,
+      "before": {
+        "name": "Math \u00b7 MATH",
+        "metric": "exact_match_flex",
+        "inference_query": "{problem}\n\nPresent the answer in LaTex format: \\boxed{Your answer}",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Math \u00b7 MATH",
+        "metric": "exact_match_flex",
+        "inference_query": "{problem}\n\nPresent the answer in LaTex format: \\boxed{Your answer}",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 1,
+      "before": {
+        "name": "Math \u00b7 AIME 2024",
+        "metric": "exact_match_flex",
+        "inference_query": "{problem}\n\nPresent the answer in LaTex format: \\boxed{Your answer}",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Math \u00b7 AIME 2024",
+        "metric": "exact_match_flex",
+        "inference_query": "{problem}\n\nPresent the answer in LaTex format: \\boxed{Your answer}",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 2,
+      "before": {
+        "name": "Math \u00b7 AIME 2025",
+        "metric": "exact_match_flex",
+        "inference_query": "{problem}\n\nPresent the answer in LaTex format: \\boxed{Your answer}",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Math \u00b7 AIME 2025",
+        "metric": "exact_match_flex",
+        "inference_query": "{problem}\n\nPresent the answer in LaTex format: \\boxed{Your answer}",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 3,
+      "before": {
+        "name": "Math \u00b7 OMEGA",
+        "metric": "exact_match_flex",
+        "inference_query": "{question}\n\nShow your work and conclude with \"Therefore, the final answer is \\boxed{answer}.\" where answer is just the final solution that solves the problem. E.g., if the answer is 6, conclude with \"Therefore, the final answer is \\boxed{6}.\"",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Math \u00b7 OMEGA",
+        "metric": "exact_match_flex",
+        "inference_query": "{question}\n\nShow your work and conclude with \"Therefore, the final answer is \\boxed{answer}.\" where answer is just the final solution that solves the problem. E.g., if the answer is 6, conclude with \"Therefore, the final answer is \\boxed{6}.\"",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 4,
+      "before": {
+        "name": "Reasoning \u00b7 BigBenchHard",
+        "metric": "exact_match",
+        "inference_query": "{task_description}Q: {question_text}\nA: Let's think step by step.",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Reasoning \u00b7 BigBenchHard",
+        "metric": "exact_match",
+        "inference_query": "{task_description}Q: {question_text}\nA: Let's think step by step.\n\nEnd your response with exactly one final line: So the answer is ANSWER.\nReplace ANSWER with only the final answer. For multiple-choice questions, use the option letter in parentheses, e.g. (B). For other questions, preserve the required numbers, signs, words, or bracket sequence. Do not write anything after this final line.",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rerun_baseline_inference_then_evaluate"
+    },
+    {
+      "index": 5,
+      "before": {
+        "name": "Reasoning \u00b7 ZebraLogic",
+        "metric": "puzzle_accuracy",
+        "inference_query": "{prompt}",
+        "evaluation_script": "/app/data/evaluators/79/7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b.py",
+        "evaluator_sha256": "7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b"
+      },
+      "after": {
+        "name": "Reasoning \u00b7 ZebraLogic",
+        "metric": "puzzle_accuracy",
+        "inference_query": "{prompt}",
+        "evaluation_script": "/app/data/evaluators/0c/0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514.py",
+        "evaluator_sha256": "0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 6,
+      "before": {
+        "name": "Reasoning \u00b7 AGIEval English",
+        "metric": "exact_match",
+        "inference_query": "Answer the following multiple-choice question by giving the correct answer letter in parentheses. Provide CONCISE reasoning for the answer, and make sure to finish the response with \"Therefore, the answer is (ANSWER_LETTER)\" where (ANSWER_LETTER) is one of (A), (B), (C), (D), (E), etc.\n\n{question_block}\n\nAnswer the above question and REMEMBER to finish your response with the exact phrase \"Therefore, the answer is (ANSWER_LETTER)\" where (ANSWER_LETTER) is one of (A), (B), (C), (D), (E), etc.",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Reasoning \u00b7 AGIEval English",
+        "metric": "exact_match",
+        "inference_query": "Answer the following multiple-choice question by giving the correct answer letter in parentheses. Provide CONCISE reasoning for the answer, and make sure to finish the response with \"Therefore, the answer is (ANSWER_LETTER)\" where (ANSWER_LETTER) is one of (A), (B), (C), (D), (E), etc.\n\n{question_block}\n\nAnswer the above question and REMEMBER to finish your response with the exact phrase \"Therefore, the answer is (ANSWER_LETTER)\" where (ANSWER_LETTER) is one of (A), (B), (C), (D), (E), etc.",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 7,
+      "before": {
+        "name": "Coding \u00b7 HumanEval+",
+        "metric": "pass_at_1",
+        "inference_query": "Complete the following function:\n{prompt}\nProvide CONCISE reasoning on how to arrive at the answer, and make sure to finish the response with the following, where (CODE) is the code for the complete function:\n\nHere is the completed function:\n\n```python\n(CODE)\n```",
+        "evaluation_script": "/app/data/evaluators/84/84d8a2118b981c271c4773533c9fc1d754e76fda38bd28c76a46d54eea32efb7.py",
+        "evaluator_sha256": "84d8a2118b981c271c4773533c9fc1d754e76fda38bd28c76a46d54eea32efb7"
+      },
+      "after": {
+        "name": "Coding \u00b7 HumanEval+",
+        "metric": "pass_at_1",
+        "inference_query": "Complete the following function:\n{prompt}\nProvide CONCISE reasoning on how to arrive at the answer, and make sure to finish the response with the following, where (CODE) is the code for the complete function:\n\nHere is the completed function:\n\n```python\n(CODE)\n```",
+        "evaluation_script": "/app/data/evaluators/84/84d8a2118b981c271c4773533c9fc1d754e76fda38bd28c76a46d54eea32efb7.py",
+        "evaluator_sha256": "84d8a2118b981c271c4773533c9fc1d754e76fda38bd28c76a46d54eea32efb7"
+      },
+      "baseline_action": "unchanged"
+    },
+    {
+      "index": 8,
+      "before": {
+        "name": "Coding \u00b7 MBPP+",
+        "metric": "pass_at_1",
+        "inference_query": "{code_prompt}\n\nProvide CONCISE reasoning on how to arrive at the answer, and make sure to finish the response with the following:\n\nHere is the completed function:\n\n```python\n(CODE)\n```\nwhere (CODE) is the code for the complete function.",
+        "evaluation_script": "/app/data/evaluators/cb/cb1bd568becdceae8b962d0c967b196d80fdb8cf078022926586131b82bec8ee.py",
+        "evaluator_sha256": "cb1bd568becdceae8b962d0c967b196d80fdb8cf078022926586131b82bec8ee"
+      },
+      "after": {
+        "name": "Coding \u00b7 MBPP+",
+        "metric": "pass_at_1",
+        "inference_query": "{code_prompt}\n\nProvide CONCISE reasoning on how to arrive at the answer, and make sure to finish the response with the following:\n\nHere is the completed function:\n\n```python\n(CODE)\n```\nwhere (CODE) is the code for the complete function.",
+        "evaluation_script": "/app/data/evaluators/cb/cb1bd568becdceae8b962d0c967b196d80fdb8cf078022926586131b82bec8ee.py",
+        "evaluator_sha256": "cb1bd568becdceae8b962d0c967b196d80fdb8cf078022926586131b82bec8ee"
+      },
+      "baseline_action": "unchanged"
+    },
+    {
+      "index": 9,
+      "before": {
+        "name": "Instruction Following \u00b7 IFEval",
+        "metric": "prompt_level_loose_acc",
+        "inference_query": "{prompt}",
+        "evaluation_script": "/app/data/evaluators/79/7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b.py",
+        "evaluator_sha256": "7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b"
+      },
+      "after": {
+        "name": "Instruction Following \u00b7 IFEval",
+        "metric": "prompt_level_loose_acc",
+        "inference_query": "{prompt}",
+        "evaluation_script": "/app/data/evaluators/0c/0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514.py",
+        "evaluator_sha256": "0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 10,
+      "before": {
+        "name": "Instruction Following \u00b7 IFBench",
+        "metric": "prompt_level_loose_acc",
+        "inference_query": "{prompt}",
+        "evaluation_script": "/app/data/evaluators/79/7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b.py",
+        "evaluator_sha256": "7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b"
+      },
+      "after": {
+        "name": "Instruction Following \u00b7 IFBench",
+        "metric": "prompt_level_loose_acc",
+        "inference_query": "{prompt}",
+        "evaluation_script": "/app/data/evaluators/0c/0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514.py",
+        "evaluator_sha256": "0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 11,
+      "before": {
+        "name": "Knowledge \u00b7 MMLU",
+        "metric": "exact_match",
+        "inference_query": "The following are multiple choice questions about {subject_display}. Summarize your reasoning concisely, then conclude with 'Therefore, the answer is: X' where X is one of A, B, C, or D.\n\n{question_block}",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Knowledge \u00b7 MMLU",
+        "metric": "exact_match",
+        "inference_query": "The following are multiple choice questions about {subject_display}. Summarize your reasoning concisely, then conclude with 'Therefore, the answer is: X' where X is one of A, B, C, or D.\n\n{question_block}",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 12,
+      "before": {
+        "name": "Knowledge \u00b7 PopQA",
+        "metric": "exact_match",
+        "inference_query": "Q: What is Thomas Widdrington's occupation? A: politician\n\nQ: In what city was Glover Morrill Allen born? A: Walpole\n\nQ: What genre is The Arab? A: adventure film\n\nQ: Who is the father of Qasim ibn Muhammad ibn Abi Bakr? A: Muhammad ibn Abi Bakr\n\nQ: In what country is Cora? A: United States of America\n\nQ: Who was the producer of Genre? A: Don Hertzfeldt\n\nQ: Who was the director of Up in the Air? A: Howard Bretherton\n\nQ: What is Lima the capital of? A: Peru\n\nQ: Who was the screenwriter for Trivandrum Lodge? A: Anoop Menon\n\nQ: Who was the composer of 1983? A: Gopi Sundar\n\nQ: What color is chalk? A: white\n\nQ: What is the religion of Spring Arbor University? A: Free Methodist Church\n\nQ: What sport does Harry Clay play? A: association football\n\nQ: Who is the author of B\u00b2FH paper? A: William Alfred Fowler\n\nQ: Who is the mother of Terry Fox? A: Betty Fox\n\nQ: {question} A:",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Knowledge \u00b7 PopQA (alias substring match)",
+        "metric": "alias_substring_match",
+        "inference_query": "Q: What is Thomas Widdrington's occupation? A: politician\n\nQ: In what city was Glover Morrill Allen born? A: Walpole\n\nQ: What genre is The Arab? A: adventure film\n\nQ: Who is the father of Qasim ibn Muhammad ibn Abi Bakr? A: Muhammad ibn Abi Bakr\n\nQ: In what country is Cora? A: United States of America\n\nQ: Who was the producer of Genre? A: Don Hertzfeldt\n\nQ: Who was the director of Up in the Air? A: Howard Bretherton\n\nQ: What is Lima the capital of? A: Peru\n\nQ: Who was the screenwriter for Trivandrum Lodge? A: Anoop Menon\n\nQ: Who was the composer of 1983? A: Gopi Sundar\n\nQ: What color is chalk? A: white\n\nQ: What is the religion of Spring Arbor University? A: Free Methodist Church\n\nQ: What sport does Harry Clay play? A: association football\n\nQ: Who is the author of B\u00b2FH paper? A: William Alfred Fowler\n\nQ: Who is the mother of Terry Fox? A: Betty Fox\n\nQ: {question} A:",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 13,
+      "before": {
+        "name": "Knowledge \u00b7 GPQA Main",
+        "metric": "exact_match",
+        "inference_query": "Answer the following multiple-choice question by giving the correct answer letter in parentheses. Provide CONCISE reasoning for the answer, and make sure to finish the response with \"Therefore, the answer is (ANSWER_LETTER)\" where (ANSWER_LETTER) is one of (A), (B), (C), (D).\n\n{question_block}\n\nAnswer the above question and REMEMBER to finish your response with the exact phrase \"Therefore, the answer is (ANSWER_LETTER)\" where (ANSWER_LETTER) is one of (A), (B), (C), (D).",
+        "evaluation_script": "/app/data/evaluators/c7/c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df.py",
+        "evaluator_sha256": "c7cfd6776c403e8e66393f5cf185e45c447dd281bb4987b90f93516b0acdf1df"
+      },
+      "after": {
+        "name": "Knowledge \u00b7 GPQA Main",
+        "metric": "exact_match",
+        "inference_query": "Answer the following multiple-choice question by giving the correct answer letter in parentheses. Provide CONCISE reasoning for the answer, and make sure to finish the response with \"Therefore, the answer is (ANSWER_LETTER)\" where (ANSWER_LETTER) is one of (A), (B), (C), (D).\n\n{question_block}\n\nAnswer the above question and REMEMBER to finish your response with the exact phrase \"Therefore, the answer is (ANSWER_LETTER)\" where (ANSWER_LETTER) is one of (A), (B), (C), (D).",
+        "evaluation_script": "/app/data/evaluators/1f/1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77.py",
+        "evaluator_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 14,
+      "before": {
+        "name": "Chat \u00b7 AlpacaEval LC (GPT-4.1)",
+        "metric": "length_controlled_winrate",
+        "inference_query": "{instruction}",
+        "evaluation_script": "/app/data/evaluators/79/7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b.py",
+        "evaluator_sha256": "7958d4e553daf647b268c7a0e665493d8f3c41c894e5e74a1c63944a65a50f0b"
+      },
+      "after": {
+        "name": "Chat \u00b7 AlpacaEval LC (GPT-4.1)",
+        "metric": "length_controlled_winrate",
+        "inference_query": "{instruction}",
+        "evaluation_script": "/app/data/evaluators/0c/0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514.py",
+        "evaluator_sha256": "0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    },
+    {
+      "index": 15,
+      "before": {
+        "name": "Coding \u00b7 LiveCodeBench v3",
+        "metric": "pass_at_1",
+        "inference_query": "### Question:\n{question_content}\n\n### Format:\nProvide CONCISE reasoning on how to arrive at the answer in the <think> </think> tag.\n{format_instruction}\n\n### Answer: (use the provided format with backticks)\n\n",
+        "evaluation_script": "/app/data/evaluators/98/98d34c255e247630ab559cf6395b0e9590eca17e04458cf475229eb3eb568681.py",
+        "evaluator_sha256": "98d34c255e247630ab559cf6395b0e9590eca17e04458cf475229eb3eb568681"
+      },
+      "after": {
+        "name": "Coding \u00b7 LiveCodeBench v3",
+        "metric": "pass_at_1",
+        "inference_query": "### Question:\n{question_content}\n\n### Format:\nProvide CONCISE reasoning on how to arrive at the answer in the <think> </think> tag.\n{format_instruction}\n\n### Answer: (use the provided format with backticks)\n\n",
+        "evaluation_script": "/app/data/evaluators/53/5368b5c4723bb98dfa3c5849dd5cc114727e686663d888a328f933c012080c35.py",
+        "evaluator_sha256": "5368b5c4723bb98dfa3c5849dd5cc114727e686663d888a328f933c012080c35"
+      },
+      "baseline_action": "rescore_saved_predictions"
+    }
+  ]
+}

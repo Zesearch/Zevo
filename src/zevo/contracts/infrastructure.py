@@ -273,7 +273,7 @@ class SlurmStageJobContract(BaseModel):
 
     enabled: bool = False
     phase: Literal["submit", "collect"] = "submit"
-    stage: Literal["", "data", "train", "inference"] = ""
+    stage: Literal["", "data", "train", "inference", "evaluation"] = ""
     estimated_gpus: int = Field(
         default=0,
         ge=0,
