@@ -130,6 +130,15 @@ scorers must use the active interpreter instead of hard-coded backend runtime
 paths. Missing dependencies fail explicitly and must be resolved in the shared
 compute environment; there is no backend fallback.
 
+The compute worker sets `ZEVO_EVALUATION_ROOT` to `results/` in its durable
+workspace, overriding any backend-only path. Judge audit files and caches stay
+there across attempts and are collected with the evaluation results. This applies
+to Slurm, instance and cloud workers. Validation and Final Test use their own
+ticket workspaces. `ZEVO_HOLDOUT_ROOT` remains an alias to the same directory
+only for compatibility with existing frozen scorers; new scorers should use
+`ZEVO_EVALUATION_ROOT`. Existing frozen scorers retain their own subdirectory
+names (for example `evaluation-audits/alpaca`); the runner does not rewrite them.
+
 Progress uses the ordinary execution markers, with a durable phase report.
 Results return through the same schema and finite-score checks as local scoring.
 A suite checkpoints completed **benchmarks**, binding each result to its inputs,

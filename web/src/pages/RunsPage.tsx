@@ -610,7 +610,7 @@ export function RunsPage() {
                       <dt className="break-words font-mono text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">
                         {a.agent_id}
                       </dt>
-                      {a.variants.map((v) => (
+                      {a.variants.filter((v) => a.agent_id !== "data" || (v.driver !== "holdout_data_runner" && v.model !== "no-llm")).map((v) => (
                         <dd
                           key={`${v.driver}/${v.model}`}
                           title={`${v.driver} · ${v.model} · ${v.heartbeats} heartbeat${v.heartbeats === 1 ? "" : "s"}`}

@@ -396,12 +396,26 @@ def worker(input_path: Path, output: Path, environment: Path) -> int:
     # Provider scope is explicitly restricted to the transferred judge keys.
     os.environ.update(env)
     token = provider_scope.set_scope(provider_scope.ProviderScope(keys=env)) if provider_scope else None
+    root_variables = ('ZEVO_EVALUATION_ROOT', 'ZEVO_HOLDOUT_ROOT')
+    previous_roots = {key: os.environ.get(key) for key in root_variables}
     try:
+        # Host paths such as /app/data/.holdout do not exist on compute nodes.
+        # Keep judge audit/cache files with the durable evaluation results,
+        # independent of the Slurm attempt and available for collection.
+        evaluation_root = output
+        os.environ['ZEVO_EVALUATION_ROOT'] = str(evaluation_root)
+        # Compatibility for immutable scorers written before the generic name.
+        os.environ['ZEVO_HOLDOUT_ROOT'] = str(evaluation_root)
         result = asyncio.run(run())
     except Exception as exc:
         from zevo.engine.agent.drivers.evaluation_runner import _failed
         result = DriverRunResult(output=_failed(inp.ticket_id, str(exc)), exit_code=1)
     finally:
+        for key, previous in previous_roots.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
         if provider_scope:
             provider_scope.reset_scope(token)
     atomic_json(output / 'result.json', result.output.model_dump(mode='json'))
