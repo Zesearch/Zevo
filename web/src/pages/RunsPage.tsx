@@ -595,7 +595,7 @@ export function RunsPage() {
               </dl>
             </div>
 
-            {peeked.agents?.length > 0 && (
+            {peeked.agents?.some((a) => a.agent_id !== "evaluation") && (
               <div className="border-t border-hair pt-4">
                 <div className="font-mono text-2xs uppercase tracking-[0.16em] text-ink">
                   Agent configuration
@@ -605,7 +605,7 @@ export function RunsPage() {
                     agent would run on today, not what this run used. An agent
                     reconfigured mid-run shows every model it ran on. */}
                 <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
-                  {peeked.agents.map((a) => (
+                  {peeked.agents.filter((a) => a.agent_id !== "evaluation").map((a) => (
                     <div key={a.agent_id} className="grid min-w-0 grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] items-start gap-3">
                       <dt className="break-words font-mono text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">
                         {a.agent_id}

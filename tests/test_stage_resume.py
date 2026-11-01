@@ -78,9 +78,10 @@ def test_deadline_preserves_preceding_batch(tmp_path, monkeypatch):
     assert values == [[1], [2]] and calls == [1]
 
 
-@pytest.mark.parametrize('stage', ['data', 'inference'])
+@pytest.mark.parametrize('stage', ['data', 'train', 'inference', 'evaluation'])
 @pytest.mark.parametrize('state,code,allowed', [('TIMEOUT', '0:0', True), ('PREEMPTED', '0:0', True),
-    ('FAILED', '75:0', True), ('FAILED', '1:0', False), ('COMPLETED', '75:0', False),
+    ('FAILED', '75:0', True), ('DEADLINE', '0:0', True), ('REVOKED', '0:0', True),
+    ('NODE_FAIL', '0:0', True), ('BOOT_FAIL', '0:0', True), ('TIMEOUT+', '0:0', True), ('FAILED', '1:0', False), ('COMPLETED', '75:0', False),
     ('CANCELLED', '0:15', False)])
 def test_retry_only_after_allocation_interruption(stage, state, code, allowed):
     from zevo.engine.run.runner import resumable_stage_interruption

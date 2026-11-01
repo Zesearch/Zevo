@@ -906,8 +906,8 @@ async def _slurm_stage_job_contract(
             or checkpoint_resume or walltime_resume
             or (
                 str(getattr(ticket, "status", "")) == "repairing"
-                and ((prior_state != "COMPLETED" and (
-                    stage != "evaluation" or prior_state in {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "BOOT_FAIL"}
+                and ((prior_state not in {"COMPLETED", "CANCELLED"} and (
+                    stage != "evaluation" or resumable_stage_interruption(ticket, job_row)
                 )) or (stage == "train" and meta.get("training_completion_repair"))
                     or (stage == "inference" and execution_retry_authorized(meta)))
                 and int(getattr(ticket, "repair_attempts", 0) or 0) <= MAX_REPAIR_ATTEMPTS
@@ -4803,13 +4803,13 @@ async def _escalate_stored_payload_validation_failure(
 
 
 def resumable_stage_interruption(ticket, row) -> bool:
-    """Allow unchanged Data/Inference code after allocation loss, within repair limits."""
-    if row is None or ticket.agent_id not in {"data", "inference"}:
+    """Allow unchanged workloads after allocation loss, within repair limits."""
+    if row is None or ticket.agent_id not in {"data", "train", "inference", "evaluation"}:
         return False
     meta = row.meta or {}
-    state = str(meta.get("scheduler_state") or "").split("+")[0].split(" ")[0]
+    state = str(meta.get("scheduler_state") or "").upper().split("+")[0].split(" ")[0]
     code = str(meta.get("scheduler_exit_code") or "").split(":")[0]
-    return state in {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "BOOT_FAIL"} or (state == "FAILED" and code == "75")
+    return state in {"TIMEOUT", "PREEMPTED", "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "REVOKED"} or (state == "FAILED" and code == "75")
 
 
 async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket) -> bool:

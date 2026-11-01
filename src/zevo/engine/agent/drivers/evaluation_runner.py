@@ -15,6 +15,7 @@ import json
 import math
 import os
 import shlex
+import signal
 import sys
 import time
 from pathlib import Path
@@ -176,8 +177,30 @@ class EvaluationRunnerDriver:
                     for member in inp.suite_members
                 ],
             ]
-            suite_results: list[EvaluationSuiteMemberResult] = []
-            for index, (name, identity, member_input) in enumerate(entries):
+            # Bound independent benchmark subprocesses; scorer-internal execution
+            # is deliberately unchanged. Operators can lower this for GPU judges.
+            concurrency = max(1, min(4, int(os.environ.get("ZEVO_EVALUATION_SUITE_WORKERS", "4"))))
+            cpu_count = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+            concurrency = min(concurrency, cpu_count)
+            semaphore = asyncio.Semaphore(concurrency)
+            if event_sink is not None:
+                event_sink({"type": "progress", "payload": {
+                    "owner": inp.ticket_id, "phase": "suite_start",
+                    "step": 0, "total": len(entries), "benchmark_total": len(entries),
+                }})
+
+            async def score_member(index, entry):
+                async with semaphore:
+                    try:
+                        return await execute_member(index, entry)
+                    except Exception as exc:
+                        return DriverRunResult(
+                            output=_failed(inp.ticket_id, f"{entry[0]}: {exc}"),
+                            exit_code=1, driver=self.name,
+                        )
+
+            async def execute_member(index, entry):
+                name, identity, member_input = entry
                 if event_sink is not None:
                     event_sink({
                         "type": "phase",
@@ -229,11 +252,11 @@ class EvaluationRunnerDriver:
                         exit_code=1,
                         driver=self.name,
                     )
-                suite_results.append(EvaluationSuiteMemberResult(
+                member_result = EvaluationSuiteMemberResult(
                     name=name,
                     metrics_path=child_output.metrics_path,
                     score=member_score,
-                ))
+                )
                 if event_sink is not None:
                     event_sink({
                         "type": "progress",
@@ -248,6 +271,23 @@ class EvaluationRunnerDriver:
                             "benchmark_total": len(entries),
                         },
                     })
+                return member_result
+
+            tasks = [asyncio.create_task(score_member(index, entry))
+                     for index, entry in enumerate(entries)]
+            try:
+                outcomes = await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # Keep successful receipts even when another benchmark failed.
+            # Input order, not completion order, defines the published suite.
+            failure = next((result for result in outcomes if isinstance(result, DriverRunResult)), None)
+            if failure is not None:
+                return failure
+            suite_results = outcomes
             aggregate = sum(member.score for member in suite_results) / len(suite_results)
             root = Path(workspace_dir).resolve()
             root.mkdir(parents=True, exist_ok=True)
@@ -476,6 +516,15 @@ class EvaluationRunnerDriver:
                 # No whole-evaluation deadline. Cancellation still uses the
                 # registered process group; individual code cases keep limits.
                 stdout_b, stderr_b = await proc.communicate()
+            except asyncio.CancelledError:
+                # Suite cancellation must also stop the scorer's descendants.
+                process_registry._signal_process_group(proc, signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=5)
+                except asyncio.TimeoutError:
+                    process_registry._signal_process_group(proc, signal.SIGKILL)
+                    await proc.communicate()
+                raise
             finally:
                 if progress_task is not None:
                     progress_task.cancel()

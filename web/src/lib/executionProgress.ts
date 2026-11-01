@@ -81,10 +81,18 @@ export function benchmarkCounts(events: ExecutionEventDTO[], members?: string[],
   let total = members?.length || 0;
   for (const event of events) {
     if (stage === "evaluation" && !event.phase?.startsWith("scoring")
-      && event.phase !== "completed"
-      && !["model_judge", "benchmark_complete"].includes(String(event.extras?.phase))) continue;
+      && !["completed", "suite_start"].includes(event.phase || "")
+      && !["suite_start", "model_judge", "benchmark_complete"].includes(String(event.extras?.phase))) continue;
     const scoring = /^scoring (\d+)\/(\d+): /.exec(event.phase || "");
     if (!members && scoring) total = Math.max(total, Number(scoring[2]));
+    if (stage === "evaluation" && Array.isArray(event.extras?.completed_benchmarks)) {
+      for (const item of event.extras.completed_benchmarks) {
+        if (item && typeof item === "object" && (!members || members.includes(item.name))) {
+          const key = String(item.id || item.name || "");
+          if (key) done.add(key);
+        }
+      }
+    }
     const name = String(event.extras?.benchmark_name || "");
     if (members && !members.includes(name)) continue;
     if (!members) total = Math.max(total, Number(event.extras?.benchmark_total) || 0);

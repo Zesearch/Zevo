@@ -9,7 +9,7 @@ import { PageHead, Kicker } from "../components/zevo/primitives";
 // the order they run), not whatever order the API returns.
 const AGENT_ORDER = [
   "orchestrator", "infrastructure", "data", "train",
-  "inference", "evaluation", "registry",
+  "inference", "registry",
 ];
 const orderIndex = (id: string) => {
   const i = AGENT_ORDER.indexOf(id);
@@ -126,9 +126,8 @@ export function AgentsPage() {
     refreshInterval: 3000,
   });
   const agents = agentsRaw
+    .filter((a) => a.id !== "evaluation")
     .sort((a, b) => orderIndex(a.id) - orderIndex(b.id));
-  const director = agents.find((a) => a.id === "orchestrator");
-  const stations = agents.filter((a) => a.id !== "orchestrator");
 
   return (
     <div className="w-full px-[max(1.5rem,1.5vw)] py-8">
@@ -143,15 +142,8 @@ export function AgentsPage() {
         }
       />
 
-      {/* Featured flight director */}
-      {director && (
-        <div className="mb-5">
-          <StationCard a={director} featured />
-        </div>
-      )}
-
       <div className="stagger grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {stations.map((a) => (
+        {agents.map((a) => (
           <StationCard key={a.id} a={a} />
         ))}
       </div>
