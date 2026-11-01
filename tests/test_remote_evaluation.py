@@ -104,7 +104,7 @@ def test_direct_host_script_uses_compute_route_without_sbatch(tmp_path, provider
     assert '#SBATCH' not in script
     assert 'ZEVO_TICKET_ID=eval-test-001' in script
     assert 'flock -n' in script
-    assert 'worker-env/bin/python -m zevo.engine.remote_evaluation' in script
+    assert 'python3 -m zevo.engine.remote_evaluation' in script
 
 
 def test_judge_environment_cannot_forward_compute_or_service_secrets(monkeypatch):
@@ -227,17 +227,16 @@ def test_worker_rejects_modified_submitted_bundle_before_scoring(tmp_path, monke
     assert not environment.exists()
 
 
-def test_legacy_runtime_requires_container_mapping_without_changing_scorer(tmp_path):
+def test_scoring_reuses_environment_without_installing_dependencies(tmp_path):
     inp = work(tmp_path); inp.slurm_job = cluster_contract(tmp_path)
-    raw = _device('cluster')
-    info = InfrastructureDeviceInfo.model_validate(raw)
-    with pytest.raises(ValueError, match='container image'):
-        remote.launch_script(inp, info, '/scratch/eval/evaluation', compatibility_runtime=True)
-    info.cluster.container_image = 'registry.example/evaluation@sha256:abc'
-    script = remote.launch_script(inp, info, '/scratch/eval/evaluation', compatibility_runtime=True)
-    assert '--container-mounts=/scratch/eval/evaluation:/scratch/eval/evaluation,/scratch/eval/evaluation/bundle/compat:/app/data' in script
-    assert '--bootstrap-runtimes bundle/runtimes.json' in script
-    assert script.index('SLURM_JOB_ID') < script.index('--bootstrap-runtimes')
+    info = InfrastructureDeviceInfo.model_validate(_device('cluster'))
+    info.cluster.env_setup = 'source /scratch/envs/env.sh'
+    script = remote.launch_script(inp, info, '/scratch/eval/evaluation')
+    assert script.index(info.cluster.env_setup) < script.index('python3 -m zevo.engine.remote_evaluation')
+    assert 'pip install' not in script
+    assert 'venv' not in script
+    assert 'python install' not in script
+    assert 'bootstrap-runtimes' not in script
 
 
 @pytest.mark.asyncio
@@ -258,3 +257,25 @@ async def test_cancel_direct_evaluation_removes_queued_judge_credentials(monkeyp
     assert result['ok']
     assert commands[0] == 'rm -f -- /scratch/zevo/run/eval-test-001/evaluation/.judge-env.json'
     assert commands[1].startswith('python3 -c ')
+
+
+def test_container_mounts_include_stage_script_and_sibling_environment(tmp_path):
+    inp = work(tmp_path); inp.slurm_job = cluster_contract(tmp_path)
+    info = InfrastructureDeviceInfo.model_validate(_device('cluster'))
+    info.cluster.workdir = '/scratch/eval'
+    info.cluster.env_setup = 'source /scratch/envs/env.sh'
+    info.cluster.container_image = 'test.sqsh'
+    script = remote.launch_script(inp, info, '/scratch/eval/evaluation')
+    assert '#SBATCH --container-mounts=/scratch:/scratch' in script
+    assert '/app/data' not in next(line for line in script.splitlines() if '--container-mounts=' in line)
+
+
+def test_container_mounts_do_not_mount_host_root(tmp_path):
+    inp = work(tmp_path); inp.slurm_job = cluster_contract(tmp_path)
+    info = InfrastructureDeviceInfo.model_validate(_device('cluster'))
+    info.cluster.workdir = '/scratch/eval'
+    info.cluster.env_setup = 'source /projects/user/envs/env.sh'
+    mounts = remote.container_mounts(inp, info, '/scratch/eval/evaluation')
+    assert '/scratch/eval:/scratch/eval' in mounts
+    assert '/projects/user/envs:/projects/user/envs' in mounts
+    assert '/:/' not in mounts

@@ -427,9 +427,9 @@ export function TicketDetailPage() {
         tk.execution_events.some(
           (p) => p.event_type === "attempt" || p.loss > 0 || (p.extras as any)?.loss !== undefined,
         ) && (
-          <Section title="Training monitor" className="mt-4">
-            <TrainingMonitor executionEvents={tk.execution_events} />
-          </Section>
+          <TrainingMonitor executionEvents={tk.execution_events} renderContainer={(content) => (
+            <Section title="Training monitor" className="mt-4">{content}</Section>
+          )} />
         )}
 
       <Section

@@ -99,30 +99,18 @@ def test_actual_cli_from_relocated_validation_script(tmp_path):
     assert metrics['protocol_revision'] == MANIFEST['protocol_revision']
 
 
-def test_remote_bundle_includes_exact_script_and_runtime_inventory(tmp_path, monkeypatch):
-    prefix = Path(MANIFEST['runtime'])
-    site = prefix / 'lib/python3.11/site-packages'
-    original_is_dir, original_glob = Path.is_dir, Path.glob
-    monkeypatch.setattr(Path, 'is_dir', lambda p: True if p == prefix else original_is_dir(p))
-    monkeypatch.setattr(Path, 'glob', lambda p, pattern, **kwargs: iter([site]) if p == prefix else original_glob(p, pattern, **kwargs))
-    monkeypatch.setattr(remote.importlib.metadata, 'distributions', lambda **_: [
-        SimpleNamespace(metadata={'Name': 'sympy'}, version='1.14.0'),
-        SimpleNamespace(metadata={'Name': 'antlr4-python3-runtime'}, version='4.11.1'),
-    ])
+def test_remote_bundle_preserves_script_without_rebuilding_environment(tmp_path):
     inp = work(tmp_path)
     inp.evaluation_script = str(SCRIPT);inp.evaluator_sha256 = MANIFEST['new_sha256']
     staging = tmp_path / 'staging';staging.mkdir()
     remote.make_bundle(inp, staging, '/compute/work')
     bundle = staging / 'bundle'
-    runtime = json.loads((bundle / 'runtimes.json').read_text())
-    assert runtime == [{'prefix': str(prefix), 'python': '3.11'}]
-    requirements = bundle / 'compat' / prefix.relative_to('/app/data') / 'requirements.txt'
-    assert 'sympy==1.14.0' in requirements.read_text()
+    assert not (bundle / 'runtimes.json').exists()
+    assert not (bundle / 'compat').exists()
     copied = bundle / 'inputs/0/evaluation_script' / SCRIPT.name
     assert copied.read_bytes() == SCRIPT.read_bytes()
     inventory = json.loads((bundle / 'manifest.json').read_text())
     assert inventory[str(copied.relative_to(bundle))] == MANIFEST['new_sha256']
-    assert str(requirements.relative_to(bundle)) in inventory
 
 
 def test_all_twelve_contracts_update_without_query_changes():

@@ -7,7 +7,6 @@ verified, benchmark-level receipts across attempts.
 from __future__ import annotations
 
 import asyncio
-import ast
 import hashlib
 import importlib.metadata
 import json
@@ -116,48 +115,6 @@ def judge_environment() -> dict[str, str]:
     return {key: value for key, value in env.items() if key in allowed}
 
 
-def package_runtime(script: Path, root: Path) -> dict | None:
-    """Export a declared frozen Python runtime, never copy its native binaries.
-
-    Legacy task scorers can select a versioned /app/data/evaluation-runtimes
-    interpreter. Keep the scorer byte-identical; recreate that interpreter
-    prefix inside the compute container using the installed package versions.
-    """
-    tree = ast.parse(script.read_text())
-    prefix = None
-    for statement in tree.body:
-        if isinstance(statement, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == 'RUNTIME' for target in statement.targets
-        ) and isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
-            prefix = Path(statement.value.value)
-    if prefix is None:
-        return None
-    allowed = Path('/app/data/evaluation-runtimes')
-    if not prefix.is_relative_to(allowed) or prefix == allowed:
-        raise ValueError('custom evaluator RUNTIME must be a versioned /app/data/evaluation-runtimes directory')
-    if not prefix.is_dir():
-        raise ValueError(f'frozen evaluation runtime is missing: {prefix}')
-    sites = sorted(prefix.glob('lib/python*/site-packages'))
-    if len(sites) != 1:
-        raise ValueError(f'frozen evaluation runtime has no unambiguous Python environment: {prefix}')
-    requirements = []
-    for distribution in importlib.metadata.distributions(path=[str(sites[0])]):
-        name, version = distribution.metadata['Name'], distribution.version
-        if name.lower() not in {'zevo', 'pip', 'setuptools', 'wheel'}:
-            requirements.append(f'{name}=={version}')
-    if not requirements:
-        raise ValueError(f'frozen evaluation runtime has no dependency inventory: {prefix}')
-    relative = prefix.relative_to('/app/data')
-    destination = root / 'compat' / relative
-    destination.mkdir(parents=True, exist_ok=True)
-    (destination / 'requirements.txt').write_text('\n'.join(sorted(set(requirements))) + '\n')
-    # These corpora are immutable evaluator assets, not any Run's labels.
-    nltk = Path('/app/data/nltk_data')
-    if nltk.is_dir() and not (root / 'compat/nltk_data').exists():
-        shutil.copytree(nltk, root / 'compat/nltk_data')
-    return {'prefix': str(prefix), 'python': sites[0].parent.name.removeprefix('python')}
-
-
 def make_bundle(inp: EvaluationTaskInput, local: Path, remote: str) -> Path:
     """Copy only declared scoring inputs and system code, never a whole Run."""
     root = local / 'bundle'
@@ -167,7 +124,6 @@ def make_bundle(inp: EvaluationTaskInput, local: Path, remote: str) -> Path:
     payload['memory'] = {}
     payload['run_context'] = {}
     entries = [payload, *payload['suite_members']]
-    runtimes = {}
     for index, entry in enumerate(entries):
         for field in ('predictions_path', 'scoring_set', 'sample_submission', 'evaluation_script'):
             if not entry.get(field):
@@ -178,9 +134,6 @@ def make_bundle(inp: EvaluationTaskInput, local: Path, remote: str) -> Path:
             if field == 'evaluation_script':
                 from zevo.evaluator_storage import verify_evaluator
                 verify_evaluator(source, entry['evaluator_sha256'])
-                runtime = package_runtime(source, root)
-                if runtime:
-                    runtimes[runtime['prefix']] = runtime
             dest = Path('inputs') / str(index) / field / source.name
             (root / dest).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, root / dest)
@@ -188,14 +141,6 @@ def make_bundle(inp: EvaluationTaskInput, local: Path, remote: str) -> Path:
     atomic_json(root / 'input.json', payload)
     package = Path(__file__).resolve().parents[1]
     shutil.copytree(package, root / 'src' / 'zevo', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    # Install the system package in an isolated environment on the compute
-    # node, using the same declared dependencies as the deployed runner.
-    project = package.parent.parent / 'pyproject.toml'
-    if not project.is_file():
-        raise ValueError('remote evaluation requires the deployed pyproject.toml')
-    shutil.copyfile(project, root / 'pyproject.toml')
-    (root / 'README.md').write_text('Zevo evaluation worker\n')
-    atomic_json(root / 'runtimes.json', list(runtimes.values()))
     archive = local / 'evaluation-bundle.tar.gz'
     atomic_json(root / 'manifest.json', {
         str(p.relative_to(root)): digest(p) for p in sorted(root.rglob('*')) if p.is_file()
@@ -205,7 +150,28 @@ def make_bundle(inp: EvaluationTaskInput, local: Path, remote: str) -> Path:
     return archive
 
 
-def launch_script(inp: EvaluationTaskInput, info: InfrastructureDeviceInfo, remote: str, *, compatibility_runtime=False, manifest_sha256='') -> str:
+def container_mounts(inp: EvaluationTaskInput, info: InfrastructureDeviceInfo, remote: str) -> list[str]:
+    # Stage scripts live beside, not inside, the evaluation bundle. The
+    # site's environment may also live in a sibling directory on the shared
+    # filesystem. Mount their common directory instead of just the bundle.
+    paths = [remote, inp.slurm_job.remote_work_dir, info.cluster.workdir]
+    for token in shlex.split(info.cluster.env_setup):
+        if token.startswith('/'):
+            paths.append(str(Path(token).parent))
+    groups: dict[str, list[str]] = {}
+    for path in paths:
+        if not path.startswith('/') or any(c.isspace() or c in ',:' for c in path):
+            raise ValueError('container mount path contains unsupported characters')
+        parts = Path(path).parts
+        if len(parts) < 2:
+            raise ValueError('evaluation cannot mount the host root')
+        groups.setdefault(parts[1], []).append(path)
+    mounts = [os.path.commonpath(group) for group in groups.values()]
+    result = [f'{path}:{path}' for path in mounts]
+    return result
+
+
+def launch_script(inp: EvaluationTaskInput, info: InfrastructureDeviceInfo, remote: str, *, manifest_sha256='') -> str:
     q = shlex.quote
     route = info.cluster or info.instance
     contract = inp.slurm_job
@@ -226,12 +192,8 @@ def launch_script(inp: EvaluationTaskInput, info: InfrastructureDeviceInfo, remo
                 lines.append(f'#SBATCH --{flag}={value}')
         if route.container_image:
             lines.append(f'#SBATCH --container-image={route.container_image}')
-            if compatibility_runtime:
-                if any(c.isspace() or c in ',:' for c in remote):
-                    raise ValueError('runtime container mount path contains unsupported characters')
-                lines.append(f'#SBATCH --container-mounts={remote}:{remote},{remote}/bundle/compat:/app/data')
-        elif compatibility_runtime:
-            raise ValueError('this frozen scorer requires a compute container image to mount its versioned runtime; configure the cluster container_image')
+            lines.append('#SBATCH --container-mounts=' + ','.join(
+                container_mounts(inp, info, remote)))
         lines += ['set -euo pipefail', 'test -n "${SLURM_JOB_ID:-}" || { echo "evaluation requires a Slurm allocation" >&2; exit 1; }',
                   contract.lifecycle_prologue, contract.runtime_prologue]
     else:
@@ -248,13 +210,9 @@ def launch_script(inp: EvaluationTaskInput, info: InfrastructureDeviceInfo, remo
               'trap zevo_eval_finish EXIT', 'rm -f exit-code results/result.json',
               route.env_setup or ':',
               'tar -xzf evaluation-bundle.tar.gz',
-              'python3 -m venv --system-site-packages worker-env',
-              'worker-env/bin/python -m pip install --disable-pip-version-check ./bundle > bootstrap.log 2>&1',
-              'worker-env/bin/python -m zevo.engine.remote_evaluation --bootstrap-runtimes bundle/runtimes.json',
               'export ZEVO_EVALUATION_WORKER=1',
-              'export PATH="$PWD/worker-env/bin:$PATH"',
               'export PYTHONPATH="$PWD/bundle/src${PYTHONPATH:+:$PYTHONPATH}"',
-              'worker-env/bin/python -m zevo.engine.remote_evaluation --worker bundle/input.json --output results --environment .judge-env.json']
+              'python3 -m zevo.engine.remote_evaluation --worker bundle/input.json --output results --environment .judge-env.json']
     return '\n'.join(lines) + '\n'
 
 
@@ -318,8 +276,7 @@ async def run_remote(inp: EvaluationTaskInput, workspace_dir: str, event_sink=No
             temp = Path(directory)
             archive = make_bundle(inp, temp, remote)
             (local / 'evaluation-bundle.sha256').write_text(digest(temp / 'bundle' / 'manifest.json') + '\n')
-            compatibility_runtime = bool(json.loads((temp / 'bundle/runtimes.json').read_text()))
-            body = launch_script(inp, info, remote, compatibility_runtime=compatibility_runtime,
+            body = launch_script(inp, info, remote,
                                  manifest_sha256=digest(temp / 'bundle/manifest.json'))
             for argv in build_upload_commands(info.ssh, sources=[str(archive)], remote_dir=remote):
                 await command(argv, timeout=600)
@@ -442,49 +399,13 @@ def worker(input_path: Path, output: Path, environment: Path) -> int:
     return result.exit_code
 
 
-def bootstrap_runtimes(manifest: Path) -> None:
-    """Runs only inside the compute environment, never on a login node."""
-    import subprocess
-    import sys
-    for runtime in json.loads(manifest.read_text()):
-        prefix = Path(runtime['prefix'])
-        # A configured direct host may already have the exact frozen runtime.
-        # Otherwise the directory must be the container's staged bind mount.
-        requirements = prefix / 'requirements.txt'
-        if not requirements.is_file():
-            executable = prefix / 'bin/python'
-            inventory = manifest.resolve().parent / 'compat' / prefix.relative_to('/app/data') / 'requirements.txt'
-            if not executable.is_file():
-                raise ValueError(f'{prefix} is not mounted in the compute environment; configure the evaluator runtime before scoring')
-            # A direct host's pre-provisioned runtime is shared. Verify it;
-            # never install into or mutate a shared absolute interpreter.
-            check = ('import importlib.metadata as m,json,sys; '
-                     'wanted=json.loads(sys.argv[1]); '
-                     'assert all(m.version(n)==v for n,v in wanted), "evaluator runtime versions differ"')
-            wanted = [line.split('==', 1) for line in inventory.read_text().splitlines() if line]
-            subprocess.run([str(executable), '-c', check, json.dumps(wanted)], check=True)
-            continue
-        version = f'{sys.version_info.major}.{sys.version_info.minor}'
-        python = sys.executable if runtime['python'] == version else shutil.which('python' + runtime['python'])
-        if not python:
-            raise ValueError(f'frozen evaluation requires Python {runtime["python"]} on the compute node')
-        subprocess.run([python, '-m', 'venv', '--system-site-packages', str(prefix)], check=True)
-        executable = str(prefix / 'bin/python')
-        subprocess.run([executable, '-m', 'pip', 'install', '-r', str(requirements)], check=True)
-        subprocess.run([executable, '-m', 'pip', 'install', '--no-deps', str(manifest.resolve().parent)], check=True)
-
-
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bootstrap-runtimes', type=Path)
     parser.add_argument('--worker', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--environment', type=Path)
     args = parser.parse_args()
-    if args.bootstrap_runtimes:
-        bootstrap_runtimes(args.bootstrap_runtimes)
-        raise SystemExit(0)
     if not (args.worker and args.output and args.environment):
         parser.error('--worker, --output and --environment are required')
     raise SystemExit(worker(args.worker, args.output, args.environment))

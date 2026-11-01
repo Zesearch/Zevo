@@ -1,0 +1,29 @@
+{
+  "environment": "configured Data/Train environment",
+  "scorers": [
+    {
+      "old_sha256": "0cff1ccde2a06b3f95d509b7f0d93a36bff3f56d1af87cf6426cb0e412370514",
+      "new_sha256": "0383130e75076a57a627d36265a7248f7f92b848b1676fb86bbdb5a170ca1b69",
+      "family": "olmo_v8",
+      "evaluation_script": "/app/data/evaluators/03/0383130e75076a57a627d36265a7248f7f92b848b1676fb86bbdb5a170ca1b69.py"
+    },
+    {
+      "old_sha256": "1fa1dc9aa26a0e046371975e82b51bed2a8d3bd20917a5a9b36055a88af0ec77",
+      "new_sha256": "ef36c60d91ddce62c91ea6f145809b8f157574c52329c836d39a46a963509cb4",
+      "family": "olmo_v8",
+      "evaluation_script": "/app/data/evaluators/ef/ef36c60d91ddce62c91ea6f145809b8f157574c52329c836d39a46a963509cb4.py"
+    },
+    {
+      "old_sha256": "5368b5c4723bb98dfa3c5849dd5cc114727e686663d888a328f933c012080c35",
+      "new_sha256": "e4f3a5c5c2d564a842f1fdd0bd635c1186cc4c8105b22f337bbae413cfa693f8",
+      "family": "olmo_v8",
+      "evaluation_script": "/app/data/evaluators/e4/e4f3a5c5c2d564a842f1fdd0bd635c1186cc4c8105b22f337bbae413cfa693f8.py"
+    },
+    {
+      "old_sha256": "29ec89a9d13556622a5359ecd246e3f4830ab811000135654fa0eb863db27f5c",
+      "new_sha256": "51496436582dd93a64381f439e033d8e6d1348a5e09d0ed1d3cea2933d25beb1",
+      "family": "olmo_validation_v2",
+      "evaluation_script": "/app/data/evaluators/51/51496436582dd93a64381f439e033d8e6d1348a5e09d0ed1d3cea2933d25beb1.py"
+    }
+  ]
+}

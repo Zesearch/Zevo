@@ -11,11 +11,12 @@ agent and returns its structured output (or raises).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from pydantic import BaseModel
 
-from zevo.engine.agent.loader import AgentBlueprint
+if TYPE_CHECKING:
+    from zevo.engine.agent.loader import AgentBlueprint
 
 
 @dataclass
