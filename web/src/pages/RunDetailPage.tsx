@@ -1209,9 +1209,9 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
           {t.agent_id === "train" && t.execution_events.some(
             (p) => p.event_type === "attempt" || p.loss > 0,
           ) && (
-            <div className="mt-3 rounded-bezel border border-hair bg-canvas/40 p-2">
-              <TrainingMonitor executionEvents={t.execution_events} />
-            </div>
+            <TrainingMonitor executionEvents={t.execution_events} renderContainer={(content) => (
+              <div className="mt-3 rounded-bezel border border-hair bg-canvas/40 p-2">{content}</div>
+            )} />
           )}
         </div>
         {hbId ? (
