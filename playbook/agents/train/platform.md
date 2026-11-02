@@ -177,6 +177,13 @@ After the deferred Result passes validation, the engine submits the job,
 resolves `%j` with its JOBID, and stamps the exact stdout/stderr paths into watcher metadata;
 the Agent must not provide or override those engine-owned fields.
 
+For a shared `per_run` allocation, preparation may run alongside another stage,
+but the engine queues the validated workload until that stage has completed
+collection and any repair. Return `deferred` after preparation; do not poll for
+the allocation, submit a second job, or launch GPU probes outside the prepared
+workload. `per_stage` and `per_submission` use independent allocations and do
+not participate in this shared-allocation queue.
+
 For `slurm_job.phase="collect"`, do not submit duplicate work. If the observed
 state is still non-terminal, return `deferred` again without posting a
 lifecycle message. On `COMPLETED`, verify and
