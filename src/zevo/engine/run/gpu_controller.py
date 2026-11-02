@@ -377,9 +377,14 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
 
     # Serialize publication inside one Run, including two concurrently ready stages.
     await session.execute(select(Run).where(Run.id == run.id).with_for_update())
+    from zevo.engine.run.stage_queue import blocking_stage, waiting_submission
+    blocker = await blocking_stage(session, run, ticket)
+    if blocker is not None:
+        return waiting_submission(blocker=blocker, contract=contract, info=info,
+            heartbeat_id=heartbeat_id, sha256=sha256, continuation=continuation)
     candidates = list((await session.execute(select(InfraInstance).where(
         InfraInstance.run_id == run.id, InfraInstance.provider == "cluster",
-        InfraInstance.released_at.is_(None),
+        InfraInstance.instance_id != "", InfraInstance.released_at.is_(None),
     ).order_by(InfraInstance.created_at.desc()))).scalars().all())
     active_consumers = list((await session.execute(
         select(InfraInstance).join(Ticket, Ticket.id == InfraInstance.ticket_id).where(
@@ -413,8 +418,8 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             raise ValueError("cannot verify the retained allocation: allocation is not reusable or terminal: " + state)
         if row.gpu_count < contract.num_gpus or int(meta.get("nodes", 1)) != contract.nodes:
             raise ValueError("stage does not fit the retained run allocation; resource plan must cover all stages")
-        # No concurrent commands on one set of GPUs. The orchestrator can retry
-        # after the active consumer completes, never overlap torchrun processes.
+        # No concurrent commands on one set of GPUs. Keep waits in the backend
+        # until the current stage (including repair and collect) has settled.
         for consumer_index, consumer in enumerate(active_consumers):
             if (consumer.meta or {}).get("controller_directory") != meta["controller_directory"]:
                 continue
@@ -429,13 +434,10 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
                     and consumer_index > active_consumers.index(current_checkpoint)
                     and (consumer.meta or {}).get("scheduler_state") == "COMPLETED"):
                 continue
-            # Evaluation can arrive while the next optimization stage is
-            # already active. Publish it to the controller's serial queue;
-            # never run scoring on login or overlap the active workload.
-            evaluation_queue = ticket.agent_id == "evaluation" or (
-                train is not None and train.agent_id == "evaluation"
-            )
-            if not evaluation_queue and not _checkpoint_allocation_handoff(run, ticket, consumer, train):
+            if not _checkpoint_allocation_handoff(run, ticket, consumer, train):
+                if run.gpu_allocation_mode == "per_run":
+                    return waiting_submission(blocker=train, contract=contract, info=info,
+                        heartbeat_id=heartbeat_id, sha256=sha256, continuation=continuation)
                 raise ValueError("retained allocation is busy with another stage")
         if continuation and continuation.get("source_job_id") == row.instance_id:
             # The worker already yielded for walltime. Do not send it back into

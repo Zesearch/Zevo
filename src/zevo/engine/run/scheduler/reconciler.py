@@ -1056,7 +1056,10 @@ async def _reconcile_slurm_stage_jobs(
                     meta["monitor_error"] = str(exc)[:1000]
 
             state = _normalise_slurm_state(str(meta.get("scheduler_state") or ""))
-            queued_for = max(0.0, (now - _aware(row.created_at)).total_seconds())
+            # Local FIFO waiting is not time spent in Slurm's queue. Admission
+            # stamps submission_committed_at when the request actually publishes.
+            submitted_at = _meta_datetime(meta.get("submission_committed_at")) or _aware(row.created_at)
+            queued_for = max(0.0, (now - submitted_at).total_seconds())
             queue_limit = max(0.0, float(run.max_queue_wait_hours or 0.0)) * 3600
             queue_expired = scheduler_observed and state == "PENDING" and queue_limit and queued_for >= queue_limit
             if (queue_expired or meta.get("queue_timeout_requested_at")) and state not in _SLURM_TERMINAL_STATES:
@@ -2099,6 +2102,9 @@ async def reconcile_runs_and_tickets(
         "resources_released": 0,
     }
     try:
+        from zevo.engine.run.stage_queue import dispatch_waiting_stages
+        async with Session() as s:
+            report["stages_admitted"] = await dispatch_waiting_stages(s)
         async with Session() as s:
             checked, resumed = await _reconcile_slurm_stage_jobs(s)
             report["slurm_jobs_checked"] = checked

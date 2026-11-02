@@ -4509,7 +4509,7 @@ async def _submit_validated_slurm_stage_once(
         continuation=resume_proof,
     )
 
-    if launch_snapshot:
+    if launch_snapshot and job_id:
         from zevo.engine.run.inference_launch import effective_snapshot
         controller_body = controller_meta.get("controller_script_snapshot")
         if controller_body:
@@ -4880,6 +4880,9 @@ async def run_ticket(
         await session.commit()
         return tk
     activation_payload = dict(activation_payload or {})
+    from zevo.engine.run.stage_queue import preparation_already_queued
+    if await preparation_already_queued(session, run, tk, activation_payload):
+        return tk
     if await _automatic_wakeup_waits_for_slurm(session, tk, activation_source):
         return tk  # The watcher, not an old reminder, owns the live workload.
     if tk.agent_id == "train":
@@ -7414,7 +7417,9 @@ async def run_ticket(
                 stderr_path=inp.slurm_job.stderr_path,
             )
         prefix = "Running" if state == "RUNNING" else "Waiting"
-        if prefix == "Running":
+        if (deferred_stage_row.meta or {}).get("stage_queue"):
+            body = "Waiting: stage preparation is complete; waiting for the shared run allocation."
+        elif prefix == "Running":
             tk.status = "running"
             body = (
                 f"Running: Slurm job {deferred_stage_row.instance_id} is running; "

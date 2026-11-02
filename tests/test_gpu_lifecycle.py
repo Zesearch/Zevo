@@ -383,7 +383,7 @@ async def test_retained_allocation_accounting_fallback(monkeypatch, queue, accou
 @pytest.mark.parametrize('stage', ['train', 'inference', 'data', 'evaluation'])
 @pytest.mark.parametrize('status', ['running', 'repairing', 'waiting_external'])
 @pytest.mark.parametrize('released', [True, False])
-async def test_retained_allocation_ignores_only_released_resource_claims(monkeypatch, stage, status, released):
+async def test_retained_allocation_keeps_stage_turn_through_repair(monkeypatch, stage, status, released):
     from datetime import datetime, timezone
     from zevo.engine.run import remote_jobs
 
@@ -419,14 +419,15 @@ async def test_retained_allocation_ignores_only_released_resource_claims(monkeyp
                     remote_work_dir='/remote', stdout_path='/out', stderr_path='/err'),
                 info=SimpleNamespace(cluster=SimpleNamespace(env_setup='')),
                 heartbeat_id='next-hb', sha256='digest')
-            if released or stage == 'evaluation':
-                job, submitted = await submit_workload(session, **kwargs)
-                assert job == '123' and submitted['allocation_owner_row_id'] == owner.id
-                assert any('next-hb' in command for command in commands)
-            else:
-                with pytest.raises(ValueError, match='busy with another stage'):
-                    await submit_workload(session, **kwargs)
-                assert not any('next-hb' in command for command in commands)
+            job, submitted = await submit_workload(session, **kwargs)
+            assert job == ''
+            assert submitted['scheduler_state'] == 'WAITING_RESOURCES'
+            assert submitted['stage_queue']['blocked_by_ticket_id'] == consumer.id
+            assert commands == []  # no remote work, even if the old allocation expired
+            consumer.status = 'succeeded'
+            await session.commit()
+            job, submitted = await submit_workload(session, **kwargs)
+            assert job == '123' and submitted['allocation_owner_row_id'] == owner.id
     finally:
         await engine.dispose()
 
@@ -487,8 +488,8 @@ async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(
             assert job == '123' and submitted['allocation_owner_row_id'] == 'owner'
             assert any('infer-hb' in command for command in commands)
         else:
-            with pytest.raises(ValueError, match='busy with another stage'):
-                await submit_workload(session, **kwargs)
+            job, submitted = await submit_workload(session, **kwargs)
+            assert job == '' and submitted['scheduler_state'] == 'WAITING_RESOURCES'
             assert not any('infer-hb' in command for command in commands)
     await engine.dispose()
 

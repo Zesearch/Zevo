@@ -190,6 +190,13 @@ Copy the validator's printed `source_fingerprint` exactly into
 `data_recipe.source_fingerprint`; it binds the immutable Hub revision and is
 not a hash of a locally downloaded dataset.
 
+For a shared `per_run` allocation, preparation may run alongside another stage,
+but the engine queues the validated workload until that stage has completed
+collection and any repair. Return `deferred` after preparation; do not poll for
+the allocation, submit a second job, or launch GPU probes outside the prepared
+workload. `per_stage` and `per_submission` use independent allocations and do
+not participate in this shared-allocation queue.
+
 At every optimization invocation produce only control-plane artifacts plus
 remote pointers:
 
