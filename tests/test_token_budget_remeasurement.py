@@ -1204,3 +1204,93 @@ async def test_mixed_trial_replays_only_effective_benchmark_on_baseline(scenario
     await rm.advance(session, run.id)
     assert rm.pending(run)['cohort'][1]['active_members'] == ['qa']
     assert (await session.get(Ticket, originals[0].id)).status == 'queued'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('lane', ['optimization', 'held_out_test'])
+async def test_published_remeasurement_handoff_does_not_wait_for_test(scenario, monkeypatch, lane):
+    from zevo.db.models import AgentWakeupRequest
+    session, run, originals, root = scenario
+    supervisor = Ticket(id='orchestrate-run-001', run_id=run.id, agent_id='orchestrator',
+                        status='succeeded', payload={})
+    run.supervisor_ticket_id = supervisor.id
+    evaluation = Ticket(id='published-evaluation', run_id=run.id, agent_id='evaluation',
+                        lane=lane, status='succeeded', payload={}, supervisor_wake_deferred=True)
+    test = Ticket(id='still-running-test', run_id=run.id, agent_id='inference',
+                  lane='held_out_test', status='running', payload={})
+    session.add_all([supervisor, evaluation, test])
+    batch = {'id': 'published-revision', 'status': 'published', 'handoff_pending': True,
+             'lane': lane, 'trigger_id': originals[0].id,
+             'cohort': [{'source_id': originals[0].id, 'inference_id': originals[0].id,
+                         'evaluation_id': evaluation.id}]}
+    rm._store(run, batch)
+    await session.commit()
+    spawned = []
+    async def spawn(*args):
+        spawned.append(True)
+    monkeypatch.setattr('zevo.engine.run.runner._spawn_holdout_infer', spawn)
+    await rm._handoff(session, run, batch)
+    assert test.status == 'running'
+    assert not batch['handoff_pending']
+    wakes = list((await session.scalars(select(AgentWakeupRequest))).all())
+    if lane == 'held_out_test':
+        assert not spawned and not wakes
+        assert supervisor.status == 'succeeded'
+    else:
+        assert spawned and len(wakes) == 1
+        assert not evaluation.supervisor_wake_deferred
+        wakes[0].status = 'completed'
+        supervisor.status = 'succeeded'
+        await session.commit()
+        # Recovering a handoff after publication cannot replay the decision.
+        await rm._handoff(session, run, batch)
+        assert len((await session.scalars(select(AgentWakeupRequest))).all()) == 1
+        assert supervisor.status == 'succeeded'
+
+
+@pytest.mark.asyncio
+async def test_private_remeasurement_does_not_swallow_validation_completion(scenario):
+    from zevo.db.models import AgentWakeupRequest
+    from zevo.engine.run.runner import _wake_after_measurement
+    session, run, originals, root = scenario
+    rm._store(run, {"id": "private-paused", "status": "paused", "lane": "held_out_test", "cohort": []})
+    supervisor = Ticket(id=f"orchestrate-{run.id[:8]}-001", run_id=run.id,
+                        agent_id='orchestrator', status='succeeded', payload={})
+    run.supervisor_ticket_id = supervisor.id
+    evaluation = Ticket(id='independent-validation', run_id=run.id, agent_id='evaluation',
+                        status='succeeded', payload={})
+    session.add_all([supervisor, evaluation])
+    await session.commit()
+    assert not await rm.intercept_completion(session, evaluation)
+    await _wake_after_measurement(session, evaluation)
+    assert len((await session.scalars(select(AgentWakeupRequest))).all()) == 1
+    assert rm.pending(run, 'held_out_test')['status'] == 'paused'
+    assert rm.pending(run, 'optimization') is None
+
+
+@pytest.mark.asyncio
+async def test_remeasurement_recovery_advances_both_lanes(scenario, monkeypatch):
+    session, run, originals, root = scenario
+    rm._store(run, {"id": "private-paused", "status": "paused", "lane": "held_out_test", "cohort": []})
+    rm._store(run, {"id": "validation-published", "status": "published", "lane": "optimization",
+                   "handoff_pending": True, "cohort": []})
+    await session.commit()
+    handled = []
+    async def handoff(db, current, batch):
+        handled.append(batch['id'])
+        batch['handoff_pending'] = False
+        rm._store(current, batch)
+        await db.commit()
+    monkeypatch.setattr(rm, '_handoff', handoff)
+    await rm.advance(session, run.id)
+    assert handled == ['validation-published']
+    assert rm.pending(run, 'held_out_test')['status'] == 'paused'
+
+
+def test_active_attempt_resolves_ticket_in_its_own_lane():
+    run = Run(id='attempts', metric='accuracy', lifecycle={})
+    for lane in ('held_out_test', 'optimization'):
+        rm._store(run, {'id': lane, 'status': 'running', 'lane': lane, 'reuse_tickets': True,
+                       'cohort': [{'inference_id': lane, 'inference_attempt': {'marker': lane}}]})
+    assert rm.active_attempt(run, 'optimization') == {'marker': 'optimization'}
+    assert rm.active_attempt(run, 'held_out_test') == {'marker': 'held_out_test'}

@@ -3420,7 +3420,7 @@ def _apply_run_score_monitor(
     if is_checkpoint_stage(ticket):
         return
     from zevo.engine.run.remeasurement import is_replay, is_superseded_prediction, pending
-    if ticket.lane == "held_out_test" or pending(run) or is_replay(run, ticket) or is_superseded_prediction(run, ticket):
+    if ticket.lane == "held_out_test" or pending(run, "optimization") or is_replay(run, ticket) or is_superseded_prediction(run, ticket):
         return
 
     # A component score is not the Run's model-selection score. Multi-benchmark
@@ -4872,7 +4872,7 @@ async def run_ticket(
     if run.cancel_requested_at is not None:
         return tk
     from zevo.engine.run.remeasurement import pending
-    if pending(run) and tk.agent_id in {"orchestrator", "train"}:
+    if pending(run, "optimization") and tk.agent_id in {"orchestrator", "train"}:
         return tk  # the complete cohort, not a partial score, releases the loop
     if finalization(run) and not finalization_allows(tk.agent_id, tk.lane):
         tk.status = "cancelled"
@@ -7610,62 +7610,7 @@ async def run_ticket(
             )
         except Exception as e:
             _warn("measurements", e)
-        # A held-out ticket is the harness measuring the run, not the run
-        # making progress. Waking the supervisor for it would put a test-set
-        # completion into `last_event` and hand the loop the one signal the
-        # whole arrangement exists to keep from it.
-        #
-        # With one exception, and it is a barrier rather than a signal. An
-        # EVALUATION is the end of a round's measurement, and the round is not
-        # measured until both lanes have reported — so if the held-out lane is
-        # still working, the wake is deferred and the lane's own final eval
-        # issues it instead. Nothing about the test set crosses over: the
-        # supervisor is told only that its own child finished, which is what it
-        # was going to be told anyway, just later.
-        #
-        # Only evaluations wait. Inference wakes Orchestrator so it can create
-        # Validation Evaluation; completion of that Evaluation starts the
-        # private mirror branch.
-        held_out_ticket = tk.lane == "held_out_test"
-        is_eval = tk.agent_id == "evaluation"
-        validation_suite_pending = await _validation_suite_pending(
-            session, tk.run_id,
-        )
-        if held_out_ticket:
-            # ANY mirror completion can be the one that settles the lane, not
-            # just its final eval. A copy job that fails never reaches an eval
-            # at all, so releasing only there left the deferred wake held by a
-            # lane that had already stopped, and the run simply never advanced.
-            if await _holdout_settled(session, tk.run_id):
-                await _release_deferred_wake(session, tk.run_id)
-        elif validation_suite_pending:
-            # The primary Evaluation has started engine-owned Validation
-            # mirrors, or one of those mirrors has handed off to its evaluator.
-            # This is still one logical Evaluation frontier, so the supervisor
-            # must not plan the next experiment from a partial suite.
-            if is_eval and not await _has_deferred_evaluation(session, tk.run_id):
-                tk.supervisor_wake_deferred = True
-                await session.commit()
-        elif (
-            _is_validation_suite_mirror(tk)
-            and await _holdout_settled(session, tk.run_id)
-        ):
-            # A failed/cancelled mirror can settle the Validation frontier
-            # without producing the aggregate that would start held-out Test.
-            # Wake with that concrete failure, but first discard the primary
-            # Evaluation's borrowed wake flag so it cannot deadlock a later
-            # round or manufacture a duplicate wake.
-            await _clear_deferred_evaluations(session, tk.run_id)
-            await _maybe_wake_supervisor(session, tk)
-        elif is_eval and not await _holdout_settled(session, tk.run_id):
-            # Record WHICH wake is being held, rather than have the release step
-            # guess: a lane that settles with nothing waiting must issue no wake,
-            # and "the newest finished evaluation" is not the same question.
-            if not await _has_deferred_evaluation(session, tk.run_id):
-                tk.supervisor_wake_deferred = True
-                await session.commit()
-        else:
-            await _maybe_wake_supervisor(session, tk)
+        await _wake_after_measurement(session, tk)
 
     return tk
 
@@ -8915,17 +8860,10 @@ def _agent_history(history: list) -> list:
 
 
 async def _holdout_settled(session: AsyncSession, run_id: str) -> bool:
-    """Has the held-out lane finished whatever it had in flight?
+    """Whether private Test work has settled, for reporting and run cleanup.
 
-    An iteration is not over when the validation number lands — it is over when
-    BOTH numbers do. Letting the loop start the next round on the validation
-    score alone leaves the test measurement running against a model the run has
-    already moved past, and the two series drift apart: iteration 3's test point
-    arrives while iteration 4 is training, or not at all if the run ends first.
-
-    Failed and cancelled count as settled. A lane that cannot finish must not
-    hold the loop forever — a missing test point is a gap in one series, an
-    unwakeable supervisor is a dead run.
+    Validation decisions do not wait for Test. Its tickets retain their own
+    candidate/iteration bindings while optimization moves to the next round.
     """
     from zevo.engine.run.remeasurement import pending as pending_remeasurement
     run = await session.get(Run, run_id, populate_existing=True)
@@ -8988,31 +8926,39 @@ async def _clear_deferred_evaluations(
     await session.commit()
 
 
-async def _release_deferred_wake(session: AsyncSession, run_id: str) -> None:
-    """Issue the supervisor wake the held-out lane was holding, if any.
-
-    The flag lives on the evaluation that deferred, so a lane settling with
-    nothing waiting does nothing at all. That matters: the mirror must never
-    manufacture a wake of its own — only hand back the one it borrowed. The
-    held-out lane also runs during iteration 0, where the loop's own evaluation
-    has usually already woken the supervisor on its own, and a second wake there
-    would have the orchestrator plan the same round twice.
-    """
-    rows = (await session.execute(
-        select(Ticket).where(
-            Ticket.run_id == run_id,
-            Ticket.lane == "optimization",
-            Ticket.agent_id == "evaluation",
-            ~Ticket.id.startswith("mid-eval-"), ~Ticket.id.startswith("mid-infer-"),
-        ).order_by(Ticket.created_at.desc())
-    )).scalars().all()
-    held = next((t for t in rows if t.supervisor_wake_deferred), None)
-    if held is None:
+async def _wake_after_measurement(session: AsyncSession, child: Ticket) -> None:
+    """Advance only a complete optimization frontier, independently of Test."""
+    if child.lane == "held_out_test":
         return
-    for ticket in rows:
-        ticket.supervisor_wake_deferred = False
-    await session.commit()
-    await _maybe_wake_supervisor(session, held)
+    if await _validation_suite_pending(session, child.run_id):
+        # This flag only belongs to unfinished Validation suites. Test must
+        # never release it, including flags left behind by older deployments.
+        if child.agent_id == "evaluation" and not await _has_deferred_evaluation(session, child.run_id):
+            child.supervisor_wake_deferred = True
+            await session.commit()
+        return
+    await _clear_deferred_evaluations(session, child.run_id)
+    completion_key = ""
+    if child.agent_id == "evaluation" and child.status in ("succeeded", "degraded"):
+        run = await session.get(Run, child.run_id)
+        source_id = str(((child.inputs or {}).get("predictions") or {}).get("source_ticket_id") or "")
+        source = await session.get(Ticket, source_id) if source_id else None
+        if run is not None and source is not None and len(_validation_sets(run)) > 1:
+            payload = source.payload or {}
+            kind = "baseline" if payload.get("model_source") == "base_model" else "trained"
+            key = f"{kind}|{int(source.iteration or 0)}|{payload.get('base_model') or ''}"
+            holdout = run.holdout or {}
+            if key in holdout.get("validation_suite_recorded", []):
+                # Concurrent/late component completions describe one published
+                # suite, not independent decisions. Revisions use _handoff's
+                # explicit measurement-batch key instead.
+                import hashlib
+                components = holdout.get("validation_suite_results", {}).get(key, {})
+                identity = sorted((name, item.get("evaluation_ticket_id"))
+                                  for name, item in components.items())
+                digest = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+                completion_key = f"validation-suite:{key}:{digest}"
+    await _maybe_wake_supervisor(session, child, completion_key=completion_key)
 
 
 async def _release_emitted_child(
@@ -9094,14 +9040,20 @@ async def _release_emitted_child(
     )
 
 
-async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
-    """Wake the supervisor only when the completed DAG frontier is settled."""
+async def _maybe_wake_supervisor(
+    session: AsyncSession, child: Ticket, *, completion_key: str = "",
+) -> None:
+    """Wake once per optimization completion; private Test never drives it."""
+    if child.lane == "held_out_test":
+        return
     from zevo.engine.run.adaptive_training import is_checkpoint_stage
     if is_checkpoint_stage(child):
         return
     from zevo.db import Run
     from zevo.engine.run.wakeup import queue_wakeup
-    run = (await session.execute(select(Run).where(Run.id == child.run_id))).scalar_one_or_none()
+    run = (await session.execute(
+        select(Run).where(Run.id == child.run_id).with_for_update()
+    )).scalar_one_or_none()
     if run is None or not run.supervisor_ticket_id:
         return
     # Re-read before trusting the status. This session loaded `run` when the
@@ -9111,7 +9063,7 @@ async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
     # "running", and the supervisor was woken to plan the next step.
     await session.refresh(run)
     from zevo.engine.run.remeasurement import pending
-    if pending(run):
+    if pending(run, "optimization"):
         return
     if run.status in TERMINAL_RUN_STATUSES:
         return  # run is terminal (incl. user-cancelled) — don't keep poking
@@ -9132,6 +9084,23 @@ async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
     # `iteration` = the loop we're in. It bumps when Validation Evaluation
     # records a trained candidate. Final Registry runs once after the loop and
     # is not an iteration counter.
+    # Serialize on the Run until queue_wakeup commits the event and refreshed
+    # supervisor payload together. A retry after the original wake has already
+    # completed must not create another decision for the same completion.
+    from zevo.db import AgentWakeupRequest, HeartbeatRun
+    if not completion_key:
+        activation = (await session.execute(
+            select(HeartbeatRun.id).where(HeartbeatRun.ticket_id == child.id)
+            .order_by(HeartbeatRun.started_at.desc(), HeartbeatRun.id.desc()).limit(1)
+        )).scalar_one_or_none()
+        completion_key = f"{child.id}:{activation or 'no-activation'}:{child.status}"
+    handled = (await session.execute(select(AgentWakeupRequest.id).where(
+        AgentWakeupRequest.ticket_id == run.supervisor_ticket_id,
+        AgentWakeupRequest.payload["optimization_completion_key"].as_string() == completion_key,
+        AgentWakeupRequest.status.in_(("queued", "running", "completed", "coalesced")),
+    ).limit(1))).scalar_one_or_none()
+    if handled is not None:
+        return
     iteration = _current_iteration(run)
     sup_id = f"orchestrate-{run.id[:8]}-001"
     trigger = {
@@ -9287,11 +9256,11 @@ async def _maybe_wake_supervisor(session: AsyncSession, child: Ticket) -> None:
             f" (re-woken after {child.id})"
         )
     run.supervisor_ticket_id = sup_id
-    await session.commit()
     await queue_wakeup(
         session, agent_id="orchestrator", ticket_id=sup_id,
         source="handoff",
         reason=f"child ticket {child.id} finished ({child.status})",
+        payload={"optimization_completion_key": completion_key},
     )
 
 

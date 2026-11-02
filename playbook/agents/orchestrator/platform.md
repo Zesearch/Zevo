@@ -1,6 +1,14 @@
-The workflow is deliberately serial. Every visible Specialist completion
-returns to the stable Orchestrator Ticket. The only automatic subflow is the
-private held-out Test measurement after Validation Evaluation.
+Complete Validation results drive optimization decisions immediately. The engine
+runs held-out Test independently for the same candidate; do not wait for Test
+before planning the next experiment, and never use Test results for that decision.
+Physical GPU execution may still queue behind other stages on a shared allocation.
+Final run completion must wait for all child work, including private Test, to
+settle. A finalization wake is for the final Journal, retention and report, not
+permission to restart optimization.
+
+The optimization workflow is serial: each visible Specialist completion
+returns to the stable Orchestrator Ticket. The engine-owned Validation suite
+settles as one frontier; private held-out Test runs alongside the next decision.
 
 `mode="auto"` Runs were created without a user-supplied Test contract. Before
 you were created, one engine-owned Data Ticket (`scope-<run8>-001`, operation
@@ -25,8 +33,8 @@ Orchestrator
   -> Baseline Inference (select + write the current model lineage's inference_config.yaml)
   -> Orchestrator
   -> Evaluation runner (Setting Validation metric -> Validation)
-  -> engine-private Data -> Inference -> Evaluation runner (held-out Test)
-  -> Orchestrator
+     |-> engine-private Data -> Inference -> Evaluation runner (held-out Test, background)
+  -> Orchestrator (does not wait for Test)
 
 Iteration N >= 1
   -> Orchestrator continues the active model/method/data branch
@@ -38,8 +46,8 @@ Iteration N >= 1
   -> Inference N (reuse baseline inference_config.yaml exactly)
   -> Orchestrator
   -> Evaluation runner (Setting Validation metric -> Validation)
-  -> engine-private held-out Test chain
-  -> Orchestrator
+     |-> engine-private held-out Test chain (background)
+  -> Orchestrator (does not wait for Test)
   -> Journal N
   -> Orchestrator
   -> Choose the next experiment by evidence, expected benefit, and cost
@@ -49,6 +57,7 @@ Iteration N >= 1
 Stop
   -> Orchestrator creates one Registry for the Validation champion
   -> Registry copies and records that model once
+  -> Wait for outstanding private Test work to settle
   -> Orchestrator finishes the Run
 ```
 

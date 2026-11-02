@@ -479,3 +479,27 @@ async def test_instruction_replacement_prevents_premature_run_close(session, ins
     await session.refresh(run)
     assert run.status == 'running'
     assert run.finished_at is None
+
+
+@pytest.mark.asyncio
+async def test_private_test_completion_is_not_a_lost_optimization_handoff(session):
+    run = Run(id="private-close", metric="accuracy", status="running",
+              supervisor_ticket_id="orchestrate-private-close-001")
+    supervisor = _ticket(run.supervisor_ticket_id, run.id, "orchestrator", updated_ago=100)
+    validation = _ticket("validation-old", run.id, "evaluation", updated_ago=200)
+    holdout = _ticket("private-result", run.id, "evaluation", status="running", updated_ago=10)
+    holdout.lane = "held_out_test"
+    session.add_all([run, supervisor, validation, holdout])
+    await session.commit()
+    await _close_finished_runs(session)
+    assert run.status == "running"
+    assert not (await session.scalars(select(AgentWakeupRequest))).all()
+
+    holdout.status = "succeeded"
+    await session.commit()
+    await _close_finished_runs(session)
+    wakes = list((await session.scalars(select(AgentWakeupRequest))).all())
+    assert len(wakes) == 1
+    assert wakes[0].trigger_detail == "finalize_run"
+    assert wakes[0].source == "reconciler"
+    assert "private-result" not in wakes[0].reason

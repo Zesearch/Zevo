@@ -1789,7 +1789,7 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
         )).scalars().all()
         # A terminal Ticket is committed before its activation finishes the
         # measurement and handoff work. In particular, Evaluation still needs
-        # to create the held-out branch and defer the supervisor wake. Treat
+        # to create the held-out branch and enqueue the supervisor wake. Treat
         # the whole wakeup lifetime as active work, for every agent, so this
         # window cannot be mistaken for a lost handoff or a finished Run.
         if pending_wakes:
@@ -1849,7 +1849,9 @@ async def _close_finished_runs(session: AsyncSession) -> dict[str, int]:
             sup_seen = _aware(supervisor.updated_at)
             unseen = [
                 t for t in tickets
-                if t.agent_id != "orchestrator" and _aware(t.updated_at) > sup_seen
+                if t.agent_id != "orchestrator"
+                and t.lane == "optimization"
+                and _aware(t.updated_at) > sup_seen
             ]
             if unseen:
                 newest = max(unseen, key=lambda t: _aware(t.updated_at))

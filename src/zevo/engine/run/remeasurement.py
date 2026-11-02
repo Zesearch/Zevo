@@ -35,8 +35,10 @@ def batches(run: Run) -> list[Batch]:
     return (getattr(run, "lifecycle", None) or {}).get(KEY, [])
 
 
-def pending(run: Run) -> Batch | None:
-    return next((b for b in batches(run) if b["status"] in {"running", "paused"}), None)
+def pending(run: Run, lane: str | None = None) -> Batch | None:
+    return next((b for b in batches(run)
+                 if b["status"] in {"running", "paused"}
+                 and (lane is None or b["lane"] == lane)), None)
 
 
 def replay_ids(batch: Batch) -> set[str]:
@@ -71,7 +73,8 @@ def needs_expansion(item: dict) -> bool:
 
 
 def active_attempt(run: Run, ticket_id: str) -> dict:
-    batch = pending(run)
+    batch = next((b for b in batches(run)
+                  if b["status"] in {"running", "paused"} and ticket_id in replay_ids(b)), None)
     if not batch or not batch.get("reuse_tickets"):
         return {}
     for item in batch["cohort"]:
@@ -301,7 +304,8 @@ async def _start(session: AsyncSession, run: Run, trigger: Ticket, evidence: dic
         # checkpoints whose files may subsequently fail to resolve remotely.
         identities = {(int(t.iteration), "baseline" if (t.payload or {}).get("model_source") == "base_model" else "trained") for t in cohort}
         for row in run.history or []:
-            if isinstance(row, dict) and row.get("base_model") == model:
+            if (isinstance(row, dict) and row.get("base_model") == model
+                    and int(row["iteration"]) <= int(trigger.iteration)):
                 if (int(row["iteration"]), row["source"]) not in identities:
                     raise ValueError("a previously compared checkpoint is missing from the replay cohort")
         products = await _products(session, baseline.id, "inference_config")
@@ -586,44 +590,41 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
 
 
 async def _handoff(session: AsyncSession, run: Run, batch: Batch) -> None:
-    from zevo.engine.run.runner import _spawn_holdout_infer, _maybe_wake_supervisor, _release_deferred_wake, _holdout_settled
+    from zevo.engine.run.runner import _spawn_holdout_infer, _maybe_wake_supervisor, _clear_deferred_evaluations
     item = next(c for c in batch["cohort"] if c["source_id"] == batch["trigger_id"])
     inference = await session.get(Ticket, item["inference_id"])
     evaluation = await session.get(Ticket, item["evaluation_id"]) if item.get("evaluation_id") else None
     if evaluation is None:
         ids = [v.get("score", {}).get("evaluation_ticket_id") for v in item.get("retained", {}).values()]
         evaluation = await session.get(Ticket, next((v for v in ids if v), ""))
-    if batch["lane"] == "held_out_test":
-        if await _holdout_settled(session, run.id):
-            await _release_deferred_wake(session, run.id)
-    elif evaluation is not None:
-        evaluation.supervisor_wake_deferred = True
-        await session.commit()
+    if batch["lane"] != "held_out_test" and evaluation is not None:
         await _spawn_holdout_infer(session, run, inference)
-        if await _holdout_settled(session, run.id):
-            evaluation.supervisor_wake_deferred = False
-            await session.commit()
-            await _maybe_wake_supervisor(session, evaluation)
-        else:
-            evaluation.supervisor_wake_deferred = True
+        await _clear_deferred_evaluations(session, run.id)
+        await _maybe_wake_supervisor(
+            session, evaluation, completion_key=f"remeasurement:{batch['id']}",
+        )
     run = await _locked_run(session, run.id)
     batch["handoff_pending"] = False
     _store(run, batch)
     await session.commit()
 
 
-async def advance(session: AsyncSession, run_id: str) -> None:
-    """Idempotent recovery entry point, also called by the reconciler."""
+async def advance(session: AsyncSession, run_id: str, *, lane: str | None = None) -> None:
+    """Recover each measurement lane independently, including paused cohorts."""
+    if lane is None:
+        for current_lane in ("optimization", "held_out_test"):
+            await advance(session, run_id, lane=current_lane)
+        return
     from zevo.engine.run.runner import _spawn_validation_eval, _spawn_holdout_eval
     run = await _locked_run(session, run_id)
     if run is None or run.status not in {"planning", "running"} or run.cancel_requested_at is not None:
         return
-    batch = deepcopy(pending(run))
+    batch = deepcopy(pending(run, lane))
     if batch and batch["status"] == "paused":
         return  # Maintenance pauses advancement, not the cohort's loop barrier.
     if not batch:
         for completed in batches(run):
-            if completed.get("handoff_pending"):
+            if completed["lane"] == lane and completed.get("handoff_pending"):
                 await _handoff(session, run, deepcopy(completed))
         return
     try:
@@ -817,10 +818,10 @@ async def intercept_completion(session: AsyncSession, ticket: Ticket) -> bool:
         return False
     if is_replay(run, ticket):
         await session.commit()
-        await advance(session, run.id)
+        await advance(session, run.id, lane=ticket.lane)
         await session.refresh(ticket)
         return True
-    if pending(run):
+    if pending(run, ticket.lane):
         return True
     # Delayed duplicate callbacks for old predictions must not restore stale
     # scores after a revision was published.
@@ -835,7 +836,7 @@ async def intercept_completion(session: AsyncSession, ticket: Ticket) -> bool:
         return False
     if not await _start(session, run, ticket, evidence):
         return False
-    await advance(session, run.id)
+    await advance(session, run.id, lane=ticket.lane)
     await session.refresh(ticket)
     return True
 

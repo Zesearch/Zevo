@@ -700,6 +700,8 @@ async def test_held_out_ticket_does_not_wake_the_supervisor(session_factory) -> 
             select(Ticket).where(Ticket.id == "holdout-eval-r-quiet-001")
         )).scalar_one()
         assert tk.lane == "held_out_test"
+        await _maybe_wake_supervisor(s, tk)
+        assert not (await s.scalars(select(AgentWakeupRequest))).all()
 
         tk.lane = "optimization"
         await s.commit()
@@ -2074,60 +2076,109 @@ async def test_a_round_is_over_only_when_both_lanes_have_reported(session_factor
 
 
 @pytest.mark.asyncio
-async def test_the_deferred_wake_is_handed_back_by_whichever_mirror_ticket_settles(
-    session_factory,
-) -> None:
-    """The wake is released by the lane STOPPING, not by the lane succeeding.
-
-    Releasing only on the mirror's final evaluation assumed the lane always
-    reaches one. It does not: the copy job that strips the test set can fail,
-    and then no eval is ever raised, no release ever fires, and the run sits on
-    a wake nothing will ever issue. Any mirror completion that leaves the lane
-    settled has to hand it back.
-
-    And a lane that settles with nothing waiting must issue NOTHING — during
-    iteration 0 the loop's own evaluation has usually woken the supervisor
-    already, and a second wake would replan the round.
-    """
-    from zevo.engine.run.runner import _release_deferred_wake
+async def test_validation_decision_runs_while_holdout_is_active_and_only_once(session_factory):
+    from zevo.engine.run.runner import _wake_after_measurement
+    from zevo.db.models import HeartbeatRun
 
     async with session_factory() as s:
-        # A supervisor the wake can actually reach: without one
-        # `_maybe_wake_supervisor` returns early and the assertions below would
-        # pass whatever the release did.
-        s.add(Run(metric="accuracy", id="r", task_name="t", status="running",
-                  supervisor_ticket_id="orchestrate-r-001",
-                  started_at=datetime.now(timezone.utc)))
-        s.add(Ticket(id="orchestrate-r-001", run_id="r", agent_id="orchestrator",
-                     status="succeeded", lane="optimization",
-                     payload={}))
-        s.add(Ticket(id="eval-1", run_id="r", agent_id="evaluation", status="succeeded", lane="optimization", payload={}))
+        run = Run(id="parallel", metric="accuracy", status="running",
+                  supervisor_ticket_id="orchestrate-parallel-001")
+        supervisor = Ticket(id=run.supervisor_ticket_id, run_id=run.id,
+                            agent_id="orchestrator", status="succeeded", payload={})
+        evaluation = Ticket(id="eval-parallel", run_id=run.id, agent_id="evaluation",
+                            status="succeeded", payload={}, supervisor_wake_deferred=True)
+        test = Ticket(id="test-parallel", run_id=run.id, agent_id="inference",
+                      lane="held_out_test", status="running", payload={})
+        s.add_all([run, supervisor, evaluation, test])
         await s.commit()
+        await _wake_after_measurement(s, evaluation)
+        wakes = list((await s.scalars(select(AgentWakeupRequest))).all())
+        assert len(wakes) == 1
+        assert supervisor.payload["trigger"]["ticket_id"] == evaluation.id
+        assert not evaluation.supervisor_wake_deferred
+        assert test.status == "running"
 
-        # Nothing deferred: no supervisor ticket is created.
-        await _release_deferred_wake(s, "r")
-        assert (await s.get(Ticket, "eval-1")).supervisor_wake_deferred is False
-        assert (await s.get(Ticket, "orchestrate-r-001")).status == "succeeded", (
-            "a lane that settled with nothing waiting re-armed the supervisor"
+        # Steering can promote a queued completion into a user-instruction
+        # activation. It must retain the completion identity it will consume.
+        from zevo.engine.run.wakeup import queue_wakeup
+        original_key = wakes[0].payload["optimization_completion_key"]
+        promoted = await queue_wakeup(
+            s, agent_id="orchestrator", ticket_id=supervisor.id, source="on_demand",
+            payload={"run_instruction_id": "user-instruction"},
         )
-
-        # Now one IS deferred, and the mirror's copy job failed — the case that
-        # never reaches an eval.
-        ev = await s.get(Ticket, "eval-1")
-        ev.supervisor_wake_deferred = True
-        s.add(Ticket(id="holdout-data-1", run_id="r", agent_id="data", status="failed", lane="held_out_test", payload={}))
+        assert promoted.id == wakes[0].id
+        assert promoted.payload["optimization_completion_key"] == original_key
+        # Even after the decision finished and Train started, a duplicate
+        # completion and any Test result must not replan the same round.
+        wakes[0].status = "completed"
+        supervisor.status = "succeeded"
+        train = Ticket(id="train-parallel", run_id=run.id, agent_id="train",
+                       status="running", payload={})
+        s.add(train)
         await s.commit()
+        await _wake_after_measurement(s, evaluation)
+        for status in ("succeeded", "failed", "cancelled"):
+            test.status = status
+            await s.commit()
+            await _wake_after_measurement(s, test)
+        assert len((await s.scalars(select(AgentWakeupRequest))).all()) == 1
+        assert supervisor.status == "succeeded"
+        assert train.status == "running"
 
-        await _release_deferred_wake(s, "r")
-        sup = await s.get(Ticket, "orchestrate-r-001")
-        await s.refresh(sup)
-        assert sup.status == "queued", "the held wake was never handed back"
-        assert (sup.payload or {}).get("trigger", {}).get("status") == "succeeded", (
-            "the supervisor must be told its OWN child finished, never the mirror's"
-        )
-        assert (await s.get(Ticket, "eval-1")).supervisor_wake_deferred is False, (
-            "the flag must clear, or the next mirror completion releases it again"
-        )
+        # A genuinely new activation of the same evaluation is a new event.
+        s.add(HeartbeatRun(id="new-eval-activation", ticket_id=evaluation.id,
+                          agent_id="evaluation", driver="stub", model="stub"))
+        await s.commit()
+        await _wake_after_measurement(s, evaluation)
+        assert len((await s.scalars(select(AgentWakeupRequest))).all()) == 2
+
+
+@pytest.mark.asyncio
+async def test_validation_waits_for_full_suite_but_test_cannot_release_it(session_factory):
+    from zevo.engine.run.runner import _wake_after_measurement
+
+    async with session_factory() as s:
+        run = Run(id="suite", metric="accuracy", status="running",
+                  supervisor_ticket_id="orchestrate-suite-001")
+        supervisor = Ticket(id=run.supervisor_ticket_id, run_id=run.id,
+                            agent_id="orchestrator", status="succeeded", payload={})
+        primary = Ticket(id="eval-suite", run_id=run.id, agent_id="evaluation",
+                         status="succeeded", payload={})
+        mirror = Ticket(id="eval-suite-mirror", run_id=run.id, agent_id="evaluation",
+                        status="running", payload={"test_set_name": "validation:secondary"})
+        test = Ticket(id="test-suite", run_id=run.id, agent_id="evaluation",
+                      lane="held_out_test", status="succeeded", payload={})
+        s.add_all([run, supervisor, primary, mirror, test])
+        await s.commit()
+        await _wake_after_measurement(s, primary)
+        assert primary.supervisor_wake_deferred
+        await _wake_after_measurement(s, test)
+        assert not (await s.scalars(select(AgentWakeupRequest))).all()
+        mirror.status = "succeeded"
+        await s.commit()
+        await _wake_after_measurement(s, mirror)
+        assert not primary.supervisor_wake_deferred
+        assert len((await s.scalars(select(AgentWakeupRequest))).all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_test_completion_ignores_legacy_deferred_flag(session_factory):
+    from zevo.engine.run.runner import _wake_after_measurement
+
+    async with session_factory() as s:
+        run = Run(id="legacy", metric="accuracy", status="running",
+                  supervisor_ticket_id="orchestrate-legacy-001")
+        supervisor = Ticket(id=run.supervisor_ticket_id, run_id=run.id,
+                            agent_id="orchestrator", status="succeeded", payload={})
+        evaluation = Ticket(id="eval-legacy", run_id=run.id, agent_id="evaluation",
+                            status="succeeded", payload={}, supervisor_wake_deferred=True)
+        test = Ticket(id="test-legacy", run_id=run.id, agent_id="evaluation",
+                      lane="held_out_test", status="succeeded", payload={})
+        s.add_all([run, supervisor, evaluation, test])
+        await s.commit()
+        await _wake_after_measurement(s, test)
+        assert supervisor.status == "succeeded"
+        assert not (await s.scalars(select(AgentWakeupRequest))).all()
 
 
 def test_every_holdout_key_the_runner_reads_is_one_the_run_actually_writes() -> None:
@@ -2681,3 +2732,54 @@ def test_carve_keeps_repeated_questions_on_one_side(tmp_path: Path) -> None:
     from zevo.engine.artifact_validation import semantic_record_fingerprints
     assert not (semantic_record_fingerprints(out.validation_set, excluded_fields=["answer"])
                 & semantic_record_fingerprints(out.test_set, excluded_fields=["answer"]))
+
+
+@pytest.mark.asyncio
+async def test_late_suite_component_does_not_repeat_aggregate_decision(session_factory):
+    from zevo.engine.run.runner import _wake_after_measurement
+    async with session_factory() as s:
+        run = Run(id="agg", metric="accuracy", status="running",
+                  supervisor_ticket_id="orchestrate-agg-001", holdout={
+                      "validation_sets": [{"name": "a"}, {"name": "b"}],
+                      "validation_suite_recorded": ["baseline|0|model"],
+                      "validation_suite_results": {"baseline|0|model": {
+                          "a": {"evaluation_ticket_id": "eval-a", "score": .4},
+                          "b": {"evaluation_ticket_id": "eval-b", "score": .6},
+                      }},
+                  })
+        supervisor = Ticket(id=run.supervisor_ticket_id, run_id=run.id,
+                            agent_id="orchestrator", status="succeeded", payload={})
+        source = Ticket(id="infer-source", run_id=run.id, agent_id="inference",
+                        status="succeeded", payload={"model_source": "base_model", "base_model": "model"})
+        evaluations = [Ticket(id=f"eval-{name}", run_id=run.id, agent_id="evaluation",
+                              status="succeeded", payload={"test_set_name": f"validation:{name}"},
+                              inputs={"predictions": {"source_ticket_id": source.id}})
+                       for name in ("a", "b")]
+        s.add_all([run, supervisor, source, *evaluations])
+        await s.commit()
+        await _wake_after_measurement(s, evaluations[0])
+        first = (await s.scalars(select(AgentWakeupRequest))).one()
+        first.status = "completed"
+        supervisor.status = "succeeded"
+        await s.commit()
+        await _wake_after_measurement(s, evaluations[1])
+        assert len((await s.scalars(select(AgentWakeupRequest))).all()) == 1
+        assert supervisor.status == "succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["success", "degraded"])
+async def test_run_cannot_finish_between_private_remeasurement_tickets(session_factory, status):
+    from fastapi import HTTPException
+    from zevo.api.routers.shared.runs import patch_run, PatchRunRequest
+    from zevo.engine.run import remeasurement as rm
+    async with session_factory() as s:
+        run = Run(id="pending-test", metric="accuracy", status="running")
+        rm._store(run, {"id": "private-revision", "status": "running", "lane": "held_out_test"})
+        s.add(run)
+        await s.commit()
+        with pytest.raises(HTTPException) as error:
+            await patch_run(run.id, PatchRunRequest(status=status), s)
+        assert error.value.status_code == 409
+        assert "measurement revisions" in error.value.detail
+        assert run.status == "running"

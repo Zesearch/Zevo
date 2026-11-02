@@ -85,7 +85,11 @@ async def queue_wakeup(
                 existing.source = source
                 existing.trigger_detail = trigger_detail
                 existing.reason = reason
-                existing.payload = payload or {}
+                completion_key = (existing.payload or {}).get("optimization_completion_key")
+                existing.payload = {
+                    **({"optimization_completion_key": completion_key} if completion_key else {}),
+                    **(payload or {}),
+                }
                 existing.scheduled_for = datetime.now(timezone.utc)
                 await session.commit()
                 await session.refresh(existing)
