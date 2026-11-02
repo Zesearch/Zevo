@@ -1599,6 +1599,9 @@ async def patch_run(
             ).scalars().all())
         effective_status = body.status
         if body.status in {"success", "degraded"}:
+            from zevo.engine.run.remeasurement import pending
+            if pending(r):
+                raise HTTPException(409, "Cannot finish run while measurement revisions are pending")
             issues = unresolved_ticket_issues(terminal_tickets, run=r)
             failed = sorted(
                 str(issue.get("ticket_id") or "")
