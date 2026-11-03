@@ -1,5 +1,6 @@
 """Artifact success is independent of resource cleanup and scoped to one execution."""
 from types import SimpleNamespace as NS
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
 from sqlalchemy import select
@@ -22,7 +23,7 @@ async def test_verified_completion_survives_cleanup_failure_without_reusing_gpu(
                   inference_config_path=str(artifact))
     result = NS(slurm_script_path=str(script), log_path='log', suite_members=[NS(name='B', **member)], **member)
     inp = NS(benchmark_id='validation:0', suite_members=[NS(name='B', benchmark_id='validation:1')], slurm_job=NS(enabled=True, bookkeeping_row_id='job'))
-    heartbeat = NS(id='collect', resolved_config={})
+    heartbeat = NS(id='34c4e8cc-7fc1-417c-b0a1-4ae997e5d3d3', resolved_config={})
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -49,6 +50,7 @@ async def test_verified_completion_survives_cleanup_failure_without_reusing_gpu(
             assert heartbeat.resolved_config['execution_phase'] == 'collect'
             assert len(infra.meta['verified_workload_result']['members']) == 2
         else:
-            assert all(e.attempt_id == 'verified-collect' for e in events)
+            assert all(e.attempt_id == str(uuid5(NAMESPACE_URL, f'zevo:verified-inference:{heartbeat.id}')) for e in events)
+            assert all(str(UUID(e.attempt_id)) == e.attempt_id for e in events)
             assert 'verified_workload_result' not in infra.meta
     await engine.dispose()

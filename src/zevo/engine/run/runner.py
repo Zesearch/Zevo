@@ -63,6 +63,7 @@ from zevo.api.artifacts import host_path
 from zevo.providers import resolve_ssh_key
 from zevo.providers.aws_ec2 import aws_credentials_present
 from zevo.engine.agent.loader import AgentBlueprint, REPO_ROOT, load_agent
+from zevo.engine.run.activation_failure import ACTIVATION_KEY, track_activation_failures
 from zevo.engine.agent.memory import (
     applicability_for,
     memory_environment,
@@ -4856,6 +4857,7 @@ async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket
     return allowed
 
 
+@track_activation_failures
 async def run_ticket(
     session: AsyncSession,
     *,
@@ -5302,6 +5304,7 @@ async def run_ticket(
     tk.status = "running"
     await session.commit()
     heartbeat_id = hb.id
+    session.info[ACTIVATION_KEY] = (ticket_id, heartbeat_id)
 
     direct_execution = None
     if tk.agent_id in {"train", "inference", "evaluation"} and not (
