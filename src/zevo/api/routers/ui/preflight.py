@@ -16,7 +16,7 @@ import csv
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Mapping
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -28,6 +28,7 @@ from zevo.providers.aws_ec2 import aws_credentials_present
 from zevo.api.database import get_db
 from zevo.db import Agent, InfraInstance, SshHost
 from zevo.contracts.customizations import RunCustomizations
+from zevo.contracts.model_save import ModelSavePolicy
 from zevo.contracts.orchestrator import (
     BUILTIN_METRICS,
     AutoUserRequest,
@@ -79,6 +80,7 @@ class PreflightBody(BaseModel):
     num_gpus: int | None = Field(None, ge=0)
     generation_backend: Literal["hf", "vllm"] | None = None
     customizations: RunCustomizations | None = None
+    model_save_policy: ModelSavePolicy | None = None
 
     @model_validator(mode="after")
     def validation_uses_suite(self) -> "PreflightBody":
@@ -122,6 +124,13 @@ def _risk(items: list[PreflightItem], code: str, msg: str, hint: str = "") -> No
 
 def _block(items: list[PreflightItem], code: str, msg: str, hint: str = "") -> None:
     items.append(PreflightItem(severity="blocker", code=code, message=msg, hint=hint))
+
+
+def _check_model_destination(policy: ModelSavePolicy | None, items: list[PreflightItem], keys: Mapping[str, str]) -> None:
+    if policy is None:
+        _block(items, "model_destination_missing", "Final model destination is not set.", "Choose a Hugging Face repository or a directory on the GPU machine.")
+    elif policy.weights == "hf" and not keys.get("HF_TOKEN"):
+        _block(items, "model_destination_token_missing", "Hugging Face model storage requires a write token.", "Set your Hugging Face write token in Settings.")
 
 
 def _check_objective(req: UserRequest, items: list[PreflightItem]) -> None:
@@ -765,6 +774,8 @@ async def preflight(body: PreflightBody, db: AsyncSession = Depends(get_db)) -> 
     items: list[PreflightItem] = []
     req = body.user_request if body.mode == "auto" else inherit_test_validation_contract(body.user_request)
 
+    from zevo.engine.run.cancel_rescue import hf_token
+    _check_model_destination(body.model_save_policy, items, {"HF_TOKEN": hf_token()})
     _check_objective(req, items)
     _check_dataset(req, items)
     _check_dataset_profile(req, items)         # B.3: hoist profiler signals

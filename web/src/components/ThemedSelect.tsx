@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { ClearFieldsContext } from "./ClearableField";
+import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Check, ChevronDown, X } from "lucide-react";
 import { useDialogOwner } from "../lib/dialog";
 import { createPortal } from "react-dom";
 
 export type ThemedSelectOption = {
   value: string;
   label: ReactNode;
+  description?: ReactNode;
   disabled?: boolean;
 };
 
@@ -20,6 +22,7 @@ export type ThemedSelectOption = {
 export function ThemedSelect({
   value,
   onChange,
+  onClear,
   options,
   placeholder = "",
   ariaLabel,
@@ -29,6 +32,7 @@ export function ThemedSelect({
 }: {
   value: string;
   onChange: (value: string) => void;
+  onClear?: () => void;
   options: ThemedSelectOption[];
   placeholder?: ReactNode;
   ariaLabel: string;
@@ -37,10 +41,12 @@ export function ThemedSelect({
   buttonClassName?: string;
 }) {
   const owner = useDialogOwner();
+  const launchStyle = useContext(ClearFieldsContext);
+  const showClear = Boolean(onClear && value && !disabled);
   const control = useRef<HTMLDivElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
+  const [active, setActive] = useState(launchStyle ? -1 : 0);
   const [position, setPosition] = useState({ left: 0, top: 0, width: 0, above: false });
   const selectedIndex = options.findIndex((o) => o.value === value);
   const selected = selectedIndex >= 0 ? options[selectedIndex] : null;
@@ -102,7 +108,7 @@ export function ThemedSelect({
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => {
-          if (!open) setActive(selectedIndex >= 0 ? selectedIndex : (enabled[0] ?? 0));
+          if (!open) setActive(launchStyle ? -1 : selectedIndex >= 0 ? selectedIndex : (enabled[0] ?? 0));
           setOpen((v) => !v);
         }}
         onKeyDown={(e) => {
@@ -117,14 +123,15 @@ export function ThemedSelect({
             choose(active);
           }
         }}
-        className={`flex w-full items-center justify-between gap-2 text-left disabled:cursor-not-allowed disabled:opacity-60 ${buttonClassName}`}
+        className={`flex w-full items-center justify-between gap-2 text-left disabled:cursor-not-allowed disabled:opacity-60 ${buttonClassName} ${showClear ? "!pr-11" : ""}`}
       >
-        <span className={`min-w-0 truncate ${selected ? "" : "text-slate-600"}`}>
+        <span className={`min-w-0 truncate ${selected ? "" : "select-placeholder text-slate-600"}`}>
           {selected?.label ?? placeholder}
         </span>
-        <ChevronDown size={14} className={`shrink-0 text-slate-500 transition-transform ${open ? "rotate-180" : ""}`} />
+        <ChevronDown size={14} className={`${showClear ? "invisible" : ""} shrink-0 text-slate-500 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
+      {showClear && <button type="button" className="field-clear" aria-label={`Clear ${ariaLabel.toLowerCase()}`} title={`Clear ${ariaLabel.toLowerCase()}`} onMouseDown={event => event.preventDefault()} onClick={() => { setOpen(false); onClear?.(); control.current?.querySelector("button")?.focus(); }}><X size={14} /></button>}
       {open && !disabled && createPortal(
         <div
           ref={menu}
@@ -139,7 +146,7 @@ export function ThemedSelect({
               ? { bottom: window.innerHeight - position.top }
               : { top: position.top }),
           }}
-          className="fixed z-[100] max-h-64 overflow-y-auto rounded-md border border-hair bg-raised p-1 shadow-2xl"
+          className={`fixed z-[100] max-h-64 overflow-y-auto rounded-md border border-hair bg-raised p-1 shadow-2xl ${launchStyle ? "launch-select-menu" : ""}`}
         >
           {options.map((option, index) => (
             <button
@@ -147,6 +154,7 @@ export function ThemedSelect({
               type="button"
               role="option"
               aria-selected={index === selectedIndex}
+              data-active={index === active}
               disabled={option.disabled}
               onMouseEnter={() => !option.disabled && setActive(index)}
               onClick={() => choose(index)}
@@ -154,7 +162,7 @@ export function ThemedSelect({
                 index === active ? "bg-brass-500/15 text-brass-200" : "text-slate-300 hover:bg-canvas/70"
               }`}
             >
-              <span className="min-w-0">{option.label}</span>
+              <span className="min-w-0 flex-1"><span className="launch-option-title block">{option.label}</span>{option.description && <span className="launch-option-description mt-1.5 block text-sm leading-relaxed text-slate-400">{option.description}</span>}</span>
               {index === selectedIndex && <Check size={13} className="mt-0.5 shrink-0 text-brass-300" />}
             </button>
           ))}

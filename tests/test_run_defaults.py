@@ -44,11 +44,11 @@ def test_run_and_preflight_reject_legacy_single_validation_input() -> None:
         "validation_set": "/data/validation.csv",
     })
     with pytest.raises(ValidationError, match="use validation_sets"):
-        CreateRunRequest(
+        CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             task_name="t", run_name="r", user_request=legacy_request,
         )
     with pytest.raises(ValidationError, match="use validation_sets"):
-        PreflightBody(user_request=legacy_request)
+        PreflightBody(model_save_policy={"weights": "remote", "remote_dir": "/models"}, user_request=legacy_request)
 
 
 def test_selection_queries_are_empty_guidance_not_decision_pins() -> None:
@@ -74,7 +74,7 @@ async def test_blank_gpu_provider_requires_a_concrete_default(tmp_path, monkeypa
     monkeypatch.setenv("ZEVO_ENV_FILE", str(env_file))
 
     with pytest.raises(HTTPException) as exc_info:
-        await _resolve_run_compute(None, CreateRunRequest(task_name="t", run_name="r"))
+        await _resolve_run_compute(None, CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="t", run_name="r"))
     assert getattr(exc_info.value, "status_code", None) == 422
     assert "GPU backend is required" in str(getattr(exc_info.value, "detail", ""))
 
@@ -89,14 +89,14 @@ async def test_credentials_do_not_become_default_without_an_explicit_choice(tmp_
     )
     monkeypatch.setenv("ZEVO_ENV_FILE", str(env_file))
     with pytest.raises(HTTPException) as exc_info:
-        await _resolve_run_compute(None, CreateRunRequest(task_name="t", run_name="r"))
+        await _resolve_run_compute(None, CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="t", run_name="r"))
     assert getattr(exc_info.value, "status_code", None) == 422
 
     env_file.write_text(
         env_file.read_text(encoding="utf-8") + "ZEVO_DEFAULT_COMPUTE=cloud:lambda\n",
         encoding="utf-8",
     )
-    target = await _resolve_run_compute(None, CreateRunRequest(task_name="t", run_name="r"))
+    target = await _resolve_run_compute(None, CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="t", run_name="r"))
     assert target.provider == "cloud"
     assert target.cloud_backend == "lambda"
 
@@ -111,7 +111,7 @@ def test_preflight_requires_a_provider_when_no_default_was_resolved(monkeypatch)
         "gpu_provider_required", "gpu_count", "generation_backend",
     ]
 
-    body = PreflightBody(
+    body = PreflightBody(model_save_policy={"weights": "remote", "remote_dir": "/models"},
         user_request=_request(), gpu_provider="cluster", num_gpus=2,
         generation_backend="hf",
     )
@@ -487,7 +487,7 @@ async def test_predefined_run_uses_system_defaults_without_saving_a_setting(tmp_
         ))
         await db.commit()
 
-        response = await create_run(CreateRunRequest(
+        response = await create_run(CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             task_name="budgeted", run_name="budgeted-defaults",
             adaptive_mid_training_evaluation=adaptive,
         ), db)
@@ -568,7 +568,7 @@ async def test_validation_carve_preserves_source_pin_and_initializes_governance(
             "base_model": "Qwen/Qwen3-0.6B-Base",
             "training_method": "lora_sft",
         })
-        response = await create_run(CreateRunRequest(
+        response = await create_run(CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             task_name="carved", run_name="carved-run", user_request=request,
             gpu_provider="instance",
         ), db)
@@ -647,7 +647,7 @@ async def test_predefined_task_test_suite_cannot_be_overridden_for_one_run(tmp_p
                 "metric_direction": "max",
             })],
         })
-        response = await create_run(CreateRunRequest(
+        response = await create_run(CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             task_name="lower-is-better",
             run_name="test-metric-override",
             user_request=request,
@@ -707,7 +707,7 @@ async def test_saving_first_custom_setting_creates_task_and_setting(tmp_path, mo
         ))
         await db.commit()
 
-        response = await create_run(CreateRunRequest(
+        response = await create_run(CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             task_name="new-benchmark",
             run_name="first-attempt",
             user_request=request,
@@ -832,7 +832,7 @@ async def test_selected_multi_validation_setting_matches_suite_only_request(
             validation_metric_type="builtin", validation_metric="suite_average",
             validation_metric_direction="max", constraints=[],
         )
-        response = await create_run(CreateRunRequest(
+        response = await create_run(CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             task_name="suite-task", run_name="reuse-L1",
             user_request=request, gpu_provider="instance",
             setting_id=setting.id,
@@ -923,15 +923,15 @@ def test_run_runtime_fields_have_one_canonical_location() -> None:
 def test_stop_threshold_is_optional_and_uses_the_metric_scale() -> None:
     from zevo.api.routers.ui.tasks import SettingBody
 
-    assert CreateRunRequest(task_name="t", run_name="r").stop_threshold is None
-    assert CreateRunRequest(
+    assert CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="t", run_name="r").stop_threshold is None
+    assert CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
         task_name="t", run_name="r", stop_threshold=0.0,
     ).stop_threshold == 0.0
-    assert CreateRunRequest(
+    assert CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
         task_name="t", run_name="r", stop_threshold=1.0,
     ).stop_threshold == 1.0
     assert SettingBody(name="s", stop_threshold=0.5).stop_threshold == 0.5
-    assert CreateRunRequest(
+    assert CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
         task_name="t", run_name="r", stop_threshold=-12.5,
     ).stop_threshold == -12.5
     assert SettingBody(name="s", stop_threshold=1800).stop_threshold == 1800
@@ -950,7 +950,7 @@ def test_full_pipeline_rejects_user_owned_experiment_contract_details() -> None:
         "decoding_config": {"max_new_tokens": 128, "temperature": 0.0, "seed": 7},
     })
 
-    customized = CreateRunRequest(
+    customized = CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
         task_name="t",
         run_name="r",
         mode="customized_pipeline",
@@ -961,14 +961,14 @@ def test_full_pipeline_rejects_user_owned_experiment_contract_details() -> None:
     assert customized.user_request.decoding_config["seed"] == 7
 
     with pytest.raises(ValidationError, match="Full Pipeline does not accept"):
-        CreateRunRequest(
+        CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             task_name="t",
             run_name="r",
             mode="full_pipeline",
             user_request=customized_request,
         )
 
-    autonomous = CreateRunRequest(
+    autonomous = CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
         task_name="t",
         run_name="r",
         mode="full_pipeline",

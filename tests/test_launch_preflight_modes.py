@@ -16,7 +16,7 @@ def test_auto_preflight_checks_selected_runtime_without_requiring_test_assets(mo
     monkeypatch.setattr(module, "_check_infra", infra)
     monkeypatch.setattr(module, "_check_provider_creds", AsyncMock())
     monkeypatch.setattr(module, "_check_orphaned_instances", AsyncMock())
-    body = module.PreflightBody(mode="auto", user_request={"task_objective": "Improve short factual answers"}, gpu_provider="instance", ssh_host_id="selected-host", num_gpus=1)
+    body = module.PreflightBody(model_save_policy={"weights": "remote", "remote_dir": "/models"}, mode="auto", user_request={"task_objective": "Improve short factual answers"}, gpu_provider="instance", ssh_host_id="selected-host", num_gpus=1)
     db = AsyncMock()
     db.get.return_value = SimpleNamespace(status="verified", category="instance")
     result = asyncio.run(module.preflight(body, db))
@@ -28,7 +28,7 @@ def test_auto_preflight_checks_selected_runtime_without_requiring_test_assets(mo
 
 def test_scoring_contract_cannot_accidentally_pass_as_standard_auto_draft():
     with pytest.raises(ValidationError, match="full scoring contract"):
-        module.PreflightBody(user_request={"task_objective": "Improve short factual answers"})
+        module.PreflightBody(model_save_policy={"weights": "remote", "remote_dir": "/models"}, user_request={"task_objective": "Improve short factual answers"})
 
 
 def test_deleted_selected_host_blocks_auto_launch(monkeypatch):
@@ -37,7 +37,7 @@ def test_deleted_selected_host_blocks_auto_launch(monkeypatch):
     monkeypatch.setattr(module, "_check_orphaned_instances", AsyncMock())
     db = AsyncMock()
     db.get.return_value = None
-    body = module.PreflightBody(mode="auto", user_request={"task_objective": "Improve factual answers"}, gpu_provider="instance", ssh_host_id="deleted")
+    body = module.PreflightBody(model_save_policy={"weights": "remote", "remote_dir": "/models"}, mode="auto", user_request={"task_objective": "Improve factual answers"}, gpu_provider="instance", ssh_host_id="deleted")
     result = asyncio.run(module.preflight(body, db))
     assert "ssh_host_missing" in result.blockers
     assert result.status == "blocked"
@@ -59,9 +59,9 @@ def test_per_submission_requires_slurm_at_preflight_and_launch(monkeypatch, prov
                   gpu_provider="" if use_default else provider, gpu_allocation_mode="per_submission")
     if use_default:
         fields.pop("gpu_provider")
-    result = asyncio.run(module.preflight(module.PreflightBody(**fields), db))
+    result = asyncio.run(module.preflight(module.PreflightBody(model_save_policy={"weights": "remote", "remote_dir": "/models"}, **fields), db))
     assert ("gpu_allocation_mode" in result.blockers) == (provider != "cluster")
-    body = runs.CreateRunRequest(task_name="task", run_name="run", **fields)
+    body = runs.CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="task", run_name="run", **fields)
     if provider == "cluster":
         assert asyncio.run(runs._resolve_run_compute(db, body)).provider == "cluster"
     else:

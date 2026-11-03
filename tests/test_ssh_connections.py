@@ -58,7 +58,7 @@ def _seed(db) -> None:
 def test_ssh_and_local_are_not_gpu_provider_categories() -> None:
     for removed in ("ssh", "local"):
         with pytest.raises(ValidationError):
-            CreateRunRequest(task_name="t", run_name="r", gpu_provider=removed)
+            CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="t", run_name="r", gpu_provider=removed)
 
 
 def test_connection_contract_uses_host_key_path_without_copying(
@@ -521,7 +521,7 @@ async def test_ssh_launch_rejects_an_unverified_connection() -> None:
         await db.commit()
         with pytest.raises(HTTPException) as ei:
             await create_run(
-                CreateRunRequest(task_name="t", run_name="r",
+                CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="t", run_name="r",
                                  gpu_provider="instance", ssh_host_id="h1"),
                 db,
             )
@@ -536,7 +536,7 @@ async def test_ssh_launch_rejects_a_missing_connection_id() -> None:
         await db.commit()
         with pytest.raises(HTTPException) as ei:
             await create_run(
-                CreateRunRequest(task_name="t", run_name="r",
+                CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="t", run_name="r",
                                  gpu_provider="instance", ssh_host_id="does-not-exist"),
             db,
         )
@@ -556,7 +556,7 @@ async def test_launch_rejects_connection_category_mismatch() -> None:
         await db.commit()
         with pytest.raises(HTTPException) as ei:
             await create_run(
-                CreateRunRequest(
+                CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"},
                     task_name="t", run_name="r", gpu_provider="instance",
                     ssh_host_id="h1",
                 ),

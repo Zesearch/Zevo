@@ -1,10 +1,12 @@
+import { SaveRunPrompt } from "./SaveRunPrompt";
+import { ClearableInput, ClearableTextarea } from "./ClearableField";
 import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady, modelSaveSummaryValues } from "./ModelSaveFields";
 import { useLaunchSetting } from "../lib/useLaunchSetting";
-import { LaunchLimitsSummary, useLaunchPreflight } from "./LaunchPreflight";
+import { useLaunchPreflight } from "./LaunchPreflight";
 import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { useNavigate } from "react-router-dom";
-import { ChevronRight, RotateCw } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { AttachmentDropzone, type Attachment } from "./AttachmentDropzone";
 import {
   ChoiceField,
@@ -105,18 +107,26 @@ const labelCls = "field-label mb-1.5 block";
 export function CustomizedRunForm({
   onDone,
   onDirtyChange,
+  onContextChange,
   initialTaskName = "",
   initialSettingId = "",
   initialRunName = "",
   initialInputs,
+  guided = false,
+  askTaskNameOnSave = false,
 }: {
   onDone: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  onContextChange?: (context: { taskName: string; settingName: string }) => void;
   initialTaskName?: string;
   initialSettingId?: string;
   initialRunName?: string;
   initialInputs?: Partial<RunInputValues>;
+  guided?: boolean;
+  askTaskNameOnSave?: boolean;
 }) {
+  const [saving, setSaving] = useState(false);
+  const [newTaskName, setNewTaskName] = useState("");
   const nav = useNavigate();
   const { data: tasks = [] } = useSWR<TaskDTO[]>("/api/tasks");
   // Run-level fields
@@ -132,7 +142,7 @@ export function CustomizedRunForm({
   const { sourceSetting, pickedSetting, setPickedSetting, editSetting } = useLaunchSetting();
   // Matches Full Pipeline: the save-reuse prompt appears only after the user
   // has chosen or changed a Setting-owned value, not on an untouched form.
-  const [touched, setTouched] = useState(false);
+  const [, setTouched] = useState(false);
   const [saveSetting, setSaveSetting] = useState(false);
   const [settingName, setSettingName] = useState("");
   // Per-Agent customization state
@@ -171,6 +181,7 @@ export function CustomizedRunForm({
     predefined ? `/api/tasks/${encodeURIComponent(predefined.name)}/settings` : null,
   );
   const picked = savedSettings.find((setting) => setting.id === pickedSetting) ?? null;
+  useEffect(() => { onContextChange?.({ taskName: askTaskNameOnSave ? (saveSetting ? newTaskName : "") : taskName, settingName: picked?.name || "" }); }, [onContextChange, askTaskNameOnSave, saveSetting, newTaskName, taskName, picked?.name]);
   const nameTaken = !!settingName.trim() && savedSettings.some(
     (setting) => setting.name.trim().toLowerCase() === settingName.trim().toLowerCase(),
   );
@@ -378,6 +389,7 @@ export function CustomizedRunForm({
     setError(null);
     try {
       if (!runName.trim()) throw new Error("Give the run a name.");
+      if (askTaskNameOnSave && saveSetting && !newTaskName.trim()) throw new Error("Name the Task you want to save.");
       if (!taskName.trim()) throw new Error("Give the run a task name.");
       if (!objective.trim()) throw new Error("Describe the objective.");
       if (!predefined?.test_sets?.length) {
@@ -417,7 +429,7 @@ export function CustomizedRunForm({
       const body = {
         mode: "customized_pipeline",
         model_save_policy: modelSave,
-        task_name: taskName.trim(),
+        task_name: askTaskNameOnSave && saveSetting ? newTaskName.trim() : taskName.trim(),
         run_name: runName.trim(),
         user_request,
         customizations: buildCustomizations(),
@@ -474,42 +486,54 @@ export function CustomizedRunForm({
     }),
   ];
 
+  const feedback = <div className="space-y-3">
+    {preflight.panel}
+    {error && <div role="alert" className="whitespace-pre-line text-sm text-coral-300">{error}</div>}
+    {busy && runSetup.progress && <RunSetupProgressView progress={runSetup.progress} />}
+  </div>;
+  const reviewAction = <div className="space-y-4">
+    {!saving && feedback}
+    <button type="button" className="launch-next" disabled={busy || requiredMissing.length > 0 || !modelSaveReady(modelSave)} onClick={() => { if (pickedSetting) void start(); else setSaving(true); }}>{busy ? "Starting…" : "Start Run →"}</button>
+  </div>;
   return (
     <>
-      <div className="space-y-4">
-        <LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />
-        <RunInputs extraRequiredValues={modelSaveSummaryValues(modelSave)} extraOptionalValues={customizedSummary} extra={<ModelSaveFields value={modelSave} onChange={setModelSave} />} {...inputs} taskTestSuite={predefined?.test_sets} requiredMissing={requiredMissing}
+      {saving && <SaveRunPrompt newTask={!predefined} askTaskName={askTaskNameOnSave} save={saveSetting} onSave={setSaveSetting} taskName={newTaskName} onTaskName={setNewTaskName} settingName={settingName} onSettingName={setSettingName} nameTaken={nameTaken} busy={busy} onBack={() => setSaving(false)} onLaunch={() => void start()} feedback={feedback} />}
+      <div className={saving ? "hidden" : guided ? "flex min-h-0 flex-1 flex-col gap-4" : "flex h-[calc(85vh-16rem)] flex-col gap-4"}>
+        <RunInputs reviewAction={reviewAction} hideSource={guided} extraRequiredValues={modelSaveSummaryValues(modelSave)} extraOptionalValues={customizedSummary} extra={<ModelSaveFields value={modelSave} onChange={setModelSave} />} {...inputs} taskTestSuite={predefined?.test_sets} validationSettingId={pickedSetting} requiredMissing={requiredMissing}
           requiredPrefixValues={[
             { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
-            { name: "Task name", value: taskName.trim() || "Not set", complete: Boolean(taskName.trim()) },
+            { name: "Task name", value: askTaskNameOnSave ? (saveSetting && newTaskName.trim() ? newTaskName.trim() : "New task") : taskName.trim() || "Not set", complete: Boolean(taskName.trim()) },
             {
               name: "Objective",
               value: (predefined?.task_objective || objective).trim() || "Not set",
               complete: Boolean((predefined?.task_objective || objective).trim()),
             },
           ]}
-          requiredPrefix={(
-            <>
-              <div>
-                <label className={labelCls}>Run name</label>
-                <input value={runName} onChange={(e) => setRunName(e.target.value)}
-                  placeholder="what to call this run"
-                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`} />
-              </div>
+          taskSelector={(
               <div>
                 <label className={labelCls}>Task name</label>
                 <TaskNameInput value={taskName} onChange={changeTaskName}
                   placeholder="a predefined task, or name your own"
                   className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(taskName.trim()))}`} />
               </div>
+          )}
+          requiredPrefix={(
+            <>
+              <div>
+                <label className={labelCls}>Run name</label>
+                <ClearableInput value={runName} onChange={(e) => setRunName(e.target.value)}
+                  placeholder="what to call this run"
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`} />
+              </div>
+
               <div>
                 <label className={labelCls}>Objective</label>
                 {predefined ? (
-                  <p className={`rounded-md border bg-canvas p-2.5 font-mono text-sm leading-relaxed ${requiredFieldStateCls(true)}`}>
+                  <p className={`launch-readonly-value rounded-md border bg-canvas p-2.5 font-mono text-sm leading-relaxed ${requiredFieldStateCls(true)}`}>
                     {predefined.task_objective}
                   </p>
                 ) : (
-                  <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={4}
+                  <ClearableTextarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={4}
                     placeholder="e.g. Fine-tune to answer MedQA multiple-choice questions."
                     className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(objective.trim()))}`} />
                 )}
@@ -517,9 +541,9 @@ export function CustomizedRunForm({
             </>
           )}
           optionalPrefix={predefined ? (
-            <section className="rounded-md border border-hair bg-canvas/40 p-3">
-              <h3 className="section-title mb-3">Saved Settings</h3>
-              <TaskSettingHistory
+            <section>
+              <h3 className="field-label mb-1.5">Saved settings</h3>
+              <TaskSettingHistory compact
                 task={predefined.name}
                 onPick={applySetting}
                 selectedId={sourceSetting}
@@ -566,8 +590,8 @@ export function CustomizedRunForm({
                 <div className="mt-2 space-y-3 rounded-md border border-hair bg-canvas/50 p-3.5">
                   <div>
                     <label className={labelCls}>Instructions to this agent</label>
-                    <textarea value={a.instructions} onChange={(e) => patch(spec.id, { instructions: e.target.value })} rows={2}
-                      placeholder="Additional guidance applied only to this agent" className={`${fieldCls} ${requiredFieldStateCls(Boolean(a.instructions.trim()))}`} />
+                    <ClearableTextarea value={a.instructions} onChange={(e) => patch(spec.id, { instructions: e.target.value })} rows={2}
+                      placeholder="Additional guidance applied only to this agent" className={`${fieldCls}`} />
                   </div>
                   <div>
                     <label className={labelCls}>Enforcement</label>
@@ -652,12 +676,12 @@ export function CustomizedRunForm({
                               options={(p.opts || []).map((o) => ({ value: o, label: o }))}
                               placeholder={p.placeholder || `${p.label} used by this agent`}
                               ariaLabel={p.label}
-                              buttonClassName={`${fieldCls} ${requiredFieldStateCls(Boolean(a.parameters[p.k]?.trim()))}`} />
+                              buttonClassName={`${fieldCls}`} />
                           ) : (
-                            <input type={p.type === "number" ? "number" : "text"} step={p.step ?? (p.integer ? "1" : undefined)}
+                            <ClearableInput type={p.type === "number" ? "number" : "text"} step={p.step ?? (p.integer ? "1" : undefined)}
                               min={p.type === "number" ? (p.min ?? 0) : undefined}
                               value={a.parameters[p.k] ?? ""} onChange={(e) => setParam(spec.id, p.k, e.target.value)}
-                              placeholder={p.placeholder || `${p.label} used by this agent`} className={`${fieldCls} ${requiredFieldStateCls(Boolean(a.parameters[p.k]?.trim()))}`} />
+                              placeholder={p.placeholder || `${p.label} used by this agent`} className={`${fieldCls}`} />
                           )}
                         </div>
                       ))}
@@ -669,8 +693,8 @@ export function CustomizedRunForm({
                   </div>
                   <div>
                     <label className={labelCls}>Output location</label>
-                    <input value={a.output_dir} onChange={(e) => patch(spec.id, { output_dir: e.target.value })}
-                      placeholder="Directory for this agent's outputs; blank uses its ticket workspace" className={`${fieldCls} ${requiredFieldStateCls(Boolean(a.output_dir.trim()))}`} />
+                    <ClearableInput value={a.output_dir} onChange={(e) => patch(spec.id, { output_dir: e.target.value })}
+                      placeholder="Directory for this agent's outputs; blank uses its ticket workspace" className={`${fieldCls}`} />
                   </div>
                 </div>
               )}
@@ -683,65 +707,6 @@ export function CustomizedRunForm({
           )}
         />
 
-        {preflight.panel}
-      </div>
-
-      {error && <div role="alert" className="max-h-32 overflow-auto whitespace-pre-line rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-xs text-coral-300">{error}</div>}
-      <div className="mt-4 flex items-center justify-end gap-2 border-t border-hair pt-4">
-        {busy && runSetup.progress ? (
-          <RunSetupProgressView progress={runSetup.progress} />
-        ) : taskName.trim() && touched && (
-          <div className="mr-auto min-w-0 flex-1">
-            {picked ? (
-              <p className="font-mono text-2xs text-slate-500">
-                reusing <span className="text-brass-300">{picked.name || picked.id.slice(0, 8)}</span>, so nothing new is saved
-              </p>
-            ) : (
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex shrink-0 items-center gap-2 font-mono text-2xs text-slate-400">
-                  <input
-                    type="checkbox"
-                    checked={saveSetting}
-                    onChange={(event) => setSaveSetting(event.target.checked)}
-                    className="accent-brass-500"
-                  />
-                  {predefined
-                    ? "save this setting for later reuse"
-                    : "save this task and setting for later reuse"}
-                </label>
-                {saveSetting && (
-                  <input
-                    value={settingName}
-                    onChange={(event) => setSettingName(event.target.value)}
-                    placeholder="name it"
-                    spellCheck={false}
-                    className={`min-w-0 flex-1 rounded border bg-canvas px-2 py-1 font-mono text-2xs text-slate-100 placeholder:text-slate-600 placeholder:opacity-100 ${
-                      nameTaken ? "border-coral-500/50" : "border-hair focus:border-brass-500/50"
-                    }`}
-                  />
-                )}
-                {saveSetting && nameTaken && (
-                  <span className="shrink-0 font-mono text-2xs text-coral-300">
-                    that name is taken
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-        <button onClick={onDone} className="btn">cancel</button>
-        <button onClick={start} disabled={
-          busy
-          || requiredMissing.length > 0
-          || !modelSaveReady(modelSave)
-          || (!pickedSetting && saveSetting && (nameTaken || !settingName.trim()))
-        }
-          title={requiredMissing.length
-            ? `Complete: ${requiredMissing.join(", ")}`
-            : ""}
-          className="btn btn-brass min-w-[9rem] justify-center uppercase tracking-[0.14em] disabled:opacity-40">
-          {busy ? <><RotateCw size={13} className="animate-spin" /> starting…</> : "start run"}
-        </button>
       </div>
     </>
   );

@@ -118,10 +118,10 @@ def test_create_run_request_accepts_only_a_uuid_setup_id() -> None:
     from zevo.api.routers.shared.runs import CreateRunRequest
 
     setup_id = uuid4()
-    parsed = CreateRunRequest(task_name="task", run_name="run", setup_id=setup_id)
+    parsed = CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="task", run_name="run", setup_id=setup_id)
     assert parsed.setup_id == setup_id
     with pytest.raises(ValidationError):
-        CreateRunRequest(task_name="task", run_name="run", setup_id="not-a-uuid")
+        CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="task", run_name="run", setup_id="not-a-uuid")
 
 
 @pytest.mark.asyncio
@@ -142,7 +142,7 @@ async def test_ui_run_submission_returns_before_background_setup(
     response = Response()
 
     accepted = await submit_run(
-        CreateRunRequest(task_name="task", run_name="run", setup_id=setup_id),
+        CreateRunRequest(model_save_policy={"weights": "remote", "remote_dir": "/models"}, task_name="task", run_name="run", setup_id=setup_id),
         response,
         tasks,
         db=None,  # The request session is deliberately unused by async setup.

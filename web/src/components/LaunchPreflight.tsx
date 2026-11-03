@@ -1,17 +1,18 @@
 import { useState } from "react";
 import { Cpu, Clock3, Wallet, Repeat2, HardDrive, CloudUpload, AlertTriangle, CheckCircle2 } from "lucide-react";
-import { modelSaveReady, type ModelSavePolicy } from "./ModelSaveFields";
+import { type ModelSavePolicy } from "./ModelSaveFields";
 import { api } from "../lib/api";
 import type { RunInputValues } from "./RunInputs";
 
 type Result = { status: "ready" | "risky" | "blocked"; summary: string; items: Array<{ code: string; severity: string; message: string; hint: string }> };
-type Draft = { mode?: string; user_request?: unknown; gpu_provider?: string; gpu_allocation_mode?: string; cloud_backend?: string; ssh_host_id?: string; num_gpus?: number; generation_backend?: string; customizations?: unknown };
+type Draft = { mode?: string; user_request?: unknown; gpu_provider?: string; gpu_allocation_mode?: string; cloud_backend?: string; ssh_host_id?: string; num_gpus?: number; generation_backend?: string; customizations?: unknown; model_save_policy?: ModelSavePolicy };
 
 export function useLaunchPreflight() {
   const [review, setReview] = useState<{ key: string; result: Result } | null>(null);
   async function check(body: Draft) {
     const payload = {
       mode: body.mode ?? "full_pipeline", user_request: body.user_request,
+      model_save_policy: body.model_save_policy,
       gpu_allocation_mode: body.gpu_allocation_mode,
       gpu_provider: body.gpu_provider, cloud_backend: body.cloud_backend,
       ssh_host_id: body.ssh_host_id, num_gpus: body.num_gpus,
@@ -41,14 +42,14 @@ export function LaunchLimitsSummary({ inputs, modelSave }: { inputs: RunInputVal
     { label: "Rounds", value: limit(inputs.iterations), icon: Repeat2 },
     { label: "Spend", value: Number(inputs.budget) > 0 ? `$${inputs.budget}` : "Unlimited", icon: Wallet },
     { label: "Active runtime", value: limit(inputs.timeLimitHours, " hours"), icon: Clock3 },
-    { label: "GPUs", value: limit(inputs.numGpus), icon: Cpu },
+    { label: "# GPUs", value: limit(inputs.numGpus), icon: Cpu },
   ];
   const isHf = modelSave.weights === "hf";
   const DestinationIcon = isHf ? CloudUpload : HardDrive;
   const destination = (isHf ? modelSave.hf_repo_id : modelSave.remote_dir).trim();
-  const ready = modelSaveReady(modelSave);
-  return <div className="sticky top-0 z-30 -mx-2 bg-panel px-2 pb-4" data-launch-summary-bar>
+  return <div className="sticky top-0 z-30 shrink-0 -mx-2 bg-panel px-2 pb-4" data-launch-summary-bar>
     <aside aria-label="Run summary" className="rounded-xl border border-hair bg-raised px-5 py-4 shadow-lg">
+    <h3 className="mb-4 font-mono text-xs uppercase tracking-[0.14em] text-brass-300">Run summary</h3>
     <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-5">
       {limits.map(({ label, value, icon: Icon }) => <div key={label} className="min-w-0">
         <dt className="mb-2 flex items-center gap-2 text-sm font-medium text-brass-300"><Icon size={14} />{label}</dt>
@@ -57,14 +58,13 @@ export function LaunchLimitsSummary({ inputs, modelSave }: { inputs: RunInputVal
       <div className="col-span-2 min-w-0 sm:col-span-1">
         <dt className="mb-2 flex items-center gap-2 text-sm font-medium text-brass-300"><DestinationIcon size={14} />Final model</dt>
         <dd>
-          <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-100">
-            {isHf ? "Hugging Face" : "GPU machine"}
-            {isHf && <span className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-normal text-slate-400">{modelSave.hf_private ? "Private" : "Public"}</span>}
+          <div className="flex items-center gap-1.5 whitespace-nowrap text-sm font-medium text-slate-100">
+            <span>{isHf ? "Hugging Face" : "GPU machine"}</span>
+            {isHf && <span className="shrink-0 rounded bg-white/[0.04] px-1 py-0.5 text-[9px] font-normal leading-none text-slate-400">{modelSave.hf_private ? "Private" : "Public"}</span>}
           </div>
-          <p title={destination || "Complete destination in Others"} className={`mt-1 truncate font-mono text-[11px] ${ready ? "text-slate-400" : "text-brass-300"}`}>
-            {destination || "Not set"}
-          </p>
-          {destination && !ready && <p className="mt-1 text-[11px] text-brass-300">Complete destination in Others</p>}
+          {destination && <p title={destination} className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[11px] text-slate-400">
+            {destination}
+          </p>}
         </dd>
       </div>
     </dl>

@@ -1,12 +1,15 @@
-import { levelOf } from "../lib/autonomy";
+import { SaveRunPrompt } from "./SaveRunPrompt";
+import { ClearableInput, ClearableTextarea, ClearFieldsContext } from "./ClearableField";
+import "./launchForm.css";
+import { trainingStepComplete, runtimeStepComplete, trainingStepReady, runtimeStepReady } from "../lib/launchStepStatus";
 import { resourceSummaryValues } from "../lib/runSummary";
 import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady, modelSaveSummaryValues } from "./ModelSaveFields";
 import { useLaunchSetting } from "../lib/useLaunchSetting";
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, Eraser } from "lucide-react";
 import useSWR from "swr";
 import { useNavigate } from "react-router-dom";
-import { LaunchLimitsSummary, useLaunchPreflight } from "./LaunchPreflight";
+import { LaunchStepFlow } from "./LaunchStepFlow";
+import { useLaunchPreflight } from "./LaunchPreflight";
 import { Modal } from "./Modal";
 import { AttachmentDropzone, type Attachment } from "./AttachmentDropzone";
 import { CustomizedRunForm } from "./CustomizedRunModal";
@@ -191,6 +194,10 @@ export function NewRunModal({
   const { data: agents = [] } = useSWR<AgentLite[]>(open ? "/api/agents" : null);
 
   const [mode, setMode] = useState<Mode>(initialMode);
+  const [screen, setScreen] = useState<"mode" | "source" | "form" | "save">("mode");
+  const [customContext, setCustomContext] = useState({ taskName: "", settingName: "" });
+  const [sourceSkipped, setSourceSkipped] = useState(false);
+  const [newTaskName, setNewTaskName] = useState("");
   // Always the full (advanced) view — the simple/advanced toggle was removed.
 
   // Full-pipeline form
@@ -205,6 +212,8 @@ export function NewRunModal({
   // What to call THIS execution. The task name says what is being run; many
   // runs share one, so this is what tells them apart in the list afterwards.
   const [runName, setRunName] = useState("");
+  const [automaticTaskId] = useState(() => crypto.randomUUID());
+  const [flowReset, setFlowReset] = useState(0);
   // Which past setting the Optional fields came from, so the form can say where
   // its own contents came from. Cleared when the task changes.
   const { sourceSetting, pickedSetting, setPickedSetting, editSetting } = useLaunchSetting();
@@ -215,7 +224,7 @@ export function NewRunModal({
   // Whether the inputs have been touched at all — by picking a setting or by
   // typing. Only used to decide when the footer starts talking: naming a task
   // decides nothing, so there is nothing yet to offer to save.
-  const [touched, setTouched] = useState(false);
+  const [, setTouched] = useState(false);
   const [saveSetting, setSaveSetting] = useState(false);
   const [settingName, setSettingName] = useState("");
 
@@ -225,23 +234,15 @@ export function NewRunModal({
   );
   const [singleNl, setSingleNl] = useState("");
   const [singleAttachments, setSingleAttachments] = useState<Attachment[]>([]);
-  const [showSingleChecklist, setShowSingleChecklist] = useState(false);
-  // Auto form shares runName / taskName / nl and the envelope half of `inputs`
-  // (GPU backend, limits) with Full Pipeline; these only fold its two panels.
-  const [showAutoChecklist, setShowAutoChecklist] = useState(false);
-  const [showAutoTest, setShowAutoTest] = useState(false);
-  const [showAutoTraining, setShowAutoTraining] = useState(false);
-  const [showAutoOthers, setShowAutoOthers] = useState(true);
+  // Auto shares runName, objective and runtime controls with Standard;
+  // its task identity is generated independently of the saved Task selector.
   const [autoTestQuery, setAutoTestQuery] = useState("");
   // One shared owner for all four help popovers. Independent local state let
   // two portaled panels remain open and overlap when their icons were clicked
   // in succession.
   const [openModeInfo, setOpenModeInfo] = useState<Mode | null>(null);
-  // Customized owns its form state internally. A key remount gives the shared
-  // clear-all control the same semantics in all three modes, while this flag
-  // lets the button use the same disabled state as the other forms.
+  // Customized owns its form state and is seeded when a configuration is chosen.
   const [customizedResetKey, setCustomizedResetKey] = useState(0);
-  const [customizedDirty, setCustomizedDirty] = useState(false);
   const [customizedSeed, setCustomizedSeed] = useState<{
     taskName: string;
     settingId: string;
@@ -257,41 +258,6 @@ export function NewRunModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const runSetup = useRunSetupProgress();
-
-  /** Put every field back to empty. Filling this dialog in is fiddly and
-   *  a wrong predefined task leaves nine fields populated from it, so
-   *  starting over should not mean closing and reopening. */
-  function clearForm() {
-    setNl("");
-    setInputs(EMPTY_RUN_INPUTS);
-    setTaskName("");
-    setRunName("");
-    setPickedSetting("");
-    setTouched(false);
-    setSaveSetting(false);
-    setSettingName("");
-    setSingleNl("");
-    setSingleAttachments([]);
-    setAgentId(initialAgent && initialAgent !== "orchestrator" ? initialAgent : "");
-    setShowSingleChecklist(false);
-    setShowAutoChecklist(false);
-    setShowAutoTest(false);
-    setShowAutoTraining(false);
-    setShowAutoOthers(true);
-    setAutoTestQuery("");
-    setOpenModeInfo(null);
-    setError(null);
-  }
-
-  function clearCurrentForm() {
-    if (mode === "customized_pipeline") {
-      setCustomizedSeed({ taskName: "", settingId: "", runName: "" });
-      setCustomizedResetKey((value) => value + 1);
-      setCustomizedDirty(false);
-      return;
-    }
-    clearForm();
-  }
 
   // The form itself needs no resetting: App mounts this component only while
   // the dialog is open, so every field is already at its initial value. This
@@ -349,7 +315,10 @@ export function NewRunModal({
     }));
   }
 
-  const trimmedTask = taskName.trim();
+  const automaticTaskStem = runName.trim().replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 42) || "run";
+  const trimmedTask = mode === "auto" || mode === "single_stage"
+    ? `${mode === "auto" ? "auto" : "stage"}-${automaticTaskStem}-${automaticTaskId.slice(0, 8)}`
+    : taskName.trim();
   // The orchestrator hands work to the others, while Evaluation is a fixed
   // system runner rather than a callable Agent. Neither belongs in Single Stage.
   const callableAgents = useMemo(
@@ -382,33 +351,21 @@ export function NewRunModal({
   ].filter(Boolean) as string[];
   const singleMissing = [
     !runName.trim() && "Run name",
-    !trimmedTask && "Task name",
     !singleNl.trim() && "Objective",
     !agentId && "Agent",
   ].filter(Boolean) as string[];
-  // Auto always starts a fresh custom task — the server 400s a predefined
-  // name, because the scoping stage exists to decide what that task already
-  // says. Caught here so the button, not the launch, is what refuses it.
-  const autoNameClash = mode === "auto" && !!predefined;
+  // Auto scopes a fresh task; only the visible required fields block launch.
   const autoMissing = [
     !runName.trim() && "Run name",
-    !trimmedTask && "Task name",
-    autoNameClash && "Task name that is not a predefined task",
     !nl.trim() && "Objective",
     !effectiveComputeTarget && "GPU backend",
     !modelSaveReady(modelSave) && "Final model destination",
     inputs.trainingMethod === "gkd" && !inputs.teacherModel.trim() && "Teacher model",
     inputs.trainingMethod === "online_dpo" && !inputs.rewardModel.trim() && "Reward model",
   ].filter(Boolean) as string[];
-  const autoLevel = levelOf(inputs.dataset, inputs.baseModel, inputs.trainingMethod);
   const autoRequiredValues = [
     ...modelSaveSummaryValues(modelSave),
     { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
-    {
-      name: "Task name",
-      value: trimmedTask || "Not set",
-      complete: Boolean(trimmedTask) && !autoNameClash,
-    },
     { name: "Objective", value: nl.trim() || "Not set", complete: Boolean(nl.trim()) },
     {
       name: "GPU backend",
@@ -444,7 +401,6 @@ export function NewRunModal({
   const selectedAgent = callableAgents.find((agent) => agent.id === agentId);
   const singleRequiredValues = [
     { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
-    { name: "Task name", value: trimmedTask || "Not set", complete: Boolean(trimmedTask) },
     {
       name: "Agent",
       value: selectedAgent ? selectedAgent.title || selectedAgent.id : "Not set",
@@ -463,6 +419,7 @@ export function NewRunModal({
     : singleMissing;
 
   function changeFullTaskName(next: string) {
+    setSourceSkipped(false);
     // Test assets belong to the task. When the user leaves a catalogued task,
     // do not let its held-out files become the invisible starting point of a
     // newly named task.
@@ -598,13 +555,8 @@ export function NewRunModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialSettingId, savedSettings.length]);
 
-  const dirtyForm = !!(
-    taskName.trim() || runName.trim() || nl.trim() || singleNl.trim() || autoTestQuery.trim()
-    || singleAttachments.length
-    || Object.values(inputs).some((v) => String(v || "").trim())
-  );
-
   async function submitFull() {
+    if (sourceSkipped && saveSetting && !newTaskName.trim()) throw new Error("Name the Task you want to save.");
     // A predefined name executes that package; anything else ships the task the
     // user described, under the name they gave it.
     // Blank stays blank: omitted limits resolve to 0 (no hard cap).
@@ -659,7 +611,7 @@ export function NewRunModal({
       // The task still supplies what a task IS — its objective and complete
       // Test suite. The scalar values are only the suite's primary projection.
       body = {
-        task_name: trimmedTask,
+        task_name: sourceSkipped && saveSetting ? newTaskName.trim() : trimmedTask,
         run_name: runName.trim(),
         user_request: {
           task_objective: predefined.task_objective,
@@ -686,7 +638,7 @@ export function NewRunModal({
       };
     } else {
       body = {
-        task_name: trimmedTask,
+        task_name: sourceSkipped && saveSetting ? newTaskName.trim() : trimmedTask,
         run_name: runName.trim(),
         user_request: buildUserRequest(nl, inputs),
         ...limits,
@@ -771,14 +723,6 @@ export function NewRunModal({
         if (!runName.trim()) {
           throw new Error("Give the run a name.");
         }
-        if (!trimmedTask) {
-          throw new Error("Give the run a task name.");
-        }
-        if (predefined) {
-          throw new Error(
-            `"${trimmedTask}" is a predefined task. Auto starts a fresh task, so give it a new name — or run the predefined task in Standard.`,
-          );
-        }
         if (!nl.trim()) {
           throw new Error("Describe the goal — that is the one thing Auto needs from you.");
         }
@@ -800,9 +744,6 @@ export function NewRunModal({
         if (!runName.trim()) {
           throw new Error("Give the run a name.");
         }
-        if (!trimmedTask) {
-          throw new Error("Give the run a task name.");
-        }
         if (!singleNl.trim()) {
           throw new Error("Describe what you want this agent to do.");
         }
@@ -817,137 +758,51 @@ export function NewRunModal({
     }
   }
 
-  // One shared control for all three modes. Customized reports its dirty state
-  // from the child form and is reset by remounting that form.
-  const clearBtn = (
-    <button
-      type="button"
-      onClick={clearCurrentForm}
-      disabled={mode === "customized_pipeline" ? !customizedDirty : !dirtyForm}
-      title="Empty every field on this form"
-      // Short enough to sit on the heading line without reaching the input.
-      className="btn !py-0.5 !text-2xs disabled:opacity-30"
-    >
-      <Eraser size={12} /> clear all
-    </button>
-  );
-
-  // Rendered by the dialog under its scroller, so "start run" stays in view
-  // however long the form is. Customized carries its own footer.
-  const footer = mode !== "customized_pipeline" ? (
-      <div className="space-y-3">
-        {(mode === "auto" || mode === "full_pipeline") && preflight.panel}
-        {error && (
-          <div role="alert" className="max-h-32 overflow-auto whitespace-pre-line rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-xs text-coral-300">
-            {error}
-          </div>
-        )}
-        <div className="flex justify-end gap-2">
-          {/* Cancel stays small and quiet; starting a run is the action this
-              dialog exists for, so it carries the weight — same proportion as
-              the task dialog's create/cancel pair. */}
-          {/* What happens to this configuration after the run — asked only once
-              there is a configuration to ask about. Naming the task alone
-              decides nothing: the fields are still empty and the Optional
-              block is still folded, so announcing "same as s2" there answers a
-              question nobody asked, about values the form is not showing.
-              (It was not wrong — this task row carries `trl-lib/Capybara` and
-              the rest, which IS s2 — but a true statement about invisible
-              values reads as a bug.) */}
-          {busy && mode === "full_pipeline" && runSetup.progress ? (
-            <RunSetupProgressView progress={runSetup.progress} />
-          ) : mode === "full_pipeline" && trimmedTask && touched && (
-            <div className="mr-auto min-w-0 flex-1">
-              {reusableSetting ? (
-                <p className="font-mono text-2xs text-slate-500">
-                  {picked ? "reusing " : "same as the saved setting "}
-                  <span className="text-brass-300">
-                    {reusableSetting.name || reusableSetting.id.slice(0, 8)}
-                  </span>
-                  , so nothing new is saved
-                </p>
-              ) : (
-                <div className="flex flex-wrap items-center gap-2">
-                  <label className="flex shrink-0 items-center gap-2 font-mono text-2xs text-slate-400">
-                    <input
-                      type="checkbox"
-                      checked={saveSetting}
-                      onChange={(e) => setSaveSetting(e.target.checked)}
-                      className="accent-brass-500"
-                    />
-                    {predefined
-                      ? "save this setting for later reuse"
-                      : "save this task and setting for later reuse"}
-                  </label>
-                  {saveSetting && (
-                    <input
-                      value={settingName}
-                      onChange={(e) => setSettingName(e.target.value)}
-                      placeholder="name it"
-                      spellCheck={false}
-                      className={`min-w-0 flex-1 rounded border bg-canvas px-2 py-1 font-mono text-2xs text-slate-100 placeholder:text-slate-600 placeholder:opacity-100 ${
-                        nameTaken ? "border-coral-500/50" : "border-hair focus:border-brass-500/50"
-                      }`}
-                    />
-                  )}
-                  {saveSetting && nameTaken && (
-                    <span className="shrink-0 font-mono text-2xs text-coral-300">
-                      that name is taken
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-          <button onClick={onClose} className="btn">
-            cancel
-          </button>
-          <button
-            onClick={submit}
-            disabled={
-              busy
-              || launchMissing.length > 0
-              || (["auto", "full_pipeline"].includes(mode) && !modelSaveReady(modelSave))
-              // A clash would 409 at the end of a launch, which is the worst
-              // moment to find out.
-              || (saveSetting && !reusableSetting && (nameTaken || !settingName.trim()))
-            }
-            title={
-              launchMissing.length
-                ? `Complete: ${launchMissing.join(", ")}`
-                : ""
-            }
-            // min-w holds the width steady across "start run" / "starting…".
-            className="btn btn-brass min-w-[9rem] justify-center uppercase tracking-[0.14em] disabled:opacity-30"
-          >
-            {busy ? "starting…" : "start run"}
-          </button>
-        </div>
-      </div>
-  ) : undefined;
+  const launchFeedback = <div className="space-y-3">
+    {(mode === "auto" || mode === "full_pipeline") && preflight.panel}
+    {error && <div role="alert" className="whitespace-pre-line text-sm text-coral-300">{error}</div>}
+    {busy && runSetup.progress && <RunSetupProgressView progress={runSetup.progress} />}
+  </div>;
+  const reviewAction = <div className="space-y-4">
+    {screen === "form" && launchFeedback}
+    <button type="button" className="launch-next" disabled={busy || launchMissing.length > 0 || (["auto", "full_pipeline"].includes(mode) && !modelSaveReady(modelSave))} onClick={() => {
+      if (mode === "full_pipeline" && !reusableSetting) setScreen("save");
+      else void submit();
+    }}>{busy ? "Starting…" : "Start Run →"}</button>
+  </div>;
+  const headerTask = mode === "customized_pipeline" ? customContext.taskName : sourceSkipped ? (saveSetting ? newTaskName : "") : taskName;
+  const headerSetting = mode === "customized_pipeline" ? customContext.settingName : picked?.name || "";
 
   return (
-    <Modal open={open} title="Start a new run" onClose={onClose} width="max-w-[78rem]" footer={footer}>
-      <div className="space-y-5 pr-2">
-        {/* Two columns: WHICH kind of run on the left, WHAT it is on the right.
-            Stacked across the top, the three mode cards took a third of the
-            dialog's height to answer a question asked once, and pushed the form
-            they configure below the fold. */}
-        <div className="grid gap-6 lg:grid-cols-[15rem_minmax(0,1fr)]">
-        <div className="flex flex-col gap-2 lg:sticky lg:top-0 lg:self-start">
+    <ClearFieldsContext.Provider value={true}><Modal fullscreen open={open} title="Launch Run" onClose={onClose} width="max-w-[78rem]">
+      <div className="launch-experience mx-auto flex h-full min-h-0 w-full max-w-[1400px] flex-col md:w-[94%]">
+        {screen !== "mode" && <div className="mb-8 grid shrink-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-5 md:grid-cols-[1fr_auto_1fr]">
+          <button type="button" className="launch-back justify-self-start" onClick={() => setScreen("mode")}>← Change mode</button>
+          <div className="flex min-w-0 flex-wrap items-center justify-center gap-x-5 gap-y-2 text-sm text-slate-300">
+            <span><span className="mr-2 text-xs text-slate-500">Mode</span>{mode === "auto" ? "Auto" : mode === "full_pipeline" ? "Standard" : mode === "customized_pipeline" ? "Customized" : "Single Stage"}</span>
+            {!["auto", "single_stage"].includes(mode) && headerTask && <span className="inline-flex min-w-0 items-center gap-2"><span className="text-xs text-slate-500">Task</span><span className="max-w-[22rem] truncate" title={headerTask}>{headerTask}</span></span>}
+            {!["auto", "single_stage"].includes(mode) && headerSetting && <span className="inline-flex min-w-0 items-center gap-2"><span className="text-xs text-slate-500">Setting</span><span className="max-w-[12rem] truncate" title={headerSetting}>{headerSetting}</span></span>}
+          </div>
+        </div>}
+        {screen === "save" && <SaveRunPrompt newTask={!predefined} askTaskName={sourceSkipped} save={saveSetting} onSave={setSaveSetting} taskName={newTaskName} onTaskName={setNewTaskName} settingName={settingName} onSettingName={setSettingName} nameTaken={nameTaken} busy={busy} onBack={() => setScreen("form")} onLaunch={() => void submit()} feedback={launchFeedback} />}
+        <div hidden={screen !== "mode"} className="my-auto py-10">
+          <p className="mb-4 text-xs uppercase tracking-[0.24em] text-brass-300">A new starting point</p>
+          <h3 className="font-display text-4xl font-semibold tracking-tight text-ink md:text-5xl">What would you like to run?</h3>
+          <p className="mb-10 mt-4 text-sm text-slate-400">Choose how much you want to define. We’ll take it one step at a time.</p>
+          <div className="grid gap-4 sm:grid-cols-2">
           {/* First and default: the mode that asks the least. Everything the
               other cards make you decide, this one hands to the scoping
               agents. */}
           <div className="relative">
           <button
-            onClick={() => { setMode("auto"); setOpenModeInfo(null); }}
-            className={`w-full rounded-bezel border p-3 pr-9 text-left transition ${
+            onClick={() => { setMode("auto"); setFlowReset(value => value + 1); setScreen("form"); setOpenModeInfo(null); }}
+            className={`h-full min-h-[160px] w-full rounded-2xl border border-transparent p-6 pr-10 text-left transition duration-200 hover:-translate-y-1 ${
               mode === "auto"
-                ? "border-brass-500/50 bg-brass-500/10 text-brass-200 shadow-glow-brass"
-                : "bezel-flat text-slate-300 hover:border-brass-500/30"
+                ? "bg-brass-500/[0.06] text-brass-200"
+                : "bg-white/[0.015] text-slate-300 hover:bg-white/[0.04]"
             }`}
           >
-            <div className="font-display text-sm font-semibold">Auto</div>
+            <div className="font-display text-xl font-semibold">Auto</div>
             <p className="mt-1 text-xs leading-snug text-slate-400">
               Describe the goal; Zevo chooses the Test suite, then runs Standard.
             </p>
@@ -960,14 +815,14 @@ export function NewRunModal({
           </div>
           <div className="relative">
           <button
-            onClick={() => { setMode("full_pipeline"); setOpenModeInfo(null); }}
-            className={`w-full rounded-bezel border p-3 pr-9 text-left transition ${
+            onClick={() => { setMode("full_pipeline"); setFlowReset(value => value + 1); setScreen("source"); setOpenModeInfo(null); }}
+            className={`h-full min-h-[160px] w-full rounded-2xl border border-transparent p-6 pr-10 text-left transition duration-200 hover:-translate-y-1 ${
               mode === "full_pipeline"
-                ? "border-brass-500/50 bg-brass-500/10 text-brass-200 shadow-glow-brass"
-                : "bezel-flat text-slate-300 hover:border-brass-500/30"
+                ? "bg-brass-500/[0.06] text-brass-200"
+                : "bg-white/[0.015] text-slate-300 hover:bg-white/[0.04]"
             }`}
           >
-            <div className="font-display text-sm font-semibold">Standard</div>
+            <div className="font-display text-xl font-semibold">Standard</div>
             <p className="mt-1 text-xs leading-snug text-slate-400">
               Choose the Task and basic Setting; Zevo owns execution details.
             </p>
@@ -982,22 +837,23 @@ export function NewRunModal({
           <button
             onClick={() => {
               setCustomizedSeed({
-                taskName: trimmedTask,
+                taskName,
                 settingId: pickedSetting,
                 runName,
                 inputs,
               });
               setCustomizedResetKey((value) => value + 1);
               setMode("customized_pipeline");
+              setFlowReset(value => value + 1); setScreen("source");
               setOpenModeInfo(null);
             }}
-            className={`w-full rounded-bezel border p-3 pr-9 text-left transition ${
+            className={`h-full min-h-[160px] w-full rounded-2xl border border-transparent p-6 pr-10 text-left transition duration-200 hover:-translate-y-1 ${
               mode === "customized_pipeline"
-                ? "border-brass-500/50 bg-brass-500/10 text-brass-200 shadow-glow-brass"
-                : "bezel-flat text-slate-300 hover:border-brass-500/30"
+                ? "bg-brass-500/[0.06] text-brass-200"
+                : "bg-white/[0.015] text-slate-300 hover:bg-white/[0.04]"
             }`}
           >
-            <div className="font-display text-sm font-semibold">Customized</div>
+            <div className="font-display text-xl font-semibold">Customized</div>
             <p className="mt-1 text-xs leading-snug text-slate-400">
               Standard plus hyperparameter, inference, or per-agent overrides.
             </p>
@@ -1010,14 +866,14 @@ export function NewRunModal({
           </div>
           <div className="relative">
           <button
-            onClick={() => { setMode("single_stage"); setOpenModeInfo(null); }}
-            className={`w-full rounded-bezel border p-3 pr-9 text-left transition ${
+            onClick={() => { setMode("single_stage"); setFlowReset(value => value + 1); setScreen("form"); setOpenModeInfo(null); }}
+            className={`h-full min-h-[160px] w-full rounded-2xl border border-transparent p-6 pr-10 text-left transition duration-200 hover:-translate-y-1 ${
               mode === "single_stage"
-                ? "border-brass-500/50 bg-brass-500/10 text-brass-200 shadow-glow-brass"
-                : "bezel-flat text-slate-300 hover:border-brass-500/30"
+                ? "bg-brass-500/[0.06] text-brass-200"
+                : "bg-white/[0.015] text-slate-300 hover:bg-white/[0.04]"
             }`}
           >
-            <div className="font-display text-sm font-semibold">Single Stage</div>
+            <div className="font-display text-xl font-semibold">Single Stage</div>
             <p className="mt-1 text-xs leading-snug text-slate-400">
               Send one focused task directly to one agent.
             </p>
@@ -1028,47 +884,56 @@ export function NewRunModal({
             onClose={() => setOpenModeInfo(null)}
           />
           </div>
-          <div className="mt-1">{clearBtn}</div>
+          </div>
         </div>
-
-        <div className="relative min-w-0 space-y-5">
-        {(mode === "auto" || mode === "full_pipeline") && <LaunchLimitsSummary inputs={inputs} modelSave={modelSave} />}
-        {mode === "auto" ? (
+        <section hidden={screen !== "source"} aria-label="Starting configuration" className="my-auto w-full max-w-4xl self-center py-8 md:px-8">
+          <h3 className="font-display text-4xl font-semibold tracking-tight text-ink">Start with something familiar?</h3>
+          <p className="mb-8 mt-4 text-sm leading-relaxed text-slate-400">Reuse a Task and saved Setting, or skip to start fresh. You can choose to save your new Task and Setting at the end.</p>
           <div className="space-y-6">
-            <section className="space-y-3">
-              <div>
-                <h3 className="section-title !text-brass-300">Required</h3>
-              </div>
-              <Field label="Run name">
-                <input
+                <Field label="Task name">
+                  <TaskNameInput value={sourceSkipped ? "" : taskName} onChange={changeFullTaskName}
+                    placeholder="Choose a Task"
+                    className={fieldCls} />
+                </Field>
+            {!predefined && !sourceSkipped && taskName.trim() && <Field label="Saved settings"><p className="text-sm text-slate-500">No saved settings for this Task.</p></Field>}
+            {predefined && <>
+              <Field label="Saved settings">
+                <TaskSettingHistory compact onClear={() => { setPickedSetting(""); setInputs({ ...EMPTY_RUN_INPUTS }); setTouched(true); setSaveSetting(false); }}
+                  task={trimmedTask}
+                  onPick={applySetting}
+                  selectedId={sourceSetting}
+                  modified={Boolean(sourceSetting && reusableSetting?.id !== sourceSetting)}
+                />
+              </Field>
+            </>}
+          </div>
+          <div className="mt-10 flex items-center justify-end pt-5">
+            <button type="button" className="launch-next" onClick={() => {
+              const skip = sourceSkipped || !taskName.trim();
+              const nextTask = skip ? `task-${crypto.randomUUID().slice(0, 8)}` : taskName;
+              setSourceSkipped(skip);
+              if (skip) { setTaskName(nextTask); setPickedSetting(""); setSaveSetting(false); }
+              if (mode === "customized_pipeline") {
+                setCustomizedSeed({ taskName: nextTask, settingId: skip ? "" : pickedSetting, runName, inputs });
+                setCustomizedResetKey(value => value + 1);
+              }
+              setFlowReset(value => value + 1); setScreen("form");
+            }}>{sourceSkipped || !taskName.trim() ? "Skip →" : "Continue →"}</button>
+          </div>
+        </section>
+        <div hidden={screen !== "form"} className={screen === "form" ? "relative flex min-h-0 flex-1 flex-col gap-4" : "hidden"}>
+        {mode === "auto" ? (
+          <LaunchStepFlow reviewAction={reviewAction} key={`auto-${flowReset}`} steps={[
+            { label: "Basic info", group: "Required", complete: autoRequiredValues.filter(value => !["Teacher model", "Reward model"].includes(value.name)).every(value => value.complete), content: <><Field label="Run name">
+                <ClearableInput
                   value={runName}
                   onChange={(e) => setRunName(e.target.value)}
                   placeholder="what to call this run, e.g. bar-exam-take1"
                   className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`}
                   spellCheck={false}
                 />
-              </Field>
-              {/* A plain input, not TaskNameInput: that one offers the
-                  predefined tasks, and Auto cannot take one. */}
-              <Field label="Task name">
-                <input
-                  value={taskName}
-                  onChange={(e) => setTaskName(e.target.value)}
-                  placeholder="name the task, e.g. bar-exam-reasoning"
-                  className={`${fieldCls} font-mono ${
-                    requiredFieldStateCls(Boolean(trimmedTask) && !autoNameClash)
-                  }`}
-                  spellCheck={false}
-                />
-                {autoNameClash && (
-                  <p className="mt-1.5 font-mono text-2xs text-coral-300">
-                    "{trimmedTask}" is a predefined task. Auto starts a fresh one — pick another
-                    name, or run it in Full Pipeline.
-                  </p>
-                )}
-              </Field>
-              <Field label="Objective">
-                <textarea
+              </Field><Field label="Objective">
+                <ClearableTextarea
                   value={nl}
                   onChange={(e) => setNl(e.target.value)}
                   placeholder="e.g. Improve a small open model's accuracy on US bar-exam style MCQs."
@@ -1076,79 +941,15 @@ export function NewRunModal({
                   className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(nl.trim()))}`}
                   spellCheck
                 />
-              </Field>
-              <BackendPicker
+              </Field><BackendPicker
                 gpuProvider={inputs.gpuProvider}
                 cloudBackend={inputs.cloudBackend}
                 sshHostId={inputs.sshHostId}
                 onChange={(patch) => setInputs((value) => ({ ...value, ...patch }))}
-              />
-            </section>
-
-            <section className="space-y-3">
-              <h3 className="section-title !text-brass-300">Optional</h3>
-              <div className="space-y-3">
-            <section className="space-y-3">
-              <button
-                type="button"
-                onClick={() => setShowAutoTest((value) => !value)}
-                className="flex w-full items-center gap-1.5 text-left"
-              >
-                <ChevronRight
-                  size={12}
-                  className={`shrink-0 text-slate-400 transition-transform ${showAutoTest ? "rotate-90" : ""}`}
-                />
-                <span className="field-label !text-slate-100">Evaluation</span>
-              </button>
-              {showAutoTest && (
-                <TextField
-                  label="Evaluation guidance"
-                  value={autoTestQuery}
-                  onChange={setAutoTestQuery}
-                  placeholder=""
-                  hint="Optional coverage or format guidance; Zevo decides the Test suite and each scoring contract."
-                />
-              )}
-            </section>
-            <section className="space-y-3">
-              <button
-                type="button"
-                onClick={() => setShowAutoTraining((value) => !value)}
-                className="flex w-full items-center justify-between gap-3 text-left"
-              >
-                <span className="flex items-center gap-1.5">
-                  <ChevronRight
-                    size={12}
-                    className={`shrink-0 text-slate-400 transition-transform ${showAutoTraining ? "rotate-90" : ""}`}
-                  />
-                  <span className="field-label !text-slate-100">Training</span>
-                </span>
-                <span className="font-mono text-2xs text-slate-500">{autoLevel}</span>
-              </button>
-              {showAutoTraining && (
-                <TrainingSetupFields
-                  inputs={inputs}
-                  onChange={(patch) => setInputs((value) => ({ ...value, ...patch }))}
-                />
-              )}
-            </section>
-
-            {/* The run envelope — where it runs and how much it may spend. */}
-            <section className="space-y-3">
-              <button
-                type="button"
-                onClick={() => setShowAutoOthers((v) => !v)}
-                className="flex w-full items-center gap-1.5 text-left"
-              >
-                <ChevronRight
-                  size={12}
-                  className={`shrink-0 text-slate-400 transition-transform ${showAutoOthers ? "rotate-90" : ""}`}
-                />
-                <span className="field-label !text-slate-100">Others</span>
-              </button>
-              {showAutoOthers && (
-                <div className="space-y-3">
-                  <ModelSaveFields value={modelSave} onChange={setModelSave} />
+              /><ModelSaveFields value={modelSave} onChange={setModelSave} /></> },
+            { label: "Training", group: "Optional", ready: trainingStepReady(inputs), complete: trainingStepComplete(inputs), content: <TrainingSetupFields inputs={inputs} onChange={patch => setInputs(value => ({ ...value, ...patch }))} /> },
+            { label: "Evaluation", group: "Optional", complete: Boolean(autoTestQuery.trim()), content: <TextField label="Evaluation guidance" value={autoTestQuery} onChange={setAutoTestQuery} placeholder="" hint="Optional coverage or format guidance; Zevo decides the Test suite and each scoring contract." /> },
+            { label: "Others", group: "Optional", ready: runtimeStepReady(inputs), complete: runtimeStepComplete(inputs), content:                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-3">
                     <NumberField
                       label="Maximum GPUs" value={inputs.numGpus}
@@ -1199,80 +1000,58 @@ export function NewRunModal({
                     />
                   </div>
                 </div>
-              )}
-            </section>
-              </div>
-            </section>
-            <section>
-              <button type="button" onClick={() => setShowAutoChecklist((v) => !v)}
-                className="flex w-full items-center justify-between gap-3 text-left">
-                <span className="flex items-center gap-1.5">
-                  <ChevronRight size={13}
-                    className={`shrink-0 text-slate-500 transition-transform ${showAutoChecklist ? "rotate-90" : ""}`} />
-                  <span className="section-title !text-brass-300">Checklist</span>
-                </span>
-                <span className={`font-mono text-[0.62rem] uppercase tracking-[0.12em] ${
-                  autoMissing.length ? "text-coral-300" : "text-phosphor-300"
-                }`}>
-                  {autoMissing.length ? `${autoMissing.length} missing` : "ready"}
-                </span>
-              </button>
-              {showAutoChecklist && (
-                <RunSummaryTable
-                  requiredValues={autoRequiredValues}
-                  optionalValues={autoOptionalValues}
-                />
-              )}
-            </section>
-
-          </div>
+ },
+            { label: "Checklist", group: "Review", complete: autoMissing.length === 0, content: <><RunSummaryTable requiredValues={autoRequiredValues} optionalValues={autoOptionalValues} /></> },
+          ]} />
         ) : mode === "customized_pipeline" ? (
-          <CustomizedRunForm
+          <CustomizedRunForm onContextChange={setCustomContext} guided askTaskNameOnSave={sourceSkipped}
             key={customizedResetKey}
             onDone={onClose}
-            onDirtyChange={setCustomizedDirty}
             initialTaskName={customizedSeed.taskName || initialTaskName}
             initialSettingId={customizedSeed.settingId || initialSettingId}
             initialRunName={customizedSeed.runName}
             initialInputs={customizedSeed.inputs}
           />
         ) : mode === "full_pipeline" ? (
-          <RunInputs
+          <RunInputs reviewAction={reviewAction} key={`standard-${flowReset}`} hideSource
             extra={<ModelSaveFields value={modelSave} onChange={setModelSave} />}
             extraRequiredValues={modelSaveSummaryValues(modelSave)}
             {...inputs}
-            taskTestSuite={predefined?.test_sets}
+            taskTestSuite={predefined?.test_sets} validationSettingId={pickedSetting}
             requiredMissing={fullMissing}
             requiredPrefixValues={[
               { name: "Run name", value: runName.trim() || "Not set", complete: Boolean(runName.trim()) },
-              { name: "Task name", value: trimmedTask || "Not set", complete: Boolean(trimmedTask) },
+              { name: "Task name", value: sourceSkipped ? (saveSetting && newTaskName.trim() ? newTaskName.trim() : "New task") : trimmedTask || "Not set", complete: Boolean(trimmedTask) },
               {
                 name: "Objective",
                 value: (predefined?.task_objective || nl).trim() || "Not set",
                 complete: Boolean((predefined?.task_objective || nl).trim()),
               },
             ]}
+            taskSelector={(
+                <Field label="Task name">
+                  <TaskNameInput value={sourceSkipped ? "" : taskName} onChange={changeFullTaskName}
+                    placeholder="Choose a Task"
+                    className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(trimmedTask))}`} />
+                </Field>
+            )}
             requiredPrefix={(
               <>
                 <Field label="Run name">
-                  <input value={runName} onChange={(e) => setRunName(e.target.value)}
+                  <ClearableInput value={runName} onChange={(e) => setRunName(e.target.value)}
                     placeholder="what to call this run, e.g. capy-lora-r16-take2"
                     className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`} spellCheck={false} />
                 </Field>
-                <Field label="Task name">
-                  <TaskNameInput value={taskName} onChange={changeFullTaskName}
-                    placeholder="e.g. med for a predefined task, or name your own"
-                    className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(trimmedTask))}`} />
-                </Field>
+
                 {predefined ? (
                   <Field label="Objective">
-                    <p className={`rounded-md border bg-canvas p-2.5 font-mono text-sm leading-relaxed ${requiredFieldStateCls(true)}`}>
+                    <p className={`launch-readonly-value rounded-md border bg-canvas p-2.5 font-mono text-sm leading-relaxed ${requiredFieldStateCls(true)}`}>
                       {predefined.task_objective}
                     </p>
                   </Field>
                 ) : (
                   <Field label="Objective">
-                    <textarea value={nl} onChange={(e) => setNl(e.target.value)}
+                    <ClearableTextarea value={nl} onChange={(e) => setNl(e.target.value)}
                       placeholder="e.g. Train a model that answers football-rules questions from this PDF, target 80% accuracy."
                       rows={4} className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(nl.trim()))}`} spellCheck />
                   </Field>
@@ -1281,7 +1060,7 @@ export function NewRunModal({
             )}
             optionalPrefix={predefined ? (
               <Field label="Saved settings">
-                <TaskSettingHistory
+                <TaskSettingHistory compact
                   task={trimmedTask}
                   onPick={applySetting}
                   selectedId={sourceSetting}
@@ -1296,32 +1075,26 @@ export function NewRunModal({
 
           />
         ) : (
-          <div className="space-y-6">
-            <section className="space-y-3">
-              <div>
-                <h3 className="section-title !text-brass-300">Required</h3>
-              </div>
-              <Field label="Run name">
-                <input
+          <LaunchStepFlow reviewAction={reviewAction} key={`single-${flowReset}`} steps={[
+            { label: "Basic info", group: "Required", complete: Boolean(runName.trim() && singleNl.trim()), content: <><Field label="Run name">
+                <ClearableInput
                   value={runName}
                   onChange={(e) => setRunName(e.target.value)}
                   placeholder="what to call this run, e.g. capy-lora-r16-take2"
                   className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(runName.trim()))}`}
                   spellCheck={false}
                 />
-              </Field>
-
-              <Field label="Task name">
-                <input
-                  value={taskName}
-                  onChange={(e) => setTaskName(e.target.value)}
-                  placeholder="what this work is"
-                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(trimmedTask))}`}
-                  spellCheck={false}
+              </Field><Field label="Objective">
+                <ClearableTextarea
+                  value={singleNl}
+                  onChange={(e) => setSingleNl(e.target.value)}
+                  placeholder="e.g. Make a 200-row chat-JSONL dataset from this PDF, USMLE-style MCQs."
+                  rows={4}
+                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(singleNl.trim()))}`}
+                  spellCheck
                 />
-              </Field>
-
-              <Field label="Agent">
+              </Field></> },
+            { label: "Agent", group: "Required", complete: Boolean(selectedAgent), content: <Field label="Agent">
                 <ThemedSelect
                   value={agentId}
                   onChange={setAgentId}
@@ -1330,59 +1103,19 @@ export function NewRunModal({
                   ariaLabel="Agent"
                   buttonClassName={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(agentId))}`}
                 />
-              </Field>
-              <Field label="Objective">
-                <textarea
-                  value={singleNl}
-                  onChange={(e) => setSingleNl(e.target.value)}
-                  placeholder="e.g. Make a 200-row chat-JSONL dataset from this PDF, USMLE-style MCQs."
-                  rows={4}
-                  className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(singleNl.trim()))}`}
-                  spellCheck
-                />
-              </Field>
-            </section>
-
-            <section className="space-y-3">
-              <div>
-                <h3 className="section-title !text-brass-300">Optional</h3>
-              </div>
-              <Field label="Attachments">
+              </Field> },
+            { label: "Attachments", group: "Optional", complete: singleAttachments.length > 0, content: <Field label="Attachments">
                 <AttachmentDropzone
                   attachments={singleAttachments}
                   onChange={setSingleAttachments}
                 />
-              </Field>
-            </section>
-            <section>
-              <button type="button" onClick={() => setShowSingleChecklist((v) => !v)}
-                className="flex w-full items-center justify-between gap-3 text-left">
-                <span className="flex items-center gap-1.5">
-                  <ChevronRight size={13}
-                    className={`shrink-0 text-slate-500 transition-transform ${showSingleChecklist ? "rotate-90" : ""}`} />
-                  <span className="section-title !text-brass-300">Checklist</span>
-                </span>
-                <span className={`font-mono text-[0.62rem] uppercase tracking-[0.12em] ${
-                  singleMissing.length ? "text-coral-300" : "text-phosphor-300"
-                }`}>
-                  {singleMissing.length ? `${singleMissing.length} missing` : "ready"}
-                </span>
-              </button>
-              {showSingleChecklist && (
-                <RunSummaryTable
-                  requiredValues={singleRequiredValues}
-                  optionalValues={singleOptionalValues}
-                />
-              )}
-            </section>
-
-          </div>
+              </Field> },
+            { label: "Checklist", group: "Review", complete: singleMissing.length === 0, content: <><RunSummaryTable requiredValues={singleRequiredValues} optionalValues={singleOptionalValues} /></> },
+          ]} />
         )}
         </div>
-        </div>
-
       </div>
-    </Modal>
+    </Modal></ClearFieldsContext.Provider>
   );
 }
 
