@@ -9,7 +9,7 @@ from sqlalchemy import select, text, func
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from zevo.db import Base, Run, Ticket, HeartbeatRun, WorkloadExecution, ExecutionEvent
+from zevo.db import Agent, Base, Run, Ticket, HeartbeatRun, WorkloadExecution, ExecutionEvent
 from zevo.engine.run.activation_failure import ACTIVATION_KEY, track_activation_failures
 from zevo.engine.run.inference_completion import record_completion
 
@@ -41,6 +41,7 @@ async def pg():
 async def seed(factory):
     hid = str(uuid4())
     async with factory() as db:
+        db.add(Agent(id='inference', name='Inference', title='Inference', identity_path='playbook/agents/inference/identity.md'))
         db.add(Run(id='run', metric='accuracy'))
         await db.flush()
         db.add(Ticket(id='infer', run_id='run', agent_id='inference', status='running', lane='optimization'))
