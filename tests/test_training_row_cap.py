@@ -88,13 +88,13 @@ async def test_auto_launch_stores_the_cap_as_a_decision_pin(tmp_path, monkeypatc
         await conn.run_sync(Base.metadata.create_all)
     Session = async_sessionmaker(engine, expire_on_commit=False)
     async with Session() as db:
-        response = await create_run(CreateRunRequest.model_validate(dict(
+        response = await create_run(CreateRunRequest.model_validate(dict(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             mode="auto", task_name="cap", run_name="cap-1", gpu_provider="instance",
             user_request={"task_objective": "o", "max_training_rows": 500},
         )), db)
         run = await db.get(Run, response.run_id)
         assert run.decision_pins["max_training_rows"] == 500
-        uncapped = await create_run(CreateRunRequest.model_validate(dict(
+        uncapped = await create_run(CreateRunRequest.model_validate(dict(model_save_policy={"weights": "remote", "remote_dir": "/models"},
             mode="auto", task_name="cap", run_name="cap-2", gpu_provider="instance",
             user_request={"task_objective": "o"},
         )), db)

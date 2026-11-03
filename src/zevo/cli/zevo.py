@@ -790,6 +790,9 @@ def run_create(
     run_name: str = typer.Option(
         "", "--run-name", help="REQUIRED. Human-readable name for this execution.",
     ),
+    model_hf_repo: str = typer.Option("", "--model-hf-repo", help="Final model destination: Hugging Face owner/repository."),
+    model_remote_dir: str = typer.Option("", "--model-remote-dir", help="Final model destination: absolute directory on the GPU machine."),
+    model_hf_private: bool = typer.Option(True, "--model-hf-private/--model-hf-public", help="Visibility of the final Hugging Face repository."),
     # ---- custom-task fields (each its own flag) ----
     base_model: str = typer.Option(
         "", "--base-model", help="HF model id, e.g. Qwen/Qwen2.5-7B-Instruct.",
@@ -957,7 +960,7 @@ def run_create(
     1) Predefined task (the catalogue names the problem; the per-field
        flags below still apply and become this run's settings):
 
-        run create --task med --run-name med-lora-try1
+        run create --task med --run-name med-lora-try1 --model-hf-repo owner/med-model
 
     2) CUSTOM task (define it with per-field flags):
 
@@ -965,7 +968,7 @@ def run_create(
             --task basketball --run-name basketball-try1 \\
             --base-model Qwen/Qwen2.5-7B-Instruct --gpu-provider cloud \\
             --attach ./basketball.jsonl --test-set /app/data/files/bball/test.csv \\
-            --target max --iterations 3 --max-cost 80
+            --target max --iterations 3 --max-cost 80 --model-remote-dir /models
 
     Either way the orchestrator drives every agent, the daemon runs it, and the
     UI shows it live.
@@ -1028,6 +1031,7 @@ def run_create(
             mode=mode, customizations_path=customizations,
             setting_ref=setting, save_setting=save_setting,
             setting_name=setting_name, allow_risky=allow_risky,
+            model_hf_repo=model_hf_repo, model_remote_dir=model_remote_dir, model_hf_private=model_hf_private,
             api_base=_API_BASE,
             started=started,
         ))
@@ -1042,6 +1046,18 @@ def run_create(
         else:
             console.print("\n[yellow]interrupted before the run started.[/]")
         raise typer.Exit(130)
+
+
+def _launch_model_policy(hf_repo: str, remote_dir: str, hf_private: bool = True) -> dict:
+    from zevo.contracts.model_save import ModelSavePolicy
+    from pydantic import ValidationError
+    if bool(hf_repo.strip()) == bool(remote_dir.strip()):
+        raise typer.BadParameter("Specify exactly one of --model-hf-repo or --model-remote-dir")
+    try:
+        return ModelSavePolicy(weights="hf" if hf_repo.strip() else "remote",
+            hf_repo_id=hf_repo, remote_dir=remote_dir, hf_private=hf_private).model_dump(mode="json")
+    except ValidationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 async def _run_create(
@@ -1064,13 +1080,15 @@ async def _run_create(
     mode: str = "full_pipeline", customizations_path: str = "",
     setting_ref: str = "", save_setting: bool = False, setting_name: str = "",
     allow_risky: bool = False,
+    model_hf_repo: str = "", model_remote_dir: str = "", model_hf_private: bool = True,
     started: Optional[list] = None,
 ) -> None:
     import httpx
+    policy = _launch_model_policy(model_hf_repo, model_remote_dir, model_hf_private)
     async with httpx.AsyncClient(timeout=120.0) as client:
         # Only send run-level knobs the user actually set; otherwise the backend
         # resolves uncapped limits and the system runtime defaults.
-        run_opts: dict = {}
+        run_opts: dict = {"model_save_policy": policy}
         if iterations is not None:
             run_opts["iteration_budget"] = iterations
         if stop_threshold is not None:
@@ -1395,6 +1413,7 @@ async def _run_create(
             body = {"task_name": task, "run_name": run_name, "user_request": ur, **run_opts}
 
         preflight_body = {
+            "model_save_policy": policy,
             "user_request": body["user_request"],
             "gpu_provider": body.get("gpu_provider"),
             "num_gpus": body.get("num_gpus"),

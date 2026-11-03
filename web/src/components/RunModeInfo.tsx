@@ -20,10 +20,10 @@ const WAYS: Record<RunLaunchMode, Way> = {
     title: "Auto",
     when: "You provide the objective; Zevo defines its evaluation suite.",
     steps: [
-      "Name the run and give the task a new name. Auto always starts a fresh task, so a predefined task name is refused.",
+      "Name the run. Auto starts a fresh task for your objective.",
       "Write the objective in plain language: what the model should get better at and what a correct answer looks like.",
       "Optionally pin the training data, base model, or training method. Leaving them blank gives Zevo the same L1–L4 ownership ladder as Standard.",
-      "Optionally set a spend cap, an iteration budget, and the GPU backend.",
+      "Choose the GPU backend and final model destination; optionally set a spend cap or iteration budget.",
       "Launch. Zevo chooses one or more public benchmarks (or synthesizes evaluation data when none fits), defines each scoring contract, and then runs the normal optimization pipeline.",
     ],
   },
@@ -53,7 +53,7 @@ const WAYS: Record<RunLaunchMode, Way> = {
     title: "Single Stage",
     when: "One agent, one job. No optimization loop.",
     steps: [
-      "Name the run and the task, and write the objective for that one job.",
+      "Name the run and write the objective for that one job.",
       "Choose the agent: data, infrastructure, train, inference or registry.",
       "Supply the inputs that agent needs for the job.",
       "Launch. The ticket goes straight to the agent and the run ends when it does.",

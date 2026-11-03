@@ -82,6 +82,7 @@ def _full_request(**overrides) -> dict:
 def _auto_body(**overrides) -> dict:
     body = dict(
         mode="auto", task_name="bar-exam-auto", run_name="first-auto",
+        model_save_policy={"weights": "remote", "remote_dir": "/models"},
         user_request={"task_objective": "Improve bar-exam answering."},
         gpu_provider="instance",
     )
@@ -303,6 +304,7 @@ async def test_full_pipeline_still_requires_scoring_and_settles_at_creation(
         with pytest.raises(HTTPException) as exc:
             await create_run(CreateRunRequest.model_validate({
                 "task_name": "custom", "run_name": "r",
+                "model_save_policy": {"weights": "remote", "remote_dir": "/models"},
                 "user_request": _full_request(test_set=""),
                 "gpu_provider": "instance",
             }), db)
@@ -311,7 +313,8 @@ async def test_full_pipeline_still_requires_scoring_and_settles_at_creation(
         assert calls == []
 
         response = await create_run(CreateRunRequest.model_validate({
-            "task_name": "custom", "run_name": "r", "user_request": _full_request(),
+            "task_name": "custom", "run_name": "r",
+                "model_save_policy": {"weights": "remote", "remote_dir": "/models"}, "user_request": _full_request(),
             "gpu_provider": "instance",
         }), db)
         run = await db.get(Run, response.run_id)

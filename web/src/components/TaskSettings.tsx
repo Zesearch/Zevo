@@ -325,7 +325,7 @@ function SettingValidationCard({
  */
 export function TaskSettingHistory({
   task, onPick, onRun, onOpenDataset, onAddingChange,
-  readOnly = false, busy = false, selectedId = "", modified = false,
+  readOnly = false, busy = false, selectedId = "", modified = false, compact = false, onClear,
 }: {
   task: string;
   onPick?: (s: TaskSettingDTO) => void;
@@ -345,6 +345,8 @@ export function TaskSettingHistory({
   /** The row whose values are in the form. Marked, because a form that filled
    *  itself in should say what filled it. */
   selectedId?: string;
+  compact?: boolean;
+  onClear?: () => void;
   modified?: boolean;
 }) {
   const { data, isLoading, mutate } = useSWR<TaskSettingDTO[]>(
@@ -381,6 +383,28 @@ export function TaskSettingHistory({
   if (onPick) {
     if (!settings.length) {
       return <p className="text-2xs text-slate-500">No setting recorded for this task yet.</p>;
+    }
+    if (compact) {
+      return <div className="space-y-1.5">
+        <ThemedSelect value={selectedId} onClear={onClear} ariaLabel="Saved setting" placeholder="Choose a saved setting"
+          options={settings.map(setting => {
+            const train = dataRows(setting, displayPath).find(row => row.label === "train");
+            const details = [
+              `Model: ${shortModel(setting.base_model) || "Zevo decides"}`,
+              `Data: ${train?.value || "Zevo decides"}`,
+              `Method: ${setting.training_method || "Zevo decides"}`,
+              ...(setting.validation_sets?.length ? [`${setting.validation_sets.length} validation benchmarks`] : []),
+            ];
+            return {
+              value: setting.id,
+              label: <span className="inline-flex max-w-full items-center gap-3"><span className="truncate">{setting.name}</span><LevelBadge level={setting.level} /></span>,
+              description: <span className="line-clamp-2 [overflow-wrap:anywhere]" title={details.join(" · ")}>{details.join(" · ")}</span>,
+            };
+          })}
+          onChange={id => { const setting = settings.find(item => item.id === id); if (setting) onPick(setting); }}
+          buttonClassName="w-full rounded-md border border-hair bg-canvas p-2.5 text-sm text-slate-200" />
+        {modified && <p className="font-mono text-2xs text-brass-300">Modified from the selected setting</p>}
+      </div>;
     }
     return (
       <div className="space-y-1.5">

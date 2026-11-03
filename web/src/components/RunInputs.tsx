@@ -1,4 +1,9 @@
-import { resourceSummaryValues, scoringSummaryValues } from "../lib/runSummary";
+import { LaunchNavigation } from "./LaunchNavigation";
+import { FieldHint } from "./FieldHint";
+import { ClearableInput, ClearableTextarea } from "./ClearableField";
+import { LaunchContents, LaunchStepHeading } from "./LaunchContents";
+import { trainingStepReady, runtimeStepReady } from "../lib/launchStepStatus";
+import { resourceSummaryValues } from "../lib/runSummary";
 import { useFileDisplayPath } from "../lib/useFileDisplayPath";
 import { PredictionColumnField } from "./PredictionColumnField";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
@@ -43,7 +48,7 @@ const fieldCls =
 const completeFieldCls =
   "!border-brass-500/55 !bg-brass-500/[0.07] !text-brass-100";
 export const requiredFieldStateCls = (complete: boolean) =>
-  complete ? completeFieldCls : "!border-hair !bg-canvas !text-slate-200 focus:!border-brass-500/50";
+  complete ? completeFieldCls : "launch-field-missing !border-hair !bg-canvas !text-slate-200 focus:!border-brass-500/50";
 
 async function uploadFile(f: File): Promise<string> {
   const fd = new FormData();
@@ -87,6 +92,7 @@ export function ScoringSuiteManifest({
   setLabel = "Test set",
   showHeader = true,
   summaryLayout = "stacked",
+  startIndex = 0,
 }: {
   items: TaskTestSet[];
   title?: string;
@@ -94,6 +100,7 @@ export function ScoringSuiteManifest({
   setLabel?: string;
   showHeader?: boolean;
   summaryLayout?: "stacked" | "inline";
+  startIndex?: number;
 }) {
   const short = useFileDisplayPath();
   return (
@@ -112,7 +119,7 @@ export function ScoringSuiteManifest({
           >
             <summary className="grid cursor-pointer list-none grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-2 px-3 py-2.5 transition hover:bg-white/[0.025] sm:grid-cols-[1.5rem_minmax(8rem,1fr)_auto]">
               <span className="pt-0.5 font-mono text-2xs tabular-nums text-slate-600">
-                {String(index + 1).padStart(2, "0")}
+                {String(startIndex + index + 1).padStart(2, "0")}
               </span>
               <span className="min-w-0">
                 <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-slate-200">
@@ -288,46 +295,84 @@ export function ScoringSuiteEditor({
     items.map((item, position) => position === index ? { ...item, ...patch } : item),
   );
   const lower = lane.toLowerCase();
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [addAttempted, setAddAttempted] = useState(false);
+  const missing = scoringSuiteMissing(items, lane);
+  const addSet = () => {
+    if (items.length > 0 && missing.length > 0) {
+      setAddAttempted(true);
+      const incomplete = items.findIndex(item => scoringSuiteMissing([item], lane).length > 0);
+      if (incomplete >= 0) {
+        setEditingIndex(incomplete);
+        listRef.current?.children[incomplete]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+      return;
+    }
+    setAddAttempted(false);
+    setEditingIndex(items.length);
+    onChange([...items, emptyScoringSet()]);
+    window.requestAnimationFrame(() => {
+      if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+    });
+  };
+  const removeSet = (index: number) => {
+    setEditingIndex(current => current === null || current === index ? null : current > index ? current - 1 : current);
+    onChange(items.filter((_, position) => position !== index));
+  };
 
   return (
     <div className="space-y-3">
       <div className="flex items-end justify-between gap-4 px-0.5">
-        <p className="font-mono text-2xs leading-relaxed text-slate-500">
+        {lane !== "Test" && <p className="font-mono text-2xs leading-relaxed text-slate-500">
           Each {lane} set has its own inference query, output format, answers, and metric.
-        </p>
-        <button
+        </p>}
+        {items.length > 0 && <button
           type="button"
-          onClick={() => onChange([...items, emptyScoringSet()])}
+          onClick={addSet}
           className="btn shrink-0 !py-1 !text-2xs"
         >
           <Plus size={12} /> add {lane} set
-        </button>
+        </button>}
       </div>
       {!items.length && (
         <button
           type="button"
-          onClick={() => onChange([emptyScoringSet()])}
+          onClick={addSet}
           className="w-full rounded-md border border-dashed border-hair px-4 py-5 font-mono text-xs text-slate-500 transition hover:border-brass-500/40 hover:text-brass-300"
         >
           Add the first {lane} set
         </button>
       )}
-      {items.map((item, index) => (
-        <section key={index} className="rounded-lg border border-hair bg-white/[0.018] p-4">
+      {addAttempted && items.length > 0 && missing.length > 0 && (
+        <p role="status" className="text-xs text-coral-300">Complete the current sets before adding another: {missing.join(", ")}.</p>
+      )}
+      <div ref={listRef} className="max-h-[min(40vh,28rem)] space-y-3 overflow-y-auto overscroll-contain pr-1" aria-label={`${lane} sets`}>
+      {items.map((item, index) => {
+        const complete = scoringSuiteMissing([item], lane).length === 0;
+        const editing = editingIndex === index || !complete;
+        return <section key={index} className="rounded-lg border border-hair bg-white/[0.018] p-4">
           <div className="mb-4 flex items-center justify-between">
             <span className="font-mono text-xs uppercase tracking-[0.14em] text-brass-300">
               {lane} set {index + 1}
             </span>
+            <div className="flex items-center gap-2">
+            <button type="button" disabled={editing && !complete}
+              onClick={() => setEditingIndex(editing ? null : index)}
+              className="btn !py-1 !text-2xs disabled:opacity-30">
+              {editing ? "Done" : "Edit"}
+            </button>
             <button
               type="button"
               title={`Remove ${lane} set`}
-              onClick={() => onChange(items.filter((_, position) => position !== index))}
+              onClick={() => removeSet(index)}
               className="rounded p-1.5 text-slate-500 transition hover:bg-coral-500/10 hover:text-coral-300"
             >
               <Trash2 size={14} />
             </button>
+            </div>
           </div>
-          <div className="space-y-3">
+          {editing ? <div className="space-y-3">
             <TextField
               label="Name"
               value={item.name}
@@ -355,7 +400,7 @@ export function ScoringSuiteEditor({
             />
             <div>
               <SlotLabel label="Inference query" tag={false} />
-              <textarea
+              <ClearableTextarea
                 value={item.inference_query}
                 onChange={(event) => update(index, { inference_query: event.target.value })}
                 rows={3}
@@ -395,7 +440,7 @@ export function ScoringSuiteEditor({
               </div>
               <div>
                 <SlotLabel label={`${lane} answer fields`} tag={false} />
-                <input
+                <ClearableInput
                   value={item.answer_fields.join(", ")}
                   onChange={(event) => update(index, {
                     // Keep a trailing empty draft so typing the comma does not
@@ -418,7 +463,7 @@ export function ScoringSuiteEditor({
               <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2">
                 <div>
                   <SlotLabel label="Custom metric name" tag={false} />
-                  <input
+                  <ClearableInput
                     value={item.metric}
                     onChange={(event) => update(index, { metric: event.target.value })}
                     placeholder="e.g. benchmark_average"
@@ -454,19 +499,20 @@ export function ScoringSuiteEditor({
                 hint="Blank uses every row in the selected split."
               />
             )}
-          </div>
-        </section>
-      ))}
+          </div> : <ScoringSuiteManifest items={[item]} setLabel={`${lane} set`} showHeader={false} startIndex={index} />}
+        </section>;
+      })}
+      </div>
     </div>
   );
 }
 
 /** Label + a required/optional tag. Under a "Required"/"Optional" heading the
  *  tag is noise, so `tag={false}` drops it. */
-function SlotLabel({ label, required, tag = true }: { label: string; required?: boolean; tag?: boolean }) {
+function SlotLabel({ label, required, tag = true, hint }: { label: string; required?: boolean; tag?: boolean; hint?: string }) {
   return (
     <div className="mb-1 flex items-baseline gap-2">
-      <span className="field-label">{label}</span>
+      <span className="field-label">{label}{hint && <FieldHint>{hint}</FieldHint>}</span>
       {tag && (
         <span className={`font-mono text-[0.62rem] ${required ? "text-brass-300" : "text-slate-600"}`}>
           {required ? "required" : "optional"}
@@ -483,76 +529,25 @@ export type RunSummaryValue = {
   overridden?: boolean;
 };
 
-function SummaryColumn({
-  title, values, required,
-}: {
-  title: string;
-  values: RunSummaryValue[];
-  required?: boolean;
-}) {
-  const completeCount = values.filter((value) => value.complete).length;
-  const allComplete = completeCount === values.length;
-  return (
-    <div className="min-w-0 rounded-md border border-hair bg-white/[0.018] p-3">
-      <div className="mb-1 flex items-center justify-between gap-3 px-1 pb-2">
-        <span className="font-mono text-[0.64rem] uppercase tracking-[0.14em] text-brass-300">
-          {title}
-        </span>
-        <span className={`font-mono text-[0.6rem] ${
-          required ? allComplete ? "text-phosphor-300" : "text-coral-300" : "text-slate-600"
-        }`}>
-          {required ? `${completeCount}/${values.length}` : values.length}
-        </span>
-      </div>
-      <table className="w-full table-fixed border-separate border-spacing-y-0.5 font-mono text-2xs">
-        <tbody>
-          {values.map(({ name, value, complete, overridden }) => (
-            <tr key={name} className="group">
-              <th className="w-[42%] align-top rounded-l px-2 py-1.5 text-left font-normal text-slate-500 transition-colors group-hover:bg-white/[0.025]">
-                {name}
-              </th>
-              <td className="align-top rounded-r px-2 py-1.5 text-right transition-colors group-hover:bg-white/[0.025]">
-                <span className="inline-flex max-w-full items-center justify-end gap-1.5">
-                  {required && (
-                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                      complete ? "bg-phosphor-400" : "bg-coral-400"
-                    }`} />
-                  )}
-                  <span
-                    className={`min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] ${
-                      required
-                        ? complete ? "text-slate-200" : "italic text-slate-600"
-                        : overridden ? "text-brass-300" : "text-slate-400"
-                    }`}
-                    title={value}
-                  >
-                    {value}
-                  </span>
-                </span>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-const LAUNCH_SUMMARY_FIELDS = new Set(["Iterations", "Budget", "Time limit", "Maximum GPUs", "Final model destination", "Hugging Face repository", "Directory on the GPU machine", "Repository visibility"]);
-
 export function RunSummaryTable({
   requiredValues, optionalValues,
 }: {
   requiredValues: RunSummaryValue[];
   optionalValues: RunSummaryValue[];
 }) {
+  const values = [...requiredValues, ...optionalValues];
   return (
-    <div className="mt-3">
-      <div className="grid gap-3 md:grid-cols-2">
-        <SummaryColumn title="Required Values" values={requiredValues.filter(value => !LAUNCH_SUMMARY_FIELDS.has(value.name))} required />
-        <SummaryColumn title="Optional Values" values={optionalValues.filter(value => !LAUNCH_SUMMARY_FIELDS.has(value.name))} />
-      </div>
-    </div>
+    <table aria-label="Run configuration" className="w-full table-fixed text-sm">
+      <colgroup><col style={{ width: "34%" }} /><col /></colgroup>
+      <tbody>
+        {values.map(({ name, value }, index) => (
+          <tr key={`${name}-${index}`} className="transition-colors hover:bg-white/[0.015]">
+            <th scope="row" className="py-3 pr-6 text-left align-top font-normal text-slate-400 [overflow-wrap:anywhere]">{name}</th>
+            <td className="whitespace-pre-wrap py-3 align-top leading-relaxed text-slate-200 [overflow-wrap:anywhere]">{value}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -639,7 +634,7 @@ function FilePicker({
 
   return (
     <div ref={box} className={`relative ${className}`}>
-      <input
+      <ClearableInput
         value={open ? q : (selected?.label ?? "")}
         onChange={(e) => { setQ(e.target.value); setActive(0); setOpen(true); }}
         onFocus={() => { setQ(""); setActive(0); setOpen(true); }}
@@ -654,7 +649,7 @@ function FilePicker({
         className={`${fieldCls} font-mono ${inputClassName}`}
       />
       {open && (
-        <div className="absolute z-30 mt-1 max-h-56 w-full overflow-auto rounded-md border border-hair bg-raised p-1 shadow-lg">
+        <div className="launch-file-menu absolute z-30 mt-1 max-h-56 w-full overflow-auto rounded-md border border-hair bg-raised p-1 shadow-lg">
           {matches.length === 0 && (
             <div className="px-2 py-1.5 font-mono text-2xs text-slate-500">
               nothing in Files matches that
@@ -676,6 +671,7 @@ function FilePicker({
                 type="button"
                 onMouseDown={(e) => { e.preventDefault(); choose(o); }}
                 onMouseEnter={() => setActive(i)}
+                data-active={i === active}
                 className={`flex w-full items-baseline justify-between gap-2 rounded px-2 py-1 pl-3 text-left font-mono text-2xs ${
                   i === active ? "bg-brass-500/15 text-brass-200" : "text-slate-300"
                 }`}
@@ -702,7 +698,7 @@ function HubInput({
   value, onChange, className = "",
 }: { value: string; onChange: (v: string) => void; className?: string }) {
   return (
-    <input
+    <ClearableInput
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder="or owner/name on HuggingFace"
@@ -786,7 +782,7 @@ function UploadBox({
           </div>
         </div>
       )}
-      <input
+      <ClearableInput
         ref={input}
         type="file"
         className="hidden"
@@ -811,7 +807,7 @@ function Chosen({
     ? uploadedFileName(value)
     : short(value);
   return (
-    <div className={`flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2 ${completeFieldCls} ${className}`}>
+    <div className={`launch-selected-value flex items-center gap-2 rounded-md border border-hair bg-canvas px-2.5 py-2 ${completeFieldCls} ${className}`}>
       {uploaded && <CheckCircle2 size={15} className="shrink-0 text-phosphor-300" />}
       <span className="min-w-0 flex-1" title={displayValue}>
         <span className="block truncate font-mono text-sm text-slate-100">{displayValue}</span>
@@ -957,7 +953,7 @@ export function TrainingDataField({
           <div className="grid grid-cols-2 gap-2">
             <label className="block">
               <span className={hubLabelCls}>Split</span>
-              <input
+              <ClearableInput
                 className={`${hubBoxCls} ${requiredFieldStateCls(Boolean(split || splitPlaceholder))}`} value={split || splitPlaceholder}
                 onChange={(e) => onSplit(e.target.value)}
                 list="zevo-hf-splits" placeholder={splitPlaceholder}
@@ -965,7 +961,7 @@ export function TrainingDataField({
             </label>
             <label className="block">
               <span className={hubLabelCls}>Config</span>
-              <input
+              <ClearableInput
                 className={`${hubBoxCls} ${config?.trim() ? completeFieldCls : ""}`} value={config ?? ""}
                 onChange={(e) => onConfig(e.target.value)}
                 placeholder="only if the repo has several"
@@ -1137,7 +1133,7 @@ export function TextField({
   return (
     <div>
       <SlotLabel label={label} tag={false} />
-      <input
+      <ClearableInput
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder || (label === "Maximum GPUs" ? "Unlimited" : label === "Stop threshold" ? "Not set" : hint)}
@@ -1220,10 +1216,10 @@ export function contractPreferencesFromInputs(inputs: RunInputValues) {
 
 /** An optional choice with a named default. */
 export function ChoiceField({
-  label, value, onChange, options, disabled = false, hint = "", required = false,
+  label, value, onChange, options, disabled = false, hint = "", required = false, labelHint,
 }: {
   label: string; value: string; onChange: (v: string) => void;
-  options: [string, string][]; disabled?: boolean; hint?: string; required?: boolean;
+  options: [string, string][]; disabled?: boolean; hint?: string; required?: boolean; labelHint?: string;
 }) {
   // The light hint stays in the closed control. The shared themed list receives
   // only real choices, so no browser can expose the hint as a menu item.
@@ -1232,7 +1228,7 @@ export function ChoiceField({
   const selected = known ? value : "";
   return (
     <div>
-      <SlotLabel label={label} tag={false} />
+      <SlotLabel label={label} tag={false} hint={labelHint} />
       <ThemedSelect
         value={selected}
         onChange={onChange}
@@ -1267,7 +1263,7 @@ export function NumberField({
       ) : (
         <SlotLabel label={label} tag={false} />
       )}
-      <input
+      <ClearableInput
         type={acceptsDecimal ? "text" : "number"}
         inputMode={acceptsDecimal ? "decimal" : undefined}
         min={min}
@@ -1296,7 +1292,7 @@ export function LimitField({
             {prefix}
           </span>
         )}
-        <input
+        <ClearableInput
           type="number"
           min={0}
           value={value}
@@ -1353,7 +1349,7 @@ export function MultiFileSlot({
       <SlotLabel label={label} tag={false} />
       <div className="flex flex-wrap items-center gap-2">
         <FilePicker datasets={datasets} value="" onPick={(o) => add(o.value)} className="max-w-[14rem]" />
-        <input
+        <ClearableInput
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(draft); } }}
@@ -1369,7 +1365,7 @@ export function MultiFileSlot({
         >
           <Upload size={12} /> {busy ? "Uploading…" : "Upload files"}
         </button>
-        <input
+        <ClearableInput
           ref={input}
           type="file"
           className="hidden"
@@ -1538,7 +1534,7 @@ export function BackendPicker({
       <ChoiceField
         label="GPU backend"
         value={effectiveValue}
-        options={compute.targets.map((target) => [target.value, target.label])}
+        options={compute.targets.map((target) => [target.value, `${target.label}${target.value === compute.defaultTarget?.value ? " · Default setting" : ""}`])}
         required
         hint={compute.loading ? "Loading available compute…" : "Choose a GPU backend or set a default in Settings."}
         onChange={(value) => {
@@ -1550,16 +1546,6 @@ export function BackendPicker({
           } : { gpuProvider: "", cloudBackend: "", sshHostId: "" });
         }}
       />
-      {!explicitValue && compute.defaultTarget && (
-        <p className="mt-1.5 inline-flex items-center gap-1.5 rounded-full border border-hair bg-white/[0.025] px-2 py-1 font-mono text-2xs text-slate-400">
-          <span>Default from Settings: <span className="text-slate-200">{compute.defaultTarget.label}</span></span>
-        </p>
-      )}
-      {!compute.loading && !effectiveValue && (
-        <p className="mt-1.5 inline-flex items-center gap-1.5 rounded-full border border-hair bg-white/[0.025] px-2 py-1 font-mono text-2xs text-slate-400">
-          <span>No default is configured. Choose a backend here or set one in Settings.</span>
-        </p>
-      )}
     </div>
   );
 }
@@ -1670,14 +1656,17 @@ export function RunInputs({
   teacherModel, rewardModel, usePeft,
   gpuProvider, cloudBackend, sshHostId, numGpus, gpuAllocationMode, generation_backend, adaptiveMidTrainingEvaluation,
   iterations, budget, timeLimitHours, queueWaitHours, stopThreshold,
-  onChange, extra, requiredPrefix, optionalPrefix, beforeChecklist,
-  requiredMissing = [], requiredPrefixValues = [], extraRequiredValues = [], extraOptionalValues = [], taskTestSuite,
+  onChange, extra, requiredPrefix, optionalPrefix, beforeChecklist, taskSelector, hideSource = false, onReviewChange, reviewAction,
+  requiredMissing = [], requiredPrefixValues = [], extraRequiredValues = [], extraOptionalValues = [], taskTestSuite, validationSettingId = "",
 }: RunInputValues & {
   onChange: (patch: Partial<RunInputValues>) => void;
-  /** Slot for anything the named fields don't cover — rendered under Optional,
-   *  because a loose attachment is optional by definition. */
+  /** Required launch fields supplied by the owning modal. */
   extra?: React.ReactNode;
   requiredPrefix?: React.ReactNode;
+  hideSource?: boolean;
+  onReviewChange?: (review: boolean) => void;
+  reviewAction?: React.ReactNode;
+  taskSelector?: React.ReactNode;
   optionalPrefix?: React.ReactNode;
   /** Mode-specific controls that should remain above the shared checklist. */
   beforeChecklist?: React.ReactNode;
@@ -1688,16 +1677,17 @@ export function RunInputs({
   /** Present for a predefined Task. Its Test suite is immutable at launch;
    *  edit it from Tasks instead. */
   taskTestSuite?: TaskTestSet[];
+  /** Show saved Validation with the same cards as the Task Test suite. */
+  validationSettingId?: string;
 }) {
-  // Collapsed by default so the form leads with the actual inputs, not a wall
-  // of status. The header still shows the "N missing / ready" badge, so the
-  // at-a-glance state is never hidden — the user expands only to see details.
   const short = useFileDisplayPath();
-  const [showChecklist, setShowChecklist] = useState(false);
-  const [showTestSetup, setShowTestSetup] = useState(true);
-  const [showTraining, setShowTraining] = useState(false);
-  const [showValidationSetup, setShowValidationSetup] = useState(false);
-  const [showOthers, setShowOthers] = useState(false);
+  const [activeStep, setActiveStep] = useState(0);
+  const [visited, setVisited] = useState<number[]>([0]);
+  useEffect(() => { onReviewChange?.(activeStep === 5); }, [activeStep, onReviewChange]);
+  const [editingValidation, setEditingValidation] = useState(false);
+  useEffect(() => setEditingValidation(false), [validationSettingId]);
+  const showSavedValidation = Boolean(validationSettingId) && !editingValidation
+    && validationSets.length > 0 && scoringSuiteMissing(validationSets, "Validation").length === 0;
   const compute = useComputeTargets();
   const explicitComputeValue = computeTargetValue({ gpuProvider, cloudBackend, sshHostId });
   const effectiveComputeTarget = (
@@ -1708,8 +1698,6 @@ export function RunInputs({
   const validationIsIndependent = hasValidationSuite;
   const hasTaskTestSuite = !!taskTestSuite?.length;
   const customTestMissing = scoringSuiteMissing(testSets, "Test");
-  const validationSuiteMissing = hasValidationSuite
-    ? scoringSuiteMissing(validationSets, "Validation") : [];
   const requiredValues: RunSummaryValue[] = [
     ...requiredPrefixValues,
     ...extraRequiredValues,
@@ -1725,15 +1713,11 @@ export function RunInputs({
     }] : [{
       name: "Test suite",
       value: testSets.length
-        ? `${testSets.length} ${testSets.length === 1 ? "dataset" : "datasets"}`
+        ? `${testSets.length} ${testSets.length === 1 ? "benchmark" : "benchmarks"}`
         : "Not set",
       complete: customTestMissing.length === 0,
     }]),
-    ...(validationIsIndependent ? [{
-      name: "Validation suite",
-      value: `${validationSets.length} ${validationSets.length === 1 ? "dataset" : "datasets"}`,
-      complete: validationSuiteMissing.length === 0,
-    }] : []),
+
     ...(trainingMethod === "gkd" ? [{
       name: "Teacher model", value: teacherModel.trim() || "Not set", complete: Boolean(teacherModel.trim()),
     }] : []),
@@ -1745,15 +1729,13 @@ export function RunInputs({
     ...(validationIsIndependent ? [
       {
         name: "Validation suite",
-        value: `${validationSets.length} independent datasets`,
+        value: `${validationSets.length} ${validationSets.length === 1 ? "benchmark" : "benchmarks"}`,
         overridden: true,
       },
     ] : [
       {
-        name: "Validation",
-        value: hasTaskTestSuite
-          ? `From Test suite · 20% per eligible set · minimum 200 rows`
-          : "From Test · 20% when it yields at least 200 rows",
+        name: "Validation suite",
+        value: "From Test",
         overridden: false,
       },
     ]),
@@ -1769,132 +1751,51 @@ export function RunInputs({
       ? [{ name: "Use LoRA", value: useLoraLabel(usePeft), overridden: Boolean(usePeft) }]
       : []),
     ...resourceSummaryValues({ numGpus, gpuAllocationMode, generation_backend, adaptiveMidTrainingEvaluation, iterations, budget, timeLimitHours, queueWaitHours, stopThreshold }),
-    ...scoringSummaryValues(taskTestSuite || testSets, "Test"),
-    ...scoringSummaryValues(validationSets, "Validation"),
     ...extraOptionalValues,
   ];
+  const missingCount = Math.max(requiredMissing.length, requiredValues.filter(value => !value.complete).length);
+  const steps = [
+    { label: "Basic info", complete: requiredPrefixValues.every(value => value.complete) && extraRequiredValues.every(value => value.complete) && Boolean(effectiveComputeTarget) },
+    { label: "Test setup", complete: hasTaskTestSuite || customTestMissing.length === 0 },
+    { label: "Training", complete: trainingStepReady({ dataset, dataQuery, baseModel, modelQuery, trainingMethod, methodQuery, teacherModel, rewardModel, usePeft }) },
+    { label: "Validation setup", complete: validationSets.length === 0 || scoringSuiteMissing(validationSets, "Validation").length === 0 },
+    { label: "Others", complete: runtimeStepReady({ numGpus, iterations, budget, timeLimitHours, queueWaitHours, stopThreshold, gpuAllocationMode, generation_backend, adaptiveMidTrainingEvaluation }) },
+    { label: "Checklist", complete: missingCount === 0 },
+  ];
+  const checklistReady = missingCount === 0 && steps.slice(0, 5).every((step, index) => step.complete && visited.includes(index));
+  useEffect(() => { if (activeStep === 5 && !checklistReady) setActiveStep(4); }, [activeStep, checklistReady]);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const goToStep = (index: number) => {
+    if (index === 5 && !checklistReady) return;
+    setVisited(value => value.includes(index) ? value : [...value, index]);
+    setActiveStep(index);
+    if (panelRef.current) panelRef.current.scrollTop = 0;
+  };
   return (
-    <div className="space-y-6">
-      {/* Two groups, and they are the two halves of the concept: what a run
-          cannot start without — the files that define and score the problem —
-          and the setting it attacks the problem with, every part of which Zevo
-          will decide for you if you leave it alone. */}
-      <section className="space-y-3">
-        <div>
-          <h3 className="section-title !text-brass-300">Required</h3>
-        </div>
-        {requiredPrefix}
-        {/* Compute backend sits here — right under the objective and always
-            visible — because which GPU/provider a Run lands on is a first-class
-            decision, not an "Others" afterthought. The finer knobs (GPU count,
-            generation backend) stay tucked away below. */}
-        <div className="pt-1">
-          <BackendPicker
-            gpuProvider={gpuProvider}
-            cloudBackend={cloudBackend}
-            sshHostId={sshHostId}
-            onChange={onChange}
-          />
-        </div>
-        <div className="space-y-3 pt-1">
-          <button
-            type="button"
-            onClick={() => setShowTestSetup((v) => !v)}
-            className="flex w-full items-center gap-1.5 text-left"
-          >
-            <ChevronRight
-              size={12}
-              className={`shrink-0 text-slate-400 transition-transform ${showTestSetup ? "rotate-90" : ""}`}
-            />
-            <span className="field-label !text-slate-100">
-              {hasTaskTestSuite ? "Test Suite" : "Test Setup"}
-            </span>
-          </button>
-          {showTestSetup && (
-            hasTaskTestSuite ? (
-              <TaskTestSuite items={taskTestSuite!} />
-            ) : (
-              <ScoringSuiteEditor
-                items={testSets}
-                lane="Test"
-                onChange={(items) => onChange({ testSets: items })}
-              />
-            )
-          )}
-        </div>
-      </section>
+    <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-5 md:grid-cols-[210px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] md:gap-x-6 lg:gap-x-10">
+      <LaunchContents steps={steps.filter((_, index) => index !== 5 || checklistReady).map((step, index) => ({ ...step, complete: step.complete && visited.includes(index), group: index < 2 ? "Required" : index === 5 ? "Review" : "Optional" }))} active={activeStep} onSelect={goToStep} />
+      <div ref={panelRef} className="min-h-0 overflow-y-auto overscroll-contain pr-2">
+        <LaunchStepHeading key={activeStep} label={steps[activeStep].label} />
+        {!hideSource && <section aria-label="Task and setting" className="space-y-3 rounded-xl bg-gradient-to-br from-brass-500/[0.07] via-white/[0.02] to-transparent p-3">
+          {taskSelector}
+          {optionalPrefix || <div>
+            <div className="field-label mb-1.5">Saved settings</div>
+            <p className="text-xs text-slate-500">Select an existing task to reuse a setting.</p>
+          </div>}
+        </section>}
 
-      {/* Optional controls stay compact as three independent accordions. */}
-      <section className="space-y-3">
-        <h3 className="section-title !text-brass-300">Optional</h3>
-        <div className="flex flex-col gap-3">
-        {optionalPrefix && <div>{optionalPrefix}</div>}
-        <div className="order-2 space-y-3">
-          <button
-            type="button"
-            onClick={() => setShowValidationSetup((v) => !v)}
-            className="flex w-full items-center gap-1.5 text-left"
-          >
-            <ChevronRight
-              size={12}
-              className={`shrink-0 text-slate-400 transition-transform ${showValidationSetup ? "rotate-90" : ""}`}
-            />
-            <span className="field-label !text-slate-100">Validation Setup</span>
-          </button>
-          {showValidationSetup && (
-            /* Empty delegates deterministic per-benchmark Validation settlement
-               to the engine before optimization begins. */
-            <div className="space-y-3">
-              {!validationIsIndependent ? (
-                <div className="rounded-md border border-brass-500/25 bg-brass-500/[0.04] px-4 py-3">
-                  <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
-                    <span className="field-label !text-brass-200">
-                      Constructed from Test suite
-                    </span>
-                    <span className="font-mono text-xs leading-relaxed text-slate-400 sm:text-right">
-                      20% per eligible set · minimum 200 rows
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => onChange({ validationSets: [emptyScoringSet()] })}
-                    className="btn mt-3 !py-1 !text-2xs"
-                  >
-                    <Plus size={12} /> use independent Validation sets
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <ScoringSuiteEditor
-                    items={validationSets}
-                    lane="Validation"
-                    onChange={(items) => onChange({ validationSets: items })}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onChange({ validationSets: [] })}
-                    className="font-mono text-2xs text-slate-500 transition hover:text-brass-300"
-                  >
-                    Use automatic Validation from Test instead
-                  </button>
-                </div>
-              )}
-            </div>
+        {/* Keep panels mounted so draft cards and upload state survive navigation. */}
+        <section hidden={activeStep !== 0} aria-label="Basic info" className="motion-safe:animate-zevo-in space-y-4">
+          {requiredPrefix}
+          <BackendPicker gpuProvider={gpuProvider} cloudBackend={cloudBackend} sshHostId={sshHostId} onChange={onChange} />
+          {extra}
+        </section>
+        <section hidden={activeStep !== 1} aria-label="Test setup" className="motion-safe:animate-zevo-in space-y-3">
+          {hasTaskTestSuite ? <TaskTestSuite items={taskTestSuite!} /> : (
+            <ScoringSuiteEditor items={testSets} lane="Test" onChange={items => onChange({ testSets: items })} />
           )}
-        </div>
-        <div className="order-1 space-y-3">
-          <button
-            type="button"
-            onClick={() => setShowTraining((v) => !v)}
-            className="flex w-full items-center gap-1.5 text-left"
-          >
-            <ChevronRight
-              size={12}
-              className={`shrink-0 text-slate-400 transition-transform ${showTraining ? "rotate-90" : ""}`}
-            />
-            <span className="field-label !text-slate-100">Training</span>
-          </button>
-          {showTraining && (
+        </section>
+        <section hidden={activeStep !== 2} aria-label="Training" className="motion-safe:animate-zevo-in space-y-3">
             <TrainingSetupFields
               inputs={{
                 dataset, datasetSplit, datasetConfig, dataQuery,
@@ -1903,21 +1804,43 @@ export function RunInputs({
               }}
               onChange={onChange}
             />
-          )}
-        </div>
-        <div className="order-3 space-y-3">
-          <button
-            type="button"
-            onClick={() => setShowOthers((v) => !v)}
-            className="flex w-full items-center gap-1.5 text-left"
-          >
-            <ChevronRight
-              size={12}
-              className={`shrink-0 text-slate-400 transition-transform ${showOthers ? "rotate-90" : ""}`}
-            />
-            <span className="field-label !text-slate-100">Others</span>
-          </button>
-          {showOthers && (
+
+        </section>
+        <section hidden={activeStep !== 3} aria-label="Validation setup" className="motion-safe:animate-zevo-in space-y-3">
+            <div className="space-y-3">
+              {!validationIsIndependent ? (
+                <div className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => onChange({ validationSets: [emptyScoringSet()] })}
+                    className="w-full rounded-md border border-dashed border-hair px-4 py-5 font-mono text-xs text-slate-500 transition hover:border-brass-500/40 hover:text-brass-300"
+                  >
+                    Add the first Validation set
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {showSavedValidation ? (
+                    <>
+                      <ScoringSuiteManifest items={validationSets} setLabel="Validation set" />
+                      <button type="button" onClick={() => setEditingValidation(true)}
+                        className="btn !py-1 !text-2xs">
+                        Edit
+                      </button>
+                    </>
+                  ) : (
+                    <ScoringSuiteEditor
+                      items={validationSets}
+                      lane="Validation"
+                      onChange={(items) => onChange({ validationSets: items })}
+                    />
+                  )}
+                </div>
+              )}
+            </div>
+
+        </section>
+        <section hidden={activeStep !== 4} aria-label="Others" className="motion-safe:animate-zevo-in space-y-3">
             <div className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           {/* A uniform Run envelope: Infrastructure chooses an actual positive
@@ -1971,36 +1894,15 @@ export function RunInputs({
             alignLabel
           />
         </div>
-        {extra}
             </div>
-          )}
-        </div>
-      </div>
-      </section>
-      {beforeChecklist}
-      <section>
-        <button
-          type="button"
-          onClick={() => setShowChecklist((v) => !v)}
-          className="flex w-full items-center justify-between gap-3 text-left"
-        >
-          <span className="flex items-center gap-1.5">
-            <ChevronRight
-              size={13}
-              className={`shrink-0 text-slate-400 transition-transform ${showChecklist ? "rotate-90" : ""}`}
-            />
-            <h3 className="section-title !text-brass-300">Checklist</h3>
-          </span>
-          <span className={`font-mono text-[0.62rem] uppercase tracking-[0.12em] ${
-            (requiredMissing.length || requiredValues.some(v => !v.complete)) ? "text-coral-300" : "text-phosphor-300"
-          }`}>
-            {Math.max(requiredMissing.length, requiredValues.filter(v => !v.complete).length) ? `${Math.max(requiredMissing.length, requiredValues.filter(v => !v.complete).length)} missing` : "ready"}
-          </span>
-        </button>
-        {showChecklist && (
+
+          {beforeChecklist}
+        </section>
+        <section hidden={activeStep !== 5} aria-label="Checklist" className="motion-safe:animate-zevo-in space-y-3">
           <RunSummaryTable requiredValues={requiredValues} optionalValues={optionalValues} />
-        )}
-      </section>
+        </section>
+        <LaunchNavigation index={activeStep} total={steps.length} onBack={() => goToStep(activeStep - 1)} onNext={() => goToStep(activeStep + 1)} canNext={activeStep === 4 ? checklistReady : steps[activeStep].complete} reviewAction={reviewAction} />
+      </div>
     </div>
   );
 }

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ClearableInput, ClearFieldsContext } from "./ClearableField";
+import { useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 
 /** Just the two fields the suggestion list shows. The full task row is bigger,
@@ -29,6 +30,8 @@ export function TaskNameInput({
   className?: string;
   id?: string;
 }) {
+  const launchStyle = useContext(ClearFieldsContext);
+  const listId = useId();
   // SWR dedupes this against the caller's own /tasks fetch, so asking for the
   // list here costs nothing and keeps the call sites to one line.
   const { data: tasks = [] } = useSWR<TaskLite[]>("/api/tasks");
@@ -72,7 +75,7 @@ export function TaskNameInput({
 
   return (
     <div ref={box} className="relative">
-      <input
+      <ClearableInput
         id={id}
         value={value}
         onChange={(e) => { onChange(e.target.value); setOpen(true); setCursor(-1); }}
@@ -101,24 +104,29 @@ export function TaskNameInput({
         autoComplete="off"
         role="combobox"
         aria-expanded={show}
+        aria-controls={show ? listId : undefined}
+        aria-autocomplete="list"
       />
       {show && (
-        <ul className="absolute left-0 right-0 top-full z-20 mt-1 max-h-56 overflow-y-auto rounded-md border border-hair bg-raised py-1 shadow-lg">
+        <ul id={listId} role="listbox" aria-label="Task name" className={`absolute left-0 right-0 top-full z-20 mt-1 max-h-56 overflow-y-auto rounded-md border border-hair bg-raised py-1 shadow-lg ${launchStyle ? "launch-select-menu" : ""}`}>
           {matches.map((t, i) => (
-            <li key={t.name}>
+            <li key={t.name} role="presentation">
               {/* Mousedown, not click: the input's blur would otherwise fire
                   first and take the row out from under the pointer. */}
               <button
                 type="button"
+                role="option"
+                aria-selected={t.name === value}
+                data-active={i === cursor}
                 onMouseDown={(e) => { e.preventDefault(); pick(t.name); }}
                 onMouseEnter={() => setCursor(i)}
                 className={`block w-full px-3 py-1.5 text-left transition ${
                   i === cursor ? "bg-brass-500/10" : "hover:bg-canvas/60"
                 }`}
               >
-                <span className="font-mono text-xs text-brass-300">{t.name}</span>
+                <span className="launch-option-title block truncate font-mono text-xs text-brass-300" title={t.name}>{t.name}</span>
                 {t.task_objective && (
-                  <span className="mt-0.5 block truncate text-2xs text-slate-500">
+                  <span className="launch-option-description mt-0.5 block text-2xs text-slate-500">
                     {t.task_objective}
                   </span>
                 )}

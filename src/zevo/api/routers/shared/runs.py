@@ -1331,8 +1331,8 @@ class CreateRunRequest(BaseModel):
     # so the union parses exactly one of them; the validator below then pins
     # which one `mode` permits.
     user_request: UserRequest | AutoUserRequest | None = None
-    # Launch UI defaults to HF and supplies its repository. Absent only for
-    # legacy API clients, which retain the existing local-copy behavior.
+    # Older stored/request objects may lack this field. Every new launch must
+    # supply a destination; create_run rejects missing policies before side effects.
     model_save_policy: ModelSavePolicy | None = None
     task_name: str = Field(min_length=1, max_length=64)
     # task_name names the work; many runs share one, so this tells executions
@@ -2224,6 +2224,8 @@ async def create_run(
     and Data prerequisites. The public route may execute this function in a
     response-independent background task while the UI polls setup progress.
     """
+    if body.model_save_policy is None:
+        raise HTTPException(422, "Final model destination is required: supply model_save_policy with an HF repository or an absolute GPU-machine directory")
     from zevo.api.routers.ui.tasks import task_to_user_request
     from zevo.engine.persistence import create_run as persist_create
     from zevo.db import Task
@@ -2957,6 +2959,8 @@ async def submit_run(
     the lifetime of the HTTP connection. Existing API/CLI callers that omit
     ``setup_id`` keep the original synchronous contract and receive ``run_id``.
     """
+    if body.model_save_policy is None:
+        raise HTTPException(422, "Final model destination is required: supply model_save_policy with an HF repository or an absolute GPU-machine directory")
     setup_id = str(body.setup_id or "")
     if setup_id and body.mode != "auto":
         from zevo.engine.run.setup_progress import update
