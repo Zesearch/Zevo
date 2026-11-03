@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import hashlib
+from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select
 
@@ -42,7 +43,7 @@ async def record_completion(session, *, ticket, heartbeat, inp, result, primary_
     execution = await session.get(WorkloadExecution, row.id) if row else None
     if execution is None:
         execution = await register_execution(session,
-            execution_id=f'verified-{heartbeat.id}', ticket_id=ticket.id,
+            execution_id=str(uuid5(NAMESPACE_URL, f'zevo:verified-inference:{heartbeat.id}')), ticket_id=ticket.id,
             heartbeat_id=heartbeat.id, runtime_key='verified_result', log_path=result.log_path or '')
     now = datetime.now(timezone.utc)
     members = [(inp.benchmark_id or ('test:0' if ticket.lane == 'held_out_test' else 'validation:0'), primary_name, result)]
