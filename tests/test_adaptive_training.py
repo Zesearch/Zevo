@@ -292,8 +292,9 @@ def test_sharded_resume_requires_optimizer_and_all_rank_rng(helper, tmp_path, la
     if layout == "deepspeed":
         (tmp_path / "latest").write_text("global_step20")
         (tmp_path / "global_step20").mkdir()
-        (tmp_path / "global_step20/rank0_optim_states.pt").write_bytes(b"optimizer")
-        (tmp_path / "global_step20/rank0_model_states.pt").write_bytes(b"model and scheduler")
+        for rank in range(2):
+            (tmp_path / f"global_step20/bf16_zero_pp_rank_{rank}_mp_rank_00_optim_states.pt").write_bytes(b"optimizer")
+            (tmp_path / f"global_step20/zero_pp_rank_{rank}_mp_rank_00_model_states.pt").write_bytes(b"model and scheduler")
     else:
         (tmp_path / "optimizer_0").mkdir()
         (tmp_path / "optimizer_0/0.distcp").write_bytes(b"optimizer")

@@ -348,6 +348,8 @@ class TrainResult(AgentResult):
         "",
         description="Absolute path to the complete train_config.yaml that actually ran.",
     )
+    remote_train_config_path: str = Field(
+        "", description="For cluster submit: absolute remote path of the configuration passed to the training command. The engine verifies its hash and records it for continuation. Empty retains the legacy remote_work_dir/train_config.yaml layout.")
     train_script_path: str = ""
     slurm_script_path: str = ""
     log_path: str = ""

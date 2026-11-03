@@ -4353,6 +4353,7 @@ async def _submit_validated_slurm_stage(
     ticket: Ticket,
     inp: BaseModel,
     heartbeat_id: str,
+    remote_train_config_path: str = "",
 ) -> InfraInstance:
     """Recover pre-publication deadlocks without rerunning the agent or sbatch.
 
@@ -4370,6 +4371,7 @@ async def _submit_validated_slurm_stage(
                 return await _submit_validated_slurm_stage_once(
                     session, run=run, ticket=ticket, inp=inp,
                     heartbeat_id=heartbeat_id, publication=publication,
+                    **({"remote_train_config_path": remote_train_config_path} if remote_train_config_path else {}),
                 )
         except DBAPIError as exc:
             # begin_nested can itself fail while flushing caller-owned writes.
@@ -4396,6 +4398,7 @@ async def _submit_validated_slurm_stage_once(
     inp: BaseModel,
     heartbeat_id: str,
     publication: dict,
+    remote_train_config_path: str = "",
 ) -> InfraInstance:
     """Commit one prepared cluster stage after its typed result validates.
 
@@ -4493,6 +4496,13 @@ async def _submit_validated_slurm_stage_once(
 
     from zevo.engine.run.remote_jobs import _ssh
 
+    if training_digest:
+        from zevo.engine.run.training_continuation import verify_remote_config
+        remote_train_config_path = remote_train_config_path or str(
+            PurePosixPath(contract.remote_work_dir) / "train_config.yaml")
+        await verify_remote_config(info, contract.remote_work_dir,
+                                   remote_train_config_path, training_digest)
+
     from zevo.engine.run.gpu_controller import submit_workload
     launch_snapshot = {}
     if isinstance(inp, InferenceTaskInput):
@@ -4549,7 +4559,10 @@ async def _submit_validated_slurm_stage_once(
             "retry_of_job_id": contract.retry_of_job_id,
             "script_sha256": local_script_sha256,
             "implementation_sha256": implementation_sha256,
-            **({"training_config_sha256": training_digest} if training_digest else {}),
+            **({"training_config_sha256": training_digest,
+                "training_config_remote_path": remote_train_config_path or
+                    str(PurePosixPath(contract.remote_work_dir) / "train_config.yaml")}
+               if training_digest else {}),
             **({"resumed_from": resume_proof} if resume_proof else {}),
             **({"inference_launch": launch_snapshot, "inference_launch_reuse": inp.slurm_launch_reuse, "frozen_reuse_artifacts": inp.frozen_reuse_artifacts} if launch_snapshot else {}),
             **controller_meta,
@@ -4969,6 +4982,8 @@ async def run_ticket(
             raise ValueError(f"system cloud acquisition helper is missing: {acquire_source}")
         shutil.copyfile(acquire_source, Path(work_dir) / "zevo_cloud_acquire.py")
     if tk.agent_id == "train":
+        shutil.copyfile(REPO_ROOT / "playbook" / "runners" / "checkpoint_state.py",
+                        Path(work_dir) / "zevo_checkpoint_state.py")
         shutil.copyfile(REPO_ROOT / "playbook" / "runners" / "adaptive_training.py",
                         Path(work_dir) / "zevo_adaptive_training.py")
         telemetry_source = REPO_ROOT / "playbook" / "runners" / "train_telemetry.py"
@@ -7079,6 +7094,8 @@ async def run_ticket(
                     ticket=tk,
                     inp=inp,
                     heartbeat_id=heartbeat_id,
+                    **({"remote_train_config_path": output.remote_train_config_path}
+                       if isinstance(output, TrainResult) else {}),
                 )
             except Exception as exc:  # submission is part of the stage result
                 if not session.is_active:

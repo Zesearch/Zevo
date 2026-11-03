@@ -111,6 +111,11 @@ is empty. Success requires absolute paths for
 `train_config_path`, `train_script_path`, `log_path`, and the verified
 checkpoint, plus measured example count, loss, and duration. The YAML alone owns
 the actual base model, parent, method, objective, hyperparameters, and rationale.
+For cluster submit, return `remote_train_config_path` as the absolute path passed
+to the remote training command. The engine checks its hash before launch and
+records it for continuation; it may live in a stable Ticket `runtime/` directory.
+Omitting it selects the legacy `slurm_job.remote_work_dir/train_config.yaml`
+layout, which must also pass the pre-launch hash check.
 The system-owned telemetry import in `train.py` and the non-empty log are
 required observability artifacts; neither can compensate for a missing config
 or checkpoint.
