@@ -3,10 +3,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import inspect
 import json
 from pathlib import Path, PurePosixPath
 import shlex
+
+# Load the same portable function that is staged beside the training worker.
+from zevo.engine.agent.loader import REPO_ROOT
+_checkpoint_spec = importlib.util.spec_from_file_location(
+    "zevo_checkpoint_state", REPO_ROOT / "playbook/runners/checkpoint_state.py")
+_checkpoint_module = importlib.util.module_from_spec(_checkpoint_spec)
+_checkpoint_spec.loader.exec_module(_checkpoint_module)
+verify_resume_checkpoint = _checkpoint_module.verify_resume_checkpoint
 
 TERMINAL = {"COMPLETED", "TIMEOUT", "PREEMPTED", "NODE_FAIL", "FAILED", "OUT_OF_MEMORY", "BOOT_FAIL", "DEADLINE", "REVOKED"}
 
@@ -52,29 +61,28 @@ def verify_files(root, request, ticket_id, executed_config, world_size):
         or state.get("max_steps") != request["planned_steps"]
         or not 0 < request["completed_steps"] < request["planned_steps"]):
         raise ValueError("trainer state does not match continuation progress")
-    required = ["trainer_state.json", "optimizer.pt", "scheduler.pt", "training_args.bin"]
-    required += (["rng_state.pth"] if world_size == 1 else
-                 [f"rng_state_{rank}.pth" for rank in range(world_size)])
-    weights = next((name for name in ("model.safetensors", "pytorch_model.bin", "adapter_model.safetensors", "adapter_model.bin")
-                    if (checkpoint / name).is_file()), None)
-    if weights:
-        required.append(weights)
-    else:
-        index = next((checkpoint / name for name in ("model.safetensors.index.json", "pytorch_model.bin.index.json")
-                      if (checkpoint / name).is_file()), None)
-        if index is None:
-            raise ValueError("continuation has no model weights")
-        shards = set(json.loads(index.read_text()).get("weight_map", {}).values())
-        if not shards:
-            raise ValueError("empty checkpoint weight index")
-        required += [index.name, *shards]
-    for name in required:
-        path = owned(checkpoint / name)
-        if not path.is_relative_to(checkpoint) or not path.is_file() or path.stat().st_size == 0:
-            raise ValueError(f"missing or invalid full-state checkpoint file: {name}")
+    verify_resume_checkpoint(checkpoint, step=request["completed_steps"],
+                             planned_steps=request["planned_steps"], world_size=world_size)
     return {**request, "checkpoint_path": str(checkpoint), "plan_path": str(plan_path),
             "ticket_id": ticket_id, "verified": True,
             "state_sha256": hashlib.sha256((checkpoint / "trainer_state.json").read_bytes()).hexdigest()}
+
+
+async def verify_remote_config(info, remote_workdir, config_path, digest):
+    """Bind an explicitly declared remote config before publishing a GPU job."""
+    from zevo.engine.run.remote_jobs import _ssh
+    root = str(PurePosixPath(remote_workdir).parent)
+    program = (
+        "from pathlib import Path\nimport hashlib\n"
+        f"p=Path({config_path!r})\nroot=Path({root!r}).resolve()\n"
+        "if not p.is_absolute() or not p.resolve().is_relative_to(root):\n"
+        "    raise ValueError('configuration outside Train ticket')\n"
+        f"if hashlib.sha256(p.read_bytes()).hexdigest() != {digest!r}:\n"
+        "    raise ValueError('remote configuration hash mismatch')\n"
+    )
+    result = await _ssh(info, "python3 -c " + shlex.quote(program), timeout_seconds=60)
+    if not result.get("ok"):
+        raise ValueError("cannot bind remote training configuration: " + str(result.get("error", "")))
 
 
 async def verify_request(session, ticket, inp, output, row):
@@ -98,12 +106,14 @@ async def verify_request(session, ticket, inp, output, row):
     if workdir.parent.name != ticket.id:
         raise ValueError("workload directory is not owned by this Train ticket")
     arguments = dict(root=str(workdir.parent), request=request, ticket_id=ticket.id,
-                     executed_config=str(workdir / "train_config.yaml"), world_size=config.training.world_size)
-    program = inspect.getsource(verify_files) + "\nimport json\nprint(json.dumps(verify_files(**" + repr(arguments) + ")))"
+                     executed_config=str(meta.get("training_config_remote_path") or workdir / "train_config.yaml"), world_size=config.training.world_size)
+    program = inspect.getsource(verify_resume_checkpoint) + "\n" + inspect.getsource(verify_files) + "\nimport json\nprint(json.dumps(verify_files(**" + repr(arguments) + ")))"
     code = "import base64;exec(base64.b64decode(" + repr(base64.b64encode(program.encode()).decode()) + "))"
     result = await _ssh(info, "python3 -c " + shlex.quote(code), timeout_seconds=60)
     if not result.get("ok"):
-        raise ValueError("cannot verify full-state continuation: " + str(result.get("error", ""))[:1000])
+        # SSH login banners can otherwise consume the entire error budget and
+        # hide the final exception that explains why continuation was refused.
+        raise ValueError("cannot verify full-state continuation: " + str(result.get("error", ""))[-4000:])
     try:
         proof = json.loads(result.get("stdout", "").strip().splitlines()[-1])
     except (ValueError, IndexError) as exc:

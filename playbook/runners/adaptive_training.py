@@ -37,31 +37,13 @@ def atomic_json(path, value):
     os.replace(temp, path)
 
 
-def verify_resume_checkpoint(path, *, step, planned_steps, world_size=1):
-    root = Path(path)
-    state = json.loads((root / "trainer_state.json").read_text())
-    if state.get("global_step") != step or state.get("max_steps") != planned_steps:
-        raise ValueError("segment changed the full training plan or saved the wrong step")
-    # Recognize the checkpoint layouts saved/resumed by Transformers Trainer:
-    # ordinary/DDP, DeepSpeed ZeRO and FSDP sharded state.
-    deepspeed = bool(list(root.glob("global_step*/*optim_states.pt")))
-    fsdp = bool(list(root.glob("optimizer*/**/*.distcp")))
-    if deepspeed:
-        if not (root / "latest").is_file() or not list(root.glob("global_step*/*model_states.pt")):
-            raise ValueError("DeepSpeed checkpoint lacks its model/scheduler state or latest tag")
-    else:
-        if not fsdp and not (root / "optimizer.pt").is_file():
-            raise ValueError("resumable checkpoint is missing optimizer.pt")
-        if not (root / "scheduler.pt").is_file():
-            raise ValueError("resumable checkpoint is missing scheduler.pt")
-    rng_files = list(root.glob("rng_state*.pth"))
-    if len(rng_files) < world_size:
-        raise ValueError("resumable checkpoint is missing per-rank RNG state")
-    sharded_weights = bool(list(root.glob("pytorch_model*/**/*.distcp")))
-    if (not deepspeed and not sharded_weights
-            and not list(root.glob("*.safetensors")) and not list(root.glob("pytorch_model*.bin"))):
-        raise ValueError("resumable checkpoint is missing model weights")
-    return state
+_checkpoint_path = Path(__file__).with_name("zevo_checkpoint_state.py")
+if not _checkpoint_path.is_file():
+    _checkpoint_path = Path(__file__).with_name("checkpoint_state.py")
+_checkpoint_spec = importlib.util.spec_from_file_location("zevo_checkpoint_state", _checkpoint_path)
+_checkpoint_module = importlib.util.module_from_spec(_checkpoint_spec)
+_checkpoint_spec.loader.exec_module(_checkpoint_module)
+verify_resume_checkpoint = _checkpoint_module.verify_resume_checkpoint
 
 
 def validate_measurement(measurement, contract, contract_sha256, step):

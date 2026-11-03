@@ -210,7 +210,11 @@ normal graceful stop may exit 0: `COMPLETED` describes this workload, not the
 whole training plan. During terminal `collect`, return `status="deferred"`
 with `continuation` containing `reason="walltime"`, absolute remote
 `checkpoint_path` and `plan_path`, `completed_steps`, `planned_steps`, and the
-unchanged YAML's `config_sha256`. Supply the local executed `train_config_path`.
+unchanged YAML's `config_sha256`. Supply the local executed `train_config_path`. During cluster submit also return
+`remote_train_config_path`, the absolute path passed to your training command.
+The engine verifies its bytes against the local configuration before launch and
+records the binding for continuation. Use a Ticket-stable `runtime/` path when
+needed; do not change configuration bytes between continuation attempts.
 Leave final `checkpoint_path` and `intermediate_checkpoints` empty. The backend
 verifies the frozen plan, progress, configuration and full-state file inventory,
 then queues a new submit activation on this SAME ticket, without a repair count
@@ -793,7 +797,8 @@ Read `adaptive_mid_training_evaluation` from the typed input. Off preserves the
 ordinary training path. When on, set `training.adaptive_evaluation=true` in the
 YAML; do not combine this mode with loss-based `training.early_stopping`.
 Use the system-owned `adaptive_training_helper_path`, copied unchanged as
-`zevo_adaptive_training.py`. Copy the entire `adaptive-validation` directory
+`zevo_adaptive_training.py`, together with the supplied sibling
+`zevo_checkpoint_state.py` (shared checkpoint inventory verifier). Copy the entire `adaptive-validation` directory
 beside it, preserving its contract and artifact bytes. It contains Validation
 only, every suite member, frozen baseline inference YAMLs, labels and evaluators.
 Never acquire or read Test for this controller.
