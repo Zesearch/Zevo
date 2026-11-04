@@ -145,6 +145,7 @@ class ExecutionEventDTO(BaseModel):
 class TicketDetail(TicketDTO):
     measurement_attempt: dict[str, Any] = Field(default_factory=dict)
     generation_report: dict[str, Any] = Field(default_factory=dict)
+    checkpoint_handoff_failure: dict[str, Any] | None = None
     mid_training_validation: dict[str, Any] | None = None
     messages: list[MessageDTO]
     notices: list[NoticeDTO]
@@ -1420,6 +1421,9 @@ async def get_ticket(
         measurement_attempt={"revision": attempt.get("revision"), "started_at": attempt.get("started_at"),
                              "active_members": item.get("active_members", [])} if attempt else {},
         generation_report=report,
+        checkpoint_handoff_failure=next((f for f in
+            ((owning_run.lifecycle or {}).get("adaptive_checkpoint_failures", {}) if owning_run else {}).values()
+            if f.get("train_ticket_id") == t.id and not f.get("resolved")), None),
         mid_training_validation=mid_training,
         **base.model_dump(),
         messages=[

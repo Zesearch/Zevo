@@ -32,10 +32,11 @@ def bundle(root):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('handoff_error', [False, True])
 @pytest.mark.parametrize('final', [False, True])
 @pytest.mark.parametrize('streamed', [False, True])
 @pytest.mark.parametrize('recover', [False, True])
-async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, final, streamed, recover):
+async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, final, streamed, recover, handoff_error):
     from zevo.engine.run import remote_jobs
     from zevo.engine.agent.drivers.evaluation_runner import EvaluationRunnerDriver
     from zevo.engine.run.runner import _advance_measurements, _maybe_wake_supervisor, _apply_run_score_monitor
@@ -57,6 +58,8 @@ async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, f
             return {'ok': True, 'stdout': '__PROGRESS__:train-1:' + json.dumps({
                 'phase': 'adaptive_checkpoint', 'adaptive_checkpoint_request': request})}
         if 'base64' in command:
+            if handoff_error:
+                return {'ok': False, 'error': 'NameError: __file__ is not defined'}
             return {'ok': True, 'stdout': 'checkpoint-verified'}
         deliveries.append(command)
         return {'ok': len(deliveries) > 1}
@@ -82,7 +85,33 @@ async def test_checkpoint_pipeline_serial_and_retryable(tmp_path, monkeypatch, f
         await db.commit()
         from zevo.engine.run.scheduler.reconciler import _reconcile_slurm_stage_jobs
         assert await _reconcile_slurm_stage_jobs(db) == (0, 0)  # No final-model collect wake.
+        if handoff_error:
+            from zevo.engine.run.adaptive_training import checkpoint_orchestration_context, activation_validation_context
+            assert 'NameError' in train.error_message
+            assert train.status == 'waiting_external'
+            assert not run.lifecycle.get('adaptive_checkpoints')
+            blocked = checkpoint_orchestration_context(run)[0]
+            assert blocked['phase'] == 'handoff_failed' and 'create_request' not in blocked
+            wakes = (await db.scalars(select(AgentWakeupRequest))).all()
+            assert len(wakes) == 1
+            assert activation_validation_context(run.lifecycle, '', wakes[0].payload)['phase'] == 'handoff_failed'
+            # Completing the first notification must not turn polling into an activation loop.
+            wakes[0].status = 'completed'
+            await db.commit()
+            await _reconcile_slurm_stage_jobs(db)
+            assert len((await db.scalars(select(AgentWakeupRequest))).all()) == 1
+            from fastapi import HTTPException
+            from zevo.engine.run.adaptive_training import create_checkpoint_stage
+            from zevo.contracts.tickets import CreateTicketBody
+            with pytest.raises(HTTPException, match='missing'):
+                await create_checkpoint_stage(db, run, CreateTicketBody(run_id='r', agent_id='inference', checkpoint_request_id=key, payload={}, inputs={}))
+            handoff_error = False
+            # Discard only this test's notification to retain the exact pipeline assertions below.
+            await db.delete(wakes[0])
+            await db.commit()
         assert await handle_checkpoint_yield(db, run, train, job, dict(job.meta))
+        assert not train.error_message
+        assert not [f for f in run.lifecycle.get('adaptive_checkpoint_failures', {}).values() if not f['resolved']]
         from datetime import datetime, timezone
         from fastapi import HTTPException
         from zevo.api.routers.shared.tickets import create_ticket
@@ -267,3 +296,28 @@ def test_checkpoint_activation_identity_keeps_dispatch_and_decision_separate():
     decision = activation_validation_context(lifecycle, '', {'adaptive_training_request_id': 'a'}, dispatch)
     assert 'phase' not in decision
     assert activation_validation_context(lifecycle, '', {}) is None
+
+
+@pytest.mark.parametrize("fault", [None, "optimizer", "ledger", "step"])
+def test_checkpoint_verifier_executes_without_file_or_runtime(tmp_path, fault):
+    import subprocess
+    import sys
+    from zevo.engine.run.adaptive_training import checkpoint_verification_program
+    checkpoint = tmp_path / "checkpoint-20"
+    checkpoint.mkdir()
+    (checkpoint / "trainer_state.json").write_text(json.dumps({"global_step": 20, "max_steps": 100}))
+    for name in ["optimizer.pt", "scheduler.pt", "rng_state.pth", "model.safetensors"]:
+        (checkpoint / name).write_bytes(b"inventory")
+    request = {"checkpoint": str(checkpoint), "step": 20, "planned_steps": 100, "world_size": 1}
+    (tmp_path / "adaptive-training.json").write_text(json.dumps({"pending_checkpoint": request}))
+    if fault == "optimizer":
+        (checkpoint / "optimizer.pt").unlink()
+    elif fault == "ledger":
+        (tmp_path / "adaptive-training.json").write_text('{}')
+    elif fault == "step":
+        (checkpoint / "trainer_state.json").write_text('{"global_step": 19, "max_steps": 100}')
+    result = subprocess.run([sys.executable, "-I", "-c", checkpoint_verification_program(request)],
+                            cwd=tmp_path, capture_output=True, text=True)
+    assert (result.returncode == 0) == (fault is None), result.stderr
+    assert ("checkpoint-verified" in result.stdout) == (fault is None)
+    assert "__file__" not in result.stderr

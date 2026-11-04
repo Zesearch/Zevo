@@ -81,7 +81,7 @@ async def _ssh(
             "exit_code": int(proc.returncode or 0),
             "stdout": stdout.decode("utf-8", "replace")[:stdout_limit],
             "stdout_truncated": len(stdout.decode("utf-8", "replace")) > stdout_limit,
-            "error": stderr.decode("utf-8", "replace")[:1000],
+            "error": stderr.decode("utf-8", "replace")[-4000:],
         }
     except Exception as exc:  # cleanup must not mask cancellation itself
         return {"ok": False, "exit_code": -1, "stdout": "", "error": str(exc)[:1000]}

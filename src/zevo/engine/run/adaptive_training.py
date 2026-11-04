@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 from pathlib import Path, PurePosixPath
 import shlex
@@ -15,6 +16,15 @@ from zevo.db import Run, Ticket, ExecutionEvent, WorkProduct
 
 def activation_validation_context(lifecycle, reason, payload, previous=None):
     """Identify a checkpoint by its request ID, never by activation timing."""
+    failure_id = (payload or {}).get("adaptive_checkpoint_failure_id")
+    if (not failure_id and not (payload or {}).get("adaptive_checkpoint_request_id")
+            and not (payload or {}).get("adaptive_training_request_id")
+            and (previous or {}).get("phase") == "handoff_failed"):
+        failure_id = previous.get("request_id")
+    failure = lifecycle.get("adaptive_checkpoint_failures", {}).get(failure_id)
+    if failure:
+        return {"request_id": failure_id, "train_ticket_id": failure["train_ticket_id"],
+                "step": failure.get("step", 0), "phase": "handoff_failed"}
     request_id = (payload or {}).get("adaptive_training_request_id")
     prefix = "mid-training Validation decision "
     if not request_id and reason.startswith(prefix):
@@ -329,6 +339,54 @@ def validate_checkpoint_request(request, train, digest):
         raise ValueError("invalid checkpoint history")
 
 
+def checkpoint_verification_program(request):
+    """Portable inventory check: python -c has no module path or GPU runtime."""
+    from zevo.engine.run.training_continuation import verify_resume_checkpoint
+    return (inspect.getsource(verify_resume_checkpoint)
+        + "\nimport json\nfrom pathlib import Path\n"
+        + f"verify_resume_checkpoint({request['checkpoint']!r},step={request['step']},planned_steps={request['planned_steps']},world_size={request['world_size']})\n"
+        + f"r=json.loads((Path({request['checkpoint']!r}).parent/'adaptive-training.json').read_text())\n"
+        + f"assert r.get('pending_checkpoint')=={request!r}, 'checkpoint request differs from saved ledger'\n"
+        + "print('checkpoint-verified')\n")
+
+
+async def report_checkpoint_handoff_failure(session, run, train, job, meta, error):
+    """Notify the supervisor without admitting an unverified checkpoint."""
+    from datetime import datetime, timezone
+    from zevo.engine.run.wakeup import queue_wakeup
+    run = (await session.execute(select(Run).where(Run.id == run.id).with_for_update()
+        .execution_options(populate_existing=True))).scalar_one()
+    detail = str(error)[-3000:]
+    request = meta.get("checkpoint_handoff_request") or {}
+    fingerprint = hashlib.sha256(detail.encode()).hexdigest()
+    failures = dict((run.lifecycle or {}).get("adaptive_checkpoint_failures", {}))
+    previous = failures.get(job.id, {})
+    failure = {"train_ticket_id": train.id, "job_row_id": job.id, "job_id": job.instance_id,
+        "step": request.get("step", 0), "checkpoint": request.get("checkpoint", ""),
+        "error": detail, "fingerprint": fingerprint, "resolved": False,
+        "first_seen_at": previous.get("first_seen_at") or datetime.now(timezone.utc).isoformat(),
+        "allocation_state": meta.get("allocation_state", ""),
+        "attempts": previous.get("attempts", 0) + 1}
+    failures[job.id] = failure
+    run.lifecycle = {**(run.lifecycle or {}), "adaptive_checkpoint_failures": failures}
+    meta["checkpoint_handoff_error"] = detail
+    job.meta = dict(meta)
+    train.status = "waiting_external"
+    train.summary = "Checkpoint handoff blocked; awaiting Orchestrator"
+    train.error_message = detail
+    await session.flush()
+    if run.status == "running" and run.supervisor_ticket_id and (
+            previous.get("notified_fingerprint") != fingerprint or previous.get("resolved")):
+        failures = {**failures, job.id: {**failure, "notified_fingerprint": fingerprint}}
+        run.lifecycle = {**run.lifecycle, "adaptive_checkpoint_failures": failures}
+        await queue_wakeup(session, agent_id="orchestrator", ticket_id=run.supervisor_ticket_id,
+            source="on_demand", reason=f"mid-training checkpoint handoff failed {job.id}",
+            payload={"adaptive_checkpoint_failure_id": job.id})
+    elif previous.get("notified_fingerprint"):
+        failures = {**failures, job.id: {**failure, "notified_fingerprint": previous["notified_fingerprint"]}}
+        run.lifecycle = {**run.lifecycle, "adaptive_checkpoint_failures": failures}
+
+
 async def handle_checkpoint_yield(session, run, train, job, meta):
     """Intercept successful *segment* exit before ordinary final-model collect."""
     if train.agent_id != "train" or not (run.lifecycle or {}).get("adaptive_mid_training_evaluation"):
@@ -336,7 +394,6 @@ async def handle_checkpoint_yield(session, run, train, job, meta):
     if meta.get("checkpoint_yield"):
         return True
     from zevo.engine.run.remote_jobs import _device_info_for_ticket, _ssh
-    from zevo.paths import REPO_ROOT
     events = (await session.execute(select(ExecutionEvent).where(
         ExecutionEvent.ticket_id == train.id, ExecutionEvent.phase == "adaptive_checkpoint")
         .order_by(ExecutionEvent.ts.desc()).limit(20))).scalars().all()
@@ -369,6 +426,7 @@ async def handle_checkpoint_yield(session, run, train, job, meta):
            .execution_options(populate_existing=True))).scalar_one()
     path, contract = checkpoint_contract(run, train)
     validate_checkpoint_request(request, train, hashlib.sha256(path.read_bytes()).hexdigest())
+    meta["checkpoint_handoff_request"] = request
     stages = dict((run.lifecycle or {}).get("adaptive_checkpoints", {}))
     key = request["request_id"]
     previous = stages.get(key)
@@ -381,17 +439,19 @@ async def handle_checkpoint_yield(session, run, train, job, meta):
         info = await _device_info_for_ticket(session, train)
         if not info:
             raise ValueError("checkpoint device route unavailable")
-        program = (REPO_ROOT / "playbook/runners/adaptive_training.py").read_text() + (
-            f"\nverify_resume_checkpoint({request['checkpoint']!r},step={request['step']},planned_steps={request['planned_steps']},world_size={request['world_size']})\n"
-            f"r=json.loads((Path({request['checkpoint']!r}).parent/'adaptive-training.json').read_text())\n"
-            f"assert r.get('pending_checkpoint')=={request!r}\nprint('checkpoint-verified')\n")
+        program = checkpoint_verification_program(request)
         code = "import base64;exec(base64.b64decode(" + repr(base64.b64encode(program.encode()).decode()) + "))"
         proof = await _ssh(info, "python3 -c " + shlex.quote(code), timeout_seconds=60)
         if not proof.get("ok") or "checkpoint-verified" not in proof.get("stdout", ""):
-            raise ValueError("checkpoint state verification failed; segment remains uncollected")
+            detail = str(proof.get("error") or proof.get("stdout") or "no verification evidence")[-3000:]
+            raise ValueError("checkpoint state verification failed: " + detail)
         stages[key] = {"request": request, "inference_ticket_id": "", "evaluation_ticket_id": "",
                        "job_row_id": job.id, "metrics_delivered": False, "resume_queued": False}
         run.lifecycle = {**(run.lifecycle or {}), "adaptive_checkpoints": stages}
+    failures = dict((run.lifecycle or {}).get("adaptive_checkpoint_failures", {}))
+    if job.id in failures:
+        failures[job.id] = {**failures[job.id], "resolved": True}
+        run.lifecycle = {**run.lifecycle, "adaptive_checkpoint_failures": failures}
     train.status = "waiting_external"
     train.summary = f"Checkpoint {request['step']} saved; waiting for Orchestrator"
     train.error_message = ""
@@ -574,8 +634,10 @@ async def reconcile_checkpoint_stages(session):
 
 
 def checkpoint_orchestration_context(run):
-    """Only verified Validation checkpoint work, never a second iteration."""
-    result = []
+    """Verified work and blocked handoffs; only verified work has a create body."""
+    result = [{**failure, "request_id": key, "phase": "handoff_failed"}
+              for key, failure in (run.lifecycle or {}).get("adaptive_checkpoint_failures", {}).items()
+              if not failure.get("resolved")]
     for key, stage in (run.lifecycle or {}).get("adaptive_checkpoints", {}).items():
         if stage.get("resume_queued"):
             continue
