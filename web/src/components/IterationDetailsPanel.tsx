@@ -3,6 +3,7 @@ import useSWR from "swr";
 import { ChevronRight, X } from "lucide-react";
 import type { RunDetail } from "../lib/api";
 import { assignIterations, iterationOrder } from "../lib/iterations";
+import { completedTrainingData, hasIterationEvidence } from "../lib/iterationEvidence";
 import { currentPredictionArtifacts } from "../lib/predictionArtifacts";
 import { fmtMetric, fmtScore, isPercentageMetric, metricScoreRange } from "../lib/format";
 import { Kicker } from "./zevo/primitives";
@@ -166,23 +167,10 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
     let activeData: Artifact[] = [];
     return iterationOrder(run.tickets).map((entry) => {
       const artifactsForRound = byKey.get(entry.key) || [];
-      const hasNewData = artifactsForRound.some((artifact) => {
-        const ticket = ticketById.get(artifact.ticket_id);
-        return ticket?.agent_id === "data" && ticket.lane === "optimization"
-          && artifact.role === "training_dataset";
-      });
-      if (hasNewData) {
-        activeData = artifactsForRound.filter((artifact) => {
-          const ticket = ticketById.get(artifact.ticket_id);
-          return ticket?.agent_id === "data" && ticket.lane === "optimization";
-        });
-      }
+      const newData = completedTrainingData(artifactsForRound, ticketById);
+      if (newData.length) activeData = newData;
       return { ...entry, artifacts: artifactsForRound, activeData: [...activeData] };
-    }).filter((entry) => entry.artifacts.some((artifact) =>
-      artifact.role === "training_dataset"
-      || artifact.role === "checkpoint"
-      || artifact.role === "predictions"
-    ));
+    }).filter((entry) => hasIterationEvidence(entry.artifacts, entry.activeData));
   }, [artifacts, run.tickets]);
 
   if (error) return <div className="rounded-bezel border border-coral-500/30 p-4 text-sm text-coral-300">Failed to load iteration details.</div>;
