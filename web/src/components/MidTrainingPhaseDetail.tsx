@@ -1,11 +1,13 @@
 import useSWR from "swr";
-import type { TicketDetail } from "../lib/api";
+import type { TicketDetail, RunDetail } from "../lib/api";
 import { pendingCheckpointStep } from "../lib/midTrainingStatus";
 import { MidTrainingValidationPanel } from "./MidTrainingValidationPanel";
 
-export function MidTrainingPhaseDetail({ ticketId }: { ticketId: string }) {
+export function MidTrainingPhaseDetail({ ticketId, run }: { ticketId: string; run: RunDetail }) {
   const { data: ticket } = useSWR<TicketDetail>(`/api/tickets/${ticketId}`, { refreshInterval: 3000 });
   if (!ticket) return <div className="p-4 text-xs text-dim">Loading validation…</div>;
+  const baseline = run.history.find((row) => row.source === "baseline"
+    && row.base_model === ticket.payload.base_model);
   return <div className="rounded-bezel border border-hair bg-panel/40">
     <div className="p-4">
       {!ticket.checkpoint_handoff_failure && !ticket.mid_training_validation && pendingCheckpointStep(ticket, []) !== null &&
@@ -16,7 +18,7 @@ export function MidTrainingPhaseDetail({ ticketId }: { ticketId: string }) {
         <p className="mt-1 text-xs text-dim">Validation is waiting for checkpoint verification.</p>
         <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{ticket.checkpoint_handoff_failure.error}</pre>
       </div>}
-      <MidTrainingValidationPanel data={ticket.mid_training_validation} events={ticket.execution_events}
+      <MidTrainingValidationPanel baseline={baseline} data={ticket.mid_training_validation} events={ticket.execution_events}
         activity={null} showExecutionProgress={false} showHeading={true} />
     </div>
   </div>;

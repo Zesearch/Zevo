@@ -10,7 +10,7 @@ test('old and current OLMO validation/test protocols display consistent percenta
   for (const metric of [
     'answer_accuracy', 'choice_accuracy', 'instruction_following_accuracy',
     'pairwise_win_rate_vs_human_reference_model_judge', 'pairwise_win_rate_vs_reference_model_judge',
-    'suite_average', 'pass_at_1', 'exact_match', 'puzzle_accuracy',
+    'custom_reference_win_rate', 'suite_average', 'pass_at_1', 'exact_match', 'puzzle_accuracy',
     'validation_score', 'exact_match_flex', 'prompt_level_strict_acc', 'prompt_level_loose_acc',
     'inst_level_strict_acc', 'inst_level_loose_acc', 'length_controlled_winrate', 'alias_substring_match',
   ]) {

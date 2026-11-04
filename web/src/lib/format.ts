@@ -13,7 +13,7 @@ const PERCENTAGE_SCORE_METRICS = new Set([
   // These custom model-judge scores average per-row values in [0, 1].
   "pairwise_win_rate_vs_human_reference_model_judge",
   "pairwise_win_rate_vs_reference_model_judge",
-  "balanced_safe_response_accuracy_model_judge",
+  "balanced_safe_response_accuracy_model_judge", "custom_reference_win_rate",
 ]);
 
 export function isPercentageMetric(metric: string | null | undefined): boolean {
