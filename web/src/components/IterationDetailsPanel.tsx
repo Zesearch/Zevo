@@ -7,13 +7,13 @@ import { currentPredictionArtifacts } from "../lib/predictionArtifacts";
 import { fmtMetric, fmtScore, isPercentageMetric, metricScoreRange } from "../lib/format";
 import { Kicker } from "./zevo/primitives";
 
-type Artifact = {
+export type Artifact = {
   id: string; ticket_id: string; role: string; path: string; local_path: string;
   exists: boolean; availability: string; size_bytes: number;
   meta: Record<string, unknown>; created_at: string;
 };
 
-type ArtifactDetail = Artifact & {
+export type ArtifactDetail = Artifact & {
   preview_kind: string;
   preview: string;
   preview_columns: string[];
@@ -161,7 +161,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
     const byKey = new Map<string, Artifact[]>();
     for (const artifact of artifacts) {
       const key = ticketInfo.get(artifact.ticket_id)?.key;
-      if (key) byKey.set(key, [...(byKey.get(key) || []), artifact]);
+      if (key && !ticketById.get(artifact.ticket_id)?.mid_training_parent) byKey.set(key, [...(byKey.get(key) || []), artifact]);
     }
     let activeData: Artifact[] = [];
     return iterationOrder(run.tickets).map((entry) => {

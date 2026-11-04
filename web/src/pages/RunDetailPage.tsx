@@ -1,3 +1,4 @@
+import { MidTrainingPredictions } from "../components/MidTrainingPredictions";
 import { ExecutionPhase } from "../components/ExecutionPhase";
 import { executionPhase } from "../lib/activationPhase";
 import { GenerationReport } from "../components/GenerationReport";
@@ -943,7 +944,7 @@ function PipelineTimeline({
           may carry a wake suffix (see planRow) — split it back apart here. */}
       <div className="min-w-0 space-y-4">
       {selectedId.includes("#validation:") ? <MidTrainingPhaseDetail
-        key={selectedId} ticketId={selectedId.split("#")[0]} /> : <StageDetail
+        key={selectedId} run={run} ticketId={selectedId.split("#")[0]} /> : <StageDetail
         ticketId={selectedId.split("#")[0]}
         checkpointTickets={(() => {
           const selected = run.tickets.find((item) => item.id === selectedId);
@@ -1214,6 +1215,9 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
             )} />
           )}
         </div>
+        {t.agent_id === "inference" && !!t.payload.mid_training_checkpoint && (
+          <MidTrainingPredictions key={t.id} runId={t.run_id} ticketId={t.id} />
+        )}
         {hbId ? (
           <div>
             <div className="mb-1.5"><Kicker strong>Live activity</Kicker></div>
