@@ -1156,16 +1156,14 @@ async def _reconcile_slurm_stage_jobs(
             )[:2000]
             meta["monitor_terminal"] = True
             if state == "COMPLETED" and not meta.get("superseded_by_instruction_id"):
-                from zevo.engine.run.adaptive_training import handle_checkpoint_yield
+                from zevo.engine.run.adaptive_training import handle_checkpoint_yield, report_checkpoint_handoff_failure
                 try:
                     if await handle_checkpoint_yield(session, run, ticket, row, meta):
                         continue
                 except (ValueError, OSError) as exc:
                     # Failed verification must never fall through to final-model
                     # collection or stop monitoring unrelated Runs.
-                    meta["checkpoint_handoff_error"] = str(exc)[:1000]
-                    row.meta = meta
-                    ticket.summary = "Checkpoint handoff verification pending"
+                    await report_checkpoint_handoff_failure(session, run, ticket, row, meta, exc)
                     log.warning("checkpoint handoff for %s: %s", ticket.id, exc)
                     continue
             can_queue_collect = (

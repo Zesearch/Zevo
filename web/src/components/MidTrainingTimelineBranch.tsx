@@ -1,7 +1,7 @@
 import useSWR from "swr";
 import { midTrainingActionLabel } from "../lib/midTrainingActivations";
 import type { HeartbeatDTO, TicketDetail, RunDetail } from "../lib/api";
-import { midTrainingHasStarted, midTrainingDecisionHasStarted } from "../lib/midTrainingStatus";
+import { midTrainingHasStarted, midTrainingDecisionHasStarted, pendingCheckpointStep } from "../lib/midTrainingStatus";
 import { StatusBadge, statusToneFor } from "./StatusBadge";
 
 export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations, selectedId, onSelect, evaluations = [], inferences = [] }: {
@@ -15,10 +15,14 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
   const latest = activations.at(-1);
   const inference = inferences.find((item) => item.id === selectedId) || inferences.at(-1);
   const evaluation = evaluations.find((item) => item.id === selectedId) || evaluations.at(-1);
+  const checkpointStep = pendingCheckpointStep(ticket, activations);
+  const handoff = !!ticket?.checkpoint_handoff_failure || checkpointStep !== null;
+  const handoffLabel = ticket?.checkpoint_handoff_failure ? "Repair"
+    : ticket?.summary?.includes("waiting for Orchestrator") ? "Start Inference" : "Validate checkpoint";
   const children = [
-    ...(midTrainingDecisionHasStarted(ticket, activations.length) ? [{ label: midTrainingActionLabel(latest), selection: `${supervisorId}#mid:${ticketId}`,
+    ...(handoff || midTrainingDecisionHasStarted(ticket, activations.length) ? [{ label: handoff ? handoffLabel : midTrainingActionLabel(latest), selection: handoff && (checkpointStep !== null || !latest) ? `${ticketId}#validation:overview` : `${supervisorId}#mid:${ticketId}`,
       status: "",
-      description: latest?.mid_training ? `Step ${latest.mid_training.step.toLocaleString()}` : "Checkpoint orchestration" }] : []),
+      description: checkpointStep !== null ? `Step ${checkpointStep.toLocaleString()}` : latest?.mid_training ? `Step ${latest.mid_training.step.toLocaleString()}` : "Checkpoint orchestration" }] : []),
     ...(inference ? [{label: "Inference", selection: inference.id,
       status: inference.status, description: `Checkpoint ${inference.mid_training_step} · Validation predictions`}] : []),
     ...(evaluation ? [{label: "Evaluation", selection: evaluation.id,
@@ -31,7 +35,7 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
         aria-pressed={selectedId === `${ticketId}#validation:overview`}
         className={`rounded px-2 py-1 text-left text-[11px] font-medium uppercase tracking-wider text-skyx-300/70 hover:bg-raised/40 ${selectedId === `${ticketId}#validation:overview` ? "bg-skyx-500/10" : ""}`}>Mid-training Validation</button>
       <ol className="relative">{children.map((child, index) => {
-        const orchestrator = child.selection.includes("#mid:");
+        const orchestrator = child.selection.includes("#mid:") || child.label === "Repair" || child.label === "Validate checkpoint" || child.label === "Start Inference";
         const active = selectedId === child.selection;
         const tone = statusToneFor(child.status);
         return <li key={child.selection} className="relative">

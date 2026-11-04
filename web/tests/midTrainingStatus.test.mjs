@@ -8,7 +8,7 @@ const source = readFileSync(new URL('../src/lib/midTrainingStatus.ts', import.me
   .replace('import { latestExecution, benchmarkCounts } from "./executionProgress";', '')
   .replace('import { trainingActivity, isMidTrainingValidationEvent } from "./trainingTelemetry";', '');
 const { code } = await transformWithEsbuild(`${shared}\n${telemetry}\n${source}`, 'status.ts', { loader: 'ts' });
-const { midTrainingExecution, validationStatus, decisionStatus, inferenceProgress, midTrainingHasStarted, midTrainingDecisionHasStarted } = await import(
+const { pendingCheckpointStep, midTrainingExecution, validationStatus, decisionStatus, inferenceProgress, midTrainingHasStarted, midTrainingDecisionHasStarted } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const event = (ts, phase, extras = {}) => ({ ts, phase, event_type: 'progress', loss: -1,
   current_step: 0, total_steps: 100, extras: { execution_purpose: 'workload', ...extras } });
@@ -91,4 +91,21 @@ test('inference counts committed benchmarks rather than generated rows', () => {
   const progress = inferenceProgress([rows, completed, completed]);
   assert.equal(progress.completed, 1);
   assert.equal(progress.total, 3);
+});
+
+test('a blocked handoff stays visible before any Orchestrator activation', () => {
+  const blocked = { ...ticket([]), checkpoint_handoff_failure: {step: 4136, error: 'verifier failed'} };
+  assert.equal(midTrainingHasStarted(blocked), true);
+  assert.equal(midTrainingDecisionHasStarted(blocked), false);
+});
+
+test('yielded checkpoints appear before orchestration, including later checkpoints', () => {
+  const first = {...event('01', 'adaptive_checkpoint'), current_step: 20};
+  const prior = {mid_training: {step: 20}};
+  assert.equal(pendingCheckpointStep(ticket([first]), []), 20);
+  assert.equal(pendingCheckpointStep(ticket([first]), [prior]), null);
+  assert.equal(pendingCheckpointStep(ticket([first, event('02', 'training')]), [prior]), null);
+  const next = {...event('03', 'adaptive_checkpoint'), current_step: 40};
+  assert.equal(pendingCheckpointStep(ticket([first, next]), [prior]), 40);
+  assert.equal(pendingCheckpointStep({...ticket([next]), status: 'succeeded'}, []), null);
 });

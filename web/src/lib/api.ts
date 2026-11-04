@@ -560,6 +560,7 @@ export type MidTrainingValidation = {
 export type TicketDetail = TicketDTO & {
   measurement_attempt?: { revision?: string; started_at?: string; active_members?: string[] };
   generation_report?: Record<string, unknown>;
+  checkpoint_handoff_failure?: { step: number; error: string; first_seen_at: string; attempts: number } | null;
   mid_training_validation?: MidTrainingValidation | null;
   messages: MessageDTO[];
   notices: NoticeDTO[];

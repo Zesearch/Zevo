@@ -717,7 +717,20 @@ finish as success. Preserve unrelated failures and the cancellation audit.
 ### Mid-training Validation orchestration
 
 Train saves full resumable state and yields before Validation. Inspect
-`runtime.adaptive_checkpoints`: each entry identifies one verified checkpoint,
+`runtime.adaptive_checkpoints`. A `handoff_failed` entry is an unverified
+checkpoint blocked before Validation, with the concrete error, checkpoint/step,
+job ID, allocation state, and retry count. Diagnose that failure in this activation.
+Retryable transport/file-visibility failures are rechecked by the scheduler;
+for a platform verifier bug report the required code repair and wait. For missing
+or inconsistent state inspect the saved files and propose a repair; never fabricate
+state or bypass verification. Preserve the original Train and its checkpoint;
+do not create another iteration or treat this as a negative measurement. Consider
+allocation cost while waiting, but do not release resources before establishing
+that the required checkpoint is safely persistent. Return `wait` with a concrete
+reason when blocked. The scheduler clears the failure only after verification
+and wakes you again with `inference`. A failed handoff has no `create_request`.
+
+For verified checkpoints, each entry identifies one verified checkpoint,
 its phase, existing child IDs, and the exact `create_request` body. For phase
 `inference`, POST that body to the ordinary ticket creation route:
 `{"run_id":"...","checkpoint_request_id":"...","agent_id":"inference","payload":{},"inputs":{}}`.

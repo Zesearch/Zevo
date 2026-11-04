@@ -12,7 +12,8 @@ export function midTrainingActivationLabel(heartbeat: HeartbeatDTO, activations:
     && (item.mid_training?.phase || "decision") === (context.phase || "decision"));
   const attempt = peers.findIndex((item) => item.id === heartbeat.id) + 1;
   const retry = attempt > 1 ? ` · Retry ${attempt}` : "";
-  const phaseLabel = context.phase === "inference" ? "Start inference"
+  const phaseLabel = context.phase === "handoff_failed" ? "Repair"
+    : context.phase === "inference" ? "Start inference"
     : context.phase === "evaluation" ? "Start evaluation"
     : context.phase === "repair_inference" ? "Repair inference"
     : context.phase === "repair_evaluation" ? "Repair evaluation" : "";
@@ -29,6 +30,7 @@ export function midTrainingActionLabel(heartbeat?: HeartbeatDTO): string {
   const context = heartbeat.mid_training;
   if (context?.action === "continue") return "Resume training";
   if (context?.action === "stop") return "Stop training";
+  if (context?.phase === "handoff_failed") return "Repair";
   if (heartbeat.action === "mark_failed") return "Stop Run";
   if (heartbeat.action === "wait") return "Wait for dependencies";
   if (context?.phase === "inference") return "Start Inference";

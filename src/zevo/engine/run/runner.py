@@ -4901,6 +4901,9 @@ async def run_ticket(
     if await _automatic_wakeup_waits_for_slurm(session, tk, activation_source):
         return tk  # The watcher, not an old reminder, owns the live workload.
     if tk.agent_id == "train":
+        if any(f.get("train_ticket_id") == tk.id and not f.get("resolved")
+               for f in (run.lifecycle or {}).get("adaptive_checkpoint_failures", {}).values()):
+            return tk  # Handoff repair must pass verification before any Train activation.
         checkpoints = [stage for stage in (run.lifecycle or {}).get("adaptive_checkpoints", {}).values()
                        if stage["request"]["ticket_id"] == tk.id]
         if any(not stage.get("resume_queued") for stage in checkpoints):
