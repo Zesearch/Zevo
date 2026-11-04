@@ -1,10 +1,11 @@
+import { CheckpointPredictions } from "./CheckpointPredictions";
 import { CheckpointComparison } from "./CheckpointComparison";
 import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { fmtScore } from "../lib/format";
 import { X } from "lucide-react";
 import { DialogOwner, useDialogFocus } from "../lib/dialog";
-import type { ExecutionEventDTO, MidTrainingValidation, IterationHistoryEntry } from "../lib/api";
+import type { ExecutionEventDTO, MidTrainingValidation, IterationHistoryEntry, RunDetail } from "../lib/api";
 
 type Measurement = MidTrainingValidation["measurements"][number];
 const decisionLabel = (row: Measurement) => row.plan_completed ? "Plan completed"
@@ -32,12 +33,13 @@ function Reason({ text }: { text: string }) {
   </section>;
 }
 
-function ValidationDetails({ data, baseline, step, onStep, onClose }: {
-  data: MidTrainingValidation; baseline?: IterationHistoryEntry; step?: number; onStep: (step: number) => void; onClose: () => void;
+function ValidationDetails({ data, baseline, runId, inferenceTickets, step, onStep, onClose }: {
+  runId: string; inferenceTickets: RunDetail["tickets"];
+  data?: MidTrainingValidation | null; baseline?: IterationHistoryEntry; step?: number; onStep: (step: number) => void; onClose: () => void;
 }) {
-  const [view, setView] = useState<"details" | "compare">("details");
+  const [view, setView] = useState<"details" | "predictions" | "compare">(data?.measurements.length ? "details" : "predictions");
   const { id, ref } = useDialogFocus(true, onClose, 100);
-  const selected = data.measurements.find((row) => row.step === step) ?? data.measurements.at(-1);
+  const selected = data?.measurements.find((row) => row.step === step) ?? data?.measurements.at(-1);
   return createPortal(<DialogOwner.Provider value={id}>
     <div className="fixed inset-0 z-[100] flex justify-end" onMouseDown={onClose}>
       <div className="absolute inset-0 bg-canvas/80 backdrop-blur-sm" />
@@ -49,22 +51,24 @@ function ValidationDetails({ data, baseline, step, onStep, onClose }: {
           <button type="button" aria-label="Close details" onClick={onClose}><X size={18} /></button>
         </div>
         <div className="mb-5 flex gap-2" aria-label="Validation view">
-          {(["details", "compare"] as const).map((item) => <button key={item} type="button"
+          {(["details", "predictions", "compare"] as const).map((item) => <button key={item} type="button"
             aria-pressed={view === item} onClick={() => setView(item)}
-            className={`btn ${view === item ? "btn-brass" : ""}`}>{item === "details" ? "Details" : "Compare"}</button>)}
+            className={`btn ${view === item ? "btn-brass" : ""}`}>{item === "details" ? "Details" : item === "predictions" ? "Predictions" : "Compare"}</button>)}
         </div>
-        {view === "compare" ? <CheckpointComparison data={data} baseline={baseline} /> : <>
+        {view === "compare" ? (data ? <CheckpointComparison data={data} baseline={baseline} /> : <p className="text-sm text-dim">Validation scores are not available yet.</p>)
+          : view === "predictions" ? <CheckpointPredictions runId={runId} tickets={inferenceTickets} initialStep={selected?.step} /> : <>
         <div className="mb-5 flex flex-wrap gap-2" aria-label="Validation checkpoints">
-          {data.measurements.map((row, index) => <button key={row.step} type="button"
+          {data?.measurements.map((row, index) => <button key={row.step} type="button"
             aria-pressed={row.step === selected?.step} onClick={() => onStep(row.step)}
             className={`rounded border px-3 py-2 text-xs ${row.step === selected?.step ? "border-sky-400 text-sky-300" : "border-hair text-dim"}`}>
             Check {index + 1} · Step {row.step.toLocaleString()}
           </button>)}
         </div>
+        {!selected && <p className="text-sm text-dim">Validation scores are not available yet.</p>}
         {selected && <div className="space-y-5 text-sm">
           <div className="flex flex-wrap gap-3 text-sky-300"><span>{decisionLabel(selected)}</span>
             <span>Suite average: {fmtScore(selected.score, "suite_average")}</span>
-            {selected.step === data.best_step && <span>Best checkpoint</span>}
+            {selected.step === data?.best_step && <span>Best checkpoint</span>}
           </div>
           <section><h3 className="mb-2 font-medium">Benchmarks · {Object.keys(selected.metrics).length}</h3>
             <table className="w-full text-left text-xs"><thead><tr className="border-b border-hair text-dim">
@@ -82,7 +86,9 @@ function ValidationDetails({ data, baseline, step, onStep, onClose }: {
   </DialogOwner.Provider>, document.body);
 }
 
-export function MidTrainingValidationPanel({ data, baseline, events = [], activity, showExecutionProgress = true, showHeading = true }: {
+export function MidTrainingValidationPanel({ data, baseline, runId, inferenceTickets, events = [], activity, showExecutionProgress = true, showHeading = true }: {
+  runId: string;
+  inferenceTickets: RunDetail["tickets"];
   baseline?: IterationHistoryEntry;
   showHeading?: boolean;
   showExecutionProgress?: boolean;
@@ -102,7 +108,7 @@ export function MidTrainingValidationPanel({ data, baseline, events = [], activi
   return <div>
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       {showHeading && <h3 className="text-sm font-medium">Mid-training Validation</h3>}
-      {!!data?.measurements.length && <button type="button" className="text-xs text-sky-300 hover:underline"
+      {(!!data?.measurements.length || inferenceTickets.length > 0) && <button type="button" className="text-xs text-sky-300 hover:underline"
         onClick={() => { setStep(undefined); setOpen(true); }}>See more details</button>}
     </div>
     {showExecutionProgress && generating && progress && <div className="mb-3 text-xs text-sky-300">{String(progress.extras?.benchmark_name)} · {progress.current_step.toLocaleString()} / {progress.total_steps.toLocaleString()} responses</div>}
@@ -125,7 +131,7 @@ export function MidTrainingValidationPanel({ data, baseline, events = [], activi
           <td className="px-3 py-2 whitespace-nowrap">{decisionLabel(row)}</td>
         </tr>)}</tbody>
       </table></div>
-      {open && <ValidationDetails data={data} baseline={baseline} step={step} onStep={setStep} onClose={() => setOpen(false)} />}
     </>}
+    {open && <ValidationDetails data={data} baseline={baseline} runId={runId} inferenceTickets={inferenceTickets} step={step} onStep={setStep} onClose={() => setOpen(false)} />}
   </div>;
 }

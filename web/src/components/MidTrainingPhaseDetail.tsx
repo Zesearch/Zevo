@@ -18,7 +18,9 @@ export function MidTrainingPhaseDetail({ ticketId, run }: { ticketId: string; ru
         <p className="mt-1 text-xs text-dim">Validation is waiting for checkpoint verification.</p>
         <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{ticket.checkpoint_handoff_failure.error}</pre>
       </div>}
-      <MidTrainingValidationPanel baseline={baseline} data={ticket.mid_training_validation} events={ticket.execution_events}
+      <MidTrainingValidationPanel runId={run.id}
+        inferenceTickets={run.tickets.filter((item) => item.agent_id === "inference" && item.mid_training_parent === ticketId)}
+        baseline={baseline} data={ticket.mid_training_validation} events={ticket.execution_events}
         activity={null} showExecutionProgress={false} showHeading={true} />
     </div>
   </div>;
