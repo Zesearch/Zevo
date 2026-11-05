@@ -13,6 +13,22 @@ from zevo.engine.run import process_registry
 from zevo.engine.run.remote_jobs import _device_info_for_ticket
 
 
+# The worker's HF branch imports huggingface_hub. On a cloud/instance host the
+# login shell's python3 is the bare system interpreter (DLAMI: Python 3.10 with
+# no Hub client), so the save died with ModuleNotFoundError after a complete
+# optimisation (run 8ee1331e). Use the first interpreter that can import the
+# client: the env_setup shell (clusters/instances), then the system-owned
+# profiles that remote_env.sh built for Inference and Train on this host.
+_REMOTE_INTERPRETER_PROBE = (
+    'ZEVO_PY=python3\n'
+    'for ZEVO_CANDIDATE in python3 "$HOME/zevo/env/infer/bin/python" "$HOME/zevo/env/train/bin/python"; do\n'
+    '  if command -v "$ZEVO_CANDIDATE" >/dev/null 2>&1 && "$ZEVO_CANDIDATE" -c "import huggingface_hub" >/dev/null 2>&1; then\n'
+    '    ZEVO_PY="$ZEVO_CANDIDATE"; break\n'
+    '  fi\n'
+    'done\n'
+)
+
+
 async def save_model(session, run, ticket, *, source: str, remote: bool, policy: ModelSavePolicy) -> dict:
     from zevo.engine.run.cancel_rescue import hf_token
     request = {'source': source, 'policy': policy.model_dump(), 'tag': model_tag_for_run(run.id)}
@@ -29,8 +45,9 @@ async def save_model(session, run, ticket, *, source: str, remote: bool, policy:
             raise ValueError('No configured SSH route to the checkpoint host')
         setup = str(getattr(getattr(info, 'cluster', None), 'env_setup', '') or '').strip()
         command = ('set -e\n' + (setup + '\n' if setup else '')
+                   + _REMOTE_INTERPRETER_PROBE
                    + 'exec env ZEVO_TICKET_ID=' + shlex.quote(ticket.id)
-                   + ' timeout 3600 python3 -c ' + shlex.quote(script))
+                   + ' timeout 3600 "$ZEVO_PY" -c ' + shlex.quote(script))
         args = [*ssh_base_args(info.ssh), f'{info.ssh.user}@{info.ssh.host}', 'bash -lc ' + shlex.quote(command)]
     else:
         if policy.weights == 'remote':
