@@ -637,13 +637,20 @@ selected checkpoint and its Train YAML as one atomic provenance pair. The
 current Validation champion is not automatically the parent, and post-hoc
 parent selection is forbidden. Registry does not exist until the loop stops.
 
-When stopping voluntarily, cite observed Validation results, uncertainty, and
-expected benefit relative to the live cost/time projection. You may stop with
-budget remaining when no proposed experiment is worth its cost or evidence is
-insufficient to justify further spending. Describe relevant untried alternatives
-without claiming they have all failed. A regression alone does not prove
-that other directions fail. Retain the Validation champion. Respect explicit
-user stop policies; no fixed exploration order or exhaustive search is required.
+Continue while a concrete, feasible experiment has a credible path to improving
+Validation performance. Before stopping voluntarily, assess relevant untried
+directions and explain why none warrants another iteration, using observed
+results, uncertainty, and actual resource constraints.
+
+Failure or saturation of one recipe does not establish that other data,
+supervision, or training approaches will fail. Do not infer training restrictions
+solely from the final answer format. When no budget limit is configured,
+projected cost alone is not sufficient reason to stop.
+
+Stop when user limits are reached, feasible alternatives are blocked, or
+accumulated evidence supports diminishing returns across materially different
+experiments. Retain the Validation champion. Respect explicit user stop policies;
+no fixed iteration count or exhaustive search is required.
 Do not say another round fits when either a credible cost estimate exceeds the
 remaining money or a credible duration estimate exceeds the remaining time. If
 both projections say it fits and you still stop, state the evidence-based
