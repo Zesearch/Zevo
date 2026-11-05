@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from zevo.contracts.model_save import ModelSavePolicy
 from zevo.contracts.model_registry import RegisterResult
+from zevo.engine.run import model_save as saver
 from zevo.engine.run import model_save_worker as worker
 from zevo.engine.run.runner import _build_registry_input, _extract_summary_artifact_meta
 
@@ -190,3 +191,70 @@ async def test_model_save_transport_failure_keeps_registry_repair_behavior():
     retry = await _apply_ticket_failure_policy(SimpleNamespace(add=messages.append), ticket,
         error_message='Model preservation transport exited 255')
     assert retry and ticket.status == 'repairing' and ticket.repair_attempts == 1
+
+
+def test_worker_names_missing_module(tmp_path, monkeypatch, capsys):
+    source = checkpoint(tmp_path)
+    monkeypatch.setitem(sys.modules, 'huggingface_hub', None)
+    monkeypatch.setattr(sys, 'stdin', __import__('io').StringIO(json.dumps({
+        'source': str(source), 'tag': 'M-run123', 'token': 'secret',
+        'policy': {'weights': 'hf', 'hf_repo_id': 'me/model', 'hf_private': True}})))
+    monkeypatch.setattr(sys, 'argv', ['model_save_worker.py'])
+    with pytest.raises(SystemExit):
+        exec(compile(Path(worker.__file__).read_text(), worker.__file__, 'exec'), {'__name__': '__main__'})
+    assert 'Model preservation failed: ModuleNotFoundError: huggingface_hub' in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_remote_save_runs_worker_with_an_interpreter_that_has_the_hub_client(monkeypatch):
+    captured = {}
+
+    class Proc:
+        returncode = 0
+        async def communicate(self, payload):
+            captured['request'] = json.loads(payload)
+            return b'ZEVO_MODEL_SAVED=' + json.dumps({'storage': 'hf', 'path': 'https://huggingface.co/me/model/tree/c1',
+                                                      'revision': 'c1', 'files': 3}).encode(), b''
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*args, **kwargs):
+        captured['args'] = args
+        return Proc()
+
+    ssh = SimpleNamespace(user='ubuntu', host='10.0.0.9', port=22, key_path='/k', password_path='')
+    info = SimpleNamespace(ssh=ssh, cluster=SimpleNamespace(env_setup=''), instance_id='i-1', provider='aws')
+
+    async def device_info(session, ticket):
+        return info
+
+    def token():
+        return 'secret'
+
+    class Session:
+        async def refresh(self, run, attribute_names):
+            pass
+        async def commit(self):
+            pass
+
+    monkeypatch.setattr(saver.asyncio, 'create_subprocess_exec', fake_exec)
+    monkeypatch.setattr(saver, '_device_info_for_ticket', device_info)
+    monkeypatch.setattr(saver, 'ssh_base_args', lambda route: ['ssh'])
+    monkeypatch.setattr('zevo.engine.run.cancel_rescue.hf_token', token)
+    monkeypatch.setattr(saver.process_registry, 'register', lambda *a: None)
+    monkeypatch.setattr(saver.process_registry, 'unregister', lambda *a: None)
+    run = SimpleNamespace(id='run123', lifecycle={})
+    ticket = SimpleNamespace(id='registry-run123-001')
+    policy = ModelSavePolicy(weights='hf', hf_repo_id='me/model', hf_private=True)
+
+    receipt = await saver.save_model(Session(), run, ticket, source='/gpu/model', remote=True, policy=policy)
+
+    assert receipt['revision'] == 'c1'
+    assert captured['request']['token'] == 'secret'
+    command = captured['args'][-1]
+    assert command.startswith('bash -lc ')
+    assert 'import huggingface_hub' in command
+    assert 'zevo/env/infer/bin/python' in command and 'zevo/env/train/bin/python' in command
+    assert '"$ZEVO_PY" -c ' in command
+    assert ' python3 -c ' not in command
+

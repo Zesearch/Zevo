@@ -101,5 +101,9 @@ if __name__ == '__main__':
         # Provider exceptions can contain request/credential details. Keep those
         # out of shared subprocess logs; structured policy errors are safe.
         message = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        if isinstance(exc, ModuleNotFoundError) and exc.name:
+            # A module name is not a credential; it tells the operator which
+            # interpreter the host ran the worker with.
+            message += ': ' + exc.name
         print('Model preservation failed: ' + message, file=sys.stderr)
         sys.exit(1)
