@@ -51,7 +51,9 @@ export function iterationOrder(tickets: MinimalTicket[]): Array<IterInfo & { tic
   const byKey = new Map<string, IterInfo & { ticketIds: string[] }>();
   for (const t of sorted) {
     const gi = info.get(t.id);
-    if (!gi) continue;
+    // The supervisor's decision cursor may point to a round that never starts.
+    // Only stage tickets establish actual iteration groups.
+    if (!gi || gi.spansRun) continue;
     let g = byKey.get(gi.key);
     if (!g) {
       g = { ...gi, ticketIds: [] };
