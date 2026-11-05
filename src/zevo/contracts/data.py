@@ -66,26 +66,12 @@ def is_sha256(value: str) -> bool:
 
 
 class TeacherDistillationIntent(BaseModel):
-    """Opt-in teacher-distilled synthetic augmentation of TRAINING data only.
+    """Opt-in generation of additional training examples.
 
-    Default OFF: an all-default instance reproduces the historical behavior in
-    which the Data Agent never calls a stronger teacher model, so the baseline
-    recipe is byte-identical to before this capability existed.  When an
-    orchestrator/data-branch decision to scale data sets ``enabled=True``, this
-    authorizes distilling supervision from a named stronger teacher into
-    additional TRAINING rows — the single biggest documented accuracy lever for
-    reasoning tasks (teacher-distilled IRAC chain-of-thought SFT; arXiv
-    2504.04945).  The controlled reversal of the blanket "no stronger teacher"
-    prohibition carries inviolable guardrails, enforced here and in the Data
-    playbook:
-
-    - held-out Validation/Test data and its answers are NEVER synthesized or
-      altered (this object still contains no Validation/Test mutation controls);
-    - every generated row is decontaminated against the frozen eval populations
-      (``decontaminate_against_eval`` cannot be disabled while enabled);
-    - the teacher model and generation params are recorded as provenance in the
-      realized recipe (and echoed in ``DataResult``);
-    - synthesis augments TRAINING data only.
+    Generation may use a specified teacher model or the Data agent itself.
+    Record the actual model and generation settings. Evaluation populations
+    remain private and unchanged; the engine owns overlap checks.
+    Existing field names are retained for compatibility.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -93,8 +79,9 @@ class TeacherDistillationIntent(BaseModel):
     teacher_model: str = Field(
         "",
         description=(
-            "Stronger teacher model id whose distilled outputs become new "
-            "TRAINING rows. Required when enabled; recorded as provenance."
+            "Actual model generating additional TRAINING rows, whether a "
+            "teacher or the Data agent itself. Required when enabled; "
+            "recorded as provenance."
         ),
     )
     output_format: Literal["irac_rationale", "instruction_distillation"] = (
@@ -111,9 +98,8 @@ class TeacherDistillationIntent(BaseModel):
     verify_answers: bool = Field(
         True,
         description=(
-            "Keep only teacher generations whose final answer passes the task's "
-            "correctness / self-consistency check (rejection filtering). The "
-            "verifier/filter is the single most important synthesis step."
+            "Keep only generated examples whose final answer passes the task's "
+            "correctness / self-consistency check (rejection filtering)."
         ),
     )
     decontaminate_against_eval: bool = Field(
@@ -203,11 +189,9 @@ class DataRecipeIntent(BaseModel):
     teacher_distillation: TeacherDistillationIntent = Field(
         default_factory=TeacherDistillationIntent,
         description=(
-            "Opt-in teacher-distilled synthetic augmentation of TRAINING data. "
-            "Default disabled (existing behavior, byte-identical baseline "
-            "recipe). When enabled by explicit intent it authorizes distilling "
-            "supervision from a stronger teacher into new training rows, never "
-            "touching the held-out Validation/Test populations or their answers."
+            "Optional TRAINING-data generation by a specified teacher or the "
+            "Data agent itself. Disabled unless explicitly enabled in the "
+            "recipe; Validation/Test populations and answers remain unchanged."
         ),
     )
 
@@ -920,8 +904,8 @@ class DataResult(AgentResult):
     synthesis_teacher_model: str = Field(
         "",
         description=(
-            "Teacher model id that produced distilled TRAINING rows this run; "
-            "empty when no teacher distillation ran."
+            "Actual model that generated additional TRAINING rows, including "
+            "the Data agent's model for direct generation; empty when none ran."
         ),
     )
     synthesis_output_format: str = ""

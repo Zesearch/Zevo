@@ -57,10 +57,16 @@ Two preparation planes exist, and the work order says which:
   `max_training_rows`. There is no GPU host yet; do not wait for one or ask
   for one. Train uploads the prepared artifact to its own device later.
 
+### Training-data acquisition and construction
+
+Use supplied data, acquire suitable existing training data, or generate additional
+training examples when explicitly enabled. Choose according to the task, source
+constraints, quality evidence, and cost; no approach is preferred by default.
+
 A non-empty `dataset` is the entire allowed training source. It may be loaded,
 parsed, normalized, filtered, or deterministically subset, but unrelated rows
 may not be acquired or synthesized — except under the explicit opt-in
-teacher-distilled augmentation described in "Teacher-distilled augmentation"
+training-data generation described in "Generate training data"
 below, which may add verified synthetic TRAINING rows when
 `recipe_intent.teacher_distillation.enabled` is true. For a Hugging Face id, use
 the exact config/split. When `dataset` is empty, require a non-empty
@@ -100,45 +106,24 @@ epochs, batch size, sequence length, decoding setting, or other Specialist
 hyperparameter. Fail if the source lacks the declared method's required signal;
 do not fabricate preferences, labels, references, or rewards.
 
-### Teacher-distilled augmentation
+#### Generate training data
 
-By default the Data Agent never calls a stronger teacher model and never
-manufactures training rows beyond deterministic transformation of the supplied
-source. That default is unchanged. A single controlled exception exists: when
-`recipe_intent.teacher_distillation.enabled` is `true` — an explicit
-orchestrator/data-branch decision to scale data — you MAY distill synthetic
-TRAINING supervision from the named `teacher_model` (structured IRAC
-chain-of-thought for legal reasoning, or general instruction distillation) and
-add it to the training dataset, using the `distill-augment` Skill. This is the
-highest-yield accuracy lever for specialized reasoning tasks. The following
-guardrails are inviolable and MUST be preserved:
+When `recipe_intent.teacher_distillation.enabled` is true, use `distill-augment`
+to generate training examples with a specified teacher model or the Data agent
+itself. The recipe defines the source seeds, output format, quantity, and
+verification approach. Record the actual generating model in `teacher_model`,
+including the agent's model when it generates directly. Do not claim an external
+teacher call when none occurred. Without this opt-in, use existing data and
+deterministic transformations only.
 
-- **Held-out integrity is absolute.** NEVER synthesize, rephrase, expand, or
-  alter the Validation or Test scoring populations or their answers. Synthesis
-  writes only to the training dataset. You receive no held-out path or content
-  and must not search Run directories to discover either population.
-- **Decontaminate without disclosure.** Keep
-  `decontaminate_against_eval=true`; never attempt the private comparison
-  yourself. Deduplicate generated rows against their known Training seed
-  sources, then return the finished Training artifact. The engine alone removes
-  exact cross-schema overlaps with Validation/Test after this activation, so no
-  scoring example or match decision can influence your source selection.
-- **Verify before keeping.** When `verify_answers` is set, keep only
-  teacher generations whose final answer passes the task's correctness /
-  self-consistency check (rejection filtering); an unfiltered synthetic set is
-  worse than a smaller filtered one.
-- **Record provenance.** The realized recipe carries `teacher_model`,
-  `output_format`, and `generation_params`; also set the `DataResult` provenance
-  fields (`synthesis_teacher_model`, `synthesis_output_format`,
-  `synthesis_generated_rows`) and summarize the teacher, params,
-  reject-filter yield, and Training-only dedup in `audit_steps`.
-  `decontamination_checked` and `decontamination_removed_rows` are engine-owned;
-  return their defaults.
-- **Augment, do not replace.** Merge survivors with the real training rows in
-  the required method shape; report the survivor count in
-  `synthesis_generated_rows`. The engine records held-out removals separately.
-
-If the flag is absent or `false`, do not synthesize — behave exactly as before.
+- Use permitted training sources; do not read or alter Validation/Test data.
+- Verify answers as specified and deduplicate against training seeds and other
+  generated rows. Merge accepted examples with the real training data.
+- Record the model, generation settings, accepted/rejected counts, and method
+  in the recipe, `audit_steps`, and `synthesis_*` provenance fields.
+- Keep `decontaminate_against_eval=true`. The engine performs private evaluation
+  overlap checks; leave `decontamination_checked` and
+  `decontamination_removed_rows` at their defaults for the engine to populate.
 
 For a Hugging Face source, resolve and pin its immutable Hub revision before
 execution. Write `remote_dataset_spec.json` from
