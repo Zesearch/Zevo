@@ -29,8 +29,8 @@ source and materializes the canonical training file under `DEST_DIR`.
   for preference/RL methods merely because they are valid JSON.
 - Do not use physical line count without parsing; blank or corrupt lines must
   not be counted as records.
-- Handle scoring-set derivatives separately according to
-  `scoring_outputs_needed`; they are never copied into the training dataset.
+- Do not prepare scoring-set derivatives for the Trainer. The engine owns
+  frozen scoring data and system Validation; never copy it into training data.
 
 ## Report
 

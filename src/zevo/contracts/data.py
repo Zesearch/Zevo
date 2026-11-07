@@ -91,8 +91,12 @@ class TeacherDistillationIntent(BaseModel):
         0,
         ge=0,
         description=(
-            "Absolute number of verified synthetic TRAINING rows to add. Must "
-            "be >= 1 when enabled; 0 when disabled."
+            "Requested number of new verified, deduplicated synthetic TRAINING rows; "
+            "the whole generated population for source-free synthesis, additional "
+            "rows for augmentation. Retained real plus generated rows must fit "
+            "max_training_rows and compatible final output targets. Report binding "
+            "quantity conflicts for recipe revision, never silently change this count. "
+            "Must be >= 1 when enabled; 0 when disabled."
         ),
     )
     verify_answers: bool = Field(
@@ -181,7 +185,10 @@ class DataRecipeIntent(BaseModel):
         description="Deterministic subset expression or named slice; empty keeps all eligible rows.",
     )
     filters: list[str] = Field(default_factory=list)
-    sampling: dict[str, Any] = Field(default_factory=dict)
+    sampling: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Requested sampling strategy/quantity; reconcile with target_size and the Run's max_training_rows ceiling before preparation.",
+    )
     weighting: dict[str, float] = Field(default_factory=dict)
     transformations: list[str] = Field(default_factory=list)
     field_mapping: dict[str, str] = Field(default_factory=dict)
@@ -569,7 +576,7 @@ class DataTaskInput(AgentTaskInput):
     artifacts_validation_command: str = Field(
         min_length=1,
         description=(
-            "Exact side-effect-free validator. For prepare_run_data it can see "
+            "Exact side-effect-free validator. Execute prepare_run_data checks on the assigned remote host; they can see "
             "only the training artifact; for private held-out preparation it "
             "validates exact answer removal. Replace only named output paths."
         ),
@@ -713,6 +720,8 @@ class DataTaskInput(AgentTaskInput):
                 )
             if not self.expected_source_identity.strip():
                 raise ValueError("prepare_run_data requires expected_source_identity")
+            # Archived local work orders remain readable. The runner and Ticket
+            # bindings require the remote contract for every new training task.
             if self.remote_dataset_spec_schema:
                 if not self.device_info_path.strip():
                     raise ValueError("remote Data requires device_info_path")
@@ -758,7 +767,7 @@ class DataTaskInput(AgentTaskInput):
                 or self.secret_environment_names
             ):
                 raise ValueError(
-                    "local Data must not carry remote Hugging Face execution fields"
+                    "remote Data execution fields require the remote source schema"
                 )
             leaked = {
                 "test_set_name": self.test_set_name,

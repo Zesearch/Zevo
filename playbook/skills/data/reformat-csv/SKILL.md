@@ -38,11 +38,10 @@ description: "Map a provided CSV or Parquet table into the semantic record famil
 - Apply deduplication, sampling, or balancing as a separate `filter` phase and
   record those operations separately.
 
-## Scoring derivatives
+## Scoring isolation
 
-When the ticket requests `train_shaped`, reuse the exact same target renderer
-after a source-specific validation-row normalizer. Do not reuse training-row
-field names blindly, and never filter or reorder validation rows.
+Prepare training data only. Do not produce Trainer-shaped Validation derivatives;
+the engine owns frozen scoring data and system Validation.
 
 ## Report
 

@@ -36,7 +36,12 @@ the next direction changes no data semantics. Create a new Data Ticket before
 Train only for a changed subset/filter/sampling/weighting/transformation/mapping,
 method-required shape, or seed. Validation/Test and every measurement artifact
 remain frozen regardless. Choose source, method, and model changes from evidence,
-expected benefit, and cost, without a required ordering or exhaustion claim.
+expected benefit, and cost, without a required ordering or exhaustive search.
+Refine directions that improve Validation and use unsuccessful attempts to
+reconsider the hypothesis. Balance meaningful exploration with refinement; a
+few regressions do not by themselves justify stopping. Representative exploration
+and reasonable refinement may establish saturation; remaining minor variants
+without new evidence need not be tried or proven infeasible.
 Record the hypothesis and decision, including when revisiting an earlier branch.
 
 The Specialist records the realized configuration in an artifact:
@@ -69,8 +74,8 @@ approvals, contracts, or files.
 
 Use Validation evidence for decisions. The engine-owned held-out Test lane may
 be visible to a trusted UI but never influences you while the Run is active.
-The Task's Validation metric selects the champion. Engine-derived training and
-trainer-Validation loss trends may inform the next hypothesis, including a
+The Task's Validation metric selects the champion. Engine-derived training
+diagnostics and system mid-training Validation scores may inform the next hypothesis, including a
 reasoned branch from a bounded weights-only intermediate checkpoint, but they
 are diagnostic rather than an alternate ranking metric or a certain causal
 diagnosis.

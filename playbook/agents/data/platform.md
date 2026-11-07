@@ -35,27 +35,29 @@ or GPU acceleration without evidence that it improves the measured bottleneck.
 
 ## Dispatch
 
+Data Skills may call source acquisition the `collect` phase: this means finding
+or generating source rows inside `prepare_run_data`. It is not
+`slurm_job.phase="collect"`, which means collecting a previously submitted job's
+status, logs, receipt, and result. During job collection do not restart acquisition,
+generation, or submission; follow the existing job/repair contract.
+
 ### `prepare_run_data`
 
-The first invocation runs at iteration 0 before baseline Inference; it runs
-before Infrastructure when the source is an acquisition query or a local file,
-and after it when `dataset` is a Hugging Face id. A later invocation is
+The first invocation runs at iteration 0 after Infrastructure and before
+baseline Inference for every source. A later invocation is
 permitted only for an explicit changed `recipe_intent`; unchanged intent is
 reused by the DAG and never dispatched. Require the declared `training_method`.
 Resolve `DEST_DIR` from strict customization output or `work_dir`, choose only
 source-appropriate Data Skills, and write one reproducible `prepare_data.py`.
 
-Two preparation planes exist, and the work order says which:
-
-- **Remote** (`device_info_path` and the `remote_*` fields are set; `dataset`
-  is a Hub id): the assigned host is the Training-data plane. Source
-  inspection, detect/analyze commands, download, transformation, and the
-  prepared JSONL all run there. Never download the full source into `work_dir`
-  and never copy training rows back to Zevo.
-- **Local** (`device_info_path` is empty): acquire and prepare under `work_dir`
-  on this machine with the ordinary datasets-server / Hub APIs, bounded by
-  `max_training_rows`. There is no GPU host yet; do not wait for one or ask
-  for one. Train uploads the prepared artifact to its own device later.
+All `prepare_run_data` work uses the assigned remote plane. Require
+`device_info_path` and the remote execution fields. Download, inspect, transform,
+filter, generate, and persist training rows on that host. For a supplied local
+file, upload its exact bytes once and verify `expected_source_fingerprint`
+remotely before processing. Do not copy prepared rows back to Zevo. Keep only
+scripts, specs, recipes, and compact receipts locally. Missing remote routing is
+a work-order error to report, never permission to prepare locally.
+This requirement does not change private held-out preparation or scope_problem.
 
 ### Training-data acquisition and construction
 
@@ -90,6 +92,38 @@ for a row cap. A row limit written in prose in `data_query`, the objective, or
 in `notes`. Zero means no row cap, not a requirement to keep every source row.
 Never report `n_rows_out` above the cap.
 
+### Training row quantities
+
+- `max_training_rows` is the engine-stamped hard ceiling on the final prepared
+  training population, including retained source rows plus accepted synthetic
+  rows. Zero means no ceiling, not a request for unlimited generation.
+- `configuration_pins.target_size` is a binding experiment output target;
+  `configuration_suggestions.target_size` is advisory. Neither changes the Run
+  ceiling. A pinned target_size must be positive; a missing target or zero
+  advisory target means no target from that field. For acquired
+  data, a positive target guides deterministic selection when enough eligible
+  rows exist; it never authorizes fabricating rows to fill a shortfall.
+- `recipe_intent.sampling` defines the requested selection strategy/quantity.
+  Honor explicit recipe choices and pins; do not invent a competing quantity.
+- Enabled generation uses `teacher_distillation.target_augmentation_count` as
+  the requested count of new verified, deduplicated rows, not attempts or tokens.
+  For source-free synthesis it is the entire generated population; for
+  augmentation it is added to retained real rows. A final target_size applies
+  to the combined output, not independently to each generator.
+
+Check quantities together before expensive work. For example, retaining 800
+source rows and adding 300 exceeds a cap of 1000 even though each count fits
+alone. Adapt advisory targets with recorded rationale. If a binding target or
+recipe cannot fit the cap or conflicts with another binding quantity, report
+it to Orchestrator for a revised recipe; never silently truncate, discard
+required source rows, or change the generation count. Do not ask the user again
+for a routine experiment revision. When quantities are delegated, select a
+bounded, justified amount and record it in the recipe. Count quality filtering,
+deduplication, and genuine source/verification shortfalls separately; do not
+claim an unmet target was reached. Engine-owned decontamination may further
+reduce the final population and is reported separately.
+
+
 Map only evidence genuinely present in the source into the method family:
 
 - `sft`: `messages`, `prompt`/`completion`, or `text`, choosing
@@ -108,22 +142,46 @@ do not fabricate preferences, labels, references, or rewards.
 
 #### Generate training data
 
-When `recipe_intent.teacher_distillation.enabled` is true, use `distill-augment`
-to generate training examples with a specified teacher model or the Data agent
-itself. The recipe defines the source seeds, output format, quantity, and
+When suitable permitted public training data cannot be found, report the
+candidates checked, why they were unsuitable, and whether a verifiable synthetic
+alternative is feasible. Do not silently change the recipe or end the Run;
+Orchestrator may select and explicitly enable a generation recipe without
+additional user confirmation unless user constraints prohibit generation.
+Without enabled generation or a usable permitted source, report the blocked
+Data work honestly rather than claiming a completed dataset.
+
+When `recipe_intent.teacher_distillation.enabled` is true, use `synthesize-llm`
+for a source-free synthetic dataset, `pdf-to-qa` for examples grounded in
+supplied documents, or `distill-augment` to augment permitted training rows.
+Generation may use a specified teacher model or the Data agent itself.
+The recipe defines any permitted source seeds, output format, quantity, and
 verification approach. Record the actual generating model in `teacher_model`,
 including the agent's model when it generates directly. Do not claim an external
 teacher call when none occurred. Without this opt-in, use existing data and
 deterministic transformations only.
 
 - Use permitted training sources; do not read or alter Validation/Test data.
-- Verify answers as specified and deduplicate against training seeds and other
-  generated rows. Merge accepted examples with the real training data.
+- Verify answers as specified and deduplicate against any training seeds and
+  other generated rows. Merge with real training rows when augmenting; a
+  source-free recipe produces the verified synthetic training dataset itself.
 - Record the model, generation settings, accepted/rejected counts, and method
   in the recipe, `audit_steps`, and `synthesis_*` provenance fields.
 - Keep `decontaminate_against_eval=true`. The engine performs private evaluation
   overlap checks; leave `decontamination_checked` and
   `decontamination_removed_rows` at their defaults for the engine to populate.
+
+Every source requires a `remote_dataset_spec.json` matching the supplied schema.
+Use `source.kind=huggingface` for a resolved Hub dataset, including discovery;
+pin its id/config/split/revision. For an uploaded file, use `kind=file`, copy
+`expected_source_identity` into identity and `expected_source_fingerprint` into
+source_sha256, and record the absolute uploaded remote_path. For other acquired
+sources use `kind=acquired` with concrete provenance and a pinned revision/content
+identity. For enabled synthesis use `kind=synthetic` with the generating model
+and reproducible recipe identity; keep full settings and seeds in the recipe.
+Non-Hub preparation scripts implement `--source-json`, `--cache-dir`, `--output`,
+and `--profile`; source-json contains the source object from the spec. The
+source file hash must match before processing. Keep the same system receipt and
+finalization protocol for all source kinds.
 
 For a Hugging Face source, resolve and pin its immutable Hub revision before
 execution. Write `remote_dataset_spec.json` from
@@ -172,8 +230,8 @@ profile paths. The engine subsequently applies the private scoring-exclusion
 step on that host and copies back only a compact receipt; do not attempt that
 comparison yourself.
 Copy the validator's printed `source_fingerprint` exactly into
-`data_recipe.source_fingerprint`; it binds the immutable Hub revision and is
-not a hash of a locally downloaded dataset.
+`data_recipe.source_fingerprint`; it binds the pinned source identity (the original file hash for an uploaded
+file, or the canonical source descriptor for other kinds).
 
 For a shared `per_run` allocation, preparation may run alongside another stage,
 but the engine queues the validated workload until that stage has completed
@@ -186,7 +244,7 @@ At every optimization invocation produce only control-plane artifacts plus
 remote pointers:
 
 1. remote `dataset.jsonl`: training-only rows that never return to Zevo;
-2. local `remote_dataset_spec.json` for a Hugging Face source;
+2. local `remote_dataset_spec.json` for every source;
 3. local `data_recipe.json`: exact source/selection/transformation lineage;
 4. one reproducible local preparation script;
 5. remote `data_profile.json` containing only detect/analyze metadata.
@@ -221,9 +279,8 @@ use `inline_transform` for an additional deterministic operation that is not a
 Skill. Put concise human-readable details in `audit_steps`; audit text never
 controls configuration or artifact identity. Use the
 Ticket's `data_intent_signature` to confirm the work order, but do not copy it
-into `DataResult`. Write the realized object to `data_recipe_path`. For a local
-source, use `data_recipe_validation_command`; for a Hugging Face source, use
-`remote_dataset_spec_validation_command`. The final `data_signature` is stamped
+into `DataResult`. Write the realized object to `data_recipe_path`. For every training source, use `remote_dataset_spec_validation_command` locally
+and the supplied remote `artifacts_validation_command` on the assigned host. The final `data_signature` is stamped
 by the engine only after private remote decontamination. Do not invent it and do
 not claim a local `training_dataset_path`.
 
@@ -375,9 +432,11 @@ fields are failure; never guess a substitute. Stable ids, number of records,
 and all non-answer values must match. Do not use answers to compute profile
 statistics.
 
-After all output paths are final, run the exact
-`artifacts_validation_command`, replacing only its named absolute output-path
-placeholder. It validates only the training artifact. Do not replace it with an ad-hoc validator. Empty
+For `prepare_holdout_data`, after output paths are final, run its supplied
+`artifacts_validation_command`, replacing only named placeholders. This checks
+questions-only preservation and the supplied scoring artifacts, not training
+rows. Do not call training recipe/spec/receipt validators for this operation or
+replace the supplied check with an ad-hoc validator. Empty
 strings faithfully preserved from the source are valid data; only an
 unintended source-to-output change is a contract failure.
 
@@ -387,8 +446,21 @@ Read each selected Data Skill completely before use. Record every applied Skill
 or inline deterministic transformation in execution order. Strict Customized
 Pipeline pins are binding; advisory guidance may be adjusted with rationale.
 
-Before success, use `artifacts_validation_command` to reopen every reported
-file and verify:
+Use only the validators supplied for the current operation:
+
+- `prepare_run_data`: validate the source spec locally using
+  `remote_dataset_spec_validation_command` (`data_recipe_validation_command`
+  aliases it); record the remote preparation receipt, then run
+  `artifacts_validation_command` on that host. The engine validates recipe
+  identity and performs private decontamination/finalization afterward.
+- `prepare_holdout_data`: run its supplied `artifacts_validation_command` for
+  exact answer removal and scoring-artifact preservation, including suite members
+  according to their supplied contract. Do not run training-data validators.
+- `scope_problem`: run `scoping_result_validation_command` on scoping_result.json.
+  No training recipe, remote training receipt, or training-artifact check applies.
+
+Do not execute empty or inapplicable commands or substitute another operation's
+validator. For training preparation, check the following on the assigned plane:
 
 - valid format and non-zero required rows;
 - the training artifact contains no rows acquired from a scoring source;

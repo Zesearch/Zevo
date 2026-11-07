@@ -41,3 +41,15 @@ def method_branch_problem(
             "a complete method/base_model branch_transition with Validation evidence"
         )
     return ""
+
+
+def method_selection_owner(
+    *, agent_id: str, input_format: str, run_mode: str,
+    selected_method: str = "", active_method: str = "",
+) -> str:
+    """Omission inherits an existing pipeline branch, never delegates a change."""
+    pipeline_train = (
+        agent_id == "train" and input_format == "typed"
+        and run_mode in {"full_pipeline", "customized_pipeline", "auto"}
+    )
+    return "orchestrator" if pipeline_train and (selected_method or active_method) else "worker"

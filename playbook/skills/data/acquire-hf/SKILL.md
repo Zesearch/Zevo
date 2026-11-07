@@ -5,7 +5,8 @@ description: "Find and load a matching public HuggingFace training dataset when 
 
 # Acquire a HuggingFace dataset
 
-Use this Skill only for the `collect` phase. Compose it with an applicable
+Use this Skill only for source acquisition (`collect` in the data recipe),
+not for Slurm job-result collection. Compose it with an applicable
 reformat Skill when the downloaded rows are not already in the required
 training shape.
 
@@ -19,7 +20,8 @@ training shape.
 3. Inspect the dataset card/configs/splits and sample records before selecting
    it. Do not select a merely adjacent dataset to avoid returning empty work.
 4. Resolve an immutable Hub revision, then load the training split on the
-   assigned remote data plane with `datasets.load_dataset`. Never download the
+   assigned remote data plane with `datasets.load_dataset`. Require the task
+   device_info and remote output contract; if absent, report a routing error. Never download the
    full dataset into the Zevo scheduler/container.
 5. Run schema detection and bounded sample analysis remotely; return only the
    compact profile/receipt, never source rows.
@@ -41,10 +43,16 @@ names a split/config, use it exactly and fail if it does not exist.
   chosen source.
 - Respect a strict `acquire_hf` directive. If no clean match exists, fail with
   the candidates checked and why they were unsuitable.
-- In autonomous mode, when no clean public match exists, stop using this Skill
-  and switch to `synthesize-llm`; record that fallback explicitly.
-- Apply deterministic sampling only when the corpus exceeds a justified
-  `target_size`. Keep the original parsed count as `n_rows_in`.
+- When no suitable permitted public match is found, report the candidates
+  checked and their limitations so Orchestrator can select a synthetic-data
+  recipe. Switch to `synthesize-llm` only when the assigned
+  `recipe_intent.teacher_distillation.enabled` is true and user constraints
+  permit generation. Otherwise report the blocked acquisition; do not enable
+  generation yourself or present source scarcity as a reason to end the Run.
+- Follow the requested sampling recipe and target_size under the Data platform's
+  Training row quantities rules. Always respect max_training_rows; a missing
+  target_size does not disable that cap. Keep the original parsed count as
+  n_rows_in and report genuine source shortfalls without fabricating rows.
 
 ## Validate and report
 

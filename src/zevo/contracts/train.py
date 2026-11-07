@@ -83,18 +83,6 @@ class TrainTaskInput(AgentTaskInput):
         "",
         description="Compact local receipt proving the remote dataset identity and row count.",
     )
-    validation_dataset_path: str = Field(
-        min_length=1,
-        description=(
-            "Engine-bound raw Validation scoring records for trainer evaluation "
-            "only. Train renders a temporary method-specific eval view without "
-            "using it to choose the training source or configuration."
-        ),
-    )
-    validation_answer_fields: list[str] = Field(
-        min_length=1,
-        description="Ground-truth fields used only to render trainer evaluation labels.",
-    )
     data_signature: str = Field(
         min_length=64,
         max_length=64,

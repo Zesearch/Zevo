@@ -9,12 +9,15 @@ branch points; this is never a requirement to save every epoch or step.
    allowed only when they serve that same direction and are explained.
 3. Resolve values in priority order: strict pins, compatible suggestions,
    selected-parent and Run-history evidence/memory, method Skill, measured runtime/data.
-   Empty/zero/missing suggestions delegate the choice.
-4. In a pipeline, execute the compatible method selected by the Orchestrator
-   or pinned by the user. A standalone/freeform request without an Orchestrator
-   selection delegates the method choice to Train. A pipeline request that omits
-   the method also delegates that choice. Retain or change methods according to that experiment decision, never
-   for diversity alone. If the method cannot run faithfully, report the evidence
+   Empty/zero/missing hyperparameter suggestions delegate those values; method
+   selection follows the separate priority below.
+4. Resolve the method in order: user pin, explicit Orchestrator selection,
+   inherited `active_training_method`, then Train choice when the activation
+   contract delegates ownership to `worker` (including standalone/freeform).
+   An omitted method does not discard an existing branch. If none applies,
+   report an incomplete work order rather than silently choosing a method.
+   Never change methods merely for diversity. If the method cannot run faithfully,
+   report the evidence
    so the Orchestrator can revise the experiment. Choose unpinned method-specific
    values and full-parameter versus PEFT execution from evidence, resources, and
    expected benefit; explain the tradeoff. GKD teacher and Online DPO reward model
@@ -33,10 +36,8 @@ branch points; this is never a requirement to save every epoch or step.
    requires it; a weights-only export is insufficient. Record checks and results,
    then continue the planned execution without repeating unrelated verification.
 
-Only after the complete training configuration is fixed, map the raw records
-at `validation_dataset_path` using `validation_answer_fields` and the same
-prompt/template renderer used for Training. Use the result only as trainer
-evaluation data; it must never enter the optimization loss or influence the
-training source/configuration choice. Store corrected, reusable runtime pitfalls in
+Do not construct Trainer evaluation data or enable validation loss/reward.
+System-owned mid-training Validation, when enabled, owns intermediate scoring,
+continuation decisions, and best-checkpoint selection. Store corrected, reusable runtime pitfalls in
 Run-local Train memory. Return failure when the selected configuration cannot
 be executed faithfully; do not mutate it silently after launch.

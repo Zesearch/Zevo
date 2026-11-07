@@ -507,3 +507,57 @@ def test_inference_config_option_fields_reject_duplicates() -> None:
             {"scoring_mode": "option_loglikelihood",
              "option_fields": ["opt_a", "opt_a"]}
         )
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_new_training_disables_internal_eval_but_preserves_adaptive(adaptive):
+    from zevo.contracts.configuration import validate_no_trainer_evaluation
+    payload = _train_payload()
+    payload["training"].update(eval_strategy="no", eval_steps=0, adaptive_evaluation=adaptive)
+    config = TrainRunConfig.model_validate(payload)
+    validate_no_trainer_evaluation(config)
+    assert config.training.adaptive_evaluation is adaptive
+
+
+def test_legacy_eval_config_is_readable_but_cannot_launch():
+    from zevo.contracts.configuration import validate_no_trainer_evaluation
+    config = TrainRunConfig.model_validate(_train_payload())
+    with pytest.raises(ValueError, match="trainer evaluation must be disabled"):
+        validate_no_trainer_evaluation(config)
+
+
+@pytest.mark.parametrize("override", [
+    {"evaluation_strategy": "steps"},
+    {"do_eval": True},
+    {"load_best_model_at_end": True},
+    {"eval_dataset": "/validation.jsonl"},
+    {"trainer_args": {"eval_on_start": True}},
+])
+def test_implementation_arguments_cannot_reenable_trainer_eval(override):
+    from zevo.contracts.configuration import validate_no_trainer_evaluation
+    payload = _train_payload()
+    payload["training"].update(eval_strategy="no", eval_steps=0)
+    payload["training"]["implementation_config"].update(override)
+    with pytest.raises(ValueError, match="evaluation"):
+        validate_no_trainer_evaluation(TrainRunConfig.model_validate(payload))
+
+
+def test_new_train_schema_preserves_adaptive_and_disables_trainer_eval():
+    from zevo.contracts.configuration import current_train_config_schema
+    fields = current_train_config_schema()["$defs"]["TrainingConfig"]["properties"]
+    assert fields["eval_strategy"]["const"] == "no"
+    assert fields["eval_steps"]["const"] == 0
+    assert fields["early_stopping"]["type"] == "null"
+    assert fields["adaptive_evaluation"]["type"] == "boolean"
+
+
+@pytest.mark.parametrize("metric,mode", [("eval_loss", "min"), ("eval_reward", "max")])
+def test_new_training_rejects_trainer_early_stopping(metric, mode):
+    from zevo.contracts.configuration import validate_no_trainer_evaluation
+    payload = _train_payload()
+    payload["training"].update(
+        eval_strategy="no", eval_steps=0,
+        early_stopping={"metric": metric, "mode": mode, "patience": 3},
+    )
+    with pytest.raises(ValueError, match="trainer early_stopping is disabled"):
+        validate_no_trainer_evaluation(TrainRunConfig.model_validate(payload))

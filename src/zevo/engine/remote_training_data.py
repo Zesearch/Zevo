@@ -1,7 +1,7 @@
-"""Remote-first materialization for Hugging Face training datasets.
+"""Remote-first materialization for all training-data sources.
 
 The scheduler is the control plane: it stores a small, immutable package that
-names the Hub revision, preparation program, and hidden scoring fingerprints.
+names the pinned source, preparation program, and hidden scoring fingerprints.
 The assigned training host is the data plane: it downloads, inspects,
 normalizes, decontaminates, and retains the actual JSONL dataset in a durable
 Run/data-intent directory shared by exact retries. Hugging Face's reusable raw downloads remain in a
@@ -61,13 +61,59 @@ class RemoteHuggingFaceSource(BaseModel):
     split: str = Field(min_length=1)
 
 
+class RemotePreparedSource(BaseModel):
+    """Non-Hub source prepared on the assigned host."""
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["file", "acquired", "synthetic"]
+    identity: str = Field(min_length=1)
+    revision: str = Field(
+        min_length=1,
+        description="Pinned source version or reproducible generation recipe identity.",
+    )
+    source_sha256: str = Field("", pattern=r"^(?:|[0-9a-f]{64})$")
+    remote_path: str = ""
+
+    @model_validator(mode="after")
+    def validate_file(self) -> "RemotePreparedSource":
+        if self.kind == "file":
+            if not self.source_sha256:
+                raise ValueError("file source requires lowercase SHA-256")
+            if not self.remote_path.startswith("/"):
+                raise ValueError("file source requires an absolute remote_path")
+        return self
+
+
+RemoteSource = RemoteHuggingFaceSource | RemotePreparedSource
+
+
+def validate_source_selection(
+    spec: "RemoteDatasetSpec", *, dataset_id: str = "",
+    dataset_split: str = "train", dataset_config: str = "",
+    source_identity: str = "", source_fingerprint: str = "",
+) -> None:
+    source = spec.source
+    if source_fingerprint:
+        if not isinstance(source, RemotePreparedSource) or source.kind != "file":
+            raise ValueError("uploaded source requires a file source spec")
+        if source.source_sha256 != source_fingerprint or source.identity != source_identity:
+            raise ValueError("remote file source differs from the work order")
+    elif dataset_id:
+        if not isinstance(source, RemoteHuggingFaceSource):
+            raise ValueError("pinned Hub source requires a Hugging Face spec")
+        if (source.dataset_id, source.split, source.config) != (dataset_id, dataset_split, dataset_config):
+            raise ValueError("remote dataset spec differs from the work order")
+    # Discovery resolves its actual source remotely. Recipe identity still binds
+    # it to the original work order, and the spec binds its realized provenance.
+
+
 class RemoteDatasetSpec(BaseModel):
-    """Data-authored, answer-blind plan for remote HF materialization."""
+    """Data-authored, answer-blind plan for remote training-data materialization."""
 
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(1, ge=1, le=1)
-    source: RemoteHuggingFaceSource
+    source: RemoteSource
     training_method: str = Field(min_length=1)
     method_format: str = Field(min_length=1)
     output_format: str = Field("jsonl", pattern=r"^jsonl$")
@@ -82,7 +128,7 @@ class RemoteTrainingPackage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(1, ge=1, le=1)
-    source: RemoteHuggingFaceSource
+    source: RemoteSource
     training_method: str = Field(min_length=1)
     method_format: str = Field(min_length=1)
     preparation_interface: str = Field(
@@ -152,7 +198,7 @@ class RemotePreparationReceipt(BaseModel):
 
     schema_version: int = Field(1, ge=1, le=1)
     data_intent_signature: str = Field(pattern=_SHA256_PATTERN)
-    source: RemoteHuggingFaceSource
+    source: RemoteSource
     prepare_script_sha256: str = Field(pattern=_SHA256_PATTERN)
     data_recipe_sha256: str = Field(pattern=_SHA256_PATTERN)
     preparation_signature: str = Field(pattern=_SHA256_PATTERN)
@@ -209,7 +255,7 @@ def load_remote_preparation_receipt(path: str | Path) -> RemotePreparationReceip
 def remote_preparation_signature(
     *,
     data_intent_signature: str,
-    source: RemoteHuggingFaceSource,
+    source: RemoteSource,
     prepare_script_sha256: str,
     data_recipe_sha256: str,
 ) -> str:
@@ -249,6 +295,8 @@ def remote_data_signature(
 
 def remote_source_fingerprint(spec: RemoteDatasetSpec) -> str:
     """Canonical immutable identity copied into DataRecipe.source_fingerprint."""
+    if isinstance(spec.source, RemotePreparedSource) and spec.source.kind == "file":
+        return spec.source.source_sha256
     return hashlib.sha256(_canonical_json(spec.source.model_dump(mode="json"))).hexdigest()
 
 
@@ -485,6 +533,9 @@ def record_remote_preparation(
 ) -> RemotePreparationReceipt:
     """Persist exact reusable evidence immediately after expensive preparation."""
     spec = load_remote_dataset_spec(spec_path)
+    if isinstance(spec.source, RemotePreparedSource) and spec.source.kind == "file":
+        if file_sha256(spec.source.remote_path) != spec.source.source_sha256:
+            raise ValueError("uploaded remote source differs from its pinned SHA-256")
     try:
         recipe = json.loads(Path(recipe_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -622,18 +673,18 @@ def materialize_remote_training_data(
     cache = Path(cache_dir).expanduser().resolve()
     cache.mkdir(parents=True, exist_ok=True)
     raw = output.with_name(f".{output.name}.before-decontamination.jsonl")
-    command = [
-        sys.executable,
-        str(prepare_script),
-        "--dataset-id", package.source.dataset_id,
-        "--dataset-split", package.source.split,
-        "--dataset-revision", package.source.revision,
-        "--cache-dir", str(cache),
-        "--output", str(raw),
-        "--profile", str(profile),
-    ]
-    if package.source.config:
-        command.extend(["--dataset-config", package.source.config])
+    command = [sys.executable, str(prepare_script), "--cache-dir", str(cache),
+               "--output", str(raw), "--profile", str(profile)]
+    if isinstance(package.source, RemoteHuggingFaceSource):
+        command.extend(["--dataset-id", package.source.dataset_id,
+                        "--dataset-split", package.source.split,
+                        "--dataset-revision", package.source.revision])
+        if package.source.config:
+            command.extend(["--dataset-config", package.source.config])
+    else:
+        if package.source.kind == "file" and file_sha256(package.source.remote_path) != package.source.source_sha256:
+            raise ValueError("uploaded remote source differs from its pinned SHA-256")
+        command.extend(["--source-json", package.source.model_dump_json()])
     environment = dict(os.environ)
     environment.setdefault("HF_HOME", str(cache))
     subprocess.run(command, check=True, env=environment)
@@ -759,10 +810,12 @@ def _main(argv: list[str] | None = None) -> int:
 
     validate = subparsers.add_parser("validate-spec")
     validate.add_argument("spec_path")
-    validate.add_argument("--dataset-id", required=True)
-    validate.add_argument("--dataset-split", required=True)
+    validate.add_argument("--dataset-id", default="")
+    validate.add_argument("--dataset-split", default="train")
     validate.add_argument("--dataset-config", default="")
     validate.add_argument("--training-method", required=True)
+    validate.add_argument("--source-identity", default="")
+    validate.add_argument("--source-fingerprint", default="")
 
     materialize = subparsers.add_parser("materialize")
     materialize.add_argument("--package", required=True)
@@ -800,22 +853,12 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "validate-spec":
         spec = load_remote_dataset_spec(args.spec_path)
-        expected = {
-            "dataset_id": args.dataset_id,
-            "split": args.dataset_split,
-            "config": args.dataset_config,
-            "training_method": args.training_method,
-        }
-        actual = {
-            "dataset_id": spec.source.dataset_id,
-            "split": spec.source.split,
-            "config": spec.source.config,
-            "training_method": spec.training_method,
-        }
-        if actual != expected:
-            raise ValueError(
-                f"remote dataset spec differs from the work order: {actual!r} != {expected!r}"
-            )
+        validate_source_selection(spec, dataset_id=args.dataset_id,
+                                  dataset_split=args.dataset_split, dataset_config=args.dataset_config,
+                                  source_identity=args.source_identity,
+                                  source_fingerprint=args.source_fingerprint)
+        if spec.training_method != args.training_method:
+            raise ValueError("remote dataset spec training method differs from the work order")
         print(json.dumps({
             "spec": spec.model_dump(mode="json"),
             "source_fingerprint": remote_source_fingerprint(spec),

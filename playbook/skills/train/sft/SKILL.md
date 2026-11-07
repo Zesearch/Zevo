@@ -31,7 +31,7 @@ Require the shape selected by `prompt_framing`:
 | `completion` | `{"prompt":...,"completion":...}` | `completion_only_loss=True` |
 | `text` | `{"text":...}` | all tokens; set neither mask |
 
-Validate every row needed by the run and the optional evaluation dataset. Fail
+Validate every training row needed by the run. Fail
 on mixed or incompatible records; do not convert them inside Train.
 
 For chat loss, expand each conversation into one example per assistant turn.
@@ -87,7 +87,7 @@ trainer = SFTTrainer(
     model=model,
     args=args,
     train_dataset=train_ds,
-    eval_dataset=eval_ds,
+    eval_dataset=None,  # System-owned Validation runs separately.
     processing_class=tokenizer,
     peft_config=peft_config,
     callbacks=[ZevoTrainerTelemetryCallback(ticket_id)],

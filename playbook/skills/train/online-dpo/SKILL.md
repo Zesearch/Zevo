@@ -12,7 +12,7 @@ API reference: https://huggingface.co/docs/trl/online_dpo_trainer
 
 ## Preconditions and data
 
-Require every training and evaluation row to contain only a valid `prompt` plus
+Require every training row to contain only a valid `prompt` plus
 any explicitly documented metadata consumed by the reward. Pipeline prompts are
 conversational message lists; consistent standard strings are acceptable in
 direct mode.
@@ -45,7 +45,7 @@ trainer = OnlineDPOTrainer(
     reward_funcs=reward,
     args=args,
     train_dataset=train_ds,
-    eval_dataset=eval_ds,
+    eval_dataset=None,  # System-owned Validation runs separately.
     processing_class=tokenizer,
     peft_config=peft_config_or_none,
     callbacks=[ZevoTrainerTelemetryCallback(ticket_id)],

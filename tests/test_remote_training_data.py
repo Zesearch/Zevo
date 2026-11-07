@@ -274,3 +274,108 @@ async def test_remote_control_exit_255_retries_in_place(
     assert attempts == 2
     assert stdout == "ok"
     assert calls == [("ssh", "host", "true"), ("ssh", "host", "true")]
+
+
+@pytest.mark.parametrize("kind", ["file", "acquired", "synthetic"])
+def test_non_hub_sources_keep_remote_preparation_and_finalization(tmp_path, kind):
+    from zevo.engine.remote_training_data import file_sha256, validate_source_selection
+    original = tmp_path / "uploaded.jsonl"
+    original.write_text('{"prompt":"2+2", "completion":"4"}\n')
+    body = _spec().model_dump()
+    body["source"] = {"kind": kind, "identity": "original-source", "revision": "recipe-v1"}
+    if kind == "file":
+        body["source"].update(remote_path=str(original), source_sha256=file_sha256(original))
+    spec = RemoteDatasetSpec.model_validate(body)
+    if kind == "file":
+        validate_source_selection(spec, source_identity="original-source", source_fingerprint=file_sha256(original))
+        with pytest.raises(ValueError, match="differs"):
+            validate_source_selection(spec, source_identity="original-source", source_fingerprint="0" * 64)
+    recipe = {"source_identity": "original-source", "source_fingerprint": remote_source_fingerprint(spec)}
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(json.dumps(recipe))
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(spec.model_dump_json())
+    script = tmp_path / "prepare.py"
+    script.write_text("# reproducible preparation\n")
+    dataset = tmp_path / "prepared.jsonl"
+    dataset.write_text(original.read_text())
+    profile = tmp_path / "profile.json"
+    profile.write_text('{"rows": 1}')
+    receipt_path = tmp_path / "prepared-receipt.json"
+    kwargs = dict(data_intent_signature="a" * 64, spec_path=spec_path,
+                  recipe_path=recipe_path, prepare_script_path=script,
+                  dataset_path=dataset, profile_path=profile, receipt_path=receipt_path)
+    receipt = record_remote_preparation(**kwargs)
+    assert validate_remote_preparation(**kwargs) == receipt
+    package = build_remote_training_package(spec=spec, recipe=recipe, prepare_script_path=script,
+                                            blocked_semantic_fingerprints=[], data_intent_signature="a" * 64)
+    package_path = tmp_path / "package.json"
+    package_path.write_text(package.model_dump_json())
+    final = finalize_remote_training_data(package_path=package_path, prepared_path=dataset,
+        output_path=tmp_path / "final.jsonl", profile_path=profile, receipt_path=tmp_path / "receipt.json")
+    assert final.n_rows == 1
+    if kind == "file":
+        original.write_text("changed source")
+        with pytest.raises(ValueError, match="SHA-256"):
+            record_remote_preparation(**kwargs)
+
+
+@pytest.mark.parametrize("source", ["hub", "file", "acquired", "synthetic"])
+def test_all_training_sources_build_remote_contract(tmp_path, source):
+    from tests.test_cloud_device_remote_data_plane import _cloud
+    from zevo.db.models import Run, Ticket
+    from zevo.engine.run.runner import _build_data_input
+    device = tmp_path / "device.json"
+    from zevo.contracts.infrastructure import InfrastructureDeviceInfo
+    device.write_text(InfrastructureDeviceInfo(**_cloud()).model_dump_json())
+    uploaded = tmp_path / "source.jsonl"
+    uploaded.write_text('{"prompt":"p", "completion":"a"}\n')
+    payload = dict(operation="prepare_run_data", training_method="sft",
+                   data_intent_signature="a" * 64, data_query="find suitable training data")
+    payload["dataset"] = "org/train" if source == "hub" else str(uploaded) if source == "file" else ""
+    run = Run(id="run-1", metric="accuracy", gpu_provider="cloud")
+    ticket = Ticket(id="data-1", run_id=run.id, agent_id="data", lane="optimization")
+    inp = _build_data_input(ticket, payload, {"device_info": {"path": str(device)}}, str(tmp_path), run)
+    assert inp.device_info_path == str(device)
+    assert inp.remote_dataset_spec_schema and inp.remote_data_output_dir
+    assert "check-prepared" in inp.artifacts_validation_command
+    assert bool(inp.expected_source_fingerprint) == (source == "file")
+
+
+def test_uploaded_source_materializes_via_generic_remote_script(tmp_path):
+    from zevo.engine.remote_training_data import file_sha256, materialize_remote_training_data
+    uploaded = tmp_path / "source with spaces.jsonl"
+    uploaded.write_text('{"prompt":"q", "completion":"answer"}\n')
+    body = _spec().model_dump()
+    body["source"] = dict(kind="file", identity="original-upload", revision="v1",
+                          source_sha256=file_sha256(uploaded), remote_path=str(uploaded))
+    spec = RemoteDatasetSpec.model_validate(body)
+    script = tmp_path / "prepare.py"
+    script.write_text('''import argparse, json, pathlib
+p = argparse.ArgumentParser()
+for name in ("source-json", "cache-dir", "output", "profile"):
+    p.add_argument("--" + name, required=True)
+a = p.parse_args()
+source = json.loads(a.source_json)
+pathlib.Path(a.output).write_bytes(pathlib.Path(source["remote_path"]).read_bytes())
+pathlib.Path(a.profile).write_text('{"rows": 1}')
+''')
+    package = build_remote_training_package(spec=spec, recipe={"source_identity": "original-upload"},
+        prepare_script_path=script, blocked_semantic_fingerprints=[], data_intent_signature="a" * 64)
+    package_file = tmp_path / "package.json"
+    package_file.write_text(package.model_dump_json())
+    receipt = materialize_remote_training_data(package_path=package_file, prepare_script_path=script,
+        output_path=tmp_path / "final.jsonl", cache_dir=tmp_path / "cache", receipt_path=tmp_path / "receipt.json")
+    assert receipt.n_rows == 1
+    assert Path(receipt.dataset_path).read_text() == uploaded.read_text()
+
+
+@pytest.mark.parametrize("dataset", ["org/train", "/upload/data.jsonl", ""])
+def test_training_data_binding_requires_infrastructure_for_every_source(dataset):
+    from zevo.contracts.tickets import validate_bindings
+    payload = {"operation": "prepare_run_data", "dataset": dataset, "data_query": "find data"}
+    with pytest.raises(ValueError, match="device_info"):
+        validate_bindings(agent_id="data", payload=payload, inputs={})
+    result = validate_bindings(agent_id="data", payload=payload, inputs={
+        "device_info": {"artifact_role": "device_info", "path": "/device.json"}})
+    assert result["device_info"]["path"] == "/device.json"

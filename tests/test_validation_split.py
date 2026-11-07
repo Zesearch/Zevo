@@ -1281,7 +1281,7 @@ def test_the_complete_stored_data_payload_is_the_only_runner_authority(tmp_path:
     assert built.evaluation_script == ""
     assert built.sample_submission == ""
     assert "--scoring-source" not in built.artifacts_validation_command
-    assert "validate-training-data" in built.artifacts_validation_command
+    assert "check-prepared" in built.artifacts_validation_command
     assert built.remote_hf_cache_path == "/work/hf"
     assert built.remote_data_output_dir == f"/work/data/runs/r/prepared/{'a' * 64}"
     assert built.remote_preparation_receipt_path == (
@@ -1485,8 +1485,8 @@ async def test_remote_cleanup_trashes_only_unreferenced_failed_ticket_data(
     assert notices[0].code == "data.remote_artifacts_trashed"
 
 
-def test_local_data_input_supplies_the_exact_source_fingerprint(tmp_path: Path) -> None:
-    """A local Data Agent copies a digest; it never chooses its serialization."""
+def test_uploaded_data_input_supplies_the_exact_source_fingerprint(tmp_path: Path) -> None:
+    """Remote preparation preserves the uploaded source digest."""
     from zevo.contracts.configuration import file_sha256
     from zevo.engine.run.runner import _build_data_input
 
@@ -1506,13 +1506,15 @@ def test_local_data_input_supplies_the_exact_source_fingerprint(tmp_path: Path) 
         "data_intent_signature": "a" * 64,
     }
 
+    device = tmp_path / "device.json"
+    _write_instance_device(device, run_id="r")
     built = _build_data_input(
-        ticket, payload, {"device_info": {"path": "/remote/device.json"}},
+        ticket, payload, {"device_info": {"path": str(device)}},
         str(tmp_path), run,
     )
     assert built.expected_source_identity == str(source)
     assert built.expected_source_fingerprint == file_sha256(source)
-    assert "--source-file" in built.data_recipe_validation_command
+    assert "--source-fingerprint" in built.data_recipe_validation_command
     assert "--source-identity" in built.data_recipe_validation_command
     assert str(source) in built.data_recipe_validation_command
     fingerprint_schema = built.data_recipe_schema["properties"]["source_fingerprint"]
@@ -1836,9 +1838,15 @@ async def test_pipeline_ticket_uses_only_run_owned_customization(session_factory
             },
             history=[], started_at=datetime.now(timezone.utc),
         ))
+        s.add(Ticket(id="infra-customization", run_id="r-customization",
+                     agent_id="infrastructure", status="succeeded", iteration=0,
+                     payload={"purpose": "train"}))
+        await s.flush()
+        s.add(WorkProduct(ticket_id="infra-customization", role="device_info", path="/remote/device.json"))
         await s.commit()
         created = await create_ticket(CreateTicketBody(
             agent_id="data", run_id="r-customization", iteration=0,
+            inputs={"device_info": {"artifact_role": "device_info", "source_ticket_id": "infra-customization"}},
             payload={
                 "operation": "prepare_run_data", "dataset": "/task/train.jsonl",
                 "training_method": "full_sft",
@@ -1917,7 +1925,7 @@ def test_each_lane_uses_its_own_metric_evaluator_and_sample(tmp_path: Path) -> N
         == ["test_gold"]
 
 
-def test_optimization_data_is_blind_while_heldout_data_gets_its_contract() -> None:
+def test_optimization_data_is_blind_while_heldout_data_gets_its_contract(tmp_path: Path) -> None:
     """Optimization Data sees no scoring assets; private Test stripping does."""
     from zevo.engine.run.runner import _build_data_input, _validation_files
 
@@ -1950,8 +1958,10 @@ def test_optimization_data_is_blind_while_heldout_data_gets_its_contract() -> No
             "dataset": "/training.jsonl", "training_method": "full_sft",
             "data_intent_signature": "a" * 64,
     }
+    device = tmp_path / "device.json"
+    _write_instance_device(device, run_id="r")
     built = _build_data_input(
-        loop, data_payload, {"device_info": {"path": "/remote/device.json"}},
+        loop, data_payload, {"device_info": {"path": str(device)}},
         "/work", run,
     )
     assert built.scoring_set == ""
@@ -2435,21 +2445,13 @@ def test_evaluation_owned_history_fact_preserves_generation_termination() -> Non
     assert refreshed[0]["generation_termination"] == termination
 
 def test_the_trainer_evals_on_the_run_s_validation_set_and_never_the_test_set() -> None:
-    """`val_loss` has to be a loss on the VALIDATION set, or it is a lie.
-
-    The engine attaches raw Validation only after Data returns; Train then
-    renders a temporary eval view with the declared answer fields.
-
-    The dangerous half is the held-out lane: it runs the SAME data agent over
-    the TEST set. A training-shaped copy of that would put the test set one
-    config line away from being trained on, so the freeze must never take one
-    from a held-out ticket.
-    """
+    """Frozen scoring artifacts stay engine-owned and outside Train input."""
     from zevo.contracts.data import DataResult
     from zevo.contracts.train import TrainTaskInput
 
     assert "validation_dataset_path" in DataResult.model_fields
-    assert "validation_dataset_path" in TrainTaskInput.model_fields
+    assert "validation_dataset_path" not in TrainTaskInput.model_fields
+    assert "validation_answer_fields" not in TrainTaskInput.model_fields
 
     src = Path("src/zevo/engine/run/runner.py").read_text()
     record = src[src.index("async def _record_prepared_scoring_data"):]
@@ -2463,16 +2465,11 @@ def test_the_trainer_evals_on_the_run_s_validation_set_and_never_the_test_set() 
 
 
 @pytest.mark.asyncio
-async def test_the_train_ticket_is_handed_the_raw_validation_set(
+async def test_the_train_ticket_does_not_receive_legacy_raw_validation_binding(
     session_factory,
     tmp_path: Path,
 ) -> None:
-    """The path is stamped by the harness, not carried by the orchestrator.
-
-    Which file the trainer may compute a loss on is a fact about the run's
-    splits. The orchestrator plans what to try; it does not choose which set
-    measures the result.
-    """
+    """Legacy bindings must not expose frozen Validation as Trainer data."""
     from zevo.engine.run.runner import _build_train_input
 
     async with session_factory() as s:
@@ -2516,8 +2513,8 @@ async def test_the_train_ticket_is_handed_the_raw_validation_set(
             tk, payload, inputs, work_dir="/w", generation_backend="vllm",
             run=run, session=s,
         )
-        assert built.validation_dataset_path == "/w/validation_dataset.jsonl"
-        assert built.validation_answer_fields == ["response"]
+        assert "validation_dataset_path" not in built.model_dump()
+        assert "validation_answer_fields" not in built.model_dump()
         assert built.dataset_path == "/w/dataset.jsonl", "training data is untouched"
 
 

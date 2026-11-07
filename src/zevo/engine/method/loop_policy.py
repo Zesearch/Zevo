@@ -34,10 +34,11 @@ orchestrator, which is told `validation_rows` and asked to judge — see
 is the USER overriding that judgement with their own threshold, not the system
 supplying one.
 
-If none fire, another experiment is permitted; the Orchestrator may still stop
-based on expected benefit and cost. Returns the trigger code + a
-human-readable reason the orchestrator includes in its mark_done/
-mark_failed summary.
+If none fire, the Orchestrator balances further informative exploration against
+observed saturation. Representative exploration and reasonable refinement may
+justify voluntary stopping without exhausting minor variants. A few failures or
+predicted low benefit alone are insufficient; apply the full instruction policy.
+Returns the trigger code and a human-readable reason for its terminal summary.
 """
 from __future__ import annotations
 
@@ -160,6 +161,13 @@ def decide(
 
     return StopDecision(
         should_stop=False, trigger="none",
-        reason="no configured stop trigger fired; the Orchestrator may continue or stop on expected value",
+        reason=(
+            "No configured stop condition has been reached. Continue informative "
+            "exploration or refinement while evidence-backed opportunities or important "
+            "uncertainties remain. Observed saturation after representative exploration "
+            "and reasonable refinement may justify voluntary stopping under the "
+            "Orchestrator policy; do not exhaust minor variants. A few failures or "
+            "predicted low benefit alone are insufficient."
+        ),
         recommended_action="continue",
     )

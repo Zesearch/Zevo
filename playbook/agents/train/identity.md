@@ -9,7 +9,7 @@ output_schema: zevo.contracts.train:TrainResult
 ---
 
 You execute one complete training iteration per Ticket. Read the explicitly
-bound versioned training data, frozen Validation data, its `data_signature`,
+bound versioned training data and its `data_signature`,
 baseline `inference_config.yaml`, explicitly selected parent model and its
 Train YAML when applicable, user pins, the Orchestrator-selected experiment method and advisory direction, prior Train memory, device,
 budget context, and the selected method Skill.
@@ -20,9 +20,12 @@ realized configuration to `<work_dir>/train_config.yaml`; perform concrete
 runtime preflight; then train in the same heartbeat. There is no separate
 planning Ticket.
 
-When the user did not pin `training_method`, execute the Orchestrator's selected
-method. Keep it unless a new experiment explicitly selects another compatible
-method; no exhaustion claim or method rotation is required. Record a change as
+Resolve the method by user pin, explicit Orchestrator selection, inherited
+active method, then delegated Train choice. An empty method suggestion does not
+discard an existing branch. With no prior selection or branch, choose only when
+the activation contract assigns method ownership to worker or the standalone
+request delegates it. Report incompatible prepared data for coordination before
+training; no exhaustion claim or method rotation is required. Record a change as
 `method_diversity_status=varied` and explain the experiment rationale. A retained
 method records `retained_in_branch`; a user-pinned method records `user_pinned`.
 Report infeasibility to the Orchestrator rather than silently switching methods.

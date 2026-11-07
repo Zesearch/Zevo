@@ -417,7 +417,6 @@ def test_orchestrator_receives_closed_payload_and_binding_authorities() -> None:
     bindings = specialist_input_binding_contracts()
     assert bindings["train"]["variants"]["checkpoint"]["required"] == {
         "training_dataset": "training_dataset",
-        "validation_dataset": "validation_dataset",
         "inference_config": "inference_config",
         "device_info": "device_info",
         "parent_checkpoint": "checkpoint",
@@ -1045,7 +1044,6 @@ def test_model_chain_bindings_require_selected_checkpoint_and_yaml() -> None:
     }
     base = {
         "training_dataset": {"artifact_role": "training_dataset", "path": "/d.jsonl"},
-        "validation_dataset": {"artifact_role": "validation_dataset", "path": "/v.jsonl"},
         "inference_config": {"artifact_role": "inference_config", "path": "/i.yaml"},
         "device_info": {"artifact_role": "device_info", "path": "/gpu.json"},
     }
@@ -1208,8 +1206,6 @@ def test_train_yaml_copies_prompt_and_records_immediate_parent(tmp_path: Path) -
         iteration=2,
         dataset_path="/tmp/data.jsonl",
         dataset_rows=1,
-        validation_dataset_path="/tmp/validation.jsonl",
-        validation_answer_fields=["answer"],
         data_signature="d" * 64,
         inference_config_path=str(inference_path),
         expected_inference_config_sha256=file_sha256(inference_path),
@@ -1352,10 +1348,12 @@ def test_unpinned_train_retains_method_until_orchestrator_switches_branch(tmp_pa
         ),
     )
     _validate_specialist_yaml(third, inp)
-    _validate_specialist_yaml(third, inp.model_copy(update={
-        "activation_contract": {"method_selection_owner": "worker"},
-        "configuration_suggestions": {}, "branch_transition": {},
-    }))
+    # Delegation alone cannot discard an existing method branch.
+    with pytest.raises(ValueError, match="explicitly selects"):
+        _validate_specialist_yaml(third, inp.model_copy(update={
+            "activation_contract": {"method_selection_owner": "worker"},
+            "configuration_suggestions": {}, "branch_transition": {},
+        }))
     # Freedom to choose does not permit silently ignoring the work order,
     # user pins, or the selected checkpoint lineage.
     for overrides, message in [
@@ -1437,8 +1435,6 @@ def test_train_input_rejects_broken_iteration_chain(tmp_path: Path) -> None:
         iteration=2,
         dataset_path="/tmp/data.jsonl",
         dataset_rows=1,
-        validation_dataset_path="/tmp/validation.jsonl",
-        validation_answer_fields=["answer"],
         data_signature="d" * 64,
         inference_config_path="/tmp/inference.yaml",
         expected_inference_config_sha256="e" * 64,
@@ -1688,3 +1684,18 @@ def test_branch_transition_legacy_alias_cannot_override_new_provenance() -> None
     schema = SearchBranchTransition.model_json_schema()["properties"]
     assert "previous_branch" in schema
     assert "exhausted_branch" not in schema
+
+
+@pytest.mark.parametrize("name,role", [
+    ("validation_dataset", "validation_dataset"),
+    ("hidden_eval", "validation_dataset"),
+    ("hidden_eval", "scoring_questions"),
+    ("hidden_eval", "sample_submission"),
+])
+def test_train_rejects_scoring_bindings_including_aliases(name, role):
+    with pytest.raises(ValueError, match="Train cannot bind scoring data"):
+        validate_bindings(
+            agent_id="train",
+            payload={"operation": "train", "model_source": "base_model"},
+            inputs={name: {"artifact_role": role, "path": "/frozen.jsonl"}},
+        )
