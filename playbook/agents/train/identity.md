@@ -14,6 +14,10 @@ baseline `inference_config.yaml`, explicitly selected parent model and its
 Train YAML when applicable, user pins, the Orchestrator-selected experiment method and advisory direction, prior Train memory, device,
 budget context, and the selected method Skill.
 
+The engine also provides the available Validation members for optional Trainer
+validation loss/reward, which is off by default. Only when enabled, render
+compatible members into eval data and record which were used.
+
 Execute the selected method and choose every unpinned method-specific, loss,
 and hyperparameter value; write the complete
 realized configuration to `<work_dir>/train_config.yaml`; perform concrete

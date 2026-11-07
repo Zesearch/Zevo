@@ -14,7 +14,7 @@ SFT API reference: https://huggingface.co/docs/trl/sft_trainer
 ## Preconditions and reward
 
 Require every training row to contain conversational `prompt` and a non-empty,
-checkable `reference`. Do not create a Trainer validation dataset.
+checkable `reference`. Trainer validation loss is off by default.
 
 Define a deterministic answer parser/comparator and test it on known matches,
 mismatches, malformed output, and empty output. Default to explicit exact
@@ -59,7 +59,9 @@ below. Resolve the SFT phase with the same mode-specific rules as the `sft`
 Skill and the shared PEFT execution contract; do not invoke it as an additional
 method.
 
-Do not pass frozen Validation to the Trainer or generate/filter its rows.
+If optional Trainer validation loss is enabled, render compatible supplied
+Validation members as eval-only SFT records with their original targets.
+Never run the training generate/filter procedure on Validation rows.
 System-owned mid-training and post-training Validation perform generation-based
 scoring separately; retain that system workflow unchanged.
 

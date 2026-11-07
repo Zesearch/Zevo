@@ -10,7 +10,7 @@ iteration count.
 | `task_objective` | Original task text retained for lineage. |
 | `agent_objective` | Effective objective including Setting clauses. |
 | `trigger` | Prior visible child completion; verify against live state. |
-| `history` | Validation-only model-performance facts, engine-derived training diagnostics (including historical trainer-Validation loss when available), plus a concise model-improvement Journal narrative. Task score remains the selection authority. |
+| `history` | Validation-only model-performance facts, engine-derived training diagnostics (including optional trainer validation loss when available), plus a concise model-improvement Journal narrative. Task score remains the selection authority. |
 | `user_request` | Agent-visible inputs; held-out Test assets are absent. |
 | `runtime` | Run-owned provider, maximum GPU count, and generation backend. A zero maximum means unlimited; Infrastructure selects the actual positive count. |
 | `budget` | Current cost/time consumption plus advisory next-iteration projections; refresh before expensive work. |

@@ -510,54 +510,66 @@ def test_inference_config_option_fields_reject_duplicates() -> None:
 
 
 @pytest.mark.parametrize("adaptive", [False, True])
-def test_new_training_disables_internal_eval_but_preserves_adaptive(adaptive):
-    from zevo.contracts.configuration import validate_no_trainer_evaluation
+def test_trainer_evaluation_defaults_off_independently_of_adaptive(adaptive):
     payload = _train_payload()
-    payload["training"].update(eval_strategy="no", eval_steps=0, adaptive_evaluation=adaptive)
+    payload["training"].pop("eval_strategy")
+    payload["training"].pop("eval_steps")
+    payload["training"]["adaptive_evaluation"] = adaptive
     config = TrainRunConfig.model_validate(payload)
-    validate_no_trainer_evaluation(config)
+    assert config.training.eval_strategy == "no"
+    assert config.training.eval_steps == 0
+    assert config.training.early_stopping is None
     assert config.training.adaptive_evaluation is adaptive
 
 
-def test_legacy_eval_config_is_readable_but_cannot_launch():
-    from zevo.contracts.configuration import validate_no_trainer_evaluation
-    config = TrainRunConfig.model_validate(_train_payload())
-    with pytest.raises(ValueError, match="trainer evaluation must be disabled"):
-        validate_no_trainer_evaluation(config)
-
-
-@pytest.mark.parametrize("override", [
-    {"evaluation_strategy": "steps"},
-    {"do_eval": True},
-    {"load_best_model_at_end": True},
-    {"eval_dataset": "/validation.jsonl"},
-    {"trainer_args": {"eval_on_start": True}},
-])
-def test_implementation_arguments_cannot_reenable_trainer_eval(override):
-    from zevo.contracts.configuration import validate_no_trainer_evaluation
-    payload = _train_payload()
-    payload["training"].update(eval_strategy="no", eval_steps=0)
-    payload["training"]["implementation_config"].update(override)
-    with pytest.raises(ValueError, match="evaluation"):
-        validate_no_trainer_evaluation(TrainRunConfig.model_validate(payload))
-
-
-def test_new_train_schema_preserves_adaptive_and_disables_trainer_eval():
+def test_train_schema_allows_optional_evaluation():
     from zevo.contracts.configuration import current_train_config_schema
     fields = current_train_config_schema()["$defs"]["TrainingConfig"]["properties"]
-    assert fields["eval_strategy"]["const"] == "no"
-    assert fields["eval_steps"]["const"] == 0
-    assert fields["early_stopping"]["type"] == "null"
+    assert fields["eval_strategy"]["default"] == "no"
+    assert "steps" in fields["eval_strategy"]["enum"]
+    assert "const" not in fields["eval_steps"]
+    assert any("$ref" in option for option in fields["early_stopping"]["anyOf"])
     assert fields["adaptive_evaluation"]["type"] == "boolean"
 
 
+@pytest.mark.parametrize("status", ["succeeded", "deferred"])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_optional_trainer_evaluation_passes_result_and_resume_validation(tmp_path, status, adaptive):
+    import yaml
+    from pathlib import Path
+    from tests.test_method_branch_identity import case
+    from zevo.contracts.configuration import _main
+    from zevo.engine.run.runner import _validate_specialist_yaml
+
+    inp, result = case(tmp_path)
+    inp = inp.model_copy(update={"adaptive_mid_training_evaluation": adaptive})
+    result = result.model_copy(update={
+        "status": status,
+        "adaptive_training_report_path": str(tmp_path / "adaptive-report.json") if adaptive else "",
+    })
+    path = Path(result.train_config_path)
+    config = yaml.safe_load(path.read_text())
+    config["training"].update(eval_strategy="steps", eval_steps=1000, adaptive_evaluation=adaptive)
+    config["training"]["implementation_config"]["trainer_args"] = {
+        "eval_strategy": "steps", "eval_steps": 1000,
+        "do_eval": True, "eval_dataset": "/existing/validation.jsonl",
+    }
+    path.write_text(yaml.safe_dump(config))
+    frozen_bytes = path.read_bytes()
+    assert _main(["validate", "train", str(path)]) == 0
+    # Previously issued commands remain usable without enforcing the old ban.
+    assert _main(["validate", "train", str(path), "--no-trainer-evaluation"]) == 0
+    realized = _validate_specialist_yaml(result, inp)
+    assert realized["training"]["eval_strategy"] == "steps"
+    assert realized["training"]["adaptive_evaluation"] is adaptive
+    assert path.read_bytes() == frozen_bytes
+
+
 @pytest.mark.parametrize("metric,mode", [("eval_loss", "min"), ("eval_reward", "max")])
-def test_new_training_rejects_trainer_early_stopping(metric, mode):
-    from zevo.contracts.configuration import validate_no_trainer_evaluation
+def test_optional_trainer_early_stopping_preserves_adaptive_decision_ownership(metric, mode):
     payload = _train_payload()
-    payload["training"].update(
-        eval_strategy="no", eval_steps=0,
-        early_stopping={"metric": metric, "mode": mode, "patience": 3},
-    )
-    with pytest.raises(ValueError, match="trainer early_stopping is disabled"):
-        validate_no_trainer_evaluation(TrainRunConfig.model_validate(payload))
+    payload["training"]["early_stopping"] = {"metric": metric, "mode": mode, "patience": 3}
+    assert TrainRunConfig.model_validate(payload).training.early_stopping.metric == metric
+    payload["training"]["adaptive_evaluation"] = True
+    with pytest.raises(ValueError, match="adaptive Validation decisions cannot be combined"):
+        TrainRunConfig.model_validate(payload)

@@ -565,9 +565,17 @@ framework.
 
 Train only on `dataset_path`. If `dataset_is_remote=true`, it is an already
 verified path in the remote persistent data cache, not a scheduler-local file;
-do not transfer it in either direction. Do not bind or construct a Trainer
-validation/evaluation dataset. Frozen Validation belongs to system-owned
-mid-training and post-training scoring; never use Validation/Test rows for
+do not transfer it in either direction. Trainer validation loss/reward is off
+by default; leave `validation_datasets` unread and unconverted when it is off.
+When enabled, use the supplied Validation members suitable for the selected
+method, after fixing the training configuration. Train renders a temporary eval
+dataset using the member's answer fields and baseline input mapping together
+with the same method/prompt/template renderer used for Training. Data does not
+perform this conversion. Record the selected members and rendering in
+`training.implementation_config`; the full list is available, with no automatic
+first-member selection or requirement to combine every member. Do not fabricate
+targets for members that cannot supply the method's required evaluation records.
+Use the rendered records only as eval data; never use Validation/Test rows for
 optimization or training-data preparation. A method-defined derived training
 set, such as RFT generate/filter output from training prompts, is allowed only
 when the Skill explicitly owns it.
@@ -671,10 +679,13 @@ the callback, and preserve every finite numeric key it receives—including
 learning rate, gradient norm, epoch, token accuracy, and method-specific metrics.
 Do not replace it with a callback conditional on `"loss"`; retain numeric log
 rows even when they contain no loss. This telemetry requirement does not require
-Trainer evaluation or evaluation-only logs. Disable Trainer evaluation with `training.eval_strategy="no"`,
-`training.eval_steps=0`, and `training.early_stopping=null`. Do not attach an
-eval dataset, enable evaluation loss/reward, or select weights through Trainer
-evaluation. System-owned mid-training Validation has its own unchanged cadence,
+Trainer evaluation or evaluation-only logs. By default use
+`training.eval_strategy="no"`, `training.eval_steps=0`, and
+`training.early_stopping=null`, without an eval dataset. Trainer validation
+loss/reward is optional: when useful, record the chosen settings and permitted
+evaluation-data source in the YAML. Use the engine-supplied `validation_datasets`
+for these diagnostics; do not acquire Test.
+System-owned mid-training Validation has its own unchanged cadence,
 scoring, continuation decisions, and checkpoint selection.
 
 Structured telemetry owns cluster progress display. Configure the cluster
@@ -698,9 +709,9 @@ defect to eliminate, not normal progress output.
 The runner materializes `training_diagnostics.json` from the newest concrete
 Trainer attempt. Expose available training loss and method-specific training
 metrics; do not manufacture missing metrics. Use system-owned Validation task
-scores to assess generalization and select the champion. Historical Trainer
-evaluation telemetry may remain readable for diagnosis; do not generate new
-Trainer validation loss/reward curves.
+scores to assess generalization and select the champion. When optional Trainer
+evaluation is enabled, preserve its validation loss/reward telemetry as
+diagnostic evidence; do not require these curves when it is off.
 
 Every concrete Trainer process launch is a distinct execution attempt. The
 system callback creates a fresh UUID, emits `__ATTEMPT__` before optimization,
@@ -737,8 +748,10 @@ and acceleration-package versions belong in `training.software_versions`. An
 argument omitted from Python may still rely on a library default, so resolve and
 record that effective value before launch. `batch_size` is per device and
 `effective_batch_size` must equal batch size × gradient accumulation × world
-size. `training.logging_steps` is exactly 20; `training.eval_strategy` is
-`no`, `training.eval_steps` is `0`, and `training.early_stopping` is null. Record the realized checkpoint strategy, cap,
+size. `training.logging_steps` is exactly 20. Trainer evaluation defaults to
+`training.eval_strategy="no"`, `training.eval_steps=0`, and
+`training.early_stopping=null`; record the actual values if explicitly enabled.
+Record the realized checkpoint strategy, cap,
 model-only setting, and every framework save argument; do not leave a default
 implicit. When retention is active, `implementation_config.save_only_model` is
 an explicit boolean and `implementation_config.save_total_limit` is exactly
@@ -782,7 +795,10 @@ configured `training.num_epochs`. Preserve this plan across repairs and resumes.
 
 Training succeeds when this target is reached, or when the system-owned
 mid-training Validation controller authorizes completion using its existing
-scoring and decision rules. Trainer loss/reward early stopping is disabled.
+scoring and decision rules. With system mid-training Validation off, an
+explicitly configured Trainer early-stopping policy may also complete training
+when its frozen metric, patience, and threshold are supported by actual logs.
+It is off by default and must not override system mid-training decisions.
 Save the final Trainer state, including `global_step` and `max_steps`, before
 final model publication. Retain a full resumable checkpoint until the final
 model is committed and verified.
@@ -808,8 +824,9 @@ or coordinator decision rather than retroactively lowering the completion target
 
 Read `adaptive_mid_training_evaluation` from the typed input. Off preserves the
 ordinary training path. When on, set `training.adaptive_evaluation=true` in the
-YAML. Trainer evaluation remains disabled in both modes; all system-owned
-mid-training Validation behavior below remains enabled when this flag is on.
+YAML. This switch is independent of optional Trainer validation loss/reward;
+all system-owned mid-training Validation behavior below remains enabled when
+this flag is on.
 Use the system-owned `adaptive_training_helper_path`, copied unchanged as
 `zevo_adaptive_training.py`, together with the supplied sibling
 `zevo_checkpoint_state.py` (shared checkpoint inventory verifier). Copy the entire `adaptive-validation` directory

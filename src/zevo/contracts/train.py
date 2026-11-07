@@ -1,7 +1,7 @@
 """Typed contract for one Train iteration.
 
 Train receives one explicitly bound versioned Data corpus, the engine's frozen
-raw Validation view, and baseline Inference's YAML. It
+raw Validation views for optional trainer evaluation, and baseline Inference's YAML. It
 executes the method selected by the Orchestrator, resolves concrete
 loss/hyperparameters for this iteration,
 copies the matching model-lineage Baseline prompt and template identity, writes
@@ -57,6 +57,19 @@ class TrainingContinuation(BaseModel):
         return self
 
 
+class TrainerValidationDataset(BaseModel):
+    """One engine-owned Validation member available for optional Trainer loss."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    dataset_path: str = Field("", description="Raw Validation records; empty if unavailable.")
+    answer_fields: list[str] = Field(default_factory=list)
+    inference_query: str = ""
+    inference_config_path: str = Field(
+        "", description="This member's baseline input rendering configuration, when available.",
+    )
+
+
 class TrainTaskInput(AgentTaskInput):
     continuation: TrainingContinuation | None = Field(
         None, description="Engine-verified full-state resume point. Preserve the exact config and full plan; restore optimizer, scheduler, RNG and sampler position before continuing.")
@@ -82,6 +95,21 @@ class TrainTaskInput(AgentTaskInput):
     remote_data_receipt_path: str = Field(
         "",
         description="Compact local receipt proving the remote dataset identity and row count.",
+    )
+    validation_datasets: list[TrainerValidationDataset] = Field(
+        default_factory=list,
+        description=(
+            "Complete engine-owned Validation list for optional Trainer evaluation. "
+            "Default evaluation is off: do not load or convert these records then. "
+            "When enabled, Train renders method-compatible eval data from suitable "
+            "members and records its selection. These rows never enter training loss."
+        ),
+    )
+    validation_dataset_path: str = Field(
+        "", description="Single-member convenience path; empty for a multi-member suite. Use validation_datasets for the full list.",
+    )
+    validation_answer_fields: list[str] = Field(
+        default_factory=list, description="Answer fields for the single-member convenience path.",
     )
     data_signature: str = Field(
         min_length=64,
