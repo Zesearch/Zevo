@@ -2444,14 +2444,14 @@ def test_evaluation_owned_history_fact_preserves_generation_termination() -> Non
     )
     assert refreshed[0]["generation_termination"] == termination
 
-def test_the_trainer_evals_on_the_run_s_validation_set_and_never_the_test_set() -> None:
-    """Frozen scoring artifacts stay engine-owned and outside Train input."""
+def test_trainer_validation_inputs_are_optional_and_exclude_test() -> None:
+    """Validation remains engine-owned and optional; Test is never exposed."""
     from zevo.contracts.data import DataResult
     from zevo.contracts.train import TrainTaskInput
 
     assert "validation_dataset_path" in DataResult.model_fields
-    assert "validation_dataset_path" not in TrainTaskInput.model_fields
-    assert "validation_answer_fields" not in TrainTaskInput.model_fields
+    for name in ("validation_datasets", "validation_dataset_path", "validation_answer_fields"):
+        assert not TrainTaskInput.model_fields[name].is_required()
 
     src = Path("src/zevo/engine/run/runner.py").read_text()
     record = src[src.index("async def _record_prepared_scoring_data"):]
@@ -2465,22 +2465,36 @@ def test_the_trainer_evals_on_the_run_s_validation_set_and_never_the_test_set() 
 
 
 @pytest.mark.asyncio
-async def test_the_train_ticket_does_not_receive_legacy_raw_validation_binding(
+@pytest.mark.parametrize("source", ["none", "scalar", "legacy", "single", "suite"])
+async def test_train_receives_optional_engine_validation_members(
     session_factory,
     tmp_path: Path,
+    source: str,
 ) -> None:
-    """Legacy bindings must not expose frozen Validation as Trainer data."""
+    """All members and renderers survive; a caller binding cannot override them."""
     from zevo.engine.run.runner import _build_train_input
+
+    holdout = {"validation_answer_fields": ["response"], "test_set": "/private/test.csv"}
+    members = [{"name": "math", "validation_set": "/validation/math.csv",
+                "answer_fields": ["solution"], "inference_query": "question"},
+               {"name": "chat", "validation_set": "/validation/chat.jsonl",
+                "answer_fields": ["reply"], "inference_query": "messages"}]
+    if source in {"single", "suite"}:
+        holdout["validation_sets"] = members[:1] if source == "single" else members
+    elif source in {"scalar", "legacy"}:
+        holdout["validation_set" if source == "scalar" else "validation_dataset"] = "/validation/legacy.csv"
 
     async with session_factory() as s:
         run = Run(
             metric="accuracy", id="r", task_name="t",
             started_at=datetime.now(timezone.utc),
-            holdout={"validation_answer_fields": ["response"]},
+            holdout=holdout,
         )
         s.add(run)
         s.add(Ticket(id="train-1", run_id="r", agent_id="train", status="queued",
                      iteration=1, payload={}))
+        s.add(Ticket(id="infer-base", run_id="r", agent_id="inference", status="succeeded",
+                     lane="optimization", payload={"base_model": "Qwen/Qwen3-0.6B", "model_source": "base_model"}))
         await s.commit()
         tk = await s.get(Ticket, "train-1")
         dataset_product = WorkProduct(
@@ -2488,6 +2502,8 @@ async def test_the_train_ticket_does_not_receive_legacy_raw_validation_binding(
             meta={"training_rows": 7},
         )
         s.add(dataset_product)
+        s.add(WorkProduct(ticket_id="infer-base", role="inference_config",
+                          path="/baseline/chat.yaml", meta={"suite_member_name": "chat"}))
         await s.commit()
 
         payload = {
@@ -2505,7 +2521,7 @@ async def test_the_train_ticket_does_not_receive_legacy_raw_validation_binding(
             "training_dataset": {
                 "path": "/w/dataset.jsonl", "work_product_id": dataset_product.id,
             },
-            "validation_dataset": {"path": "/w/validation_dataset.jsonl"},
+            "validation_dataset": {"path": "/private/test.csv"},
             "inference_config": {"path": str(inference_config)},
             "device_info": {"path": str(device_info)},
         }
@@ -2513,8 +2529,32 @@ async def test_the_train_ticket_does_not_receive_legacy_raw_validation_binding(
             tk, payload, inputs, work_dir="/w", generation_backend="vllm",
             run=run, session=s,
         )
-        assert "validation_dataset_path" not in built.model_dump()
-        assert "validation_answer_fields" not in built.model_dump()
+        assert "/private/test.csv" not in built.model_dump_json()
+        assert "--no-trainer-evaluation" not in built.config_validation_command
+        assert not built.adaptive_mid_training_evaluation
+        if source == "none":
+            assert built.validation_datasets == []
+            assert built.validation_dataset_path == ""
+            assert built.validation_answer_fields == []
+        elif source in {"scalar", "legacy"}:
+            assert len(built.validation_datasets) == 1
+            assert built.validation_dataset_path == "/validation/legacy.csv"
+            assert built.validation_answer_fields == ["response"]
+        else:
+            expected = members[:1] if source == "single" else members
+            assert [v.name for v in built.validation_datasets] == [m["name"] for m in expected]
+            for member, original in zip(built.validation_datasets, expected):
+                assert member.dataset_path == original["validation_set"]
+                assert member.answer_fields == original["answer_fields"]
+                assert member.inference_query == original["inference_query"]
+            assert built.validation_datasets[0].inference_config_path == str(inference_config)
+            if source == "suite":
+                assert built.validation_datasets[1].inference_config_path == "/baseline/chat.yaml"
+                assert built.validation_dataset_path == ""
+                assert built.validation_answer_fields == []
+            else:
+                assert built.validation_dataset_path == members[0]["validation_set"]
+                assert built.validation_answer_fields == members[0]["answer_fields"]
         assert built.dataset_path == "/w/dataset.jsonl", "training data is untouched"
 
 

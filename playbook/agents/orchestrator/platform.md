@@ -456,8 +456,8 @@ After a trained candidate is measured, read its engine-owned
 attempt. Combine them with system mid-training Validation scores, when enabled,
 to form the next hypothesis, such as testing an earlier weights-only branch
 point or reducing optimization intensity after measured task-score degradation.
-Historical trainer-Validation loss may remain available for diagnosis; new
-training does not compute it. Treat diagnostic trends as possible explanations,
+Trainer validation loss is optional and off by default; use it for diagnosis
+when available. Treat diagnostic trends as possible explanations,
 not proof. Missing or method-incomparable evidence is unavailable; never invent
 it. The Task's deterministic
 Validation score remains the only champion/Registry selection authority.

@@ -155,6 +155,7 @@ from zevo.contracts.train import (
     TrainExecutionContract,
     TrainTaskInput,
     TrainResult,
+    TrainerValidationDataset,
 )
 from zevo.contracts.freeform import FreeformInput
 from zevo.contracts.length_calibration import validate as validate_length_calibration
@@ -1103,6 +1104,38 @@ async def _slurm_stage_job_contract(
 
 
 
+async def _trainer_validation_datasets(
+    session: AsyncSession, *, run: Run, base_model: str, inference_config_path: str,
+) -> list[TrainerValidationDataset]:
+    """Expose Validation metadata without loading or preparing an eval dataset."""
+    suite = _validation_sets(run)
+    if not suite and (run.holdout or {}).get("validation_dataset"):
+        suite = [{
+            "name": "validation",
+            "validation_set": run.holdout["validation_dataset"],
+            "answer_fields": _answer_fields(run.holdout, "validation"),
+            "inference_query": str(run.holdout.get("validation_inference_query") or ""),
+        }]
+    members = []
+    for index, item in enumerate(suite):
+        name = str(item.get("name") or f"Validation {index + 1}")
+        config = await _baseline_suite_config_path(
+            session, run=run, base_model=base_model, member_name=name,
+        )
+        # The bound baseline YAML describes the primary member. This fallback
+        # supplies its renderer; it does not select it for Trainer evaluation.
+        if not config and index == 0:
+            config = inference_config_path
+        members.append(TrainerValidationDataset(
+            name=name,
+            dataset_path=str(item.get("validation_set") or ""),
+            answer_fields=list(item.get("answer_fields") or []),
+            inference_query=str(item.get("inference_query") or ""),
+            inference_config_path=config,
+        ))
+    return members
+
+
 async def _build_train_input(
     ticket: Ticket, payload: dict, inputs: dict, work_dir: str, generation_backend: str,
     run: Run, session: AsyncSession, specialist_context: dict | None = None,
@@ -1192,6 +1225,11 @@ async def _build_train_input(
             proof = prior.meta["training_continuation"]
             continuation = TrainingContinuation(**{key: proof[key] for key in TrainingContinuation.model_fields})
     from zevo.contracts.configuration import current_train_config_schema
+    validation_datasets = await _trainer_validation_datasets(
+        session, run=run, base_model=str(payload.get("base_model") or ""),
+        inference_config_path=input_path(inputs, "inference_config"),
+    )
+    single_validation = validation_datasets[0] if len(validation_datasets) == 1 else None
     return TrainTaskInput(
         continuation=continuation,
         ticket_id=ticket.id,
@@ -1204,6 +1242,9 @@ async def _build_train_input(
         dataset_rows=dataset_rows,
         dataset_is_remote=dataset_is_remote,
         remote_data_receipt_path=remote_data_receipt_path,
+        validation_datasets=validation_datasets,
+        validation_dataset_path=single_validation.dataset_path if single_validation else "",
+        validation_answer_fields=single_validation.answer_fields if single_validation else [],
         data_signature=str(_require(payload, "data_signature", ticket)),
         inference_config_path=input_path(inputs, "inference_config"),
         expected_inference_config_sha256=file_sha256(
@@ -1213,7 +1254,7 @@ async def _build_train_input(
         training_method_contracts=train_method_contracts(),
         config_validation_command=(
             "python -m zevo.contracts.configuration validate train "
-            "<absolute-yaml-path> --no-trainer-evaluation"
+            "<absolute-yaml-path>"
             f" --source-rows {dataset_rows}"
             + (
                 f" --cluster --expected-world-size {slurm_job.num_gpus}"
@@ -2508,8 +2549,6 @@ def _validate_specialist_yaml(
             raise ValueError(
                 "train_config.yaml generation_backend differs from Run runtime"
             )
-        from zevo.contracts.configuration import validate_no_trainer_evaluation
-        validate_no_trainer_evaluation(config)
         if config.training.adaptive_evaluation != inp.adaptive_mid_training_evaluation:
             raise ValueError("train_config adaptive_evaluation must match the Run switch")
         if result.status == "succeeded" and inp.adaptive_mid_training_evaluation and not result.adaptive_training_report_path:
@@ -4965,8 +5004,8 @@ async def run_ticket(
     try:
         binding_inputs = dict(tk.inputs or {})
         if tk.agent_id == "train":
-            # Old queued tickets may still carry the obsolete scoring binding.
-            # Never resolve/copy frozen scoring data into a Train workspace.
+            # Validation metadata comes from the Run's engine-owned suite,
+            # not caller-supplied artifact bindings (including legacy ones).
             binding_inputs = {k: v for k, v in binding_inputs.items()
                               if k != "validation_dataset" and
                               v.get("artifact_role") not in {

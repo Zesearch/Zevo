@@ -1011,7 +1011,10 @@ def validate_bindings(
             "validation_dataset", "validation_source", "scoring_questions", "sample_submission",
         } for name, binding in parsed.items()
     ):
-        raise ValueError("Train cannot bind scoring data; use system mid-training Validation")
+        raise ValueError(
+            "Train cannot bind scoring data directly; optional trainer evaluation "
+            "uses the engine-supplied validation_datasets"
+        )
     required = _required_input_bindings(agent_id, payload)
     for name, role in required.items():
         binding = parsed.get(name)

@@ -36,7 +36,9 @@ branch points; this is never a requirement to save every epoch or step.
    requires it; a weights-only export is insufficient. Record checks and results,
    then continue the planned execution without repeating unrelated verification.
 
-Do not construct Trainer evaluation data or enable validation loss/reward.
+By default, leave Trainer validation loss/reward and loss-based early stopping
+off. They are optional; enable them only when useful for the chosen experiment
+and record the realized settings and permitted evaluation-data source.
 System-owned mid-training Validation, when enabled, owns intermediate scoring,
 continuation decisions, and best-checkpoint selection. Store corrected, reusable runtime pitfalls in
 Run-local Train memory. Return failure when the selected configuration cannot

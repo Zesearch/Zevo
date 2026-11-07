@@ -314,8 +314,8 @@ class IterationHistoryEntry(BaseModel):
         None,
         description=(
             "Engine-derived training diagnostics for a trained candidate. "
-            "Trainer Validation loss is retained only for historical records; "
-            "new training does not compute it. System Validation scores are "
+            "Trainer validation loss is optional and off by default; include "
+            "it as diagnostic evidence when available. System Validation scores are "
             "reported separately and remain the model-selection authority."
         ),
     )

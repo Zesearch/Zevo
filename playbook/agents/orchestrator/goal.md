@@ -85,9 +85,9 @@ Rules:
 7. Select and retain models by final Validation score in the Task direction.
    Improvement over baseline is reported alongside final score, not substituted
    for it. Use engine-derived training metrics and system Validation scores to
-   inform the next direction or branch point. Trainer Validation loss is available
-   only in historical records and serves as diagnostic evidence; new training
-   does not compute it. Diagnostics never replace the Task metric as champion
+   inform the next direction or branch point. Trainer validation loss is optional
+   and off by default; when available, it serves as diagnostic evidence.
+   Diagnostics never replace the Task metric as champion
    authority.
 8. Complete every measured Journal row with non-empty `action`, `result`,
    `analysis`, and `next`. Keep the Journal model-centered and concise:
