@@ -1253,9 +1253,9 @@ function BenchmarkStageProgress({ ticket, events, useCurrentAttempt, active }: {
   const workers = Number(latest?.extras?.parallel_workers || 0);
   return <StageProgress completed={count.completed} total={count.total} label={`${suite} inference benchmarks`}>
     <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 font-mono text-xs">
-      <span className="text-slate-200"><span className="text-brass-300">Inference</span> · {name}
+      <span className="text-slate-200"><span className="text-brass-300">Inference</span> · {count.completed >= count.total ? "Completed" : name}
         {workers > 1 && <span className="ml-2 text-dim">· {workers} replicas</span>}</span>
-      <span className="tabular-nums text-brass-300">{suite} {count.completed} / {count.total} <span className="text-dim">{count.completed >= count.total ? "Completed" : "inferred"}</span></span>
+      <span className="tabular-nums text-brass-300">{suite} {count.completed} / {count.total} <span className="text-dim">inferred</span></span>
     </div>
   </StageProgress>;
 }
