@@ -7,6 +7,12 @@ description: "Extract and chunk user-provided PDF, text, or HTML documents, then
 
 Use the supplied documents as the complete source. Author examples from their
 content; do not supplement them with unrelated facts.
+For `prepare_run_data`, require
+`recipe_intent.teacher_distillation.enabled=true` before authoring examples,
+including direct generation by the Data agent. If it is not enabled, report
+that the generation recipe needs Orchestrator selection; do not enable it
+yourself. Honor user restrictions and record the actual generating model,
+verification, and synthesis provenance as required by the Data platform.
 
 ## Workflow
 
@@ -24,9 +30,11 @@ content; do not supplement them with unrelated facts.
    that chunk. Cover the source rather than repeating one easy question pattern.
 6. Render examples through the Data Agent's method-specific target renderer and
    write `<DEST_DIR>/dataset.jsonl`.
-7. Deduplicate normalized prompts and stop at `target_size` when it is positive;
-   otherwise choose a size justified by source coverage and available distinct
-   content.
+7. Deduplicate normalized prompts and count verified examples against the
+   enabled recipe's target_augmentation_count. Reconcile any final target_size,
+   retained rows, and max_training_rows using the Data platform's Training row
+   quantities rules before generation. Report source-coverage or verification
+   shortfalls rather than inventing unsupported examples.
 
 ## Method compatibility
 

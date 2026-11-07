@@ -23,7 +23,11 @@ The Data agent may generate directly or call the specified teacher model.
    When `verify_answers` is enabled, retain only examples passing the specified
    correctness or consistency checks. Record rejections and deduplicate against
    the training seeds and other generated examples.
-4. Merge accepted examples with the real training rows in the required method
+4. Count target_augmentation_count as new verified, deduplicated rows. Before
+   generation, reconcile retained real rows plus that target with any final
+   target_size and max_training_rows using the Data platform's Training row
+   quantities rules. Do not silently change a binding recipe to fit the cap.
+   Merge accepted examples with the retained real rows in the required method
    format. Validate the dataset and record reproducible source/model/settings
    provenance and accepted/rejected counts.
 

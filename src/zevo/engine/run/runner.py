@@ -328,16 +328,21 @@ def _build_data_input(
             f"expected {expected_operation!r}"
         )
     dataset = "" if held_out else str(payload.get("dataset") or "")
-    remote_huggingface = bool(not held_out and looks_like_hub_id(dataset))
+    remote_preparation = not held_out
     device_info_path = (
         ""
         if held_out
-        else input_path(inputs, "device_info", required=remote_huggingface)
+        else input_path(inputs, "device_info", required=False)
     )
+    if remote_preparation and not device_info_path:
+        raise ValueError(
+            "Training Data requires a purpose=train device_info binding; "
+            "provision Infrastructure before preparing training data"
+        )
     remote_hf_cache_path = ""
     remote_data_output_dir = ""
     remote_preparation_receipt_path = ""
-    if remote_huggingface:
+    if remote_preparation:
         try:
             device_info = InfrastructureDeviceInfo.model_validate_json(
                 Path(device_info_path).read_text(encoding="utf-8")
@@ -349,7 +354,7 @@ def _build_data_input(
         route = device_info.cluster or device_info.instance
         if route is None:
             raise ValueError(
-                "remote Hugging Face Data requires a cluster, instance, or cloud route "
+                "remote Data requires a cluster, instance, or cloud route "
                 "with workdir and hf_cache"
             )
         remote_hf_cache_path = str(PurePosixPath(route.hf_cache))
@@ -415,15 +420,29 @@ def _build_data_input(
     remote_spec_validation_command = ""
     if held_out:
         from zevo.holdout_storage import resolve_asset
-    if remote_huggingface:
+    if remote_preparation:
         remote_spec_validation_command = (
             "python -m zevo.engine.remote_training_data validate-spec "
             "<absolute-remote-dataset-spec-json-path>"
-            " --dataset-id " + shlex.quote(dataset)
+            " --dataset-id " + shlex.quote(dataset if looks_like_hub_id(dataset) else "")
             + " --dataset-split " + shlex.quote(str(payload.get("dataset_split") or "train"))
             + " --dataset-config " + shlex.quote(str(payload.get("dataset_config") or ""))
             + " --training-method " + shlex.quote(str(payload.get("training_method") or ""))
+            + " --source-identity " + shlex.quote(expected_source_identity)
+            + " --source-fingerprint " + shlex.quote(expected_source_fingerprint)
         )
+    if remote_preparation:
+        # This command executes on the data host with uploaded control artifacts.
+        artifact_validation_command = (
+            "python <remote-helper-path> check-prepared"
+            " --data-intent-signature " + shlex.quote(str(payload.get("data_intent_signature") or ""))
+            + " --spec <remote-spec-path> --recipe <remote-recipe-path>"
+            " --prepare-script <remote-prepare-script-path>"
+            " --dataset <absolute-remote-training-dataset-path>"
+            " --profile <absolute-remote-data-profile-path>"
+            " --receipt " + shlex.quote(remote_preparation_receipt_path)
+        )
+        recipe_validation_command = remote_spec_validation_command
     return DataTaskInput(
         ticket_id=ticket.id,
         **_customization_kwargs(ticket.customization or {}),
@@ -496,12 +515,12 @@ def _build_data_input(
         work_dir=work_dir,
         device_info_path=device_info_path,
         remote_data_helper_path=(
-            "" if not remote_huggingface else str(
+            "" if not remote_preparation else str(
                 Path(__file__).resolve().parents[1] / "remote_training_data.py"
             )
         ),
         remote_dataset_spec_schema=(
-            {} if not remote_huggingface else RemoteDatasetSpec.model_json_schema()
+            {} if not remote_preparation else RemoteDatasetSpec.model_json_schema()
         ),
         remote_dataset_spec_validation_command=remote_spec_validation_command,
         remote_hf_cache_path=remote_hf_cache_path,
@@ -514,11 +533,11 @@ def _build_data_input(
                 "RUN_ID": str(ticket.run_id or ""),
                 "TICKET_ID": ticket.id,
             }
-            if remote_huggingface else {}
+            if remote_preparation else {}
         ),
         secret_environment_names=(
             ["HF_TOKEN"]
-            if remote_huggingface
+            if remote_preparation
             and os.environ.get("HF_TOKEN", "").strip()
             else []
         ),
@@ -1172,6 +1191,7 @@ async def _build_train_input(
             from zevo.contracts.train import TrainingContinuation
             proof = prior.meta["training_continuation"]
             continuation = TrainingContinuation(**{key: proof[key] for key in TrainingContinuation.model_fields})
+    from zevo.contracts.configuration import current_train_config_schema
     return TrainTaskInput(
         continuation=continuation,
         ticket_id=ticket.id,
@@ -1184,20 +1204,16 @@ async def _build_train_input(
         dataset_rows=dataset_rows,
         dataset_is_remote=dataset_is_remote,
         remote_data_receipt_path=remote_data_receipt_path,
-        validation_dataset_path=input_path(inputs, "validation_dataset"),
-        validation_answer_fields=_answer_fields(
-            dict(run.holdout or {}), "validation",
-        ),
         data_signature=str(_require(payload, "data_signature", ticket)),
         inference_config_path=input_path(inputs, "inference_config"),
         expected_inference_config_sha256=file_sha256(
             input_path(inputs, "inference_config")
         ),
-        train_config_schema=TrainRunConfig.model_json_schema(),
+        train_config_schema=current_train_config_schema(),
         training_method_contracts=train_method_contracts(),
         config_validation_command=(
             "python -m zevo.contracts.configuration validate train "
-            "<absolute-yaml-path>"
+            "<absolute-yaml-path> --no-trainer-evaluation"
             f" --source-rows {dataset_rows}"
             + (
                 f" --cluster --expected-world-size {slurm_job.num_gpus}"
@@ -2492,8 +2508,8 @@ def _validate_specialist_yaml(
             raise ValueError(
                 "train_config.yaml generation_backend differs from Run runtime"
             )
-        if config.training.adaptive_evaluation and config.training.early_stopping is not None:
-            raise ValueError("adaptive Validation decisions cannot be combined with trainer loss early stopping")
+        from zevo.contracts.configuration import validate_no_trainer_evaluation
+        validate_no_trainer_evaluation(config)
         if config.training.adaptive_evaluation != inp.adaptive_mid_training_evaluation:
             raise ValueError("train_config adaptive_evaluation must match the Run switch")
         if result.status == "succeeded" and inp.adaptive_mid_training_evaluation and not result.adaptive_training_report_path:
@@ -2548,8 +2564,7 @@ def _validate_specialist_yaml(
                 suggested_method = str(
                     inp.configuration_suggestions.get("training_method") or ""
                 ).strip().lower()
-                if (inp.activation_contract.get("method_selection_owner", "orchestrator") == "orchestrator"
-                        and suggested_method != config.training_method):
+                if suggested_method != config.training_method:
                     raise ValueError(
                         "an unpinned method may change only when the Orchestrator "
                         "explicitly selects the next experiment method"
@@ -3989,12 +4004,15 @@ def _validate_remote_data_output(result: DataResult, inp: DataTaskInput):
         if result.remote_training_package_path or result.remote_data_receipt_path:
             raise ValueError("Data cannot author engine-owned remote package/receipt")
         spec = load_remote_dataset_spec(result.remote_dataset_spec_path)
-        if spec.source.dataset_id != inp.dataset:
-            raise ValueError("remote dataset spec id differs from the Data work order")
-        if spec.source.split != (inp.dataset_split or "train"):
-            raise ValueError("remote dataset spec split differs from the Data work order")
-        if spec.source.config != inp.dataset_config:
-            raise ValueError("remote dataset spec config differs from the Data work order")
+        from zevo.engine.remote_training_data import validate_source_selection
+        validate_source_selection(
+            spec, dataset_id=inp.dataset if looks_like_hub_id(inp.dataset) else "",
+            dataset_split=inp.dataset_split or "train", dataset_config=inp.dataset_config,
+            source_identity=inp.expected_source_identity,
+            source_fingerprint=inp.expected_source_fingerprint,
+        )
+        if getattr(spec.source, "kind", "") == "synthetic" and not inp.recipe_intent.teacher_distillation.enabled:
+            raise ValueError("synthetic remote data requires enabled teacher_distillation")
         if spec.training_method != inp.training_method:
             raise ValueError("remote dataset spec training method differs from the work order")
         recipe = load_data_recipe(result.data_recipe_path)
@@ -4002,7 +4020,7 @@ def _validate_remote_data_output(result: DataResult, inp: DataTaskInput):
             raise ValueError("remote data recipe source identity differs from the work order")
         if recipe.source_fingerprint != remote_source_fingerprint(spec):
             raise ValueError(
-                "remote data recipe fingerprint does not bind the immutable Hub revision"
+                "remote data recipe fingerprint does not bind the realized source"
             )
     except (ValueError, OSError) as exc:
         raise DataOutputValidationError(f"Data output validation failed: {exc}") from exc
@@ -4023,9 +4041,9 @@ async def _bind_system_validation_artifacts(
     holdout = dict(run.holdout or {})
     if holdout.get("test_semantic_fingerprints") and holdout.get("semantic_fingerprint_version") != 2:
         raise ValueError("This Run uses legacy scoring fingerprints. Start a new Run to rebuild its protected scoring contract before preparing Training data.")
-    if looks_like_hub_id(inp.dataset) and not result.remote_dataset_path:
+    if inp.device_info_path and not result.remote_dataset_path:
         raise ValueError(
-            "Hugging Face Training data must stay on the assigned remote data plane"
+            "Training data must stay on the assigned remote data plane"
         )
     validation_suite = _validation_sets(holdout)
     if not validation_suite:
@@ -4945,8 +4963,18 @@ async def run_ticket(
     # immediately so the orchestrator sees a terminal status and can
     # decide whether to retry the upstream or mark the run failed.
     try:
+        binding_inputs = dict(tk.inputs or {})
+        if tk.agent_id == "train":
+            # Old queued tickets may still carry the obsolete scoring binding.
+            # Never resolve/copy frozen scoring data into a Train workspace.
+            binding_inputs = {k: v for k, v in binding_inputs.items()
+                              if k != "validation_dataset" and
+                              v.get("artifact_role") not in {
+                                  "validation_dataset", "validation_source",
+                                  "scoring_questions", "sample_submission",
+                              }}
         resolved_inputs = await resolve_input_bindings(
-            session, run_id=tk.run_id, inputs=tk.inputs or {}
+            session, run_id=tk.run_id, inputs=binding_inputs
         )
     except ValueError as binding_err:
         tk.status = "failed"
@@ -5118,13 +5146,14 @@ async def run_ticket(
             "collection" if getattr(getattr(inp, "slurm_job", None), "enabled", False) and phase == "collect" else
             "execution"
         )
+        from zevo.engine.method.branch import method_selection_owner
         contract = {
             "completion_boundary": boundary,
             "agent": tk.agent_id,
-            "method_selection_owner": (
-                "orchestrator" if tk.agent_id == "train" and tk.input_format == "typed"
-                and run.mode in {"full_pipeline", "customized_pipeline", "auto"}
-                and bool(inp.configuration_suggestions.get("training_method")) else "worker"
+            "method_selection_owner": method_selection_owner(
+                agent_id=tk.agent_id, input_format=tk.input_format, run_mode=run.mode,
+                selected_method=str(getattr(inp, "configuration_suggestions", {}).get("training_method") or ""),
+                active_method=str(getattr(inp, "active_training_method", "") or ""),
             ),
             "operation": getattr(inp, "operation", ""),
             "phase": phase,

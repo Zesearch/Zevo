@@ -4,6 +4,7 @@ import type { ExecutionEventDTO, HeartbeatDTO } from "../lib/api";
 
 export function evaluationAttemptLabel(phase: string, sequence: number, lane: string): string {
   const suite = lane === "held_out_test" ? "Held-Out" : "Validation";
+  if (phase === "collect") return `Collect ${suite} Results`;
   if (phase === "repair") return `Retry ${suite} Evaluation`;
   return sequence > 1 ? `Re-evaluate ${suite}` : `Evaluate ${suite}`;
 }

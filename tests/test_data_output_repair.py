@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from zevo.contracts.data import DataResult
+from zevo.engine.remote_training_data import RemoteHuggingFaceSource
 from zevo.engine.run import runner
 from zevo.engine.run.failure_policy import classify_failure
 
@@ -24,9 +25,9 @@ def test_data_cannot_return_engine_finalization_fields(field):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('mismatch', ['dataset', 'split', 'config', 'method', 'identity', 'fingerprint', 'missing_spec'])
 async def test_remote_data_output_errors_schedule_repair(monkeypatch, mismatch):
-    spec = SimpleNamespace(source=SimpleNamespace(dataset_id='org/data', split='train', config='default'), training_method='sft')
+    spec = SimpleNamespace(source=RemoteHuggingFaceSource(dataset_id='org/data', split='train', config='default', revision='pinned'), training_method='sft')
     recipe = SimpleNamespace(source_identity='source', source_fingerprint='fingerprint')
-    inp = SimpleNamespace(dataset='org/data', dataset_split='train', dataset_config='default', training_method='sft', expected_source_identity='source')
+    inp = SimpleNamespace(dataset='org/data', dataset_split='train', dataset_config='default', training_method='sft', expected_source_identity='source', expected_source_fingerprint='')
     result = SimpleNamespace(remote_training_package_path='', remote_data_receipt_path='', remote_dataset_spec_path='/work/spec', data_recipe_path='/work/recipe')
     if mismatch == 'dataset': spec.source.dataset_id = 'org/wrong'
     if mismatch == 'split': spec.source.split = 'wrong'

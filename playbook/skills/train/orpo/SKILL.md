@@ -14,7 +14,7 @@ API reference: https://huggingface.co/docs/trl/orpo_trainer
 
 Require the same canonical preference rows as DPO/CPO:
 `{"prompt":[...],"chosen":[assistant...],"rejected":[assistant...]}`.
-Validate all training and evaluation rows. Fail on absent, empty, equal, or
+Validate all training rows. Fail on absent, empty, equal, or
 fabricated contrasts.
 
 ## Implement
@@ -30,7 +30,7 @@ trainer = ORPOTrainer(
     model=model,
     args=args,
     train_dataset=train_ds,
-    eval_dataset=eval_ds,
+    eval_dataset=None,  # System-owned Validation runs separately.
     processing_class=tokenizer,
     peft_config=peft_config_or_none,
     callbacks=[ZevoTrainerTelemetryCallback(ticket_id)],

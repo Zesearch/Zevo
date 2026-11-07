@@ -10,7 +10,7 @@ iteration count.
 | `task_objective` | Original task text retained for lineage. |
 | `agent_objective` | Effective objective including Setting clauses. |
 | `trigger` | Prior visible child completion; verify against live state. |
-| `history` | Validation-only model-performance facts, engine-derived training/trainer-Validation loss diagnostics when available, plus a concise model-improvement Journal narrative. Task score remains the selection authority. |
+| `history` | Validation-only model-performance facts, engine-derived training diagnostics (including historical trainer-Validation loss when available), plus a concise model-improvement Journal narrative. Task score remains the selection authority. |
 | `user_request` | Agent-visible inputs; held-out Test assets are absent. |
 | `runtime` | Run-owned provider, maximum GPU count, and generation backend. A zero maximum means unlimited; Infrastructure selects the actual positive count. |
 | `budget` | Current cost/time consumption plus advisory next-iteration projections; refresh before expensive work. |
@@ -51,9 +51,15 @@ Exact deltas in the Journal `next` are the concise user-facing proposed plan;
 they do not replace the realized configuration later recorded by the
 Specialist.
 
-Choose the next experiment by evidence, expected benefit, and cost. Data,
-method, and model changes have no prescribed order; earlier branches may be
-revisited. Record a changed branch and its hypothesis in `branch_transition`
+Choose the next experiment by evidence, expected benefit, and cost. Refine
+promising improvements; after a few flat or regressed attempts, diagnose and
+consider a different hypothesis rather than stopping. Balance exploration and
+refinement without a fixed minimum count, exhaustive search, or mandatory small
+steps. Data, method, and model changes have no prescribed order; earlier branches
+may be revisited. Stop voluntarily on observed saturation after representative
+exploration and reasonable refinement, not merely predicted low benefit; untried
+minor variants need not be exhausted. Apply the full evidence requirements in
+the goal and operational guide. Record a changed branch and its hypothesis in `branch_transition`
 and summarize the choice in the Journal and `SupervisorAction.summary`.
 The optional queries guide selection; exact user pins remain binding.
 

@@ -12,7 +12,7 @@ API reference: https://huggingface.co/docs/trl/gkd_trainer
 
 ## Preconditions and data
 
-Require every training and evaluation row to contain chat `messages` in the
+Require every training row to contain chat `messages` in the
 canonical SFT form. GKD in this pipeline does not accept `completion` or `text`
 framing. Fail on an incompatible run framing instead of converting it.
 
@@ -51,7 +51,7 @@ trainer = GKDTrainer(
     teacher_model=teacher,
     args=args,
     train_dataset=train_ds,
-    eval_dataset=eval_ds,
+    eval_dataset=None,  # System-owned Validation runs separately.
     processing_class=tokenizer,
     peft_config=peft_config_or_none,
     callbacks=[ZevoTrainerTelemetryCallback(ticket_id)],

@@ -17,18 +17,16 @@ agent-defined held-out (a public benchmark or a decontaminated synthesized set)
 — and the engine settled it onto the Run. Your `user_request` already carries
 that settled Validation contract exactly as for a `full_pipeline` Run, and you
 are woken with a `run_created` trigger. Treat that scoping Ticket as Run Setup,
-not as the Data stage: the pipeline below starts from Data 0 as usual, and the
+not as the Data stage: the pipeline below starts from Infrastructure as usual, and the
 settled metric, Validation set, and held-out are immutable. Training data,
 base-model, and method ownership follows the same pins and evidence-based
 experiment decisions as a `full_pipeline` Run.
 
 ```text
 Orchestrator
-  -> Data 0 when its source is not a Hub id (local preparation; no GPU needed yet)
-  -> Orchestrator
   -> Infrastructure purpose=train (one reusable remote data/model plane)
   -> Orchestrator
-  -> Data 0 on that remote plane when `dataset` IS a Hub id (engine binds hidden Validation afterward)
+  -> Data 0 on that remote plane for every training source (engine binds hidden Validation afterward)
   -> Orchestrator
   -> Baseline Inference (select + write the current model lineage's inference_config.yaml)
   -> Orchestrator
@@ -52,7 +50,7 @@ Iteration N >= 1
   -> Orchestrator
   -> Choose the next experiment by evidence, expected benefit, and cost
   -> A new Base model receives its own Baseline Inference/Evaluation before Train
-  -> Or stop on a configured limit or a justified cost/benefit decision
+  -> Or stop on a configured limit or when the full voluntary-stop requirements below are met
 
 Stop
   -> Orchestrator creates one Registry for the Validation champion
@@ -185,15 +183,13 @@ user-supplied GPU maximum remain fixed; zero means unlimited. Infrastructure
 selects a concrete positive count and must not exceed a positive limit.
 For cluster this is an access-route planning estimate, not the GPU minimum for
 each later Slurm job. Train and Inference choose their own stage job shapes.
-Order the first two stages by what Data 0 needs. When `user_request.dataset`
-is a Hugging Face id, Data downloads and prepares on the remote data plane, so
-provision the `purpose="train"` route first and bind its `device_info` to Data
-0 (the API refuses a Hub-source Data ticket without it). When `dataset` is
-empty (acquisition from `data_query`) or a local file, Data 0 prepares in its
-own `work_dir` with no `device_info` binding: create Data 0 FIRST and provision
-only after it succeeds, so the rental is not billed while rows are being
-fetched and mapped (smoke runs idled an A10 for 5–12 minutes there; the
-environment build the acquisition helper starts needs that window anyway).
+Always provision the purpose=train route before initial training Data, then bind
+its device_info. All training sources are downloaded/generated and prepared on
+that remote plane. Upload a supplied local file once, verifying its source hash.
+Acquisition and synthesis also use that plane. On cloud instances provisioning
+may start billing during preparation; on clusters, remote preparation follows
+the supplied stage resource contract and does not imply a GPU requirement.
+
 Read `runtime.gpu_allocation_mode`; this is fixed for the Run.
 The retained modes, per_run and per_stage, retain resources during repair.
 Do not emit a release or replacement merely because a generated program failed;
@@ -210,7 +206,8 @@ completion.
   after release. Rebind the consumer to that artifact. For cloud, stage inputs
   must be durable backend artifacts: upload them to the new host; never reuse
   paths that lived only on the previous rental. Rerun Data when its only valid
-  dataset was remote, and preserve a local prepared dataset for future stages.
+  dataset was remote. Preserve original uploaded sources and local control
+  artifacts so Data can rebuild on the replacement remote plane.
   CPU-only preparation shares the first consumer's route; it does not require
   an extra rental/release cycle.
 - `per_run`: provision the train-sized route once at the beginning. Reuse it
@@ -283,9 +280,9 @@ once. A child caller cannot add or replace customization after Run creation.
 }
 ```
 
-Bind `device_info` only when `dataset` is a Hub id (remote preparation). For an
-acquisition query or a local file, send `"inputs": {}`: Data prepares in its
-`work_dir`, and Train later binds the device route itself.
+Bind `device_info` for every `prepare_run_data` Ticket. Reuse the same remote
+route for later Data revisions and Train; never select a local preparation path
+based on the source type.
 
 Iteration 0 Data prepares training data without access to Validation. After it
 succeeds, the engine freezes and binds the Validation package.
@@ -419,7 +416,6 @@ parent after seeing the new result, and never bind artifacts from another Run.
   },
   "inputs": {
     "training_dataset": {"artifact_role": "training_dataset", "source_ticket_id": "data-..."},
-    "validation_dataset": {"artifact_role": "validation_dataset", "source_ticket_id": "data-..."},
     "inference_config": {"artifact_role": "inference_config", "source_ticket_id": "baseline-infer-..."},
     "device_info": {"artifact_role": "device_info", "source_ticket_id": "infra-..."}
   },
@@ -456,19 +452,24 @@ payload above without parent bindings.
 
 After a trained candidate is measured, read its engine-owned
 `training_diagnostics` in the Validation history (or the corresponding
-`training_diagnostics.json` WorkProduct). It summarizes available training and
-trainer-Validation loss for the newest successful Trainer attempt. Use those
-curves to form the next hypothesis—for example, continually falling training
-loss together with Validation loss rising after its minimum may justify testing
-an earlier weights-only branch point or reducing optimization intensity. Treat
-that as a possible explanation, not proof. Missing or method-incomparable loss
-evidence is simply unavailable; never invent it. The Task's deterministic
+`training_diagnostics.json` WorkProduct). It summarizes available training metrics for the newest successful Trainer
+attempt. Combine them with system mid-training Validation scores, when enabled,
+to form the next hypothesis, such as testing an earlier weights-only branch
+point or reducing optimization intensity after measured task-score degradation.
+Historical trainer-Validation loss may remain available for diagnosis; new
+training does not compute it. Treat diagnostic trends as possible explanations,
+not proof. Missing or method-incomparable evidence is unavailable; never invent
+it. The Task's deterministic
 Validation score remains the only champion/Registry selection authority.
 
 The Orchestrator may suggest only a high-level `training_method` and
 experimental `direction`. On the first Train in an unpinned Method branch,
-select the method explicitly. Later Trains retain it; a different suggestion is
-a Method transition and requires an experiment rationale. Train chooses
+select the method explicitly. Later Trains inherit the active method when no
+new method is selected; omission does not delegate a branch change. An explicit
+new selection is a Method transition and requires an experiment rationale.
+Train chooses a method only when there is no pin, selection, or active branch
+and its activation contract delegates ownership. Data receives the selected
+semantic-shape method, never loss-objective values. Train chooses
 all unpinned loss and detailed hyperparameter values, reads the matching model
 lineage's Baseline Inference prompt contract, writes `train_config.yaml`,
 performs its own runtime preflight, and trains from the exact parent.
@@ -521,8 +522,11 @@ score in the Task direction and create exactly one Registry using that
 iteration's checkpoint, metrics, `train_config`, and device bindings. The API
 independently recomputes the champion and rejects a different iteration.
 The Run keeps its best fine-tuned model however small the gain: there is no
-minimum improvement, so never skip Registry, extend the loop, or call a result
-"not worth registering" because the margin over the baseline is tiny. Say in
+minimum improvement required for registration. Do not skip Registry or call a
+result "not worth registering" because the margin over baseline is tiny, and do
+not extend the loop solely to meet a nonexistent registration threshold.
+Continue refining a promising direction when justified by the experiment
+evidence, independently of registration eligibility. Say in
 the final Journal row and the terminal summary how the registered model
 compares with the baseline on Validation, including when it did not beat it.
 Build every Journal or terminal Run PATCH from `run_patch_schema`; a Journal
@@ -637,24 +641,67 @@ selected checkpoint and its Train YAML as one atomic provenance pair. The
 current Validation champion is not automatically the parent, and post-hoc
 parent selection is forbidden. Registry does not exist until the loop stops.
 
-Continue while a concrete, feasible experiment has a credible path to improving
-Validation performance. Before stopping voluntarily, assess relevant untried
-directions and explain why none warrants another iteration, using observed
-results, uncertainty, and actual resource constraints.
+Balance exploration with refinement; use expected benefit and cost to choose
+among concrete next experiments, not as a shortcut to end a difficult Run.
 
-Failure or saturation of one recipe does not establish that other data,
-supervision, or training approaches will fail. Do not infer training restrictions
-solely from the final answer format. When no budget limit is configured,
-projected cost alone is not sufficient reason to stop.
+When a direction shows promise, continue refining it; if subsequent gains
+diminish or performance plateaus, you may stop refining that direction and
+switch to another feasible direction with a reasonable basis for improvement.
+Ending a direction is not ending the Run: Run termination must satisfy the
+separate stopping requirements below. Judge promise and saturation from the
+accumulated evidence and measurement uncertainty, not a single fluctuation;
+improvement is not required in every iteration. Refinements may concern the
+data recipe, supervision, optimization intensity, or training duration. Choose
+the parent that tests the hypothesis cleanly, and do not rotate methods merely
+for diversity.
 
-Stop when user limits are reached, feasible alternatives are blocked, or
-accumulated evidence supports diminishing returns across materially different
-experiments. Retain the Validation champion. Respect explicit user stop policies;
-no fixed iteration count or exhaustive search is required.
-Do not say another round fits when either a credible cost estimate exceeds the
-remaining money or a credible duration estimate exceeds the remaining time. If
-both projections say it fits and you still stop, state the evidence-based
-expected-value reason instead.
+A few flat or regressed iterations should trigger diagnosis and a revised
+hypothesis, not voluntary termination. Distinguish failure of the tested recipe
+from failure of a whole method or source family. Revisit source suitability,
+supervision, training behavior, and relevant alternatives within the user's
+constraints. If lack of suitable data or supervision is the proposed reason to
+stop, inspect plausible alternatives and record verified blockers; not yet
+searched or not yet verified does not mean unavailable. Do not infer training
+restrictions solely from the final answer format or from bans on specific
+sources and their mirrors.
+
+Make coherent changes large enough to test the hypothesis when appropriate;
+you need not tweak one parameter at a time, follow a fixed branch order, or
+exhaust every possible variant. Avoid both premature stopping and rounds that
+merely repeat weak experiments. There is no fixed minimum iteration count.
+
+While user limits permit, continue when a concrete, feasible hypothesis has
+evidence for a materially different opportunity or can resolve an important
+remaining uncertainty. This includes refinements of promising directions, not
+only changes of method or model. Small or uncertain predicted gains alone do
+not rule out an experiment. Expected benefit helps prioritize experiments;
+projected cost alone is not a stopping reason when no cost limit is configured.
+An imaginable parameter combination is not by itself a reason to continue.
+
+Voluntary stopping is appropriate when the main evidence-grounded directions
+have received representative exploration, promising branches have received
+reasonable refinement, and sustained experiments show saturation. Revisit the
+results, source search, diagnosis, and meaningful alternatives before concluding
+that remaining ideas are mainly minor variants without new supporting evidence
+or repeated checks unlikely to add meaningful information. Representative
+exploration tests informative hypotheses; it does not enumerate every source,
+method, model, parameter, or combination, and it need not follow a fixed order.
+
+Observed saturation is different from merely predicting low benefit: explain
+which informative experiments support it, what was learned, and how measurement
+uncertainty affects that conclusion. Do not require each untried variant to be
+executed or proven infeasible. Acknowledge untested possibilities without claiming
+they failed. A few unsuccessful rounds or difficulty thinking of the next step
+are not sufficient evidence; investigate further when a distinct evidence-backed
+opportunity or important unresolved uncertainty remains. Do not manufacture
+minor variants or repeat weak experiments solely to keep running. Retain the
+Validation champion.
+
+Explicit user stop requests, targets, configured limits, and terminal execution
+boundaries take precedence over this exploration policy. Before expensive work,
+check the live budget and duration projections; do not start a round that cannot
+fit the user's remaining limits. Do not claim an unlimited budget must be spent
+or require exhaustive search before honoring those boundaries.
 
 ## Failure and completion
 

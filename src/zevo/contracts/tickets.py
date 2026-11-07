@@ -813,8 +813,7 @@ def specialist_input_binding_contracts() -> dict[str, Any]:
             "discriminator": "payload.operation",
             "variants": {
                 "prepare_run_data": {
-                    "required": {},
-                    "optional": {"device_info": "device_info"},
+                    "required": {"device_info": "device_info"},
                     "lineage": {
                         "device_info": source("infrastructure"),
                     },
@@ -830,10 +829,6 @@ def specialist_input_binding_contracts() -> dict[str, Any]:
                     "train", {"model_source": "base_model"}
                 ), "lineage": {
                     "training_dataset": source("data", "not_later_than_child"),
-                    "validation_dataset": {
-                        **source("data", "not_later_than_child"),
-                        "same_source_ticket_as": "training_dataset",
-                    },
                     "inference_config": {
                         **source("inference", "not_later_than_child"),
                         "source_payload": {"model_source": "base_model"},
@@ -846,10 +841,6 @@ def specialist_input_binding_contracts() -> dict[str, Any]:
                     ),
                     "lineage": {
                         "training_dataset": source("data", "not_later_than_child"),
-                        "validation_dataset": {
-                            **source("data", "not_later_than_child"),
-                            "same_source_ticket_as": "training_dataset",
-                        },
                         "inference_config": {
                             **source("inference", "not_later_than_child"),
                             "source_payload": {"model_source": "base_model"},
@@ -973,10 +964,11 @@ def validate_stored_payload(
 def _required_input_bindings(agent_id: str, payload: dict[str, Any]) -> dict[str, str]:
     """Return the one required binding-name → artifact-role mapping."""
     required: dict[str, str] = {}
+    if agent_id == "data" and payload.get("operation") == "prepare_run_data":
+        required = {"device_info": "device_info"}
     if agent_id == "train":
         required = {
             "training_dataset": "training_dataset",
-            "validation_dataset": "validation_dataset",
             "inference_config": "inference_config",
             "device_info": "device_info",
         }
@@ -1014,6 +1006,12 @@ def validate_bindings(
         name: ArtifactBinding.model_validate(value).model_dump()
         for name, value in inputs.items()
     }
+    if agent_id == "train" and any(
+        name == "validation_dataset" or binding["artifact_role"] in {
+            "validation_dataset", "validation_source", "scoring_questions", "sample_submission",
+        } for name, binding in parsed.items()
+    ):
+        raise ValueError("Train cannot bind scoring data; use system mid-training Validation")
     required = _required_input_bindings(agent_id, payload)
     for name, role in required.items():
         binding = parsed.get(name)

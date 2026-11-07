@@ -34,11 +34,10 @@ description: "Parse provided JSONL or JSON-array records that do not already mat
   silently.
 - Use a separate `filter` phase for deduplication, balancing, or sampling.
 
-## Scoring derivatives
+## Scoring isolation
 
-When `train_shaped` is requested, use a validation-specific source normalizer
-and the identical target renderer. Preserve every validation row and answer;
-never copy validation rows into the training output.
+Prepare training data only. Do not produce Trainer-shaped Validation derivatives;
+the engine owns frozen scoring data and system Validation.
 
 ## Report
 

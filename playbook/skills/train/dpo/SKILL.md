@@ -15,8 +15,7 @@ API reference: https://huggingface.co/docs/trl/dpo_trainer
 Require every pipeline row to contain conversational `prompt`, `chosen`, and
 `rejected` fields, with chosen/rejected assistant continuations. TRL also accepts
 a consistent standard string representation in direct mode. Reject missing,
-empty, identical, or trivially fabricated contrasts. Validate evaluation rows
-against the same representation.
+empty, identical, or trivially fabricated contrasts.
 
 ## Implement
 
@@ -31,7 +30,7 @@ trainer = DPOTrainer(
     ref_model=None,
     args=args,
     train_dataset=train_ds,
-    eval_dataset=eval_ds,
+    eval_dataset=None,  # System-owned Validation runs separately.
     processing_class=tokenizer,
     peft_config=peft_config_or_none,
     callbacks=[ZevoTrainerTelemetryCallback(ticket_id)],
@@ -58,8 +57,12 @@ The validated `train_config.yaml` supplies the complete mapping; do not read the
 fields from `method_config`, invent a missing execution value, or change them.
 
 The canonical starting value is `loss_type="sigmoid"`. Select another current
-TRL loss only while freezing an iteration, before its Data Ticket, from that
-iteration's explicit hypothesis:
+TRL loss while Train resolves and validates `train_config.yaml`, before trainer
+execution, from that iteration's explicit hypothesis. Honor user loss pins.
+Data prepares genuine preference pairs without choosing the DPO objective; loss
+selection need not precede Data. If the objective requires unavailable signal,
+report the incompatibility for a revised Data recipe before training:
+
 
 - `ipo` for identity-transform regularization;
 - `hinge` for a hard margin;

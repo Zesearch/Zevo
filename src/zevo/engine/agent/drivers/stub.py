@@ -365,8 +365,8 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
             "gradient_checkpointing": False,
             "packing": False,
             "logging_steps": 20,
-            "eval_strategy": "steps",
-            "eval_steps": 20,
+            "eval_strategy": "no",
+            "eval_steps": 0,
             "checkpoint_retention": {
                 "strategy": "none",
                 "save_steps": 0,

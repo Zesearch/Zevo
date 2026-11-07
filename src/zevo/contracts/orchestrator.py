@@ -313,8 +313,10 @@ class IterationHistoryEntry(BaseModel):
     training_diagnostics: TrainingDiagnostics | None = Field(
         None,
         description=(
-            "Engine-derived training and Validation loss summary for a trained "
-            "candidate. Diagnostic evidence only; score remains the model-selection authority."
+            "Engine-derived training diagnostics for a trained candidate. "
+            "Trainer Validation loss is retained only for historical records; "
+            "new training does not compute it. System Validation scores are "
+            "reported separately and remain the model-selection authority."
         ),
     )
     generation_termination: GenerationTerminationSummary | None = Field(

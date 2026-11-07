@@ -43,9 +43,9 @@ or GPU acceleration without evidence that it improves the measured bottleneck.
    parent checkpoint/YAML, device/access route, execution contracts, and local output directory.
 2. Load relevant Run-local Train memory and prior Validation evidence.
 3. Select one coherent iteration direction and resolve every unpinned value.
-4. If the method is not user-pinned, retain `active_training_method` unless the
-   Orchestrator explicitly selected a new method with `branch_transition`
-   evidence. This engine-resolved field identifies the current search branch;
+4. Resolve the method by user pin, explicit Orchestrator selection, inherited
+   `active_training_method`, then delegated Train choice, in that order. A
+   pipeline Method transition requires `branch_transition` evidence. This engine-resolved field identifies the current search branch;
    an empty value means there is no earlier measured method. The selected parent
    YAML describes the starting weights, not the active branch: continuing RFT
    from an older SFT champion does not itself switch methods. Read the
@@ -260,7 +260,8 @@ Resolve each value in this order:
 4. verified Run-local memory;
 5. the selected method Skill and measured data/device constraints.
 
-An omitted, empty, null, or numeric-zero suggestion means self-select. Do not
+For hyperparameters, an omitted, empty, null, or numeric-zero suggestion means
+self-select. Method omission instead follows Method branch selection below. Do not
 record it as a rejected value. Record actual suggestions as accepted or
 adjusted, and record self-selected important values with concise rationale.
 
@@ -341,8 +342,8 @@ The grounded defaults (see the SOTA finetuning report) are:
 - Effective batch size ≥ 32, reached through `gradient_accumulation_steps` ×
   `world_size` rather than a large per-device `batch_size`.
 - Sequence `packing` on for SFT to cut padding waste; `warmup_ratio` ~0.03 with a
-  cosine schedule; `num_epochs` 2-3 for supervised data (watch for
-  `validation_loss_rose_after_minimum`).
+  cosine schedule; `num_epochs` 2-3 for supervised data (use system mid-training Validation scores, when enabled,
+  to detect task-performance degradation).
 - Reinforcement methods use a much lower learning rate (`grpo` ~`1e-6`) and do
   not pack SFT-style; follow the method entry and its Skill.
 
@@ -440,10 +441,23 @@ those boundaries.
 
 ### Method branch selection
 
-When `training_method_pin` is non-empty, use exactly that method in every
-iteration; Method transitions do not apply.
+Use this method-selection priority:
 
-Otherwise, identify the data-signal family before the first choice or an
+1. A non-empty `training_method_pin` is binding; Method transitions do not apply.
+2. Execute an explicit Orchestrator selection in
+   `configuration_suggestions.training_method`; do not treat that selection as
+   optional hyperparameter advice. A pipeline change requires transition evidence.
+3. Otherwise retain `active_training_method`. The selected parent's method does
+   not override the active branch, and omission is not permission to change it.
+4. With no pin, selection, or active branch, choose a compatible method only when
+   `activation_contract.method_selection_owner="worker"` or the standalone/freeform
+   request delegates it. Otherwise report the missing selection for coordination.
+
+Check the prepared data against the chosen method before execution. If a change
+requires a different supervision shape, report the incompatibility so Orchestrator
+can prepare a new Data version; never fabricate signal or train incompatible rows.
+
+Identify the data-signal family before the first choice or an
 Orchestrator-selected method change:
 
 - supervised language-model or prompt-completion rows: `sft` (and GKD only
@@ -454,8 +468,8 @@ Orchestrator-selected method change:
 - unpaired desirable/undesirable labels: `kto`;
 - prompt-only rows plus a supplied Hugging Face reward model: `online_dpo`.
 
-Execute the method chosen for this experiment. When no new method is selected,
-retain the bound method. A change must be named in
+Execute the method resolved above. When no new method is selected,
+retain the active method. A pipeline change must be named in
 `configuration_suggestions.training_method` with the Orchestrator's hypothesis
 and supporting evidence. These are compatibility examples, not a prescribed
 order or round-robin schedule. Do not fabricate preference pairs or
@@ -551,14 +565,12 @@ framework.
 
 Train only on `dataset_path`. If `dataset_is_remote=true`, it is an already
 verified path in the remote persistent data cache, not a scheduler-local file;
-do not transfer it in either direction. The engine binds raw scoring records at
-`validation_dataset_path`; after every training choice is fixed, use
-`validation_answer_fields` to render a temporary eval dataset with the exact
-same method/prompt/template function as Training. Pass it only as an evaluation
-dataset. Never concatenate, sample, filter, or mine Validation/Test rows for
-training, and never revise configuration after inspecting it. A method-defined derived training set,
-such as RFT generate/filter output from training prompts, is allowed only when
-the Skill explicitly owns it.
+do not transfer it in either direction. Do not bind or construct a Trainer
+validation/evaluation dataset. Frozen Validation belongs to system-owned
+mid-training and post-training scoring; never use Validation/Test rows for
+optimization or training-data preparation. A method-defined derived training
+set, such as RFT generate/filter output from training prompts, is allowed only
+when the Skill explicitly owns it.
 
 For iteration 1, set `training.data_selection` to `mode=all`, copy the bound
 `dataset_rows` into both row counts, and consume every prepared Training row.
@@ -656,12 +668,14 @@ there.
 The system-owned telemetry callback is mandatory. Configure the Trainer to log
 every `telemetry_interval_steps` optimizer steps, pass the current Ticket id to
 the callback, and preserve every finite numeric key it receives—including
-learning rate, gradient norm, epoch, token accuracy, method-specific metrics,
-and evaluation metrics. Do not replace it with a callback conditional on
-`"loss"`, and do not suppress evaluation-only log rows. Trainer evaluation
-uses the YAML's explicit positive `training.eval_steps` cadence with
-`training.eval_strategy="steps"`; the fixed 20-step rule applies to training
-logs, not to Validation evaluation.
+learning rate, gradient norm, epoch, token accuracy, and method-specific metrics.
+Do not replace it with a callback conditional on `"loss"`; retain numeric log
+rows even when they contain no loss. This telemetry requirement does not require
+Trainer evaluation or evaluation-only logs. Disable Trainer evaluation with `training.eval_strategy="no"`,
+`training.eval_steps=0`, and `training.early_stopping=null`. Do not attach an
+eval dataset, enable evaluation loss/reward, or select weights through Trainer
+evaluation. System-owned mid-training Validation has its own unchanged cadence,
+scoring, continuation decisions, and checkpoint selection.
 
 Structured telemetry owns cluster progress display. Configure the cluster
 Trainer with its raw tqdm/progress bar disabled; do not print a second per-step
@@ -682,12 +696,11 @@ are allowed when that verified plan fits. A repeated
 defect to eliminate, not normal progress output.
 
 The runner materializes `training_diagnostics.json` from the newest concrete
-Trainer attempt. Ensure telemetry exposes available training loss and trainer
-Validation loss, but do not manufacture either value when the selected method
-does not report it. A falling training loss with a Validation loss that later
-rises can support a *possible* late-degradation/overfitting hypothesis; flat or
-high losses can support other hypotheses. They are diagnostics, not proof, and
-the Task's deterministic Validation metric—not loss—still selects the champion.
+Trainer attempt. Expose available training loss and method-specific training
+metrics; do not manufacture missing metrics. Use system-owned Validation task
+scores to assess generalization and select the champion. Historical Trainer
+evaluation telemetry may remain readable for diagnosis; do not generate new
+Trainer validation loss/reward curves.
 
 Every concrete Trainer process launch is a distinct execution attempt. The
 system callback creates a fresh UUID, emits `__ATTEMPT__` before optimization,
@@ -725,8 +738,7 @@ argument omitted from Python may still rely on a library default, so resolve and
 record that effective value before launch. `batch_size` is per device and
 `effective_batch_size` must equal batch size × gradient accumulation × world
 size. `training.logging_steps` is exactly 20; `training.eval_strategy` is
-`steps`, and `training.eval_steps` is a positive cadence selected from run
-length and evaluation cost. Record the realized checkpoint strategy, cap,
+`no`, `training.eval_steps` is `0`, and `training.early_stopping` is null. Record the realized checkpoint strategy, cap,
 model-only setting, and every framework save argument; do not leave a default
 implicit. When retention is active, `implementation_config.save_only_model` is
 an explicit boolean and `implementation_config.save_total_limit` is exactly
@@ -768,11 +780,12 @@ config_path=..., planned_steps=..., planned_epochs=...)`. Call this on rank zero
 (for example in `on_train_begin`), before optimization starts; `planned_epochs` must equal the
 configured `training.num_epochs`. Preserve this plan across repairs and resumes.
 
-Training succeeds when this target is reached, or when the metric history
-satisfies `training.early_stopping` declared before execution (`metric`, `mode`,
-`patience`, `min_delta`). Save the final Trainer state, including `global_step`,
-`max_steps`, and evaluation history, before final model publication. Retain a
-full resumable checkpoint until the final model is committed and verified.
+Training succeeds when this target is reached, or when the system-owned
+mid-training Validation controller authorizes completion using its existing
+scoring and decision rules. Trainer loss/reward early stopping is disabled.
+Save the final Trainer state, including `global_step` and `max_steps`, before
+final model publication. Retain a full resumable checkpoint until the final
+model is committed and verified.
 
 After the distributed framework has materialized the selected final weights
 and tokenizer into a staging directory, publish with
@@ -795,7 +808,8 @@ or coordinator decision rather than retroactively lowering the completion target
 
 Read `adaptive_mid_training_evaluation` from the typed input. Off preserves the
 ordinary training path. When on, set `training.adaptive_evaluation=true` in the
-YAML; do not combine this mode with loss-based `training.early_stopping`.
+YAML. Trainer evaluation remains disabled in both modes; all system-owned
+mid-training Validation behavior below remains enabled when this flag is on.
 Use the system-owned `adaptive_training_helper_path`, copied unchanged as
 `zevo_adaptive_training.py`, together with the supplied sibling
 `zevo_checkpoint_state.py` (shared checkpoint inventory verifier). Copy the entire `adaptive-validation` directory

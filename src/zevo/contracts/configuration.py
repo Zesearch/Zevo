@@ -1132,8 +1132,10 @@ class TrainingConfig(BaseModel):
     gradient_checkpointing: bool
     packing: bool
     logging_steps: Literal[20]
-    eval_strategy: Literal["steps"]
-    eval_steps: int = Field(ge=1)
+    # Historical configurations remain readable; new launches use the stricter
+    # current_train_config_schema and validate_no_trainer_evaluation gate.
+    eval_strategy: Literal["no", "steps"] = "no"
+    eval_steps: int = Field(default=0, ge=0)
     checkpoint_retention: CheckpointRetentionConfig
     seed: int = Field(ge=0)
     lora_r: int = Field(ge=0)
@@ -1437,6 +1439,44 @@ def load_inference_config(path: str | Path) -> InferenceRunConfig:
     )
 
 
+def validate_no_trainer_evaluation(config: TrainRunConfig) -> None:
+    """New Train launches never evaluate frozen scoring data inside a trainer.
+
+    System mid-training Validation is independent and remains supported.
+    Historical YAML is still loadable for provenance and parent checkpoints.
+    """
+    training = config.training
+    if training.eval_strategy != "no" or training.eval_steps != 0:
+        raise ValueError("trainer evaluation must be disabled: eval_strategy=no, eval_steps=0")
+    if training.early_stopping is not None:
+        raise ValueError("trainer early_stopping is disabled; use system mid-training Validation")
+    def check(values):
+        for key, value in values.items():
+            if key in {"eval_strategy", "evaluation_strategy"} and value not in (None, "no"):
+                raise ValueError("implementation_config cannot enable trainer evaluation")
+            if key in {"eval_steps", "eval_delay"} and value not in (None, 0):
+                raise ValueError("implementation_config cannot schedule trainer evaluation")
+            if key in {"do_eval", "eval_on_start", "load_best_model_at_end",
+                       "final_plan_evaluation"} and value not in (None, False):
+                raise ValueError("implementation_config cannot enable trainer evaluation or selection")
+            if key in {"eval_dataset", "validation_eval_dataset", "metric_for_best_model",
+                       "early_stopping_implementation", "best_checkpoint_selection"} and value:
+                raise ValueError("trainer-owned evaluation/checkpoint selection is disabled")
+            if isinstance(value, dict):
+                check(value)
+    check(training.implementation_config)
+
+
+def current_train_config_schema() -> dict:
+    """Expose the current launch policy without invalidating archived YAML."""
+    schema = TrainRunConfig.model_json_schema()
+    fields = schema["$defs"]["TrainingConfig"]["properties"]
+    fields["eval_strategy"] = {"type": "string", "const": "no", "default": "no"}
+    fields["eval_steps"] = {"type": "integer", "const": 0, "default": 0}
+    fields["early_stopping"] = {"type": "null", "default": None}
+    return schema
+
+
 def load_train_config(path: str | Path) -> TrainRunConfig:
     return TrainRunConfig.model_validate(load_yaml_config(path, TrainRunConfig).model_dump())
 
@@ -1610,14 +1650,21 @@ def _main(argv: list[str] | None = None) -> int:
         type=int,
         help="require Train distributed nodes to match the stage request",
     )
+    validate_parser.add_argument("--no-trainer-evaluation", action="store_true",
+                                 help="disable trainer evaluation; preserve system mid-training Validation")
     validate_parser.add_argument("--shared-core", help="enforce the engine-owned Validation core JSON")
     args = parser.parse_args(argv)
     model = _CONFIG_MODELS[args.kind]
     if args.command == "schema":
-        print(json.dumps(model.model_json_schema(), indent=2, sort_keys=True))
+        schema = current_train_config_schema() if args.kind == "train" else model.model_json_schema()
+        print(json.dumps(schema, indent=2, sort_keys=True))
         return 0
     try:
         config = load_yaml_config(args.path, model)
+        if args.no_trainer_evaluation:
+            if args.kind != "train":
+                raise ValueError("--no-trainer-evaluation is supported only for Train")
+            validate_no_trainer_evaluation(config)
         if args.shared_core:
             if args.kind != "inference":
                 raise ValueError("--shared-core is supported only for Inference")

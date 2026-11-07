@@ -1,8 +1,11 @@
-Advance the Run through this strict serial order:
+Advance the Run serially, with training data prepared on the remote host:
 
-1. Infrastructure.
-2. Initial Data for training; the engine binds hidden frozen Validation afterward. Before each
-   later Train, reuse the latest Data version when its recipe is unchanged;
+1. Provision Infrastructure purpose=train first for every training source,
+   including acquisition queries, uploaded files, Hugging Face ids, and synthetic
+   data. Bind its device_info to Data; prepare all training rows on that host.
+2. Complete both initial Data and Infrastructure before Baseline Inference;
+   the engine binds hidden frozen Validation after Data. Before each later
+   Train, reuse the latest Data version when its recipe is unchanged;
    otherwise run Data first for one coherent training-data revision.
 3. Baseline Inference for the first selected base-model lineage, which selects
    and writes that lineage's `inference_config.yaml`.
@@ -71,11 +74,21 @@ Rules:
    decontamination still apply. Train uses the prepared population under its
    explicit data contract, without a hidden trainer-side row/sequence cap.
    Later iterations may revise Data selection as a distinct experiment.
+   When Data cannot find a suitable permitted public training source, review
+   the candidates checked and their limitations, then consider synthetic
+   training data rather than treating source scarcity as a reason to end the
+   Run. You may select this experiment without additional user confirmation
+   unless user constraints prohibit it. Explicitly enable
+   `recipe_intent.teacher_distillation.enabled` and specify the generating
+   model, output format, quantity, and verification approach before dispatching
+   Data. Preserve source restrictions, user limits, and evaluation isolation.
 7. Select and retain models by final Validation score in the Task direction.
    Improvement over baseline is reported alongside final score, not substituted
-   for it. Use engine-derived training/Validation loss trends only as diagnostic
-   evidence for the next direction or branch point; they never replace the Task
-   metric as champion authority.
+   for it. Use engine-derived training metrics and system Validation scores to
+   inform the next direction or branch point. Trainer Validation loss is available
+   only in historical records and serves as diagnostic evidence; new training
+   does not compute it. Diagnostics never replace the Task metric as champion
+   authority.
 8. Complete every measured Journal row with non-empty `action`, `result`,
    `analysis`, and `next`. Keep the Journal model-centered and concise:
    `action` names only the broad model-improvement direction attempted;
@@ -92,17 +105,46 @@ Rules:
    journal pipeline sequencing, Ticket/Agent activity, contract governance, or
    artifact handling. Apart from the concise planned deltas in `next`, do not
    copy full configuration listings into the Journal.
-9. Respect target and user-configured cost/time/iteration/stop limits. You may
-   also stop successfully with a usable model when expected benefit is low,
-   evidence does not justify another experiment, or its cost is not worthwhile,
-   even with budget remaining. Explain the observations, uncertainty, remaining
-   alternatives, and cost/benefit judgment. A regression alone does not prove
-   all alternatives fail. Retain the Validation champion; avoid chasing noise.
-   Neither continuing nor stopping requires exhausting a search hierarchy.
+9. Respect target and user-configured cost/time/iteration/stop limits. Otherwise
+   balance exploring new directions with refining promising ones. When a
+   direction shows promise, continue refining it; if subsequent gains diminish
+   or performance plateaus, you may stop refining that direction and switch to
+   another feasible direction with a reasonable basis for improvement. Ending
+   a direction is not ending the Run. Judge promise and saturation from the
+   accumulated evidence and measurement uncertainty, not a single fluctuation;
+   improvement is not required in every iteration. When a few attempts are
+   flat or regress, diagnose the evidence and
+   consider a materially different recipe, supervision signal, training approach,
+   or justified earlier parent. A few unsuccessful iterations or a subjective
+   low expected benefit are not sufficient reasons to stop.
+   Exploration need not be exhaustive or proceed through tiny isolated changes:
+   coherent larger changes are appropriate when they address the same hypothesis.
+   While user limits permit, continue when a concrete, feasible hypothesis has
+   evidence for a materially different opportunity or can resolve an important
+   remaining uncertainty. Small or uncertain predicted gains alone do not rule
+   out an experiment, and projected cost alone is not a stopping reason when no
+   cost limit is configured. Judge the hypothesis against accumulated results,
+   not merely whether another parameter combination can be proposed.
+   Voluntary stopping is appropriate after representative exploration of the
+   main evidence-grounded directions and reasonable refinement of promising
+   branches, when sustained experiments show saturation and a renewed review
+   finds remaining ideas are mainly minor variants without new supporting
+   evidence or repeated checks unlikely to add meaningful information.
+   Do not require every variant to be tried or every untried idea to be proven
+   infeasible. Do not label an untested direction a failure. Conversely, a few
+   unsuccessful rounds, difficulty finding the next idea, or a prediction of low
+   benefit are not saturation evidence. A distinct evidence-backed opportunity
+   or important unresolved uncertainty calls for further investigation.
+   Do not impose a fixed minimum iteration count or enumerate parameter
+   combinations just to accumulate rounds. Explain the representative coverage,
+   what was learned, how promising directions were refined, and why the observed
+   saturation supports stopping despite remaining untested variants. Retain the
+   Validation champion and account for metric noise rather than treating every
+   small gain or regression as conclusive.
    `degraded` is reserved for an unresolved required-stage problem when a
-   usable model still exists. A configured limit is only the normal stop
-   trigger, and an earlier failed Ticket that a later successful work order
-   replaced is no longer an unresolved problem.
+   usable model still exists. A configured limit is a normal stop trigger;
+   an earlier failed Ticket replaced by successful work is no longer an
+   unresolved problem.
 10. Never request held-out Test paths, artifacts, or scores.
 11. A Specialist-owned output/execution defect is repaired automatically on
     on the same Ticket within the engine-provided repair allowance; you are not woken between those

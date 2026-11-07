@@ -9,6 +9,7 @@
 // The Launch run button is not here — every page that can start a run offers it
 // in its own header, and ⌘K reaches it from anywhere.
 import useSWR from "swr";
+import { Link } from "react-router-dom";
 import { Command } from "lucide-react";
 import type { ModelDTO, RunStatistics } from "../../lib/api";
 import { fmtCost, fmtDuration } from "../../lib/format";
@@ -54,12 +55,12 @@ export function ConsoleBar() {
           the wordmark block takes the remaining 156. Without this the vertical
           line in the bar sat 34px inside the vertical line down the page, and
           the two read as two unrelated rules rather than one frame. */}
-      <div className="flex w-auto shrink-0 md:w-[calc(11rem-1.25rem)] items-baseline gap-1">
+      <Link to="/" aria-label="Zevo Dashboard" className="flex w-auto shrink-0 md:w-[calc(11rem-1.25rem)] items-baseline gap-1 rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brass-300">
         <img src={logoUrl} alt="Z" className="h-8 w-auto shrink-0" />
         <span className="ml-0.5 font-display text-3xl font-semibold leading-none tracking-tight text-ink">
           evo
         </span>
-      </div>
+      </Link>
 
       <div className="hidden items-center gap-5 border-l border-hair pl-5 xl:flex">
         <Vital label="Active runs" value={active === null ? "—" : String(active)} live={active !== null && active > 0} />

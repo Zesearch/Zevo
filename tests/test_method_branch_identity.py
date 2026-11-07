@@ -33,7 +33,6 @@ def case(tmp_path: Path, active="rft", transition=None):
     result = _stub_train(payload, tmp_path / "current")
     inp = TrainTaskInput(
         **payload, run_id="r", dataset_path="/tmp/data.jsonl", dataset_rows=1,
-        validation_dataset_path="/tmp/validation.jsonl", validation_answer_fields=["answer"],
         expected_inference_config_sha256=file_sha256(inference),
         train_config_schema=TrainRunConfig.model_json_schema(),
         training_method_contracts=train_method_contracts(), config_validation_command="validate",
@@ -125,3 +124,25 @@ def test_new_and_historical_transition_fields_share_method_identity():
     assert not method_branch_problem('sft', 'rft', transition=current.model_dump())
     historical = SearchBranchTransition.model_validate(TRANSITION)
     assert not method_branch_problem('sft', 'rft', transition=historical.model_dump())
+
+
+@pytest.mark.parametrize("mode", ["full_pipeline", "customized_pipeline", "auto"])
+@pytest.mark.parametrize("selected,active,expected", [
+    ("dpo", "sft", "orchestrator"),
+    ("", "sft", "orchestrator"),
+    ("sft", "", "orchestrator"),
+    ("", "", "worker"),
+])
+def test_method_ownership_preserves_pipeline_inheritance(mode, selected, active, expected):
+    from zevo.engine.method.branch import method_selection_owner
+    assert method_selection_owner(
+        agent_id="train", input_format="typed", run_mode=mode,
+        selected_method=selected, active_method=active,
+    ) == expected
+
+
+def test_freeform_method_choice_stays_worker_owned():
+    from zevo.engine.method.branch import method_selection_owner
+    assert method_selection_owner(
+        agent_id="train", input_format="freeform", run_mode="full_pipeline",
+    ) == "worker"

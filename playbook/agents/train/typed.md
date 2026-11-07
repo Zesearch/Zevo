@@ -5,13 +5,11 @@
 | `operation` | Always `train`. |
 | `iteration` | 1..N; iteration 0 has no Train stage. |
 | `dataset_path` / `data_signature` | Exact versioned training records and their verified identity. `data_signature` is already canonical; copy its bare 64-character lowercase SHA-256 exactly. |
-| `validation_dataset_path` | Engine-bound raw Validation scoring records; use only to build trainer evaluation data after configuration is fixed. |
-| `validation_answer_fields` | Exact ground-truth fields to map into the method's temporary trainer-eval representation. |
 | `inference_config_path` | Baseline Inference YAML; copy its prompt, template identity, and exact `template_kwargs` and load them at runtime. |
 | `expected_inference_config_sha256` | Engine-computed bare lowercase 64-character SHA-256 of the exact baseline YAML bytes. Copy it exactly into `train_config.yaml.inference_config_sha256`; do not recompute it. |
 | `train_config_schema` | Exact machine-readable key/type authority for `train_config.yaml`; never infer keys from a Skill example or prior Run. |
 | `training_method_contracts` | Exact per-method `method_config`, complete loss contract by prompt framing, objective-config keys/recommended starts, `recommended_training_starts` (non-binding best-practice starting values for common TrainingConfig knobs—LoRA rank/alpha/target-modules, learning_rate, effective batch, warmup, epochs, packing), required software-version keys, PEFT/LoRA state, and hash encoding. Copy the machine-readable requirements instead of inferring them; treat `recommended_training_starts` as guidance to start from and deviate from with rationale. |
-| `config_validation_command` | Side-effect-free validator that must pass after the optional tokenizer/data-collator-only example check and before optimizer/model execution. Its Cluster form validates the DataLoader CPU/memory worker plan; preserve the supplied `--cluster` argument. |
+| `config_validation_command` | Side-effect-free validator that must pass after the optional tokenizer/data-collator-only example check and before optimizer/model execution. Its Cluster form validates the DataLoader CPU/memory worker plan; preserve the supplied `--cluster` and `--no-trainer-evaluation` arguments. |
 | `remote_env_helper_path` | System-owned builder of the pinned `train` environment on a direct host. Run `bash ~/zevo/env/remote_env.sh ensure train` over SSH (upload this copy there if absent) and use the interpreter it prints. Never build the environment yourself. Empty for cluster. |
 | `telemetry_helper_path` | System-owned callback to copy/import unchanged; it forwards all numeric Trainer logs. |
 | `checkpoint_helper_path` | System-owned checkpoint transaction helper to copy/import unchanged; use it for rank-zero DDP save, bounded sharding, validation, atomic publication, and the commit marker. |
@@ -23,7 +21,9 @@
 | `parent_checkpoint_path` | Empty for a baseline branch; otherwise the selected earlier Run checkpoint. |
 | `parent_train_config_path` | Empty for a baseline branch; otherwise YAML from the same parent Train Ticket. |
 | `branch_transition` | Engine-validated experiment-transition record. `none` while continuing; a Method change carries its prior branch, Validation evidence, and next branch. |
-| `training_method_pin` | Binding method when non-empty. |
+| `training_method_pin` | Highest-priority binding method when non-empty. |
+| `active_training_method` | Inherit when there is no user pin or explicit Orchestrator selection; parent YAML does not override it. |
+| `activation_contract.method_selection_owner` | `worker` delegates method choice only after applying pins, explicit selection, and active-branch inheritance. |
 | `method_config_pins` | Binding method-owned values. |
 | `loss_objective_pins` | Binding method-valid objective values. |
 | `configuration_suggestions` | High-level Orchestrator method/direction, plus any user advisory customization. |
@@ -133,9 +133,10 @@ not directories nested inside it. These successful Result artifacts are not the
 full-state recovery checkpoints used to continue a finite Slurm Train job.
 
 The runner—not Train—derives `training_diagnostics.json` from the newest real
-Trainer attempt's telemetry. It summarizes available training-loss and trainer
-Validation-loss series without asserting a diagnosis. Do not invent or hand-edit
-this artifact.
+Trainer attempt's telemetry. It summarizes available training-loss series without
+asserting a diagnosis. Historical trainer Validation-loss series remain readable;
+new training does not generate them. System-owned Validation scores are reported
+separately. Do not invent or hand-edit this artifact.
 
 
 When adaptive_mid_training_evaluation is enabled, adaptive_training_helper_path

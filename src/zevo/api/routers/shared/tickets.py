@@ -866,8 +866,7 @@ async def create_ticket(
                             "reusable_ticket_id": reusable.id,
                             "data_intent_signature": requested_signature,
                             "advice": (
-                                "Do not run Data again. Bind this Ticket's training_dataset "
-                                "and validation_dataset to Train."
+                                "Do not run Data again. Bind this Ticket's training_dataset to Train."
                             ),
                         },
                     )
@@ -914,12 +913,11 @@ async def create_ticket(
             agent_id=body.agent_id, payload=payload, inputs=body.inputs or {}
         ) if body.input_format == "typed" else {}
         if body.agent_id == "data" and payload.get("operation") == "prepare_run_data":
-            from zevo.engine.remote_datasets import looks_like_hub_id
-            if looks_like_hub_id(str(payload.get("dataset") or "")) and not (
+            if not (
                 (inputs or {}).get("device_info")
             ):
                 raise ValueError(
-                    "Hugging Face Data requires a purpose=train device_info binding; "
+                    "Training Data requires a purpose=train device_info binding; "
                     "download and preparation run on that remote data plane"
                 )
         if inputs:
@@ -969,16 +967,8 @@ async def create_ticket(
 
             if body.agent_id == "train" and payload.get("operation") == "train":
                 data_ticket = await source_ticket("training_dataset", "data")
-                validation_data_ticket = await source_ticket(
-                    "validation_dataset", "data",
-                )
                 if int(data_ticket.iteration or 0) > int(body.iteration or 0):
                     raise ValueError("Train cannot use Data prepared for a later iteration")
-                if validation_data_ticket.id != data_ticket.id:
-                    raise ValueError(
-                        "Train and Validation datasets must come from the same "
-                        "versioned Run Data ticket"
-                    )
                 current_revisions = (await db.execute(select(Ticket.id).where(
                     Ticket.run_id == run_id,
                     Ticket.agent_id == "data",
