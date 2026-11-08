@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from zevo.contracts.customizations import AgentCustomization
+from zevo.contracts.failure import FailureRecovery
 from zevo.contracts.memory import AgentMemoryContext, MemoryUpdate
 
 
@@ -79,6 +80,13 @@ class AgentResult(StrictResult):
         ..., description="Empty on succeeded/degraded/deferred; specific failure detail otherwise."
     )
     notes: str = Field(..., description="Concise execution notes; empty is allowed.")
+    failure_recovery: FailureRecovery | None = Field(
+        None, description=(
+            "For failed results, explain the evidence, attempted actions and authority "
+            "needed for recovery. Use this field to request Orchestrator review instead "
+            "of relying on phrases in notes/error_message. Null preserves legacy results."
+        ),
+    )
     memory_updates: list[MemoryUpdate] = Field(
         default_factory=list,
         description=(
@@ -93,6 +101,8 @@ class AgentResult(StrictResult):
 
     @model_validator(mode="after")
     def require_status_error_consistency(self) -> "AgentResult":
+        if self.failure_recovery is not None and self.status != "failed":
+            raise ValueError("failure_recovery is only valid for failed results")
         if self.status == "failed" and not self.error_message.strip():
             raise ValueError("failed results require a non-empty error_message")
         if self.status in {"succeeded", "degraded", "deferred"} and self.error_message.strip():

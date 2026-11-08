@@ -9,6 +9,17 @@ export function completedTrainingData<T extends Artifact>(artifacts: T[], ticket
   });
 }
 
+/** A new Data task supersedes the previous population even before publication. */
+export function iterationTrainingData<T extends Artifact>(
+  artifacts: T[], roundTickets: Ticket[], tickets: Map<string, Ticket>, previous: T[],
+): T[] {
+  const latest = roundTickets.filter((ticket) => ticket.agent_id === "data"
+    && ticket.lane === "optimization").at(-1);
+  return latest
+    ? completedTrainingData(artifacts.filter((artifact) => artifact.ticket_id === latest.id), tickets)
+    : previous;
+}
+
 /** Reused, completed Data is evidence for this round even without a new artifact. */
 export function hasIterationEvidence(artifacts: Artifact[], activeData: Artifact[]): boolean {
   return activeData.some((artifact) => artifact.role === "training_dataset")

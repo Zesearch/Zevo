@@ -78,6 +78,12 @@ continue or report a blocker. Repeated unchanged attempts are not progress.
 The activation contract reports repair allowances and the no-progress limit;
 these are distinct from stored-payload validation failures. Do not invent an
 additional turn-count deadline or claim success merely to finish an activation.
+Across all agents, five consecutive failed activations without changed execution,
+artifacts, or measured workload progress end local repair. Optimization specialists
+hand off to the Orchestrator for review; held-out Test and the Orchestrator itself
+do not escalate to the Orchestrator. Real progress restarts this streak; normal
+external waiting does not count as failure. A request that already needs upstream
+authority can be escalated immediately without consuming five failures.
 
 ## Runtime environment
 
@@ -429,6 +435,38 @@ lesson was learned. It must contain a concise update when the Agent recovered
 from an error through reflection and the verified correction is likely to help
 one of its later Tickets in this Run. Do not print prose, a second JSON object,
 or another message after the result.
+
+### Failure recovery and ownership
+
+For a failed result, put the specific current failure in `error_message` and
+use `failure_recovery` to describe recovery. `notes` is explanatory context;
+phrases such as "escalating" in prose are not a handoff protocol.
+
+- `scope="current_task"`: name a concrete implementation correction or bounded
+  diagnostic within the existing work order. Explain what the next action will
+  fix or distinguish. An OOM alone does not determine ownership.
+- `scope="upstream_input"`, `"resource_plan"`, `"fixed_configuration"`, or
+  `"run_decision"`: the next action needs authority outside this work order.
+  Request Orchestrator review through that scope. Do not change pins, upstream
+  inputs, resource plans or standing decisions yourself.
+- Include `reason`, `attempted_actions`, concrete `evidence` with artifact/log
+  references, and `next_action`. Separate measured facts from hypotheses. An
+  escalation requests review; it does not prove the diagnosis or authorize
+  stopping the Run. Preserve lane isolation in both evidence and requests.
+
+Use this mechanism for Data, Train, Inference and other producing Agents. A
+live asynchronous workload follows its existing `deferred`/collection contract;
+waiting for it is not a failed repair. `failure_recovery` is only valid with
+`status="failed"`; old results without it remain compatible.
+
+Continue while a distinct, justified repair or diagnostic can resolve the
+blocker within your authority. Failed checks can be informative, but rewriting
+notes/reports, replaying the same observation, or changing timestamps is not
+progress. The engine compares execution/artifact changes and backend-bound
+workload progress; mutable repair reports alone do not reset the unchanged
+failure guard. A new explanation alone does not reset it either. If further
+work needs a decision, request review instead of cycling the same attempt.
+User boundaries and the engine's repair allowance still apply.
 
 ## Phase reporting for every stage
 

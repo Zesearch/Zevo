@@ -3442,6 +3442,7 @@ class ArtifactDetail(ArtifactDTO):
     preview_rows: list[dict[str, Any]] = Field(default_factory=list)
     preview_page: int = 1
     preview_page_size: int = 10
+    preview_total_rows: int | None = None
 
 
 def _clip_preview_value(value: Any) -> Any:
@@ -3643,6 +3644,8 @@ def _artifact_availability(
     original_exists: bool, retained_model: RegistryModel | None,
     retained_exists: bool,
 ) -> Literal["local", "remote", "saved_model", "missing"]:
+    if role == "training_dataset" and meta.get("location") == "remote":
+        return "remote"
     if role == "checkpoint" and meta.get("location") == "remote":
         if (
             retained_model is not None
@@ -3748,7 +3751,24 @@ async def get_artifact_detail(
     preview_columns: list[str] = []
     preview_rows: list[dict[str, Any]] = []
     preview_offset = (preview_page - 1) * preview_page_size
-    if availability == "saved_model":
+    preview_total_rows = None
+    if availability == "remote" and wp.role == "training_dataset":
+        from zevo.engine.dataset_preview import remote_training_preview
+        from zevo.engine.run.remote_jobs import _device_info_for_ticket
+
+        sample, preview_error = await remote_training_preview(
+            info=await _device_info_for_ticket(db, tk),
+            dataset_path=wp.path,
+            receipt_path=str(meta.get("remote_data_receipt_path") or ""),
+        )
+        preview_total_rows = len(sample)
+        preview_rows = sample[preview_offset:preview_offset + preview_page_size]
+        preview_columns = _preview_columns(preview_rows)
+        preview_kind = "jsonl" if sample else "missing"
+        preview = preview_error or (
+            "No rows are available on this preview page." if not preview_rows else ""
+        )
+    elif availability == "saved_model":
         preview_kind = "text"
         preview = (
             "This checkpoint was produced on the remote GPU. Registry retained "
@@ -3924,6 +3944,7 @@ async def get_artifact_detail(
         preview_kind=preview_kind, preview=preview,
         preview_columns=preview_columns, preview_rows=preview_rows,
         preview_page=preview_page, preview_page_size=preview_page_size,
+        preview_total_rows=preview_total_rows,
     )
 
 

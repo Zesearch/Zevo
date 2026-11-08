@@ -184,7 +184,10 @@ def test_saved_external_models_are_listed_without_local_files():
 
 
 @pytest.mark.asyncio
-async def test_model_save_transport_failure_keeps_registry_repair_behavior():
+async def test_model_save_transport_failure_keeps_registry_repair_behavior(monkeypatch):
+    from zevo.engine.run import repair_progress
+    async def not_stalled(*args, **kwargs): return False
+    monkeypatch.setattr(repair_progress, "repeated_without_progress", not_stalled)
     from zevo.engine.run.runner import _apply_ticket_failure_policy
     messages = []
     ticket = SimpleNamespace(id='registry-run123', agent_id='registry', repair_attempts=0, status='running')
@@ -258,3 +261,85 @@ async def test_remote_save_runs_worker_with_an_interpreter_that_has_the_hub_clie
     assert '"$ZEVO_PY" -c ' in command
     assert ' python3 -c ' not in command
 
+
+
+@pytest.mark.parametrize('bad_card', [False, True])
+def test_upload_card_repair_preserves_checkpoint_and_validates_before_upload(tmp_path, monkeypatch, bad_card):
+    source = checkpoint(tmp_path)
+    original_card = '---\nbase_model: /local/cache\n---\nDescription\n'
+    (source / 'README.md').write_text(original_card)
+    before = worker.manifest(source)
+    replacement = original_card if bad_card else '---\nbase_model: owner/model\n---\nDescription\n'
+    uploads = []
+    class Card:
+        def __init__(self, content):
+            self.content = content
+        def validate(self):
+            assert self.content == replacement
+            if '/local/cache' in self.content:
+                raise ValueError('base_model.0 must be a Hub model ID')
+    class Api:
+        def __init__(self, **kwargs): pass
+        def create_repo(self, **kwargs): pass
+        def model_info(self, repo, **kwargs):
+            if not kwargs:
+                return SimpleNamespace(private=True, siblings=[])
+            sizes = {name: item['size'] for name, item in before.items()}
+            sizes['README.md'] = len(replacement.encode())
+            return SimpleNamespace(siblings=[SimpleNamespace(rfilename=k, size=v) for k, v in sizes.items()])
+        def upload_folder(self, **kwargs):
+            stage = Path(kwargs['folder_path'])
+            assert stage != source
+            assert (stage / 'README.md').read_text() == replacement
+            assert (stage / 'model.safetensors').read_bytes() == b'model-bytes'
+            uploads.append(stage)
+            return SimpleNamespace(oid='fixed-card')
+    monkeypatch.setitem(sys.modules, 'huggingface_hub', SimpleNamespace(HfApi=Api, RepoCard=Card))
+    request = {'source': str(source), 'tag': 'M-run123', 'token': 'secret', 'model_card': replacement,
+               'policy': {'weights': 'hf', 'hf_repo_id': 'me/model', 'hf_private': True}}
+    if bad_card:
+        with pytest.raises(ValueError, match='base_model.0'):
+            worker.save(request)
+        assert not uploads
+    else:
+        assert worker.save(request)['revision'] == 'fixed-card'
+        assert len(uploads) == 1 and not uploads[0].exists()
+    assert worker.manifest(source) == before
+    assert not list(tmp_path.glob('.zevo-upload-*'))
+
+
+@pytest.mark.asyncio
+async def test_verified_preservation_is_reused_after_manifest_repair(tmp_path, monkeypatch):
+    from zevo.contracts.model_save import ModelSavePolicy
+    ticket = SimpleNamespace(id='registry-run123', status='running')
+    policy = ModelSavePolicy(hf_repo_id='me/model')
+    run = SimpleNamespace(id='run123', status='running', lifecycle={})
+    receipt = dict(identity=saver.save_identity(run, '/gpu/model', policy), ticket_id=ticket.id,
+                   path='https://huggingface.co/me/model/tree/c1', revision='c1', storage='hf')
+    run.lifecycle['model_storage'] = receipt
+    manifest = tmp_path / 'registry.yaml'
+    manifest.write_text(yaml.safe_dump({'models': {'M-run123': {'eval': {'score': .5}}}}))
+    inp = SimpleNamespace(model_save_policy=policy.model_dump(), checkpoint_path='/gpu/model',
+                          checkpoint_is_remote=True, expected_version_tag='M-run123')
+    output = SimpleNamespace(model_card_path='', registry_path=str(manifest))
+    async def refresh(*args, **kwargs): pass
+    async def unexpected_save(*args, **kwargs): pytest.fail('verified upload must not be repeated')
+    monkeypatch.setattr(saver, 'save_model', unexpected_save)
+    assert await saver.finalize_registry_model(SimpleNamespace(refresh=refresh), run, ticket,
+        inp=inp, output=output, work_dir=str(tmp_path)) == receipt
+    assert inp.saved_model_path == receipt['path']
+    final = yaml.safe_load(manifest.read_text())['models']['M-run123']
+    assert final['revision'] == 'c1' and final['eval'] == {'score': .5}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('state', ['cancelled', 'paused'])
+async def test_preservation_does_not_start_after_run_stops(tmp_path, monkeypatch, state):
+    run = SimpleNamespace(status=state, lifecycle={})
+    ticket = SimpleNamespace(status='running')
+    async def refresh(*args, **kwargs): pass
+    async def unexpected_save(*args, **kwargs): pytest.fail('stopped run must not upload')
+    monkeypatch.setattr(saver, 'save_model', unexpected_save)
+    with pytest.raises(ValueError, match='no longer active'):
+        await saver.finalize_registry_model(SimpleNamespace(refresh=refresh), run, ticket,
+            inp=None, output=None, work_dir=str(tmp_path))

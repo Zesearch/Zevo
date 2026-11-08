@@ -1,5 +1,5 @@
+import { operationCaption, stageAttemptLabel, withRepairLabel } from "../lib/stageLabels";
 import { ExecutionPhase } from "../components/ExecutionPhase";
-import { executionPhase } from "../lib/activationPhase";
 import { GenerationReport } from "../components/GenerationReport";
 import { latestBenchmarkEvent, activationExecution, activationWorkload, workloadCanProgress, executionPhase as workloadPhase } from "../lib/executionProgress";
 import { measurementProgress } from "../lib/measurementProgress";
@@ -17,7 +17,7 @@ import useSWR from "swr";
 import { StopCircle, ChevronRight, ChevronDown, Clock, ListChecks, Package, ArrowLeft, Layers3, ScrollText } from "lucide-react";
 import { InputChangesNotice } from "../components/InputChangesNotice";
 import { TrainingMonitor } from "../components/TrainingMonitor";
-import { EvaluationProgress, evaluationAttemptLabel } from "../components/EvaluationProgress";
+import { EvaluationProgress } from "../components/EvaluationProgress";
 import { RunInstructionPanel } from "../components/RunInstructionPanel";
 import { StepTimeline } from "../components/StepTimeline";
 import type { EventEnvelope } from "../components/LiveTranscript";
@@ -211,77 +211,6 @@ function stageLabel(t: TLTicket): string {
   };
   const agent = agentIdOf(t);
   return names[agent] || agent;
-}
-
-function operationCaption(t: {
-  agent_id?: string;
-  lane?: string;
-  iteration?: number;
-  operation?: string;
-  model_source?: string;
-  test_set_name?: string;
-  payload?: Record<string, unknown>;
-}, heartbeatOperation = "", activationPhase = ""): string {
-  const op = heartbeatOperation || t.operation || String(t.payload?.operation || "");
-  const modelSource = t.model_source || String(t.payload?.model_source || "");
-  const testSetName = t.test_set_name || String(t.payload?.test_set_name || "");
-  const phase = activationPhase.trim().toLowerCase();
-  const inferenceName = t.lane === "held_out_test"
-    ? "Held-Out Inference"
-    : modelSource === "base_model"
-      ? "Baseline Inference"
-      : "Candidate Inference";
-  const stageName = ({
-    infrastructure: "Infrastructure",
-    data: "Data",
-    train: "Train",
-    inference: "Inference",
-    evaluation: "Evaluation",
-    registry: "Registry",
-    orchestrator: "Orchestrator",
-  } as Record<string, string>)[t.agent_id || ""] || t.agent_id || "Stage";
-
-  if (op === "run_inference") {
-    if (phase === "remeasure") return "Length Remeasurement";
-    if (phase === "remeasure_collect") return "Collect Length Remeasurement Results";
-    if (phase === "submit") return `Submit ${inferenceName}`;
-    if (phase === "collect") return `Collect ${inferenceName} Results`;
-    if (phase === "repair") return `Repair ${inferenceName}`;
-    if (phase === "continue") return `Continue ${inferenceName}`;
-  }
-  if (op === "train") {
-    if (phase === "submit") return "Submit Candidate Training";
-    if (phase === "collect") return "Collect Candidate Training Results";
-    if (phase === "repair") return "Repair Candidate Training";
-    if (phase === "continue") return "Continue Candidate Training";
-  }
-  if (phase === "submit") return `Submit ${stageName} Job`;
-  if (phase === "collect") return `Collect ${stageName} Results`;
-  if (phase === "repair") return `Repair ${stageName}`;
-  if (phase === "continue") return `Continue ${stageName}`;
-
-  const labels: Record<string, string> = {
-    provision: "Provision compute",
-    prepare_run_data: "Prepare Run data and Validation setup",
-    prepare_holdout_data: `Prepare questions-only held-out data${
-      testSetName ? ` · ${testSetName}` : ""
-    }`,
-    train: "Select config and train candidate",
-    run_inference: t.lane === "held_out_test"
-      ? "Run Held-Out Inference"
-      : modelSource === "base_model"
-        ? "Run Baseline Inference"
-        : "Run Candidate Inference",
-    release: "Release resources",
-  };
-  if (labels[op]) return labels[op];
-  if (agentIdOf(t) === "evaluation") {
-    return t.lane === "held_out_test"
-      ? `Run held-out evaluator via Bash${testSetName ? ` · ${testSetName}` : ""}`
-      : "Run validation evaluator via Bash";
-  }
-  if (agentIdOf(t) === "registry") return "Select and save the best model";
-  return op ? op.replaceAll("_", " ") : "Execute stage";
 }
 
 function orchestratorLabel(h: HeartbeatDTO, tickets: Map<string, TLTicket>): string {
@@ -793,9 +722,7 @@ function PipelineTimeline({
                     const t = item.ticket;
                     const activationCaptions = Array.from(new Set(
                       (heartbeatsByTicket.get(t.id) || [])
-                        .map((heartbeat) => operationCaption(
-                          t, heartbeat.operation, executionPhase(heartbeat),
-                        ))
+                        .map((heartbeat, index) => stageAttemptLabel(t, heartbeat, index + 1))
                         .filter(Boolean),
                     ));
                     const activity = activationCaptions.length > 1
@@ -1142,18 +1069,13 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
       </div>}
       {(activations.length > 1 || midTrainingTicketId) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
-          <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation history" : "Activations"}</span>
+          <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation history" : "Stage history"}</span>
           {activations.map((heartbeat, index) => {
             const active = heartbeat.id === picked?.id;
-            const label = midTrainingTicketId ? midTrainingActivationLabel(heartbeat, activations) : t.agent_id === "train" && heartbeat.id === chronological.at(-1)?.id && currentTrainingActivity
-              ? currentTrainingActivity
-              : t.agent_id === "evaluation"
-              ? evaluationAttemptLabel(heartbeat.activation_phase, index + 1, t.lane)
-              : t.agent_id === "orchestrator"
-              ? index === 0 ? "Initial" : `Repair ${index}`
-              : heartbeat.operation
-              ? operationCaption(t, heartbeat.operation, executionPhase(heartbeat))
-              : `Activation ${index + 1}`;
+            const label = midTrainingTicketId
+              ? withRepairLabel(midTrainingActivationLabel(heartbeat, activations), heartbeat)
+              : stageAttemptLabel(t, heartbeat, index + 1,
+                t.agent_id === "train" && heartbeat.id === chronological.at(-1)?.id ? currentTrainingActivity || "" : "");
             return (
               <button
                 key={heartbeat.id}
@@ -1167,7 +1089,6 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
                 }`}
               >
                 {label}
-                {heartbeat.activation_phase === "repair" && heartbeat.execution_phase && <span className="ml-2 text-dim">Repair</span>}
               </button>
             );
           })}

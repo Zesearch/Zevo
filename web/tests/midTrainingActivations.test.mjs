@@ -34,5 +34,5 @@ test('mid-training branch names the concrete action instead of the agent', async
 
 test('handoff failures are reviews, not validation decisions', () => {
   const failed = { ...first, exit_code: 0, mid_training: { ...first.mid_training, phase: 'handoff_failed' } };
-  assert.equal(midTrainingActivationLabel(failed, [failed]), 'Step 552 · Repair');
+  assert.equal(midTrainingActivationLabel(failed, [failed]), 'Step 552 · Review handoff · Repair');
 });

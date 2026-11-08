@@ -1,5 +1,6 @@
 """Run on the checkpoint host. JSON request/response over stdin/stdout only."""
 from __future__ import annotations
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -69,7 +70,37 @@ def save(request: dict) -> dict:
         return {'storage': 'remote', 'path': str(dest), 'revision': '', 'files': len(before)}
     if policy['weights'] != 'hf':
         raise ValueError('Unsupported model destination')
+    with upload_copy(source, request.get('model_card')) as upload_source:
+        return upload_hf(request, source, before, upload_source)
+
+
+@contextmanager
+def upload_copy(source: Path, model_card: str | None):
+    if model_card is None:
+        yield source
+        return
+    if not isinstance(model_card, str) or not model_card or len(model_card) > 131072:
+        raise ValueError('Model card replacement must be nonempty and at most 131072 characters')
+    # Hardlink unchanged files on the same filesystem to avoid copying large
+    # weights. Replace README via unlink/write; never write through a hardlink.
+    with tempfile.TemporaryDirectory(prefix='.zevo-upload-', dir=source.parent) as directory:
+        stage = Path(directory) / 'model'
+        shutil.copytree(source, stage, copy_function=os.link)
+        card = stage / 'README.md'
+        if card.exists():
+            card.unlink()
+        card.write_text(model_card, encoding='utf-8')
+        yield stage
+
+
+def upload_hf(request: dict, source: Path, before: dict, upload_source: Path) -> dict:
+    policy = request['policy']
+    expected = manifest(upload_source)
     from huggingface_hub import HfApi
+    if (upload_source / "README.md").is_file():
+        from huggingface_hub import RepoCard
+        # Surface field-level diagnostics to Registry before attempting upload.
+        RepoCard((upload_source / "README.md").read_text()).validate()
     api = HfApi(token=request['token'])
     repo = policy['hf_repo_id']
     api.create_repo(repo_id=repo, private=policy['hf_private'], exist_ok=True)
@@ -77,25 +108,26 @@ def save(request: dict) -> dict:
     if bool(repo_info.private) != policy['hf_private']:
         raise ValueError('Existing HF repository visibility differs from the selected visibility')
     stale_weights = [f.rfilename for f in (repo_info.siblings or [])
-                     if f.rfilename not in before and f.rfilename.endswith(('.safetensors', '.bin', '.index.json'))]
+                     if f.rfilename not in expected and f.rfilename.endswith(('.safetensors', '.bin', '.index.json'))]
     if stale_weights:
         raise ValueError('HF repository contains other model weights; choose an empty repository')
-    commit = api.upload_folder(repo_id=repo, folder_path=str(source), ignore_patterns=['.zevo-*'],
+    commit = api.upload_folder(repo_id=repo, folder_path=str(upload_source), ignore_patterns=['.zevo-*'],
                                commit_message=f'Zevo {request["tag"]} selected champion')
     revision = commit.oid
     uploaded = api.model_info(repo, revision=revision, files_metadata=True)
     sizes = {f.rfilename: f.size for f in uploaded.siblings}
-    if any(sizes.get(name) != item['size'] for name, item in before.items()):
+    if any(sizes.get(name) != item['size'] for name, item in expected.items()):
         raise ValueError('HF commit does not contain every checkpoint file with the expected size')
-    if manifest(source) != before:
-        raise ValueError('Checkpoint changed while uploading')
+    if manifest(source) != before or manifest(upload_source) != expected:
+        raise ValueError('Checkpoint or upload copy changed while uploading')
     return {'storage': 'hf', 'path': f'https://huggingface.co/{repo}/tree/{revision}',
-            'revision': revision, 'files': len(before)}
+            'revision': revision, 'files': len(expected)}
 
 
 if __name__ == '__main__':
     try:
-        result = save(json.load(sys.stdin))
+        request = json.load(sys.stdin)
+        result = save(request)
         print('ZEVO_MODEL_SAVED=' + json.dumps(result), flush=True)
     except Exception as exc:
         # Provider exceptions can contain request/credential details. Keep those
@@ -105,5 +137,11 @@ if __name__ == '__main__':
             # A module name is not a credential; it tells the operator which
             # interpreter the host ran the worker with.
             message += ': ' + exc.name
+        token = locals().get('request', {}).get('token', '')
+        if token:
+            message = message.replace(token, '[redacted]')
+        # Preserve multiline validator diagnostics in the one safe record that
+        # the parent process returns to the agent.
+        message = ' '.join(message.splitlines())[:4000]
         print('Model preservation failed: ' + message, file=sys.stderr)
         sys.exit(1)

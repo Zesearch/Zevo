@@ -1,4 +1,4 @@
-import { executionPhase } from "../lib/activationPhase";
+import { stageAttemptLabel } from "../lib/stageLabels";
 import { GenerationReport } from "../components/GenerationReport";
 import { trainingActivity } from "../lib/trainingTelemetry";
 import { useEffect, useMemo, useState } from "react";
@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 
 import { TrainingMonitor } from "../components/TrainingMonitor";
-import { EvaluationProgress, evaluationAttemptLabel } from "../components/EvaluationProgress";
+import { EvaluationProgress } from "../components/EvaluationProgress";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { StepTimeline } from "../components/StepTimeline";
 import type { EventEnvelope } from "../components/LiveTranscript";
@@ -146,60 +146,10 @@ export function TicketDetailPage() {
   const renderHbTab = (h: HeartbeatDTO) => {
     const active = curHbId === h.id;
     const emitted = emittedByHb.get(h.id);
-    const operationLabel: Record<string, string> = {
-      provision: "Provision Compute",
-      prepare_run_data: "Prepare Run Data And Validation Setup",
-      prepare_holdout_data: "Prepare Questions-Only Held-Out Data",
-      train: "Select Configuration And Train Candidate",
-      run_inference: tk?.lane === "held_out_test"
-        ? "Run Held-Out Inference"
-        : tk?.payload?.model_source === "base_model"
-          ? "Run Baseline Inference"
-          : "Run Candidate Inference",
-      release: "Release Resources",
-    };
-    const phase = executionPhase(h).toLowerCase();
-    const inferenceName = tk?.lane === "held_out_test"
-      ? "Held-Out Inference"
-      : tk?.payload?.model_source === "base_model"
-        ? "Baseline Inference"
-        : "Candidate Inference";
-    let activationLabel = operationLabel[h.operation]
-      || `Activation ${hbSeq.get(h.id) ?? "?"}`;
-    if (tk?.agent_id === "evaluation") {
-      activationLabel = evaluationAttemptLabel(phase, hbSeq.get(h.id) ?? 1, tk.lane);
-    } else if (phase === "remeasure") {
-      activationLabel = "Length Remeasurement";
-    } else if (phase === "remeasure_collect") {
-      activationLabel = "Collect Length Remeasurement Results";
-    } else if (h.operation === "run_inference" && phase === "submit") {
-      activationLabel = `Submit ${inferenceName}`;
-    } else if (h.operation === "run_inference" && phase === "collect") {
-      activationLabel = `Collect ${inferenceName} Results`;
-    } else if (h.operation === "run_inference" && phase === "repair") {
-      activationLabel = `Repair ${inferenceName}`;
-    } else if (h.operation === "train" && phase === "submit") {
-      activationLabel = "Submit Candidate Training";
-    } else if (h.operation === "train" && phase === "collect") {
-      activationLabel = "Collect Candidate Training Results";
-    } else if (h.operation === "train" && phase === "continue") {
-      activationLabel = "Continue Candidate Training";
-    } else if (h.operation === "train" && phase === "repair") {
-      activationLabel = "Repair Candidate Training";
-    } else if (phase === "submit") {
-      activationLabel = `Submit ${tk?.agent_id || "Stage"} Job`;
-    } else if (phase === "collect") {
-      activationLabel = `Collect ${tk?.agent_id || "Stage"} Results`;
-    } else if (phase === "repair") {
-      activationLabel = `Repair ${tk?.agent_id || "Stage"}`;
-    } else if (phase === "continue") {
-      activationLabel = `Continue ${tk?.agent_id || "Stage"}`;
-    }
-    if (h.activation_phase === "repair" && h.execution_phase) activationLabel += " · Repair";
-    if (tk?.agent_id === "train" && h.id === heartbeats[0]?.id) {
-      activationLabel = trainingActivity(tk.execution_events, tk.mid_training_validation, tk.status,
-        runInstructions.some((item) => instructionBlocks(item.status))) || activationLabel;
-    }
+    const activity = tk?.agent_id === "train" && h.id === heartbeats[0]?.id
+      ? trainingActivity(tk.execution_events, tk.mid_training_validation, tk.status,
+          runInstructions.some((item) => instructionBlocks(item.status))) || "" : "";
+    const activationLabel = stageAttemptLabel(tk || {agent_id: h.agent_id}, h, hbSeq.get(h.id) ?? 1, activity);
     return (
       <button
         key={h.id}
