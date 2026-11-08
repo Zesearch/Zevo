@@ -2021,6 +2021,15 @@ async def _build_input(
     if agent_id == "registry":
         registry_input = _build_registry_input(ticket, payload, inputs, work_dir)
         registry_input.model_save_policy = dict((run.lifecycle or {}).get("model_save_policy") or {})
+        if registry_input.model_save_policy:
+            from zevo.contracts.model_save import ModelSavePolicy
+            from zevo.engine.run.model_save import save_identity
+            receipt = (run.lifecycle or {}).get("model_storage") or {}
+            identity = save_identity(run, registry_input.checkpoint_path,
+                                     ModelSavePolicy.model_validate(registry_input.model_save_policy))
+            if receipt.get("identity") == identity and receipt.get("ticket_id", ticket.id) == ticket.id:
+                registry_input.saved_model_path = receipt["path"]
+                registry_input.saved_model_revision = receipt["revision"]
         return registry_input
     raise ValueError(f"no input builder for agent_id={agent_id!r}")
 
@@ -3065,7 +3074,7 @@ def _infra_provision_summary(info: InfrastructureDeviceInfo) -> str:
 
 def _extract_summary_artifact_meta(
     result: BaseModel, *, inp: BaseModel, agent_id: str, work_dir: str,
-    run_id: str = "",
+    run_id: str = "", allow_pending_model_save: bool = False,
 ) -> tuple[str, str, str, dict]:
     """Pull (status, summary, artifact_path, artifact_meta).
 
@@ -3073,6 +3082,11 @@ def _extract_summary_artifact_meta(
     file so Registry can consume the `metrics` ArtifactBinding cleanly.
     """
     status = getattr(result, "status", "succeeded")
+
+    if status == "failed":
+        # The explicit failure is the routing input for every Agent. Narrative
+        # notes may mention rejected hypotheses or unrelated historical errors.
+        return status, result.error_message or result.notes or "agent failed", "", {}
 
     contract = getattr(inp, "slurm_job", None)
     if (isinstance(result, InferenceResult) and status == "deferred"
@@ -3092,10 +3106,6 @@ def _extract_summary_artifact_meta(
     if isinstance(result, EvaluationResult):
         if status == "deferred":
             return status, result.notes, "", {}
-        if status == "failed":
-            # A deterministic scorer's typed failure is authoritative. Do not
-            # replace it with empty notes or metrics from an earlier attempt.
-            return status, result.error_message or result.notes or "evaluation failed", "", {}
         artifact, metrics = materialize_metrics_artifact(result.metrics_path, work_dir)
         # The durable file is the only score authority.
         score = extract_score({"score": metrics.get("score")})
@@ -3351,10 +3361,16 @@ def _extract_summary_artifact_meta(
                                 "selected champion eval differs from metrics.json"
                             )
                         if inp.model_save_policy:
-                            if not inp.saved_model_path or selected.model_path != inp.saved_model_path:
-                                raise ValueError("selected champion differs from the engine-verified storage receipt")
-                            if selected.storage != inp.model_save_policy["weights"] or selected.revision != inp.saved_model_revision:
-                                raise ValueError("selected champion storage/revision differs from the verified receipt")
+                            if allow_pending_model_save and not inp.saved_model_path:
+                                if (selected.model_path != inp.checkpoint_path
+                                        or selected.storage != inp.model_save_policy["weights"]
+                                        or selected.revision):
+                                    raise ValueError("prepared registry must name the assigned checkpoint, selected storage and empty revision")
+                            else:
+                                if not inp.saved_model_path or selected.model_path != inp.saved_model_path:
+                                    raise ValueError("selected champion differs from the engine-verified storage receipt")
+                                if selected.storage != inp.model_save_policy["weights"] or selected.revision != inp.saved_model_revision:
+                                    raise ValueError("selected champion storage/revision differs from the verified receipt")
                             local_model = selected.model_path
                         else:
                             if selected.storage != "local":
@@ -3771,7 +3787,7 @@ async def _finalize_remote_data_artifact(
     package_signature: str,
     work_dir: str,
 ) -> tuple[str, str, int, int, str, int]:
-    """Finalize and receipt Data on its assigned host without copying rows back."""
+    """Finalize Data on its assigned host; retain a bounded UI sample locally."""
     try:
         info = InfrastructureDeviceInfo.model_validate_json(
             Path(inp.device_info_path).read_text(encoding="utf-8")
@@ -3850,6 +3866,10 @@ async def _finalize_remote_data_artifact(
         raise ValueError("remote receipt data_signature differs from engine package")
     if receipt.dataset_path != str(final_dataset):
         raise ValueError("remote receipt points at an unexpected dataset path")
+    from zevo.engine.dataset_preview import remote_training_preview
+    await remote_training_preview(
+        info=info, dataset_path=receipt.dataset_path, receipt_path=local_receipt,
+    )
     return (
         receipt.dataset_path,
         local_receipt,
@@ -4725,20 +4745,35 @@ async def _apply_ticket_failure_policy(
     *,
     error_message: str,
     cancelled: bool = False,
+    result: BaseModel | None = None,
 ) -> bool:
     """Set the Ticket's failure/repair state; return True when reactivation is due."""
+    recovery = getattr(result, "failure_recovery", None)
     disposition = classify_failure(
-        error_message, agent_id=ticket.agent_id, cancelled=cancelled,
+        error_message, agent_id=ticket.agent_id, cancelled=cancelled, recovery=recovery,
     )
     if cancelled:
         ticket.repair_attempts = int(ticket.repair_attempts or 0)
         ticket.repair_route = "terminal"
         return False
-    if disposition.route == "self" and ticket.agent_id in {"data", "train", "inference", "evaluation"}:
+    if recovery is not None:
+        session.add(TicketNotice(
+            ticket_id=ticket.id, code="failure.recovery_route", severity="info",
+            body=json.dumps({"route": disposition.route, "code": disposition.code,
+                             "reason": disposition.reason, "request": recovery.model_dump()}),
+        ))
+    if disposition.route == "self":
         from zevo.engine.run.repair_progress import repeated_without_progress
-        if await repeated_without_progress(session, ticket, error_message):
+        if await repeated_without_progress(
+            session, ticket, error_message,
+            result_output=result.model_dump() if result is not None else None,
+        ):
             ticket.status = "failed"
-            ticket.repair_route = "terminal" if ticket.lane == "held_out_test" else "orchestrator"
+            ticket.repair_route = (
+                "terminal"
+                if ticket.lane == "held_out_test" or ticket.agent_id == "orchestrator"
+                else "orchestrator"
+            )
             ticket.error_message = f"Repair stopped after {MAX_UNCHANGED_FAILURES} unchanged failures: " + error_message[:1800]
             ticket.summary = f"Repair stopped: no new execution or changed artifacts across {MAX_UNCHANGED_FAILURES} failures"
             return False
@@ -6068,15 +6103,6 @@ async def run_ticket(
     output: BaseModel | None = None
     exit_code = 0
     try:
-        if isinstance(inp, RegisterTaskInput) and inp.model_save_policy:
-            from zevo.contracts.model_save import ModelSavePolicy
-            from zevo.engine.run.model_save import save_model
-            receipt = await save_model(session, run, tk,
-                source=inp.checkpoint_path, remote=inp.checkpoint_is_remote,
-                policy=ModelSavePolicy.model_validate(inp.model_save_policy))
-            inp.saved_model_path = receipt["path"]
-            inp.saved_model_revision = receipt["revision"]
-            stdout_sink("Model saved and verified: " + receipt["path"] + "\n")
         result = await driver.run_agent(
             blueprint=blueprint,
             input_payload=inp,
@@ -6431,9 +6457,9 @@ async def run_ticket(
                 })
         status, summary, artifact, artifact_meta = _extract_summary_artifact_meta(
             output, inp=inp, agent_id=tk.agent_id, work_dir=work_dir,
-            run_id=tk.run_id,
+            run_id=tk.run_id, allow_pending_model_save=True,
         )
-        if status == "failed" and isinstance(output, EvaluationResult):
+        if status == "failed":
             error_message = output.error_message or summary
             hb.error_message = error_message[:2000]
         if (
@@ -7151,6 +7177,27 @@ async def run_ticket(
                 if stage_row is not None:
                     stage_row.meta = {**dict(stage_row.meta or {}), "training_completion_repair": True}
 
+        if (isinstance(output, RegisterResult) and isinstance(inp, RegisterTaskInput)
+                and inp.model_save_policy and status == "succeeded"):
+            # Like other stage finalizers, preservation runs only AFTER the
+            # agent has produced validated artifacts. Failures enter the same
+            # auto-repair policy below, so the next agent can fix its artifacts.
+            from zevo.engine.run.model_save import finalize_registry_model
+            try:
+                await finalize_registry_model(session, run, tk, inp=inp, output=output, work_dir=work_dir)
+                status, summary, artifact, artifact_meta = _extract_summary_artifact_meta(
+                    output, inp=inp, agent_id=tk.agent_id, work_dir=work_dir, run_id=tk.run_id,
+                )
+                if status == "failed":
+                    raise ValueError(summary)
+            except (OSError, ValueError, RuntimeError) as exc:
+                status = "failed"
+                error_message = summary = f"model preservation failed: {exc}"[:2000]
+                output.status = "failed"
+                output.error_message = error_message
+                artifact = ""
+                artifact_meta = {}
+
         if (isinstance(output, InferenceResult) and status == "failed"
             and output.execution_retry_reason.strip()
             and getattr(getattr(inp, "slurm_job", None), "phase", "") == "collect"):
@@ -7203,6 +7250,7 @@ async def run_ticket(
                     tk,
                     error_message=error_message or summary,
                     cancelled=False,
+                    result=output,
                 )
             elif status == "deferred":
                 tk.status = "waiting_external"

@@ -277,6 +277,10 @@ class RegisterResult(AgentResult):
 
     registry_path: str = Field(..., description="Absolute path to the Ticket-local registry manifest that was committed.")
     register_script_path: str = Field(..., description="Path to the generated register.py. '' on failure.")
+    model_card_path: str = Field(default="", description=(
+        "Optional corrected README.md in work_dir for the engine's upload copy. "
+        "The original measured checkpoint and weights must remain unchanged."
+    ))
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised by subprocess tests

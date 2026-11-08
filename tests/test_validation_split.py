@@ -1359,6 +1359,13 @@ async def test_engine_accepts_only_the_assigned_durable_remote_data_root(
     monkeypatch.setattr(
         "zevo.engine.run.runner._run_remote_control_command", remote_command,
     )
+    preview_calls = []
+
+    async def preview(**kwargs):
+        preview_calls.append(kwargs)
+        return [], "Preview unavailable: host unreachable."
+
+    monkeypatch.setattr("zevo.engine.dataset_preview.remote_training_preview", preview)
     direct = DataResult(
         status="failed", operation="prepare_run_data", ticket_id=ticket.id,
         error_message="fixture", notes="fixture",
@@ -1373,6 +1380,8 @@ async def test_engine_accepts_only_the_assigned_durable_remote_data_root(
         work_dir=str(tmp_path),
     )
     assert finalized[0] == final_path
+    assert preview_calls[0]["dataset_path"] == final_path
+    assert preview_calls[0]["receipt_path"] == str(tmp_path / "remote_data_receipt.json")
 
     old_workdir_copy = direct.model_copy(update={
         "remote_dataset_path": "/work/durable-run/data/data-direct/dataset.jsonl",

@@ -1,14 +1,36 @@
 ## Run-selected model destination
 
-When `model_save_policy` is nonempty, the engine has already saved and verified
-this exact checkpoint before invoking you. `saved_model_path` and
-`saved_model_revision` are authoritative. Do NOT download or upload the model
-again. Write the manifest with `model_path=saved_model_path`,
-`storage=model_save_policy.weights`, and `revision=saved_model_revision`.
-A HF URL or SSH URL is a valid retained model; do not check it with local
-filesystem APIs. Preserve metrics and provenance exactly as before.
-These destination rules supersede local-copy requirements below. Empty policy
-is the legacy local-copy contract for already launched Runs.
+When `model_save_policy` is nonempty, prepare your artifacts FIRST. The engine
+validates your result and then preserves the selected model at the Run's
+chosen destination. A preservation failure becomes a normal failed activation:
+you receive its diagnostic in the next auto-repair activation, fix the relevant
+artifact, and return a corrected result. There is no separate upload retry loop
+and you must not independently publish or handle upload credentials.
+
+Prepare `registry.yaml` with the exact assigned `checkpoint_path` as
+`model_path`, `storage=model_save_policy.weights`, and an empty `revision`.
+This is a preparation manifest, not proof that publication succeeded. After a
+verified save, the engine atomically replaces only these destination fields
+with its verified receipt before registering the model. Preserve metrics and
+provenance exactly. If supplied `saved_model_path` is nonempty, a previous
+attempt already saved the model: reuse that path and `saved_model_revision`.
+
+On repair, inspect the actual preservation error and the assigned artifacts.
+For a model-card error, read the checkpoint README.md and write a corrected
+copy inside `work_dir`, then return its absolute `model_card_path`. Use the
+supplied provenance to resolve identifiers; do not guess a Hub ID from a
+folder name. Preserve the card's other accurate information. The engine applies
+this card only to an upload copy. Never mutate the measured checkpoint,
+weights, tokenizer, or training configuration. Keep the corrected card path
+in subsequent repair results. Errors requiring a different resource, input or
+fixed configuration follow the shared failure-recovery rules.
+
+Write the preparation and any repair in reproducible `register.py`. Report
+`succeeded` when your artifacts are ready for backend validation; the engine
+owns the final stage outcome, including upload failures. A saved HF/SSH URL
+is valid and must not be probed with local filesystem APIs. These destination
+rules supersede local-copy requirements below. Empty policy retains the
+legacy local-copy contract for already launched Runs.
 
 Registry is the once-per-Run final stage after optimization stops. Its inputs are
 already resolved; use the paths exactly as supplied.

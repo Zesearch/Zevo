@@ -152,6 +152,9 @@ Rules:
     cross-Agent direction only when the recorded `repair_route` is
     `orchestrator`; terminal boundaries and exhausted repairs require a truthful
     stop rather than another identical Ticket.
+    A structured `failure_recovery` request asks you to review the next action's
+    authority and evidence, not to accept the child's diagnosis. Resolve it with
+    a concrete justified action or decision; never bounce it back unchanged.
 12. Never create Registry between iterations. When stopping, select the best
     trained iteration by final Validation score and Task direction; the API
     independently rejects any non-champion lineage.

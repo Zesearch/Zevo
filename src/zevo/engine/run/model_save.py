@@ -1,6 +1,7 @@
 """One destination implementation for normal Registry and cancel-and-save."""
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 import shlex
@@ -29,10 +30,18 @@ _REMOTE_INTERPRETER_PROBE = (
 )
 
 
-async def save_model(session, run, ticket, *, source: str, remote: bool, policy: ModelSavePolicy) -> dict:
+def save_identity(run, source: str, policy: ModelSavePolicy) -> str:
+    return json.dumps({'source': source, 'policy': policy.model_dump(),
+                       'tag': model_tag_for_run(run.id)}, sort_keys=True)
+
+
+async def save_model(session, run, ticket, *, source: str, remote: bool, policy: ModelSavePolicy,
+                     model_card: str | None = None) -> dict:
     from zevo.engine.run.cancel_rescue import hf_token
     request = {'source': source, 'policy': policy.model_dump(), 'tag': model_tag_for_run(run.id)}
-    identity = json.dumps(request, sort_keys=True)
+    identity = save_identity(run, source, policy)
+    if model_card is not None:
+        request['model_card'] = model_card
     if policy.weights == 'hf':
         request['token'] = hf_token()
         if not request['token']:
@@ -68,6 +77,8 @@ async def save_model(session, run, ticket, *, source: str, remote: bool, policy:
             raise RuntimeError('Model preservation returned no verified receipt')
         receipt = json.loads(lines[0].split('=', 1)[1])
         receipt['identity'] = identity
+        receipt['ticket_id'] = ticket.id
+        receipt['model_card_sha256'] = hashlib.sha256(model_card.encode()).hexdigest() if model_card is not None else ''
         if receipt['storage'] == 'remote':
             ssh = info.ssh
             receipt['remote_path'] = receipt['path']
@@ -84,3 +95,58 @@ async def save_model(session, run, ticket, *, source: str, remote: bool, policy:
             proc.kill()
             await proc.wait()
         process_registry.unregister(ticket.id, proc)
+
+
+async def finalize_registry_model(session, run, ticket, *, inp, output, work_dir: str) -> dict:
+    """Finalize a validated Registry result; failures use normal ticket repair."""
+    import os
+    import tempfile
+    import yaml
+    from zevo.contracts.tickets import TERMINAL_RUN_STATUSES
+
+    await session.refresh(ticket, attribute_names=['status'])
+    await session.refresh(run, attribute_names=['status', 'lifecycle'])
+    if ticket.status == 'cancelled' or run.status in TERMINAL_RUN_STATUSES or run.status == 'paused':
+        raise ValueError('Run or ticket is no longer active; model preservation was not started')
+    policy = ModelSavePolicy.model_validate(inp.model_save_policy)
+    model_card = None
+    if output.model_card_path:
+        if policy.weights != 'hf':
+            raise ValueError('A model card replacement is only applicable to HF preservation')
+        card = Path(output.model_card_path).resolve()
+        if not card.is_relative_to(Path(work_dir).resolve()):
+            raise ValueError('Corrected model card must be inside this ticket work_dir')
+        # Bound the actual read as well as the nominal file size.
+        with card.open('rb') as stream:
+            content = stream.read(131073)
+        if not content or len(content) > 131072:
+            raise ValueError('Corrected model card must be nonempty and at most 128 KiB')
+        model_card = content.decode('utf-8')
+    identity = save_identity(run, inp.checkpoint_path, policy)
+    card_hash = hashlib.sha256(model_card.encode()).hexdigest() if model_card is not None else ''
+    receipt = (run.lifecycle or {}).get('model_storage') or {}
+    if not (receipt.get('identity') == identity
+            and receipt.get('ticket_id', ticket.id) == ticket.id
+            and receipt.get('model_card_sha256', '') == card_hash):
+        receipt = await save_model(session, run, ticket, source=inp.checkpoint_path,
+            remote=inp.checkpoint_is_remote, policy=policy, model_card=model_card)
+    # Only engine-owned destination fields change after preservation. All
+    # provenance and evaluation facts were validated before this function.
+    manifest = Path(output.registry_path)
+    body = yaml.safe_load(manifest.read_text())
+    entry = body['models'][inp.expected_version_tag]
+    entry.update(model_path=receipt['path'], storage=receipt['storage'], revision=receipt['revision'])
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=manifest.parent, prefix='.registry-', delete=False) as stream:
+            temporary = Path(stream.name)
+            yaml.safe_dump(body, stream, sort_keys=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, manifest)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    inp.saved_model_path = receipt['path']
+    inp.saved_model_revision = receipt['revision']
+    return receipt

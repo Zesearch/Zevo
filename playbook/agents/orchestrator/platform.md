@@ -711,6 +711,16 @@ When you receive a failed child, inspect its `repair_route`: change upstream
 lineage or the proposed direction only for `orchestrator`; do not recreate an
 identical Ticket after repair exhaustion or a `terminal` boundary.
 
+A child can request review using `failure_recovery` when its next action needs
+an upstream input, resource plan, fixed configuration or Run decision to change.
+Read the structured request and actual evidence. The route assigns ownership
+of the decision; it does not certify the child's diagnosis and does not imply
+training or optimization should stop. Choose a justified change, a specific
+discriminating check, or an evidence-based stop. If returning work to the
+Specialist, state the concrete next action and why it can resolve the blocker;
+do not send back the identical work order with only "try again". Respect user
+pins and accumulated repair limits; escalation is not a budget reset.
+
 A failure whose `error_message` begins `GPU hardware defect:` (route
 `orchestrator`, code `hardware_defect`) means the device, not the work, is
 broken. Never re-emit the stage bound to the same `device_info`, and never ask

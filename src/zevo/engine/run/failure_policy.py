@@ -5,10 +5,11 @@ spends again.  This module assigns one of three routes:
 
 ``self``
     The Specialist owns the generated output, script, command, or artifact and
-    gets up to twenty repair activations on the same Ticket. Data, Train,
-    Inference and Evaluation stop earlier after three failures with unchanged
-    evidence; Data/Evaluation include error text, execution identity and input
-    artifacts in that evidence.
+    gets up to twenty repair activations on the same Ticket. All agents stop
+    local repair earlier after five consecutive failures with unchanged
+    evidence, including execution identity, input/output artifacts and measured
+    workload progress. Specialists hand off for Orchestrator review; the
+    Orchestrator itself cannot escalate to itself.
 ``orchestrator``
     The work order/upstream lineage must change.  Re-running the Specialist
     unchanged would be wasteful, so its terminal failure is handed upstream.
@@ -22,10 +23,12 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from zevo.contracts.failure import FailureRecovery
+
 
 RepairRoute = Literal["self", "orchestrator", "terminal"]
 MAX_REPAIR_ATTEMPTS = 20
-MAX_UNCHANGED_FAILURES = 3
+MAX_UNCHANGED_FAILURES = 5
 
 # A ticket's STORED typed payload is validated BEFORE the agent runs. A `queued`
 # ticket whose payload fails that check cannot be repaired by re-running it
@@ -115,8 +118,14 @@ def classify_failure(
     *,
     agent_id: str,
     cancelled: bool = False,
+    recovery: FailureRecovery | None = None,
 ) -> FailureDisposition:
     """Return the one retry owner for a failed activation.
+
+    Structured requests outside the work order go to Orchestrator review,
+    without accepting the diagnosis or authorizing the proposed change.
+    Cancellation and terminal boundaries always win. Legacy text patterns
+    remain a compatibility fallback, not the protocol for requesting review.
 
     Unknown implementation failures default to the producing Agent.  This is
     intentionally different from the older manual-rerun classifier: malformed
@@ -129,6 +138,11 @@ def classify_failure(
     for code, pattern, reason in _TERMINAL:
         if pattern.search(message):
             return FailureDisposition("terminal", code, reason)
+    if recovery is not None and recovery.scope != "current_task":
+        return FailureDisposition(
+            "orchestrator", "recovery_" + recovery.scope,
+            "Orchestrator review required for the proposed next action: " + recovery.reason,
+        )
     for code, pattern, reason in _ORCHESTRATOR:
         if pattern.search(message):
             return FailureDisposition("orchestrator", code, reason)
@@ -157,6 +171,11 @@ def repair_instruction(
         "inference when the completed artifact can be verified and reported correctly. "
         "Run the required artifact validators and checks relevant to the repair, then emit the typed "
         "Result schema. If a new expensive execution is genuinely required, explain "
-        "why in notes and keep it within the original work order.\n\n"
+        "why in notes and keep it within the original work order. If recovery needs "
+        "an upstream input, resource-plan, fixed-configuration or Run-decision change, "
+        "return failed with failure_recovery describing that scope, evidence and "
+        "the requested next action; the Orchestrator will review it. For current-task "
+        "repair or investigation, name the concrete change or discriminating check. "
+        "Updating a report alone is not progress.\n\n"
         f"Exact failure: {error_message[:6000]}"
     )

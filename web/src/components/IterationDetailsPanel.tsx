@@ -3,7 +3,7 @@ import useSWR from "swr";
 import { ChevronRight, X } from "lucide-react";
 import type { RunDetail } from "../lib/api";
 import { assignIterations, iterationOrder } from "../lib/iterations";
-import { completedTrainingData, hasIterationEvidence } from "../lib/iterationEvidence";
+import { iterationTrainingData, hasIterationEvidence } from "../lib/iterationEvidence";
 import { currentPredictionArtifacts } from "../lib/predictionArtifacts";
 import { fmtMetric, fmtScore, isPercentageMetric, metricScoreRange } from "../lib/format";
 import { Kicker } from "./zevo/primitives";
@@ -19,6 +19,7 @@ export type ArtifactDetail = Artifact & {
   preview: string;
   preview_columns: string[];
   preview_rows: Array<Record<string, unknown>>;
+  preview_total_rows?: number | null;
 };
 type DetailKind = "data" | "train" | "inference" | "evaluation";
 type BenchmarkPerformance = {
@@ -150,7 +151,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
         ? testArtifactId || selection.testArtifactId
         : validationArtifactId || selection.artifactId)
     : selection?.artifactId;
-  const { data: detail } = useSWR<ArtifactDetail>(
+  const { data: detail, error: previewError } = useSWR<ArtifactDetail>(
     detailArtifactId
       ? `/api/runs/${encodeURIComponent(run.id)}/artifacts/${detailArtifactId}?preview_page=${previewPage}&preview_page_size=10`
       : null,
@@ -167,10 +168,12 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
     let activeData: Artifact[] = [];
     return iterationOrder(run.tickets).map((entry) => {
       const artifactsForRound = byKey.get(entry.key) || [];
-      const newData = completedTrainingData(artifactsForRound, ticketById);
-      if (newData.length) activeData = newData;
-      return { ...entry, artifacts: artifactsForRound, activeData: [...activeData] };
-    }).filter((entry) => hasIterationEvidence(entry.artifacts, entry.activeData));
+      const roundTickets = entry.ticketIds.map((id) => ticketById.get(id)!);
+      activeData = iterationTrainingData(artifactsForRound, roundTickets, ticketById, activeData);
+      const preparingData = roundTickets.some((ticket) => ticket.agent_id === "data"
+        && ticket.lane === "optimization");
+      return { ...entry, artifacts: artifactsForRound, activeData: [...activeData], preparingData };
+    }).filter((entry) => entry.preparingData || hasIterationEvidence(entry.artifacts, entry.activeData));
   }, [artifacts, run.tickets]);
 
   if (error) return <div className="rounded-bezel border border-coral-500/30 p-4 text-sm text-coral-300">Failed to load iteration details.</div>;
@@ -191,7 +194,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
             (item) => item.id === (validationArtifactId || selection.artifactId),
           )?.rows ?? selection.validationRows
       : undefined;
-  const selectedTotal = Number(selectedTotalRows);
+  const selectedTotal = Number(detail?.preview_total_rows ?? selectedTotalRows);
   const previewPageCount = Number.isFinite(selectedTotal) && selectedTotal > 0
     ? Math.min(10, Math.ceil(selectedTotal / 10))
     : 1;
@@ -328,7 +331,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
             <div className="grid grid-cols-1 divide-y divide-hair md:grid-cols-2 xl:grid-cols-5 xl:divide-x xl:divide-y-0">
               <Fact
                 label="Data"
-                value={group.kind === "baseline" ? "—" : `Train ${numberText(dataMeta.training_rows)} · ${datasetName(dataMeta)}`}
+                value={group.kind === "baseline" || !data ? "—" : `Train ${numberText(dataMeta.training_rows)} · ${datasetName(dataMeta)}`}
                 onClick={group.kind !== "baseline" && data ? () => {
                   setPreviewPage(1);
                   setSelection({
@@ -480,7 +483,10 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
                     <Pagination page={previewPage} pageCount={previewPageCount} onPage={setPreviewPage} />
                   </div>
                 : <div className={`${selection.kind === "inference" ? "mt-3" : ""} rounded-md border border-dashed border-hair p-8 text-center text-sm text-dim`}>
-                    {detail ? "No tabular preview is available." : "Loading preview…"}
+                    {previewError ? "Unable to load preview. Please try again."
+                      : detail ? (selection.kind === "data" && detail.preview
+                          ? detail.preview : "No tabular preview is available.")
+                        : "Loading preview…"}
                   </div>
             )}
           </aside>
