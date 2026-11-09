@@ -6446,7 +6446,13 @@ async def run_ticket(
                 },
             ))
     else:
-        failure_origin = "agent_execution" if output.status == "failed" else "result_validation"
+        # SupervisorAction records a decision, not a specialist Result status.
+        # Its action is validated below; even mark_failed is a valid decision.
+        failure_origin = (
+            "agent_execution"
+            if not isinstance(output, SupervisorAction) and getattr(output, "status", None) == "failed"
+            else "result_validation"
+        )
         if (
             isinstance(output, DataResult)
             and output.status == "succeeded"
@@ -9186,7 +9192,9 @@ async def _maybe_wake_supervisor(
     session: AsyncSession, child: Ticket, *, completion_key: str = "",
 ) -> None:
     """Wake once per optimization completion; private Test never drives it."""
-    if child.lane == "held_out_test":
+    # A supervisor failure must stop when its bounded repair stops. Treating
+    # that same Ticket as a completed child requeues it outside the repair cap.
+    if child.agent_id == "orchestrator" or child.lane == "held_out_test":
         return
     from zevo.engine.run.adaptive_training import is_checkpoint_stage
     if is_checkpoint_stage(child):
