@@ -307,7 +307,8 @@ class InferencePromptExample(BaseModel):
     input_values: dict[str, str] = Field(
         min_length=1,
         description=(
-            "Ordered task input mapping using <INPUT:field> placeholders; never "
+            "Task input mapping using <INPUT:field> placeholders; input_fields "
+            "defines its canonical order. Never "
             "copy a Validation/Test answer into this example."
         ),
     )
@@ -568,11 +569,17 @@ class InferenceRunConfig(BaseModel):
         )
         framing = self.prompt.prompt_framing
         input_fields = list(self.measurement.inference_config.get("input_fields") or [])
-        if list(self.prompt_example.input_values) != input_fields:
+        if set(self.prompt_example.input_values) != set(input_fields):
             raise ValueError(
-                "prompt_example.input_values must preserve measurement.inference_config "
-                "input_fields order"
+                "prompt_example.input_values must contain exactly the "
+                "measurement.inference_config input_fields"
             )
+        # JSON objects (including PostgreSQL JSONB) do not preserve key order.
+        # The explicit input_fields array is the authority; message/prompt
+        # validation below still verifies the actual model input unchanged.
+        self.prompt_example.input_values = {
+            field: self.prompt_example.input_values[field] for field in input_fields
+        }
         inference_query = str(
             self.measurement.inference_config.get("inference_query") or ""
         )

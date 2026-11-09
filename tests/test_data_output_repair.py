@@ -54,7 +54,8 @@ async def test_remote_data_output_errors_schedule_repair(monkeypatch, mismatch):
     progress.assert_awaited_once()
     assert ticket.status == 'repairing'
     assert ticket.repair_attempts == 2
-    assert len(messages) == 1
+    from zevo.db import TicketMessage
+    assert sum(isinstance(message, TicketMessage) for message in messages) == 1
 
 
 @pytest.mark.parametrize(('agent', 'error'), [

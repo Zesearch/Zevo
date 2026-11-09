@@ -76,6 +76,8 @@ def render(source, inp):
     if hashlib.sha256(body.encode()).hexdigest() != source["sha256"]:
         raise ValueError("successful Inference launch snapshot changed")
     old, new = source["contract"], inp.slurm_job
+    if old.get("transport", "slurm") != getattr(new, "transport", "slurm"):
+        raise ValueError("a launch cannot be reused across execution transports")
     # Replace the argument before paths so tokenizer references stay unchanged.
     body = _model_argument(body, source["model"], inp.checkpoint_path or inp.base_model)
     replacements = {
@@ -92,6 +94,8 @@ def render(source, inp):
     # Single pass: replacement values must not themselves be rewritten.
     keys = sorted((k for k in replacements if k), key=len, reverse=True)
     body = re.sub("|".join(re.escape(k) for k in keys), lambda m: replacements[m[0]], body)
+    if getattr(new, "transport", "slurm") == "direct":
+        return body
     # Resource requests are engine-owned; preserve site/environment/container
     # directives and the executable body from the successful launch.
     resource_keys = {"job-name", "output", "error", "chdir", "nodes", "gpus", "gres", "gpus-per-node", "gpus-per-task"}
@@ -283,6 +287,8 @@ async def prepare_launch(session, run, ticket, inp):
             source = await verified_existing_launch(session, row, owner)
         if not source:
             continue
+        if source.get("contract", {}).get("transport", "slurm") != getattr(contract, "transport", "slurm"):
+            continue
         if (not isinstance(source.get("body"), str)
                 or hashlib.sha256(source["body"].encode()).hexdigest() != source.get("sha256")):
             continue  # Corrupt reference evidence must not block fresh implementation.
@@ -295,7 +301,7 @@ async def prepare_launch(session, run, ticket, inp):
                 "Use the successful launch and predict script as references when useful. "
                 "Adapt or regenerate the implementation for this work order; keep its config contract."
             ))
-        source_path = Path(inp.work_dir) / "launch-reuse" / (source["sha256"] + ".sbatch")
+        source_path = Path(inp.work_dir) / "launch-reuse" / (source["sha256"] + (".sh" if getattr(contract, "transport", "slurm") == "direct" else ".sbatch"))
         source_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.write_text(source["body"])
         provenance["source_script_path"] = str(source_path.resolve())

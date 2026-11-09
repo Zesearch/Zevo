@@ -93,28 +93,33 @@ def _direct_process_kill_command(ticket_id: str) -> str:
     script = f"""import os, signal, time
 marker = bytes.fromhex('{marker}')
 mine = os.getpid()
-pids = []
-for entry in os.listdir('/proc'):
-    if not entry.isdigit() or int(entry) == mine:
-        continue
+def owned(pid):
     try:
-        values = open('/proc/' + entry + '/environ', 'rb').read().split(b'\\0')
-        if marker in values:
-            pids.append(int(entry))
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
-        pass
-for pid in pids:
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-time.sleep(2)
-for pid in pids:
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-print('terminated', len(pids), 'ticket processes')
+        root = '/proc/' + str(pid)
+        values = open(root + '/environ', 'rb').read().split(b'\\0')
+        fields = open(root + '/stat').read().rsplit(')', 1)[1].split()
+        return fields[19] if marker in values and fields[0] != 'Z' else None
+    except (FileNotFoundError, PermissionError, ProcessLookupError, IndexError):
+        return None
+started = time.monotonic()
+stopped = set()
+while True:
+    workers = [(int(p), owned(int(p))) for p in os.listdir('/proc') if p.isdigit() and int(p) != mine]
+    workers = [(pid, start) for pid, start in workers if start is not None]
+    if not workers:
+        break
+    elapsed = time.monotonic() - started
+    if elapsed > 15:
+        raise RuntimeError('owned ticket processes are still alive; cleanup not confirmed')
+    for pid, start in workers:
+        if owned(pid) == start:
+            try:
+                os.kill(pid, signal.SIGTERM if elapsed < 2 else signal.SIGKILL)
+                stopped.add((pid, start))
+            except ProcessLookupError:
+                pass
+    time.sleep(.1)
+print('terminated', len(stopped), 'ticket processes')
 """
     return "python3 -c " + shlex.quote(script)
 
@@ -191,6 +196,15 @@ async def cancel_ticket_remote_job(
     info = await _device_info_for_ticket(db, ticket)
     if info is None:
         return {"ticket_id": ticket.id, "attempted": False, "reason": "no resolved device route"}
+    if info.provider == "cloud" and db is not None:
+        owners = (await db.scalars(select(InfraInstance).where(
+            InfraInstance.run_id == ticket.run_id, InfraInstance.provider == "cloud",
+            InfraInstance.instance_id == info.instance_id))).all()
+        if any(row.released_at is not None and (row.meta or {}).get("cloud_health", {}).get("state")
+               in {"terminated", "deleted", "destroyed", "not-found"} for row in owners):
+            return {"ticket_id": ticket.id, "attempted": False, "ok": True,
+                    "reason": "cloud provider already confirmed this allocation lost"}
+    direct_rows = []
     cluster_row = await _open_cluster_job(db, ticket) if info.provider == "cluster" else None
     if info.provider == "cluster" and resize_allocation:
         cluster_row = await allocation_for_resize(db, ticket) or cluster_row
@@ -222,6 +236,17 @@ async def cancel_ticket_remote_job(
             env_setup=info.cluster.env_setup if info.cluster else "",
         )
     else:
+        from zevo.engine.run.direct_jobs import direct, remote_call
+        rows = (await db.scalars(select(InfraInstance).where(
+            InfraInstance.ticket_id == ticket.id, InfraInstance.run_id == ticket.run_id,
+            InfraInstance.released_at.is_(None)))).all() if db is not None else []
+        direct_rows = [row for row in rows if direct(row)]
+        for row in direct_rows:
+            try:
+                await remote_call(info, row.meta["direct_manifest"], "cancel",
+                    helper_body=row.meta["supervisor_source"].encode())
+            except (OSError, ValueError, RuntimeError) as exc:
+                return {"ticket_id": ticket.id, "attempted": True, "ok": False, "error": str(exc)}
         command = _direct_process_kill_command(ticket.id)
     result = await _ssh(info, command)
     if cluster_row is not None and result.get("ok"):
@@ -231,6 +256,19 @@ async def cancel_ticket_remote_job(
         cluster_row.meta = {**dict(cluster_row.meta or {}),
                             "cancellation_requested_at": now.isoformat()}
         cluster_row.release_reason = "cancellation requested; awaiting scheduler confirmation"
+        await db.flush()
+    if direct_rows and result.get("ok"):
+        # Direct cleanup confirms the process tree is gone. Preserve that
+        # terminal evidence even when an instruction superseded the watcher;
+        # otherwise its replacement would remain bound to a RUNNING attempt.
+        now = datetime.now(timezone.utc)
+        for row in direct_rows:
+            row.meta = {**dict(row.meta or {}), "scheduler_state": "CANCELLED",
+                        "scheduler_exit_code": "143", "scheduler_reason": "owned workers stopped",
+                        "cancellation_requested_at": now.isoformat(), "monitor_terminal": True}
+            row.status = "released"
+            row.released_at = now
+            row.release_reason = "execution cancelled; allocation retained"
         await db.flush()
     return {
         "ticket_id": ticket.id,

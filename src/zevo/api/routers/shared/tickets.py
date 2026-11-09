@@ -145,6 +145,7 @@ class ExecutionEventDTO(BaseModel):
 
 class TicketDetail(TicketDTO):
     measurement_attempt: dict[str, Any] = Field(default_factory=dict)
+    measurement_attempts: list[dict[str, Any]] = Field(default_factory=list)
     measurement_members: list[dict[str, str]] | None = None
     generation_report: dict[str, Any] = Field(default_factory=dict)
     checkpoint_handoff_failure: dict[str, Any] | None = None
@@ -596,6 +597,10 @@ async def create_ticket(
         from zevo.engine.run.lifecycle import finalization
         if r.cancel_requested_at is not None:
             raise HTTPException(409, "Run is cancelling; no new work is accepted")
+        if body.agent_id == "infrastructure" and body.payload.get("operation", "provision") == "provision":
+            recoveries = (r.lifecycle or {}).get("cloud_resource_recoveries", {})
+            if any(event.get("blocked_reason") == "Ticket repair limit reached" for event in recoveries.values()):
+                raise HTTPException(409, "Cloud resource recovery stopped at its repair or Run limit; replacement is not authorized")
         if finalization(r) and body.agent_id not in {"orchestrator", "registry"}:
             raise HTTPException(409, "Run is finalizing at its limit; no new optimization is accepted")
         if r.mode != "single_stage" and body.agent_id != "orchestrator":
@@ -1303,6 +1308,13 @@ async def create_ticket(
         assignee=body.agent_id,
     )
 
+    inherited_repairs = 0
+    if owning_run is not None:
+        from zevo.engine.run.cloud_recovery import inherited_repairs as recovery_repairs
+        from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
+        inherited_repairs = await recovery_repairs(db, owning_run, body.agent_id, body.iteration, payload)
+        if inherited_repairs >= MAX_REPAIR_ATTEMPTS:
+            raise HTTPException(409, "The same work order exhausted its repair limit; a new Ticket cannot reset it")
     tk = Ticket(
         id=tid,
         run_id=run_id,
@@ -1318,8 +1330,12 @@ async def create_ticket(
         ),
         inputs=inputs,
         summary="",
+        repair_attempts=inherited_repairs,
     )
     db.add(tk)
+    if inherited_repairs:
+        db.add(TicketNotice(ticket_id=tid, code="resource.repair_inherited", severity="info",
+            body=f"Preserved {inherited_repairs} repair activations from this work order's cloud recovery history."))
     db.add(TicketNotice(
         ticket_id=tid, code="ticket.created", severity="info",
         body=f"Ticket created via /api/tickets for agent {body.agent_id}.",
@@ -1403,18 +1419,17 @@ async def get_ticket(
     from zevo.engine.run.adaptive_training import validation_summary
     owning_run = await db.get(Run, t.run_id) if t.run_id else None
     mid_training = validation_summary(t, (owning_run.lifecycle or {}) if owning_run else {}, events)
-    from zevo.engine.run.remeasurement import active_attempt, replay_item
-    attempt = active_attempt(owning_run, t.id) if owning_run else {}
-    item = replay_item(owning_run, t.id) if attempt else {}
+    from zevo.engine.run.remeasurement import progress_attempts
+    attempts = progress_attempts(owning_run, t.id) if owning_run else []
     report = next((v for v in (owning_run.lifecycle or {}).get("generation_reports", [])
                    if v["ticket_id"] == t.id), {}) if owning_run else {}
     base = _to_dto(t)
     return TicketDetail(
         measurement_members=(inference_members(owning_run.holdout or {}, t.payload or {}, t.lane,
-                                              remeasurement=bool(item))
+                                              remeasurement=bool(attempts))
                              if owning_run and t.agent_id == "inference" else None),
-        measurement_attempt={"revision": attempt.get("revision"), "started_at": attempt.get("started_at"),
-                             "active_members": item.get("active_members", [])} if attempt else {},
+        measurement_attempt=attempts[-1] if attempts else {},
+        measurement_attempts=attempts,
         generation_report=report,
         checkpoint_handoff_failure=next((f for f in
             ((owning_run.lifecycle or {}).get("adaptive_checkpoint_failures", {}) if owning_run else {}).values()
@@ -1571,7 +1586,7 @@ async def post_message(
             # Mark the old execution before releasing the instruction gate.
             # Both future watcher polls and already queued events must ignore it.
             stages = (await db.execute(select(InfraInstance).where(
-                InfraInstance.ticket_id == t.id, InfraInstance.provider == "cluster",
+                InfraInstance.ticket_id == t.id,
                 InfraInstance.instance_id != "",
             ).order_by(InfraInstance.created_at.desc()))).scalars().all()
             for stage in stages:
@@ -1591,7 +1606,6 @@ async def post_message(
             select(InfraInstance)
             .where(
                 InfraInstance.ticket_id == ticket_id,
-                InfraInstance.provider == "cluster",
                 InfraInstance.instance_id != "",
             )
             .order_by(InfraInstance.created_at.desc())

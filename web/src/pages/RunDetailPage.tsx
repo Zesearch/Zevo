@@ -1,14 +1,14 @@
 import { operationCaption, stageAttemptLabel, withRepairLabel } from "../lib/stageLabels";
 import { ExecutionPhase } from "../components/ExecutionPhase";
 import { GenerationReport } from "../components/GenerationReport";
-import { latestBenchmarkEvent, activationExecution, activationWorkload, workloadCanProgress, executionPhase as workloadPhase } from "../lib/executionProgress";
+import { latestBenchmarkEvent, activationExecution, activationWorkload, workloadCanProgress, shortBenchmarkName, executionPhase as workloadPhase } from "../lib/executionProgress";
 import { measurementProgress } from "../lib/measurementProgress";
 import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
 import { isMidTrainingActivation, midTrainingActivationLabel, midTrainingActionLabel } from "../lib/midTrainingActivations";
 import { MidTrainingTimelineBranch } from "../components/MidTrainingTimelineBranch";
 import { StageProgress } from "../components/StageProgress";
 import { trainingActivity } from "../lib/trainingTelemetry";
-import { heartbeatGroups, settledHeartbeat } from "../lib/heartbeatGroups";
+import { heartbeatGroups, settledHeartbeat, heartbeatGroupFor, heartbeatStatus } from "../lib/heartbeatGroups";
 import { instructionBlocks, stageStatus } from "../lib/stageStatus";
 import { latestTimelineTickets, timelineTicketStatus } from "../lib/timelineStatus";
 import { useState, useMemo, useEffect, Fragment } from "react";
@@ -34,11 +34,6 @@ import { useRunWebsocket } from "../lib/ws";
 import { agentIdOf, assignIterations, iterationOrder, liveIterationKey } from "../lib/iterations";
 import { Bezel, Gauge, Kicker, Note, PageHead, Readout } from "../components/zevo/primitives";
 import { LOOP_STATIONS, PipelineRing, ticketAtStation, type Station, type StationState } from "../components/zevo/PipelineRing";
-
-function shortBenchmarkName(name: string): string {
-  const pieces = name.split("·");
-  return (pieces.length > 1 ? pieces.slice(1).join("·") : name).trim();
-}
 
 function runStopReason(status: string, reason: string): { label: string; detail: string } {
   const label = status === "cancelled"
@@ -425,9 +420,8 @@ function PipelineTimeline({
   // A run has ONE supervisor ticket with one heartbeat per activation, spanning
   // every iteration. groupByIteration can only file it under one block, so the
   // other blocks' markers had no ticket to point at and simply did nothing when
-  // clicked. Resolve it run-wide instead, and number the activations run-wide
-  // too: the wake above a stage is the one that emitted it, wherever that stage
-  // sits in the run.
+  // clicked. Resolve it run-wide and carry the activation ID: the wake above a
+  // stage is the one that emitted it, wherever that stage sits in the run.
   const supervisor = useMemo(
     () => run.tickets.find((t) => agentIdOf(t) === "orchestrator"),
     [run.tickets],
@@ -444,10 +438,6 @@ function PipelineTimeline({
     [rawOrchestratorWakes],
   );
   const midTrainingWakes = rawOrchestratorWakes.filter(isMidTrainingActivation);
-  const wakeIndex = useMemo(
-    () => new Map(rawOrchestratorWakes.map((heartbeat, index) => [heartbeat.id, index])),
-    [rawOrchestratorWakes],
-  );
   const ticketById = useMemo(
     () => new Map(run.tickets.map((ticket) => [ticket.id, ticket])),
     [run.tickets],
@@ -571,7 +561,7 @@ function PipelineTimeline({
     runningOrchestrator
       ? isMidTrainingActivation(runningOrchestrator)
         ? `${supervisorId}#mid:${runningOrchestrator.mid_training!.train_ticket_id}`
-        : `${supervisorId}#${wakeIndex.get(runningOrchestrator.id) ?? 0}`
+        : `${supervisorId}#heartbeat:${runningOrchestrator.id}`
       : unrecordedOrchestratorFailure ? `${supervisorId}#failed` : ""
   );
   // Track EXPANDED groups; empty by default → the timeline starts fully collapsed.
@@ -649,8 +639,7 @@ function PipelineTimeline({
                     Tickets share one chronological rail. */}
                 {open && (g.tickets.length > 0 || groupOrchestrator.length > 0 || g.mirror.length > 0 || groupHasUnrecordedFailure) && (() => {
                   const planRow = (heartbeat: HeartbeatDTO, showConnector: boolean) => {
-                    const wake = wakeIndex.get(heartbeat.id) ?? 0;
-                    const selId = supervisorId ? `${supervisorId}#${wake}` : "";
+                    const selId = supervisorId ? `${supervisorId}#heartbeat:${heartbeat.id}` : "";
                     const active = !!selId && selectedId === selId;
                     const live = heartbeat.is_live;
                     const activationFailed = !!heartbeat.finished_at && heartbeat.exit_code !== 0;
@@ -871,6 +860,7 @@ function PipelineTimeline({
       <div className="min-w-0 space-y-4">
       {selectedId.includes("#validation:") ? <MidTrainingPhaseDetail
         key={selectedId} run={run} ticketId={selectedId.split("#")[0]} /> : <StageDetail
+        key={selectedId}
         ticketId={selectedId.split("#")[0]}
         checkpointTickets={(() => {
           const selected = run.tickets.find((item) => item.id === selectedId);
@@ -878,8 +868,7 @@ function PipelineTimeline({
             item.mid_training_parent === selected.mid_training_parent && item.agent_id === selected.agent_id) : [];
         })()}
         onCheckpointSelect={setSel}
-        wake={selectedId.includes("#") && !selectedId.endsWith("#failed") && !selectedId.includes("#mid:")
-          ? Number(selectedId.split("#")[1]) : undefined}
+        heartbeatId={selectedId.includes("#heartbeat:") ? selectedId.split("#heartbeat:")[1] : undefined}
         midTrainingTicketId={selectedId.includes("#mid:") ? selectedId.split("#mid:")[1] : undefined}
         showUnrecordedFailure={selectedId.endsWith("#failed")}
         paused={pausedTicketIds.has(selectedId.includes("#mid:") ? selectedId.split("#mid:")[1] : selectedId.split("#")[0])}
@@ -891,9 +880,9 @@ function PipelineTimeline({
   );
 }
 
-function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = [], onCheckpointSelect, showUnrecordedFailure = false, paused = false, needsInput = false, applying = false }: {
+function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTickets = [], onCheckpointSelect, showUnrecordedFailure = false, paused = false, needsInput = false, applying = false }: {
   ticketId: string;
-  wake?: number;
+  heartbeatId?: string;
   midTrainingTicketId?: string;
   checkpointTickets?: RunDetail["tickets"];
   onCheckpointSelect?: (id: string) => void;
@@ -923,16 +912,15 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
     t?.run_id ? `/api/infra/instances?active_only=false&run_id=${encodeURIComponent(t.run_id)}` : null,
     { refreshInterval: 3000 },
   );
-  // The API returns heartbeats newest-first; the timeline counts activations
-  // oldest-first, so flip before indexing. With no wake given (a normal stage,
-  // which has one), show the newest.
+  // Order history chronologically, but select activations by stable ID. The
+  // timeline omits instruction wakes while this detail fetch includes them.
   // The feed LiveTranscript is showing, lifted so the Overview above can list
   // the same steps without opening a second socket. Both hooks stay ABOVE the
   // early returns: React counts hooks per render and requires the same count
   // every time.
   const [events, setEvents] = useState<EventEnvelope[]>([]);
   const [seek, setSeek] = useState<{ ts: string; n: number }>({ ts: "", n: 0 });
-  const [selectedActivation, setSelectedActivation] = useState<number | undefined>(undefined);
+  const [selectedActivation, setSelectedActivation] = useState<string | undefined>(undefined);
   const chronological = [...heartbeats].sort((a, b) => a.started_at.localeCompare(b.started_at));
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<string | undefined>(undefined);
   const allMidActivations = midTrainingTicketId ? chronological.filter((heartbeat) =>
@@ -943,20 +931,19 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
     ?? midCheckpoints.at(-1)?.request_id;
   const midActivations = allMidActivations.filter((heartbeat) => heartbeat.mid_training?.request_id === currentCheckpoint);
   const orchestrationGroup = t?.agent_id === "orchestrator"
-    ? heartbeatGroups(chronological).find((group) => group.some((heartbeat) =>
-        heartbeat.id === chronological[wake ?? chronological.length - 1]?.id))
+    ? heartbeatGroupFor(chronological, heartbeatId)
     : undefined;
   const defaultWake = midTrainingTicketId ? midActivations.at(-1) : orchestrationGroup?.at(-1);
-  const effectiveWake = selectedActivation ?? (defaultWake
-    ? chronological.findIndex((heartbeat) => heartbeat.id === defaultWake.id) : wake);
+  const effectiveHeartbeatId = selectedActivation ?? defaultWake?.id ?? heartbeatId;
   const picked = showUnrecordedFailure
     ? undefined
-    : effectiveWake !== undefined ? chronological[effectiveWake] : midTrainingTicketId ? undefined : heartbeats[0];
+    : effectiveHeartbeatId !== undefined ? chronological.find((heartbeat) => heartbeat.id === effectiveHeartbeatId)
+      : midTrainingTicketId ? undefined : heartbeats[0];
   const hbId = picked?.id;
   useEffect(() => {
     setSelectedActivation(undefined);
     setSelectedCheckpoint(undefined);
-  }, [ticketId, wake, midTrainingTicketId]);
+  }, [ticketId, heartbeatId, midTrainingTicketId]);
   // Clear on switch. LiveTranscript resets its own feed per heartbeat, but this
   // copy would otherwise keep the previous activation's steps on screen until
   // the new one produced its first event.
@@ -982,14 +969,10 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
   // scope them to the picked wake's window; the summary has no per-wake
   // equivalent, so it is shown only when you are looking at the latest wake.
   const executionEvents = (() => {
-    if (showUnrecordedFailure || (midTrainingTicketId && !picked)) return [];
-    // Scope to `picked` whenever there IS one -- NOT only when a wake index was
-    // passed. Clicking a stage on the timeline gives no wake, and `picked` then
-    // falls back to the newest heartbeat, which is the one the transcript below
-    // renders. Returning the unscoped ticket-level list there broke the very
-    // invariant this block exists for: the overview listed every wake's execution events
-    // while the transcript showed one wake's events, so a supervisor ticket on
-    // its tenth wake dumped 27 stale headings above the first event.
+    if (showUnrecordedFailure || ((heartbeatId || midTrainingTicketId) && !picked)) return [];
+    // Scope the overview to the same activation as the transcript, including
+    // when the selection defaults to the newest heartbeat. While an explicitly
+    // selected ID is still loading, do not show another activation's events.
     if (!picked) return t.execution_events;
     // Attribute by when the remote process emitted the marker, not by which
     // heartbeat happened to observe it. A cluster collect/repair activation may
@@ -1000,11 +983,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
     // activation during which the work actually happened; TrainingMonitor then
     // de-duplicates equal steps.
     const from = picked.started_at;
-    // With no wake index, `picked` is the newest heartbeat and nothing follows
-    // it, so the window runs to the end.
-    const to = effectiveWake === undefined
-      ? "\uffff"
-      : chronological[effectiveWake + 1]?.started_at ?? "\uffff";
+    const to = chronological.find((heartbeat) => heartbeat.started_at > picked.started_at)?.started_at ?? "\uffff";
     return t.execution_events.filter((p) => p.ts >= from && p.ts < to);
   })();
   // Resource-request state is provider- and stage-agnostic. The row is created
@@ -1043,7 +1022,9 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
           <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? midTrainingActionLabel(picked) : t.id}</Link>
-          {!midTrainingTicketId && <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />}
+          {!midTrainingTicketId && (t.agent_id === "orchestrator" && !showUnrecordedFailure
+            ? picked && <StatusBadge status={stageStatus(heartbeatStatus(picked), paused, "", needsInput, picked.activation_phase)} />
+            : <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />)}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
         </div>
         <div className="flex items-center gap-3">
@@ -1081,7 +1062,7 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
                 key={heartbeat.id}
                 title={heartbeat.started_at ? new Date(heartbeat.started_at).toLocaleString() : undefined}
                 type="button"
-                onClick={() => setSelectedActivation(chronological.findIndex((item) => item.id === heartbeat.id))}
+                onClick={() => setSelectedActivation(heartbeat.id)}
                 className={`rounded-full border px-2.5 py-1 font-mono text-[11px] transition ${
                   active
                     ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
@@ -1109,7 +1090,9 @@ function StageDetail({ ticketId, wake, midTrainingTicketId, checkpointTickets = 
           <ExecutionPhase events={t.agent_id === "inference" ? inferenceEvents : phaseEvents} agent={t.agent_id} active={phaseActive} workload={selectedWorkload} />
           <BenchmarkStageProgress ticket={t} events={inferenceEvents} useCurrentAttempt={useCurrentAttempt} active={phaseActive} />
           {t.agent_id === "evaluation" && (
-            <EvaluationProgress events={t.execution_events} heartbeat={picked} activations={chronological} lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
+            <EvaluationProgress events={t.execution_events} heartbeat={picked} activations={chronological}
+              scopedEvents={activationExecution(t.execution_events, picked, chronological, selectedWorkload)}
+              lane={t.lane} paused={paused || needsInput} benchmarkName={String(t.payload.test_set_name || "")} />
           )}
 
           {activeResourceRequest && (

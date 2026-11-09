@@ -259,19 +259,22 @@ class PatchInfraInstanceBody(StrictBody):
 
 
 class SlurmStageJobContract(BaseModel):
-    """Engine-owned contract for a finite Data, Train, or Inference Slurm job.
+    """Engine-owned finite workload contract (legacy wire name: slurm_job).
 
     Cluster stages render this contract as a local ``.sbatch`` artifact and
     copy it to the exact verified login path. After validating the typed stage
     Result and the local/remote script checksum, the engine dispatches that file
     through a finite allocation controller. A child exit is distinct from
     allocation release; repair can reuse the same JOBID.
-    Other providers keep ``enabled=false`` and use direct SSH execution.
+    Direct hosts use transport=direct on their existing allocation. The engine
+    owns launch, observation and collection for both transports. Disabled
+    contracts remain readable for historical and CPU-only activations.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    transport: Literal["slurm", "direct"] = "slurm"
     phase: Literal["submit", "collect"] = "submit"
     stage: Literal["", "data", "train", "inference", "evaluation"] = ""
     estimated_gpus: int = Field(
@@ -301,6 +304,7 @@ class SlurmStageJobContract(BaseModel):
     )
     # Backend snapshot of the failed execution, including its exact log paths.
     previous_execution: dict[str, Any] = Field(default_factory=dict)
+    implementation_sha256: str = ""
     restart_instruction_id: str = ""
     retry_of_bookkeeping_row_id: str = ""
     retry_of_job_id: str = ""
@@ -357,6 +361,28 @@ class SlurmStageJobContract(BaseModel):
                 self.runtime_prologue,
             )) or self.phase != "submit":
                 raise ValueError("disabled Slurm stage contract cannot carry job state")
+            return self
+        if self.transport == "direct":
+            root = PurePosixPath(self.remote_work_dir)
+            if (not self.stage or not root.is_absolute() or str(root) == "/"
+                    or not self.script_path.startswith("/") or not self.script_path.endswith(".sh")
+                    or PurePosixPath(self.remote_script_path).parent != root
+                    or not self.remote_script_path.endswith(".sh")
+                    or self.status_path != str(root / "workload.json")
+                    or self.stdout_path != str(root / "workload.out")
+                    or self.stderr_path != str(root / "workload.err")
+                    or self.lifecycle_prologue or self.runtime_prologue
+                    or self.nodes != 1):
+                raise ValueError("direct workload requires exact attempt paths on a single existing host")
+            if self.phase == "submit" and any((self.bookkeeping_row_id, self.job_id,
+                    self.scheduler_state, self.scheduler_exit_code, self.scheduler_reason)):
+                raise ValueError("new direct execution cannot carry collected job state")
+            if self.attempt == 1 and (self.retry_of_bookkeeping_row_id or self.retry_of_job_id):
+                raise ValueError("first direct execution cannot supersede another attempt")
+            if self.attempt > 1 and not (self.retry_of_bookkeeping_row_id and self.retry_of_job_id):
+                raise ValueError("direct retry requires the exact preceding execution")
+            if self.phase == "collect" and not (self.bookkeeping_row_id and self.job_id and self.scheduler_state):
+                raise ValueError("direct collection requires an observed execution")
             return self
         if not (
             self.stage and self.estimated_gpus >= 1

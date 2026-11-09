@@ -54,6 +54,47 @@ async def test_ticket_detail_exposes_assigned_inference_members_before_any_progr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["running", "paused", "published", "failed", "superseded"])
+async def test_remeasurement_progress_scope_survives_terminal_batch(db, status):
+    from zevo.engine.run.remeasurement import active_attempt
+    run, ticket, _ = await setup(db, "inference")
+    attempt = {"revision": "revision-1", "started_at": "2026-11-09T05:00:00+00:00",
+               "previous_inputs": {"private": "not display metadata"}}
+    run.lifecycle = {"token_budget_remeasurements": [{
+        "id": "revision-1", "status": status, "reuse_tickets": True,
+        "cohort": [{"inference_id": ticket.id, "active_members": ["Benchmark 4"],
+                    "inference_attempt": attempt}],
+    }]}
+    await db.commit()
+    detail = await get_ticket(ticket.id, Request({"type": "http"}), db)
+    expected = {"revision": "revision-1", "started_at": attempt["started_at"],
+                "active_members": ["Benchmark 4"]}
+    assert detail.measurement_attempt == expected
+    assert detail.measurement_attempts == [expected]
+    assert len(detail.measurement_members) == 6  # Original execution retains the full suite.
+    assert bool(active_attempt(run, ticket.id)) == (status in {"running", "paused"})
+
+
+@pytest.mark.asyncio
+async def test_progress_history_preserves_execution_scope_and_ignores_unstarted_revision(db):
+    run, ticket, _ = await setup(db, "inference")
+    from zevo.engine.run.remeasurement import progress_attempts
+    run.lifecycle = {"token_budget_remeasurements": [
+        {"id": "old", "status": "superseded", "cohort": [{"inference_id": ticket.id,
+            "active_members": [], "inference_attempt": {"revision": "old",
+            "started_at": "2026-11-09T05:00:00+00:00", "active_members": ["Benchmark 4", "Benchmark 5"]}}]},
+        {"id": "new", "status": "published", "cohort": [{"inference_id": ticket.id,
+            "active_members": ["Benchmark 5"], "inference_attempt": {"revision": "new",
+            "started_at": "2026-11-09T06:00:00+00:00"}}]},
+        {"id": "planned", "status": "running", "cohort": [{"inference_id": ticket.id,
+            "active_members": ["Benchmark 0"]}]},
+    ]}
+    history = progress_attempts(run, ticket.id)
+    assert [entry["active_members"] for entry in history] == [["Benchmark 4", "Benchmark 5"], ["Benchmark 5"]]
+    assert progress_attempts(run, "unrelated") == []
+
+
+@pytest.mark.asyncio
 async def test_finalization_label_recovers_old_resume_without_relabeling_prior_training(db):
     from zevo.api.routers.ui.heartbeats import _training_finalizations, _dto
     from zevo.db import HeartbeatResult

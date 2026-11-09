@@ -2,6 +2,43 @@ This contract applies to every Agent and both input formats. `typed.md` or
 `freeform.md` defines the invocation envelope; `platform.md` defines the
 Agent-specific work and result.
 
+## Engine-owned workloads on every compute backend
+
+The input field `slurm_job` describes a finite engine-owned workload.
+`transport="slurm"` uses the cluster scheduler; `transport="direct"` uses the
+existing cloud/instance allocation. Cluster commands and directives apply only
+to `slurm`; `enabled=true` alone does not select the transport.
+
+For `transport="direct"`, this protocol takes precedence over legacy inline
+cloud/instance execution instructions in the stage guide:
+
+- On `phase="submit"`, prepare the assigned local `.sh` launcher and generated
+  program. Run syntax, configuration and input checks; bounded CPU-only probes
+  are allowed. Upload every required input and the top-level Python files to
+  `remote_work_dir`, preserving their bytes. Stage prepared configuration files
+  at the same paths relative to `work_dir`, including suite subdirectories.
+  The launcher uses the assigned
+  environment and the normal system GPU runtime/resume helpers, runs the
+  workload in the foreground, and exits with its return code. It must not
+  submit jobs, detach workers, or start GPU computation during preparation.
+- Report `slurm_script_path=slurm_job.script_path` (the result field retains its
+  historical name), the prepared configuration paths, and `status="deferred"`.
+  Leave artifacts not yet produced empty. Post `Waiting:`, never `Done:`.
+  The engine validates before launching, records an independent execution,
+  and monitors remote stdout/stderr without keeping an Agent running.
+- On `phase="collect"`, read the exact assigned execution and download its
+  artifacts and logs. Do not launch the workload again or alter executed files.
+  If still running, return `deferred`. Validate completed outputs normally. On
+  failure diagnose from the registered logs and follow the same repair rules;
+  only a new submit contract authorizes another execution.
+- A prepared launcher is work, not an allocation. Never rent a second cloud
+  machine or acquire another instance GPU lease. Resource retention still
+  follows `per_run`/`per_stage`; `per_submission` remains Slurm-only.
+
+Log paths are always supplied by the contract. Successful launch reuse metadata
+under `slurm_launch_reuse` applies to both transports; preserve frozen inputs
+and adapt only the engine-authorized model, paths and resource bindings.
+
 ## One wake, one activation
 
 One heartbeat handles one activation of a Ticket:
@@ -19,10 +56,10 @@ Finish instruction updates and all other API work before that PATCH. After
 it succeeds, return `mark_done` or `mark_failed` and exit immediately; do not
 POST another message, read back state, or retry API calls after closure.
 
-Finite cluster Data, Train, and Inference jobs are the exception to step 5. Their
-submission activation POSTs `Waiting:` after the JOBID is registered and
-returns `deferred`; it must never say `Done:`. The backend Scheduler publishes
-`Running:` when Slurm starts the job. On the collect activation, the Agent
+Engine-owned Data, Train, and Inference workloads are the exception to step 5.
+Their preparation activation POSTs `Waiting:` and returns `deferred`; it must
+never say `Done:`. The engine registers and launches the prepared workload,
+then publishes `Running:` when the backend observes it running. On the collect activation, the Agent
 validates and reports the artifacts without posting `Done:` itself; the runner
 publishes `Done:` only after the typed Result and every required artifact have
 passed engine validation. Thus `Done:` always means the stage is genuinely
@@ -458,6 +495,22 @@ Use this mechanism for Data, Train, Inference and other producing Agents. A
 live asynchronous workload follows its existing `deferred`/collection contract;
 waiting for it is not a failed repair. `failure_recovery` is only valid with
 `status="failed"`; old results without it remain compatible.
+
+When an activation fails without a recovery proposal, the engine returns the
+failure to the same Ticket for diagnosis. This also applies when your output
+was accepted but engine post-processing failed. First identify the failed step,
+the evidence and the authority needed for the next action. Reuse prepared data,
+checkpoints and predictions; a post-processing failure does not authorize
+repeating their expensive production. Repair an environment or implementation
+within this work order, then re-emit the result for engine validation. Never
+change engine code, evaluation contracts, hidden scoring assets or credentials
+to make a check pass. Request review if the required action is outside your
+authority. Error wording alone does not determine the owner.
+
+Every diagnostic/repair activation counts toward the same limit of 20 repairs
+per Ticket. Five consecutive failures with unchanged execution/artifact/progress
+evidence stop local repair earlier. Neither a new explanation nor a backend
+post-processing failure resets the counter.
 
 Continue while a distinct, justified repair or diagnostic can resolve the
 blocker within your authority. Failed checks can be informative, but rewriting

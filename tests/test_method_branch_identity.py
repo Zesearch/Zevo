@@ -61,7 +61,7 @@ def test_actual_method_change_requires_evidence_before_compute(tmp_path, status)
     result = result.model_copy(update={"status": status})
     with pytest.raises(ValueError, match="upstream method branch conflict") as exc:
         _validate_specialist_yaml(result, inp)
-    assert classify_failure(str(exc.value), agent_id="train").route == "orchestrator"
+    assert classify_failure(str(exc.value), agent_id="train").route == "self"  # diagnose/correct config; cannot bypass the validator
     approved = inp.model_copy(update={"branch_transition": TRANSITION})
     assert _validate_specialist_yaml(result, approved)["training_method"] == "rft"
 

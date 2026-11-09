@@ -1549,6 +1549,34 @@ def test_disabled_thinking_survives_inference_to_train(tmp_path: Path, empty_spa
         TrainRunConfig.model_validate(train)
 
 
+def test_prompt_example_mapping_survives_json_key_reordering(tmp_path):
+    body = yaml.safe_load(_write_inference_config(tmp_path).read_text())
+    fields = ["task_description", "question_text"]
+    query = "{task_description}\n{question_text}"
+    user = "<INPUT:task_description>\n<INPUT:question_text>"
+    body["measurement"]["inference_config"].update(input_fields=fields, inference_query=query)
+    example = body["prompt_example"]
+    example["input_values"] = {field: f"<INPUT:{field}>" for field in fields}
+    example["messages"][-1]["content"] = user
+    example["rendered_prompt"] = example["rendered_prompt"].replace("<INPUT:instruction>", user)
+    expected = InferenceRunConfig.model_validate(body)
+    # JSONB and sorted JSON serializers may reverse the original map order.
+    reordered = json.loads(json.dumps(body, sort_keys=True))
+    assert list(reordered["prompt_example"]["input_values"]) != fields
+    actual = InferenceRunConfig.model_validate(reordered)
+    assert list(actual.prompt_example.input_values) == fields
+    assert actual.model_dump() == expected.model_dump()
+    for invalid in ({"task_description": "<INPUT:task_description>"},
+                    {**example["input_values"], "extra": "<INPUT:extra>"}):
+        changed = json.loads(json.dumps(body))
+        changed["prompt_example"]["input_values"] = invalid
+        with pytest.raises(ValidationError, match="must contain exactly"):
+            InferenceRunConfig.model_validate(changed)
+    reordered["prompt_example"]["messages"][-1]["content"] = "<INPUT:question_text>\n<INPUT:task_description>"
+    with pytest.raises(ValidationError, match="user turn differs"):
+        InferenceRunConfig.model_validate(reordered)
+
+
 def test_structured_conversation_example_preserves_roles_and_rejects_flattening(tmp_path):
     from zevo.contracts.prompting import conversation_messages
     config = yaml.safe_load(_write_inference_config(tmp_path).read_text())

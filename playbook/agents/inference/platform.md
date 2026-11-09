@@ -1,3 +1,12 @@
+## Execution transport
+
+For an enabled execution contract, follow the shared engine-owned workload
+protocol first. `slurm_job.transport="direct"` prepares a `.sh` on the existing
+cloud/instance host and returns `deferred`; the engine runs it and later wakes
+collection. The cluster submission sections below apply only to
+`slurm_job.transport="slurm"`. Inline execution instructions apply only to
+historical/CPU work orders with `slurm_job.enabled=false`.
+
 
 ## Execution order
 
@@ -775,7 +784,9 @@ the device falls off the bus, stop: do not reserve memory regions, lower the
 device fraction, retry the same rows, or move to a sibling index. Return
 `status="failed"` with `error_message` beginning `GPU hardware defect:` and
 the exact evidence (device index, Xid lines, ECC counters, instance id). The
-engine routes that failure to the Orchestrator for a replacement device; a
+result must include `failure_recovery` with scope `resource_plan`, this evidence,
+and a concrete request to review replacement. The engine routes that proposal
+to the Orchestrator; the error prefix alone does not select the route. A
 workaround on the same card is not a repair and spends the Run's budget on
 hardware nobody will keep.
 

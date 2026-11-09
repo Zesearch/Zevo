@@ -223,11 +223,11 @@ async def _persist_slurm_execution_marker(
     if kind == "config":
         # Replaying stdout must preserve engine-owned activation metadata.
         protected = {key: value for key, value in (heartbeat.resolved_config or {}).items()
-                     if key in {"mid_training", "execution_phase", "measurement_revision"}}
+                     if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision"}}
         heartbeat.resolved_config = {
             **{key: value for key, value in payload.items()
                if key not in {"kind", "owner", "attempt_id", "t", "telemetry_sequence",
-                              "mid_training", "execution_phase", "measurement_revision"}},
+                              "mid_training", "execution_phase", "execution_transport", "measurement_revision"}},
             **protected,
         }
         return True
@@ -452,7 +452,7 @@ def _mark_slurm_job_running(
             ticket_id=ticket.id,
             author="system",
             body=(
-                f"Running: Slurm job {row.instance_id} started; Zevo will "
+                f"Running: {'Slurm job' if row.provider == 'cluster' else 'workload'} {row.instance_id} started; Zevo will "
                 "collect and validate its outputs after it finishes."
             ),
         ))
@@ -1155,50 +1155,55 @@ async def _reconcile_slurm_stage_jobs(
                 meta.get("scheduler_reason") or f"Slurm job {state.lower()}"
             )[:2000]
             meta["monitor_terminal"] = True
-            if state == "COMPLETED" and not meta.get("superseded_by_instruction_id"):
-                from zevo.engine.run.adaptive_training import handle_checkpoint_yield, report_checkpoint_handoff_failure
-                try:
-                    if await handle_checkpoint_yield(session, run, ticket, row, meta):
-                        continue
-                except (ValueError, OSError) as exc:
-                    # Failed verification must never fall through to final-model
-                    # collection or stop monitoring unrelated Runs.
-                    await report_checkpoint_handoff_failure(session, run, ticket, row, meta, exc)
-                    log.warning("checkpoint handoff for %s: %s", ticket.id, exc)
-                    continue
-            can_queue_collect = (
-                bool(meta.get("submission_committed"))
-                and not meta.get("superseded_by_instruction_id")
-                and ticket.status in {"waiting_external", "running"}
-                and ticket.id not in active_collect_ticket_ids
-            )
-            if can_queue_collect and not bool(meta.get("collect_wakeup_queued")):
-                ticket.status = "queued"
-                ticket.summary = f"Slurm job {row.instance_id} finished: {state}"
-                ticket.error_message = ""
-                meta["collect_wakeup_queued"] = True
-                row.meta = meta
-                await session.flush()
-                from zevo.engine.run.wakeup import queue_wakeup
-                await queue_wakeup(
-                    session,
-                    agent_id=ticket.agent_id,
-                    ticket_id=ticket.id,
-                    source="slurm_watcher",
-                    trigger_detail=f"job_{state.lower()}",
-                    reason=(
-                        f"finite Slurm job {row.instance_id} reached {state}; "
-                        + ("collect and validate its outputs" if state == "COMPLETED"
-                           else "diagnose and repair in one activation")
-                    ),
-                    payload={"job_id": row.instance_id, "resource_row_id": row.id, "scheduler_state": state},
-                )
-                resumed += 1
-                continue
+            resumed += await finish_observed_workload(session, row, run, ticket, meta, state, active_collect_ticket_ids)
         row.meta = meta
 
     await session.commit()
     return checked, resumed
+
+
+async def finish_observed_workload(session, row, run, ticket, meta, state, active_collect_ticket_ids):
+    """Shared verified checkpoint/terminal handoff, independent of transport."""
+    if state == "COMPLETED" and not meta.get("superseded_by_instruction_id"):
+        from zevo.engine.run.adaptive_training import handle_checkpoint_yield, report_checkpoint_handoff_failure
+        try:
+            if await handle_checkpoint_yield(session, run, ticket, row, meta):
+                return 0
+        except (ValueError, OSError) as exc:
+            # Failed verification must never fall through to final-model
+            # collection or stop monitoring unrelated Runs.
+            await report_checkpoint_handoff_failure(session, run, ticket, row, meta, exc)
+            log.warning("checkpoint handoff for %s: %s", ticket.id, exc)
+            return 0
+    can_queue_collect = (
+        bool(meta.get("submission_committed"))
+        and not meta.get("superseded_by_instruction_id")
+        and ticket.status in {"waiting_external", "running"}
+        and ticket.id not in active_collect_ticket_ids
+    )
+    if can_queue_collect and not bool(meta.get("collect_wakeup_queued")):
+        ticket.status = "queued"
+        ticket.summary = f"Workload {row.instance_id} finished: {state}"
+        ticket.error_message = ""
+        meta["collect_wakeup_queued"] = True
+        row.meta = meta
+        await session.flush()
+        from zevo.engine.run.wakeup import queue_wakeup
+        await queue_wakeup(
+            session,
+            agent_id=ticket.agent_id,
+            ticket_id=ticket.id,
+            source="slurm_watcher" if row.provider == "cluster" else "workload_watcher",
+            trigger_detail=f"job_{state.lower()}",
+            reason=(
+                f"workload {row.instance_id} reached {state}; "
+                + ("collect and validate its outputs" if state == "COMPLETED"
+                   else "diagnose and repair in one activation")
+            ),
+            payload={"job_id": row.instance_id, "resource_row_id": row.id, "scheduler_state": state},
+        )
+        return 1
+    return 0
 
 
 def _aware(t: datetime) -> datetime:
@@ -1278,7 +1283,6 @@ async def _sweep_stuck_tickets(
             select(InfraInstance)
             .where(
                 InfraInstance.ticket_id == tk.id,
-                InfraInstance.provider == "cluster",
                 InfraInstance.instance_id != "",
             )
             .order_by(InfraInstance.created_at.desc())
@@ -1449,25 +1453,18 @@ async def _reactivate_stuck_repairing_tickets(
 
 
 async def _fail_validation_looping_tickets(session: AsyncSession) -> int:
-    """Safety net: a `queued` ticket whose wakeups keep failing typed-payload
-    validation must never idle-burn a GPU forever.
+    """Recover legacy queued validation loops lacking versioned failure notices.
 
-    The runner already escalates each such wakeup and, after
-    MAX_PAYLOAD_VALIDATION_ATTEMPTS, fails the ticket terminally (see
-    ``_escalate_stored_payload_validation_failure``). This is the backstop for
-    when that terminal step never runs -- its final wakeup was never re-drained,
-    the runner crashed before committing, or a mid-run restart lost it -- leaving
-    the ticket `queued` while the alarm-clock cron re-enqueues the identical
-    payload every tick. Detect it from the same evidence the runner uses: a
-    `queued` ticket with at least MAX_PAYLOAD_VALIDATION_ATTEMPTS wakeups marked
-    `failed` and stamped with the validation signature. Fail it and wake the run
-    orchestrator so it can re-emit a corrected child.
+    New failures stop after the first rejection. The historical counter remains
+    only for old rows; it must never reject a corrected, explicitly requeued
+    work order using the previous input version's failure history.
     """
     from zevo.engine.run.failure_policy import (
         MAX_PAYLOAD_VALIDATION_ATTEMPTS,
         PAYLOAD_VALIDATION_FAILURE_SIGNATURE,
     )
-    from zevo.engine.run.wakeup import queue_wakeup
+    from zevo.db import TicketNotice
+    from zevo.engine.run.input_validation import NOTICE_CODE, report_input_failure
 
     queued = (await session.execute(
         select(Ticket).where(Ticket.status == "queued")
@@ -1475,6 +1472,11 @@ async def _fail_validation_looping_tickets(session: AsyncSession) -> int:
 
     failed = 0
     for tk in queued:
+        versioned = await session.scalar(select(TicketNotice.id).where(
+            TicketNotice.ticket_id == tk.id, TicketNotice.code == NOTICE_CODE,
+        ).limit(1))
+        if versioned:
+            continue
         n = (await session.execute(
             select(func.count()).select_from(AgentWakeupRequest).where(
                 AgentWakeupRequest.ticket_id == tk.id,
@@ -1496,27 +1498,7 @@ async def _fail_validation_looping_tickets(session: AsyncSession) -> int:
             "cron re-enqueue can no longer idle-burn a GPU on an invalid payload"
         )
         log.warning("%s", reason)
-        tk.status = "failed"
-        tk.repair_route = "orchestrator"
-        tk.error_message = reason[:2000]
-        if not tk.summary:
-            tk.summary = "reconciler: payload validation looped"
-        await session.commit()
-        # Escalate to the orchestrator so the run can recover with a corrected
-        # child rather than silently losing this stage.
-        if tk.agent_id != "orchestrator" and run.supervisor_ticket_id:
-            await queue_wakeup(
-                session,
-                agent_id="orchestrator",
-                ticket_id=run.supervisor_ticket_id,
-                source="handoff",
-                trigger_detail=f"payload_validation_failed:{tk.id}"[:128],
-                reason=(
-                    f"{_RECONCILER_TAG} child ticket {tk.id} failed typed-payload "
-                    f"validation {int(n)}× and was failed; re-emit a corrected "
-                    "ticket"
-                ),
-            )
+        await report_input_failure(session, tk, run, reason)
         failed += 1
     return failed
 
@@ -2109,6 +2091,14 @@ async def reconcile_runs_and_tickets(
             checked, resumed = await _reconcile_slurm_stage_jobs(s)
             report["slurm_jobs_checked"] = checked
             report["slurm_tickets_resumed"] = resumed
+        async with Session() as s:
+            from zevo.engine.run.cloud_recovery import reconcile as reconcile_cloud_allocations
+            report["cloud_allocations_lost"] = await reconcile_cloud_allocations(s)
+        async with Session() as s:
+            from zevo.engine.run.direct_jobs import reconcile as reconcile_direct_workloads
+            checked, resumed = await reconcile_direct_workloads(s)
+            report["direct_jobs_checked"] = checked
+            report["direct_tickets_resumed"] = resumed
         async with Session() as s:
             from zevo.engine.run.adaptive_training import reconcile_adaptive_training
             report["adaptive_training_requests"] = await reconcile_adaptive_training(s)

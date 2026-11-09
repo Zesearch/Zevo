@@ -261,8 +261,9 @@ class VastAIProvider:
             )
             r.raise_for_status()
             data = r.json()
-        instances = data.get("instances", []) if isinstance(data, dict) else []
-        return instances if isinstance(instances, list) else []
+        if not isinstance(data, dict) or not isinstance(data.get("instances"), list):
+            raise ValueError("Vast.ai returned an incomplete instance inventory")
+        return data["instances"]
 
     async def destroy_instance(self, instance_id: str) -> bool:
         """Destroy (terminate) a rented instance. Returns True on success."""

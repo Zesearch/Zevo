@@ -107,11 +107,13 @@ from zevo.engine.observe.run_metrics import (
 )
 from zevo.engine.method.score_direction import is_better
 from zevo.engine.run.failure_policy import (
-    MAX_PAYLOAD_VALIDATION_ATTEMPTS,
     MAX_REPAIR_ATTEMPTS,
     MAX_UNCHANGED_FAILURES,
     PAYLOAD_VALIDATION_FAILURE_SIGNATURE,
     classify_failure,
+    FailureBoundary,
+    FailureContext,
+    FailureOrigin,
     repair_instruction,
 )
 from zevo.engine.run.resource_planning import plan_stage_resources
@@ -902,9 +904,7 @@ async def _slurm_stage_job_contract(
             if recorded and all(row.released_at is not None for row in recorded):
                 raise ValueError("cloud instance has been released; provision a fresh device_info before the next stage")
     maximum_gpus = _num_gpus(run)
-    job_row = None
-    if cluster:
-        job_row = await _latest_slurm_resource_request(session, ticket)
+    job_row = await _latest_slurm_resource_request(session, ticket)
     meta = dict(job_row.meta or {}) if job_row is not None else {}
     prior_state = str(meta.get("scheduler_state") or "").strip().upper()
     prior_state = prior_state.split()[0].rstrip("+") if prior_state else ""
@@ -919,8 +919,7 @@ async def _slurm_stage_job_contract(
     from zevo.engine.run.training_continuation import authorized as continuation_authorized
     walltime_resume = continuation_authorized(ticket, job_row)
     repair_submission = bool(
-        cluster
-        and job_row is not None
+        job_row is not None
         and prior_state in _SLURM_TERMINAL_STATES
         and (
             restart_instruction_id or measurement_restart
@@ -1000,6 +999,9 @@ async def _slurm_stage_job_contract(
                 f"Infrastructure selected {selected_gpus} GPUs outside Run maximum {limit}"
             )
         selection = None
+        from zevo.engine.run.direct_jobs import contract_for
+        return contract_for(info=info, ticket=ticket, work_dir=work_dir, stage=stage,
+            previous=job_row, retry=repair_submission, restart_instruction_id=restart_instruction_id)
     per_run_allocation = cluster and (getattr(run, "gpu_allocation_mode", None) or "per_stage") == "per_run"
     if per_run_allocation and requested_gpus and selection.nodes != 1:
         raise ValueError("per_run requires a single-node allocation; use per_stage for multi-node training")
@@ -1259,7 +1261,7 @@ async def _build_train_input(
             + (
                 f" --cluster --expected-world-size {slurm_job.num_gpus}"
                 f" --expected-nodes {slurm_job.nodes}"
-                if slurm_job.enabled else ""
+                if slurm_job.enabled and slurm_job.transport == "slurm" else ""
             )
         ),
         gpu_runtime_helper_path=str(Path(work_dir) / "zevo_gpu_runtime.py"),
@@ -1962,7 +1964,9 @@ async def _build_input(
             agent_id=agent_id, ticket=ticket, payload=payload, work_dir=work_dir
         )
     if agent_id == "orchestrator":
+        from zevo.engine.run.cloud_recovery import recovery_context
         payload = {**payload, "runtime": {**payload.get("runtime", {}),
+            "cloud_resource_recoveries": await recovery_context(session, run),
             "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
             "validation_generation_reports": validation_generation_reports(run),
             "adaptive_checkpoints": checkpoint_orchestration_context(run),
@@ -1975,7 +1979,7 @@ async def _build_input(
         if (
             isinstance(data_input, DataTaskInput)
             and data_input.device_info_path
-            and str(run.gpu_provider or "instance") == "cluster"
+            and data_input.operation == "prepare_run_data"
         ):
             data_input = data_input.model_copy(update={
                 "slurm_job": await _slurm_stage_job_contract(
@@ -2511,7 +2515,7 @@ def _validate_specialist_yaml(
                 "TrainResult.tracking_url must exactly match the engine-owned "
                 "Weights & Biases URL (or remain empty when tracking is disabled)"
             )
-        if inp.slurm_job.enabled:
+        if inp.slurm_job.enabled and inp.slurm_job.transport == "slurm":
             validate_cluster_train_config(config)
         inference = load_inference_config(inp.inference_config_path)
         if config.iteration != inp.iteration:
@@ -2914,6 +2918,9 @@ def _slurm_stage_result_problem(
         body = path.read_text(encoding="utf-8")
     except OSError as exc:
         return f"cannot read cluster stage Slurm script: {exc}"
+    if contract.transport == "direct":
+        from zevo.engine.run.direct_validation import validate_launch
+        return validate_launch(inp, body, executable_name, configuration_path=configuration_path)
     if isinstance(inp, InferenceTaskInput):
         from zevo.engine.run.inference_launch import verify_frozen_inputs
         try:
@@ -3089,6 +3096,10 @@ def _extract_summary_artifact_meta(
         return status, result.error_message or result.notes or "agent failed", "", {}
 
     contract = getattr(inp, "slurm_job", None)
+    if (isinstance(contract, SlurmStageJobContract) and contract.enabled
+            and contract.transport == "direct" and contract.phase == "submit"
+            and not contract.previous_execution and status in {"succeeded", "degraded"}):
+        return "failed", "prepared workload must return deferred for engine validation before execution", "", {}
     if (isinstance(result, InferenceResult) and status == "deferred"
         and isinstance(contract, SlurmStageJobContract)
         and contract.enabled and contract.phase == "collect"):
@@ -4346,7 +4357,6 @@ async def _latest_slurm_resource_request(
     rows = (await session.execute(
         select(InfraInstance)
         .where(
-            InfraInstance.provider == "cluster",
             InfraInstance.run_id == ticket.run_id,
             InfraInstance.ticket_id == ticket.id,
             InfraInstance.instance_id != "",
@@ -4432,6 +4442,7 @@ async def _submit_validated_slurm_stage(
     inp: BaseModel,
     heartbeat_id: str,
     remote_train_config_path: str = "",
+    prepared_config_paths: tuple[str, ...] = (),
 ) -> InfraInstance:
     """Recover pre-publication deadlocks without rerunning the agent or sbatch.
 
@@ -4440,6 +4451,11 @@ async def _submit_validated_slurm_stage(
     leaves refresh()/failure handling unusable until that savepoint rolls back.
     Never replay once the remote command may have published a workload.
     """
+    if getattr(getattr(inp, "slurm_job", None), "transport", "slurm") == "direct":
+        from zevo.engine.run.direct_jobs import submit
+        return await submit(session, run=run, ticket=ticket, inp=inp,
+                            heartbeat_id=heartbeat_id, remote_train_config_path=remote_train_config_path,
+                            prepared_config_paths=prepared_config_paths)
     from sqlalchemy.exc import DBAPIError
 
     for attempt in range(3):
@@ -4746,16 +4762,28 @@ async def _apply_ticket_failure_policy(
     error_message: str,
     cancelled: bool = False,
     result: BaseModel | None = None,
+    origin: FailureOrigin = "agent_execution",
+    boundary: FailureBoundary | None = None,
+    can_diagnose: bool = True,
 ) -> bool:
     """Set the Ticket's failure/repair state; return True when reactivation is due."""
     recovery = getattr(result, "failure_recovery", None)
     disposition = classify_failure(
         error_message, agent_id=ticket.agent_id, cancelled=cancelled, recovery=recovery,
+        boundary=boundary, can_diagnose=can_diagnose,
     )
     if cancelled:
         ticket.repair_attempts = int(ticket.repair_attempts or 0)
         ticket.repair_route = "terminal"
         return False
+    context = FailureContext(origin, error_message[:6000], boundary)
+    session.add(TicketNotice(
+        ticket_id=ticket.id, code="failure.context", severity="error",
+        body=json.dumps({"origin": context.origin, "message": context.message,
+                         "boundary": context.boundary, "policy_route": disposition.route,
+                         "code": disposition.code,
+                         "recovery": recovery.model_dump() if recovery is not None else None}),
+    ))
     if recovery is not None:
         session.add(TicketNotice(
             ticket_id=ticket.id, code="failure.recovery_route", severity="info",
@@ -4790,18 +4818,60 @@ async def _apply_ticket_failure_policy(
             body=repair_instruction(
                 agent_id=ticket.agent_id,
                 attempt=int(ticket.repair_attempts),
-                error_message=error_message,
+                error_message=error_message, origin=origin,
             ),
         ))
         return True
     ticket.status = "failed"
     ticket.repair_route = (
-        "orchestrator"
+        ("terminal" if ticket.lane == "held_out_test" or ticket.agent_id == "orchestrator" else "orchestrator")
         if disposition.route == "self"
         and int(ticket.repair_attempts or 0) >= MAX_REPAIR_ATTEMPTS
         else disposition.route
     )
+    # Held-out diagnostics must never be handed to the optimization supervisor.
+    if ticket.lane == "held_out_test" and ticket.repair_route == "orchestrator":
+        ticket.repair_route = "terminal"
     return False
+
+
+async def _queue_ticket_repair(session: AsyncSession, tk: Ticket) -> None:
+    # Repair remains inside the same Ticket and must not wake the
+    # Orchestrator between attempts. The new activation sees the exact
+    # system repair message above plus every existing artifact in work_dir.
+    # Reap an orphaned remote process before starting the next activation;
+    # otherwise a failed local Agent/SSH session could leave the old
+    # trainer consuming the same GPU beside its repair attempt.
+    try:
+        from zevo.engine.run.remote_jobs import cancel_ticket_remote_job
+        cleanup = await cancel_ticket_remote_job(session, tk, preserve_allocation=True)
+        if cleanup.get("attempted") and not cleanup.get("ok"):
+            tk.status = "failed"
+            tk.error_message = "Repair could not confirm old worker termination; GPU retained for cleanup"
+            tk.repair_route = "terminal" if tk.lane == "held_out_test" or tk.agent_id == "orchestrator" else "orchestrator"
+            await session.commit()
+            await _maybe_wake_supervisor(session, tk)
+            return
+    except Exception as exc:
+        tk.status = "failed"
+        tk.error_message = f"Repair process cleanup failed: {exc}"
+        tk.repair_route = "terminal" if tk.lane == "held_out_test" or tk.agent_id == "orchestrator" else "orchestrator"
+        await session.commit()
+        await _maybe_wake_supervisor(session, tk)
+        return
+    from zevo.engine.run.wakeup import queue_wakeup
+    await queue_wakeup(
+        session,
+        agent_id=tk.agent_id,
+        ticket_id=tk.id,
+        source="retry",
+        trigger_detail=f"repair_{int(tk.repair_attempts or 0)}",
+        reason=(
+            f"automatic self-repair {int(tk.repair_attempts or 0)}/"
+            f"{MAX_REPAIR_ATTEMPTS}: {tk.error_message[:500]}"
+        ),
+        payload={"repair_attempt": int(tk.repair_attempts or 0)},
+    )
 
 
 class StoredPayloadValidationError(ValueError):
@@ -4809,102 +4879,22 @@ class StoredPayloadValidationError(ValueError):
     agent ran.
 
     Deterministic, not transient: re-draining the identical payload fails
-    identically, so it must be escalated + bounded rather than silently
-    retried. Raised so the daemon records THIS wakeup failed with the
-    payload-validation signature (feeding both the runner's consecutive-failure
-    counter and the reconciler's safety net).
+    identically, so it requires a corrected work order. Raised so the daemon
+    records this wakeup failed with the stable payload-validation signature.
     """
-
-
-async def _count_validation_failed_wakeups(
-    session: AsyncSession, ticket_id: str | None
-) -> int:
-    """How many of this ticket's wakeups already failed typed-payload validation.
-
-    Counted from the wakeup rows the daemon marks `failed` and stamps with
-    `PAYLOAD_VALIDATION_FAILURE_SIGNATURE`. This survives a rerun (old failed
-    rows stay), so a ticket that keeps being re-queued with a still-invalid
-    payload is bounded across its whole life, and a corrected *new* ticket (a
-    different id) starts its own count from zero.
-    """
-    if not ticket_id:
-        return 0
-    n = (await session.execute(
-        select(func.count()).select_from(AgentWakeupRequest).where(
-            AgentWakeupRequest.ticket_id == ticket_id,
-            AgentWakeupRequest.status == "failed",
-            AgentWakeupRequest.reason.contains(PAYLOAD_VALIDATION_FAILURE_SIGNATURE),
-        )
-    )).scalar_one()
-    return int(n or 0)
 
 
 async def _escalate_stored_payload_validation_failure(
     session: AsyncSession, tk: Ticket, run: Run, exc: Exception,
 ) -> None:
-    """Escalate a ticket whose stored typed payload failed validation at wakeup.
-
-    Typed-payload validation (validate_stored_payload, and the per-agent
-    *TaskInput builders that enforce the same contract) runs BEFORE the agent
-    executes. A `queued` ticket that fails it used to stay `queued`: the wakeup
-    was marked failed but the ticket was untouched, and the alarm-clock cron
-    (~5 min) re-enqueued the identical payload forever -- no escalation, no
-    re-plan, and on a rented GPU an unbounded idle burn.
-
-    Instead: record the validation error on the ticket, wake the run's
-    orchestrator with the error as feedback so it can re-emit a corrected child
-    (mirroring the repair/handoff wake pattern), and after
-    MAX_PAYLOAD_VALIDATION_ATTEMPTS consecutive failures fail the ticket
-    terminally rather than looping. Always raises StoredPayloadValidationError
-    so the wakeup is recorded failed with the signature the counters read.
-    """
+    """Reject the work order once and hand it to its owner for correction."""
+    from zevo.engine.run.input_validation import report_input_failure
     detail = " ".join(str(exc).split())[:1500]
-    prior = await _count_validation_failed_wakeups(session, tk.id)
-    attempt = prior + 1
-    terminal = attempt >= MAX_PAYLOAD_VALIDATION_ATTEMPTS
     note = (
         f"{PAYLOAD_VALIDATION_FAILURE_SIGNATURE}: the ticket's stored typed "
-        f"payload failed schema validation before the agent ran "
-        f"(attempt {attempt}/{MAX_PAYLOAD_VALIDATION_ATTEMPTS}): {detail}"
+        f"payload failed validation before the agent ran: {detail}"
     )
-    tk.error_message = note[:2000]
-    # The work order/upstream lineage must change; re-running the specialist
-    # unchanged is wasteful. This is an orchestrator-owned failure.
-    tk.repair_route = "orchestrator"
-    if terminal:
-        tk.status = "failed"
-        tk.summary = (
-            f"stored payload failed validation {attempt}× — "
-            "failed terminally instead of looping"
-        )[:400]
-    else:
-        tk.summary = (
-            f"stored payload failed validation "
-            f"(attempt {attempt}/{MAX_PAYLOAD_VALIDATION_ATTEMPTS}); "
-            "escalated to orchestrator"
-        )[:400]
-    await session.commit()
-
-    # Escalate to the orchestrator with the validation error as feedback. A
-    # ticket the orchestrator itself owns has nobody upstream to hand to, and a
-    # run with no supervisor (e.g. a standalone ticket) has nowhere to escalate;
-    # in both cases the recorded error + terminal cap still break the loop.
-    if tk.agent_id != "orchestrator" and run.supervisor_ticket_id:
-        from zevo.engine.run.wakeup import queue_wakeup
-        await queue_wakeup(
-            session,
-            agent_id="orchestrator",
-            ticket_id=run.supervisor_ticket_id,
-            source="handoff",
-            trigger_detail=f"payload_validation_failed:{tk.id}"[:128],
-            reason=(
-                f"child ticket {tk.id} could not start: its stored payload "
-                f"failed schema validation (attempt {attempt}/"
-                f"{MAX_PAYLOAD_VALIDATION_ATTEMPTS}"
-                f"{'; failed terminally' if terminal else ''}). "
-                f"Re-emit a corrected ticket. Error: {detail}"
-            ),
-        )
+    await report_input_failure(session, tk, run, note)
     raise StoredPayloadValidationError(note) from exc
 
 
@@ -4938,7 +4928,13 @@ async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket
         f"{meta.get('scheduler_reason') or row.release_reason or ''}. "
         f"Inspect stdout {meta.get('log_path', '')} and stderr {meta.get('stderr_path', '')}."
     )
-    allowed = await _apply_ticket_failure_policy(session, ticket, error_message=error)
+    previous = (await session.scalars(select(HeartbeatRun).where(
+        HeartbeatRun.ticket_id == ticket.id,
+    ).order_by(HeartbeatRun.started_at.desc()).limit(1))).first()
+    allowed = await _apply_ticket_failure_policy(
+        session, ticket, error_message=error, origin="external_workload",
+        can_diagnose=previous is None or previous.driver not in {"evaluation_runner", "holdout_data_runner"},
+    )
     ticket.error_message = error[:2000]
     ticket.summary = (
         f"Repairing failed workload {row.instance_id}"
@@ -5005,7 +5001,7 @@ async def run_ticket(
         str(activation_payload.get("run_instruction_id") or "")
         if activation_payload.get("instruction_action") == "restart_activation" else ""
     )
-    if activation_source == "slurm_watcher":
+    if activation_source in {"slurm_watcher", "workload_watcher"}:
         from zevo.engine.run.remeasurement import restarts_workload
         previous_job = await _latest_slurm_resource_request(session, tk)
         if previous_job is not None and restarts_workload(run, tk.id, previous_job.id):
@@ -5018,7 +5014,7 @@ async def run_ticket(
             # event obtains the Ticket lock; never reinterpret the old wake as
             # Collect for the new job.
             return tk
-    if activation_source == "slurm_watcher":
+    if activation_source in {"slurm_watcher", "workload_watcher"}:
         if not await _activate_failed_workload_repair(session, tk):
             await _maybe_wake_supervisor(session, tk)
             return tk
@@ -5238,7 +5234,7 @@ async def run_ticket(
             "repair_attempts_remaining": max(0, MAX_REPAIR_ATTEMPTS - int(tk.repair_attempts or 0)),
             "unchanged_failure_count": unchanged_count,
             "unchanged_failure_limit": MAX_UNCHANGED_FAILURES,
-            "payload_validation_failure_limit": MAX_PAYLOAD_VALIDATION_ATTEMPTS,
+            "payload_validation_failure_limit": 1,
         }
         if tk.agent_id == "data" and getattr(inp, "operation", "") == "prepare_run_data":
             contract["data_plane"] = "remote" if getattr(inp, "device_info_path", "") else "local"
@@ -5378,7 +5374,8 @@ async def run_ticket(
 
     if isinstance(slurm_contract, SlurmStageJobContract) and slurm_contract.enabled:
         hb.resolved_config = {**(hb.resolved_config or {}),
-                              "execution_phase": str(slurm_contract.phase or "")}
+                              "execution_phase": str(slurm_contract.phase or ""),
+                              "execution_transport": slurm_contract.transport}
 
     if tk.agent_id == "train":
         from zevo.engine.run.adaptive_training import is_training_finalization
@@ -6038,7 +6035,7 @@ async def run_ticket(
                     )).scalar_one_or_none()
                     if live_hb is not None:
                         live_hb.resolved_config = {**config, **{key: value for key, value in (live_hb.resolved_config or {}).items()
-                            if key in {"mid_training", "execution_phase", "measurement_revision", "training_finalization"}}}
+                            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization"}}}
                 await live_session.commit()
             for row in rows:
                 row.pop("_live_inflight", None)
@@ -6106,6 +6103,7 @@ async def run_ticket(
     _os.environ["HEARTBEAT_ID"] = heartbeat_id
 
     error_message = ""
+    failure_origin: FailureOrigin = "agent_execution"
     output: BaseModel | None = None
     exit_code = 0
     try:
@@ -6210,7 +6208,7 @@ async def run_ticket(
         session.add(ExecutionEvent(ticket_id=tk.id, heartbeat_id=heartbeat_id, **values))
     if config_rows:
         hb.resolved_config = {**dict(config_rows[-1]["extras"]), **{key: value for key, value in (hb.resolved_config or {}).items()
-            if key in {"mid_training", "execution_phase", "measurement_revision", "training_finalization"}}}
+            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization"}}}
 
     # Did the measured stage go looking at its grader?
     #
@@ -6369,11 +6367,22 @@ async def run_ticket(
     pending_continuation = None
     await session.refresh(tk)
     cancelled_by_user = tk.status == "cancelled"
+    if run.gpu_provider == "cloud" and tk.agent_id in {"data", "train", "inference", "evaluation"}:
+        from zevo.engine.run.cloud_recovery import binding_lost
+        if await binding_lost(session, run.id, getattr(inp, "device_info_path", "")):
+            # The provider watcher already committed recovery. A late Agent
+            # response must not revive this execution or publish stale outputs.
+            hb.finished_at = datetime.now(timezone.utc)
+            hb.exit_code = 1
+            hb.error_message = "Cloud allocation was lost during this activation"
+            await session.commit()
+            return tk
     if output is None or error_message:
         summary = error_message or "driver produced no output"
         deferred_stage_row = await _latest_slurm_resource_request(session, tk)
         if (
             not cancelled_by_user
+            and not heldout_access_hits
             and tk.agent_id in {"data", "train", "inference", "evaluation"}
             and _slurm_job_was_submitted_by(deferred_stage_row, heartbeat_id)
         ):
@@ -6419,6 +6428,9 @@ async def run_ticket(
             tk.summary = summary[:400]
             repair_scheduled = await _apply_ticket_failure_policy(
                 session, tk, error_message=summary, cancelled=cancelled_by_user,
+                origin=failure_origin,
+                boundary="held_out_isolation" if heldout_access_hits else None,
+                can_diagnose=not is_system_runner,
             )
             session.add(HeartbeatResult(
                 ticket_id=tk.id,
@@ -6434,6 +6446,7 @@ async def run_ticket(
                 },
             ))
     else:
+        failure_origin = "agent_execution" if output.status == "failed" else "result_validation"
         if (
             isinstance(output, DataResult)
             and output.status == "succeeded"
@@ -6446,15 +6459,17 @@ async def run_ticket(
                 )
             # This is an engine-owned post-processing boundary.  A parser,
             # transfer, or validation implementation error must become a normal
-            # failed Result so the heartbeat and Ticket are committed terminally;
+            # failed Result so the heartbeat closes and bounded repair can run;
             # allowing it to escape leaves a completed agent displayed as live.
             except DataOutputValidationError as exc:
+                failure_origin = "result_validation"
                 output = output.model_copy(update={
                     "status": "failed",
                     "error_message": str(exc),
                     "notes": str(exc),
                 })
             except Exception as exc:  # noqa: BLE001
+                failure_origin = "engine_postprocessing"
                 message = f"engine could not prepare frozen Validation artifacts: {exc}"
                 output = output.model_copy(update={
                     "status": "failed",
@@ -7197,6 +7212,7 @@ async def run_ticket(
                 if status == "failed":
                     raise ValueError(summary)
             except (OSError, ValueError, RuntimeError) as exc:
+                failure_origin = "engine_postprocessing"
                 status = "failed"
                 error_message = summary = f"model preservation failed: {exc}"[:2000]
                 output.status = "failed"
@@ -7223,8 +7239,13 @@ async def run_ticket(
                     heartbeat_id=heartbeat_id,
                     **({"remote_train_config_path": output.remote_train_config_path}
                        if isinstance(output, TrainResult) else {}),
+                    **({"prepared_config_paths": tuple(path for path in (
+                        output.inference_config_path, *(member.inference_config_path for member in output.suite_members)
+                    ) if path)} if isinstance(output, InferenceResult)
+                       and inp.slurm_job.transport == "direct" else {}),
                 )
             except Exception as exc:  # submission is part of the stage result
+                failure_origin = "engine_postprocessing"
                 if not session.is_active:
                     await session.rollback()
                 await session.refresh(run)
@@ -7239,6 +7260,15 @@ async def run_ticket(
                     output.status = "failed"
                 if hasattr(output, "error_message"):
                     output.error_message = summary
+        if run.gpu_provider == "cloud":
+            from zevo.engine.run.cloud_recovery import binding_lost
+            if await binding_lost(session, run.id, getattr(inp, "device_info_path", "")):
+                await session.refresh(tk)
+                hb.finished_at = datetime.now(timezone.utc)
+                hb.exit_code = 1
+                hb.error_message = "Cloud allocation was lost during result validation or publication"
+                await session.commit()
+                return tk
         # A cancelled ticket stays cancelled. Cancelling SIGTERMs the driver,
         # which surfaces here as a non-zero exit — indistinguishable from a
         # genuine failure unless we look. Overwriting the status lost the fact
@@ -7256,7 +7286,9 @@ async def run_ticket(
                     tk,
                     error_message=error_message or summary,
                     cancelled=False,
-                    result=output,
+                    result=output, origin=failure_origin,
+                    boundary="held_out_isolation" if heldout_access_hits else None,
+                    can_diagnose=not is_system_runner,
                 )
             elif status == "deferred":
                 tk.status = "waiting_external"
@@ -7567,15 +7599,15 @@ async def run_ticket(
         elif prefix == "Running":
             tk.status = "running"
             body = (
-                f"Running: Slurm job {deferred_stage_row.instance_id} is running; "
+                f"Running: workload {deferred_stage_row.instance_id} is running; "
                 "Zevo will collect and validate its outputs after it finishes."
             )
         elif state in _SLURM_TERMINAL_STATES:
-            body = f"Waiting: Slurm job {deferred_stage_row.instance_id} finished; output collection is pending."
+            body = f"Waiting: workload {deferred_stage_row.instance_id} finished; output collection is pending."
         else:
             body = (
-                f"Waiting: Slurm job {deferred_stage_row.instance_id} was submitted "
-                "and registered; Zevo is waiting for Slurm to start it."
+                f"Waiting: workload {deferred_stage_row.instance_id} was submitted "
+                "and registered; Zevo is waiting for execution to start."
             )
         await _add_slurm_stage_message_once(
             session,
@@ -7598,7 +7630,7 @@ async def run_ticket(
                 job=completed_stage_row,
                 prefix="Done",
                 body=(
-                    f"Done: Slurm job {completed_stage_row.instance_id} completed; "
+                    f"Done: workload {completed_stage_row.instance_id} completed; "
                     f"the {tk.agent_id} Result and all required artifacts passed "
                     "Zevo validation."
                 ),
@@ -7636,42 +7668,7 @@ async def run_ticket(
         return tk
 
     if repair_scheduled:
-        # Repair remains inside the same Ticket and must not wake the
-        # Orchestrator between attempts. The new activation sees the exact
-        # system repair message above plus every existing artifact in work_dir.
-        # Reap an orphaned remote process before starting the next activation;
-        # otherwise a failed local Agent/SSH session could leave the old
-        # trainer consuming the same GPU beside its repair attempt.
-        try:
-            from zevo.engine.run.remote_jobs import cancel_ticket_remote_job
-            cleanup = await cancel_ticket_remote_job(session, tk, preserve_allocation=True)
-            if cleanup.get("attempted") and not cleanup.get("ok"):
-                tk.status = "failed"
-                tk.error_message = "Repair could not confirm old worker termination; GPU retained for cleanup"
-                tk.repair_route = "orchestrator"
-                await session.commit()
-                await _maybe_wake_supervisor(session, tk)
-                return tk
-        except Exception as exc:
-            tk.status = "failed"
-            tk.error_message = f"Repair process cleanup failed: {exc}"
-            tk.repair_route = "orchestrator"
-            await session.commit()
-            await _maybe_wake_supervisor(session, tk)
-            return tk
-        from zevo.engine.run.wakeup import queue_wakeup
-        await queue_wakeup(
-            session,
-            agent_id=tk.agent_id,
-            ticket_id=tk.id,
-            source="retry",
-            trigger_detail=f"repair_{int(tk.repair_attempts or 0)}",
-            reason=(
-                f"automatic self-repair {int(tk.repair_attempts or 0)}/"
-                f"{MAX_REPAIR_ATTEMPTS}: {tk.error_message[:500]}"
-            ),
-            payload={"repair_attempt": int(tk.repair_attempts or 0)},
-        )
+        await _queue_ticket_repair(session, tk)
         return tk
 
     from zevo.engine.run.gpu_lifecycle import finish_stage

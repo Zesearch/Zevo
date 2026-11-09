@@ -202,7 +202,8 @@ async def test_engine_inherits_prediction_compute_route_and_rejects_released_hos
         session.add_all([run, infra, product, source, ticket]); await session.flush()
         inp = await runner._bind_evaluation_compute(session, run, ticket, ticket.inputs, str(tmp_path), work(tmp_path))
         assert inp.device_info_path == str(device)
-        assert inp.slurm_job.enabled == (provider == 'cluster')
+        assert inp.slurm_job.enabled
+        assert inp.slurm_job.transport == ('slurm' if provider == 'cluster' else 'direct')
         assert inp.remote_work_dir.endswith('/eval-test-001/evaluation')
         assert ticket.inputs['device_info']['work_product_id'] == product.id
         if provider == 'cloud':

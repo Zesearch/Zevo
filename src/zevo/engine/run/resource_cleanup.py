@@ -67,16 +67,41 @@ async def discover_resources(session, run: Run) -> list[InfraInstance]:
     return rows
 
 
-def _cloud_provider(backend: str):
+async def cloud_recovery_keys(session, run: Run, owner: InfraInstance) -> dict[str, str]:
+    """Self-hosted credentials; Console supplies its workspace-scoped adapter."""
+    if owner.run_id != run.id or not owner.instance_id:
+        raise ValueError("cloud observation requires the Run's exact allocation")
+    keys = {name: os.environ.get(name, "") for name in
+            ("VASTAI_API_KEY", "LAMBDA_API_KEY", "AWS_REGION")}
+    backend = (owner.meta or {}).get("backend") or (owner.meta or {}).get("cloud_backend") or run.cloud_backend
+    if backend == "aws":
+        import boto3
+        credentials = boto3.session.Session().get_credentials()
+        if credentials:
+            frozen = credentials.get_frozen_credentials()
+            keys.update(AWS_ACCESS_KEY_ID=frozen.access_key, AWS_SECRET_ACCESS_KEY=frozen.secret_key,
+                        AWS_SESSION_TOKEN=frozen.token or "")
+    return keys
+
+
+def _cloud_provider(backend: str, api_key: str | None = None, secret_key: str = "", *,
+                    region: str = "", session_token: str = ""):
     if backend == "vastai":
         from zevo.providers.vastai import VastAIProvider
-        return VastAIProvider()
+        return VastAIProvider(api_key=api_key)
     if backend == "lambda":
         from zevo.providers.lambda_labs import LambdaCloudProvider
-        return LambdaCloudProvider()
+        return LambdaCloudProvider(api_key=api_key)
     if backend == "aws":
+        import boto3
         from zevo.providers.aws_ec2 import AwsEc2Provider
-        return AwsEc2Provider()
+        options = {"region": region} if region else {}
+        if api_key is not None:
+            if not api_key or not secret_key:
+                raise ValueError("cloud observation requires valid AWS credentials")
+            options["session"] = boto3.session.Session(aws_access_key_id=api_key,
+                aws_secret_access_key=secret_key, aws_session_token=session_token or None)
+        return AwsEc2Provider(**options)
     raise ValueError("cloud backend is unknown; refusing cross-provider destruction")
 
 

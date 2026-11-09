@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { transformWithEsbuild } from 'vite';
 const source = readFileSync(new URL('../src/lib/executionProgress.ts', import.meta.url), 'utf8');
 const { code } = await transformWithEsbuild(source, 'execution.ts', { loader: 'ts' });
-const { executionPhase, phaseLabel, inferencePreparation, latestBenchmarkEvent, activationExecution, benchmarkCounts, latestExecution, activationWorkload, workloadCanProgress } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+const { evaluationBenchmarkLabel, executionPhase, phaseLabel, inferencePreparation, latestBenchmarkEvent, activationExecution, benchmarkCounts, latestExecution, activationWorkload, workloadCanProgress } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const hb = (id, hour, phase) => ({id, started_at: `2026-10-26T${hour}:00:00Z`, activation_phase: phase});
 const event = (hour, heartbeat, execution, name, complete = false) => ({ts: `2026-10-26T${hour}:10:00Z`, heartbeat_id: heartbeat,
   phase: 'generate', extras: {execution_id: execution, benchmark_name: name, benchmark_total: 3, benchmark_complete: complete}});
@@ -177,6 +177,16 @@ test('finished or suspended workloads never keep a live phase timer without an e
   assert.equal(workloadCanProgress({...workload('job', '10'), status: 'failed'}), false);
 });
 
+test('direct progress follows the workload even while its host remains ready', () => {
+  for (const provider of ['instance', 'cloud']) {
+    const row = {...workload('job', '10'), provider, status:'ready'};
+    for (const state of ['PENDING', 'RUNNING', 'STOPPING', 'COMPLETED']) {
+      row.meta = {...row.meta, direct_workload:true, scheduler_state:state};
+      assert.equal(workloadCanProgress(row), state === 'RUNNING', `${provider}:${state}`);
+    }
+  }
+});
+
 test('historical selection and new submit activations cannot bind a different workload', () => {
   const activations = [hb('first', '09', 'submit'), hb('retry', '12', 'submit'), hb('collect', '14', 'collect')];
   const old = workload('old', '10', 'COMPLETED');
@@ -196,10 +206,19 @@ test('legacy events without execution IDs cannot leak from a later retry into hi
   assert.deepEqual(activationExecution([first, later], activations[0], activations, old), [first]);
 });
 
-test('evaluation exposes the full suite before its first completion', () => {
-  assert.deepEqual(benchmarkCounts([{phase: 'progress', extras: {
+test('evaluation waits for scoring instead of the pre-allocation suite announcement', () => {
+  const announcement = {phase: 'progress', extras: {
     phase: 'suite_start', benchmark_total: 16, step: 0, total: 16,
-  }}], undefined, 'evaluation'), {completed: 0, total: 16});
+  }};
+  assert.equal(benchmarkCounts([announcement], undefined, 'evaluation'), null);
+  for (const phase of ['waiting_for_allocation', 'starting_workload', 'validating_inputs']) {
+    assert.equal(benchmarkCounts([announcement, {phase, extras: {}}], undefined, 'evaluation'), null);
+  }
+  for (const phase of ['scoring', 'benchmark_start:hash', 'model_judge:hash']) {
+    const started = {phase, extras: {phase: phase.split(':')[0], benchmark_total: 16}};
+    assert.deepEqual(benchmarkCounts([announcement, started], undefined, 'evaluation'), {completed: 0, total: 16});
+    assert.equal(benchmarkCounts([announcement, {...started, extras: {...started.extras, progress_scope: 'preflight'}}], undefined, 'evaluation'), null);
+  }
 });
 
 test('polled evaluation snapshots preserve parallel completions without double counting', () => {
@@ -209,4 +228,37 @@ test('polled evaluation snapshots preserve parallel completions without double c
     ]}};
   assert.deepEqual(benchmarkCounts([event, event], undefined, 'evaluation'), {completed: 2, total: 16});
   assert.deepEqual(benchmarkCounts([event], ['A'], 'evaluation'), {completed: 1, total: 1});
+});
+
+
+test('collect ignores historical zero reset and keeps completed workload', () => {
+  const done = {...event('10', 'a', 'first', 'Alpaca'), phase: 'benchmark_complete:alpaca',
+    extras: {execution_id: 'first', phase: 'benchmark_complete', benchmark_total: 2,
+      completed_benchmarks: [{id:'a', name:'MATH'}, {id:'b',name:'Alpaca'}]}};
+  const reset = {...event('11','b',undefined,''), phase:'suite_start', extras:{benchmark_total:2}};
+  const scoped = activationExecution([done,reset], hb('b','11','collect'));
+  assert.deepEqual(benchmarkCounts(scoped,undefined,'evaluation'),{completed:2,total:2});
+  assert.deepEqual(activationExecution([done],hb('c','12','repair')),[]);
+});
+
+test('evaluation labels use structured concurrent benchmark names and completion', () => {
+  const start = {phase:'benchmark_start:a',extras:{benchmark_name:'MATH',active_benchmarks:['MATH','Alpaca']}};
+  assert.equal(evaluationBenchmarkLabel([start],'Final Test'),'MATH · Alpaca');
+  const finish = {phase:'benchmark_finished:a',extras:{active_benchmarks:['Alpaca']}};
+  assert.equal(evaluationBenchmarkLabel([start,finish],'Final Test'),'Alpaca');
+  assert.equal(evaluationBenchmarkLabel([{phase:'model_judge:x',extras:{benchmark_name:'Dolly'}}],'Validation'),'Dolly');
+  const completed = {phase:'completed',extras:{active_benchmarks:[],benchmark_total:2,completed_benchmarks:[{id:'a',name:'MATH'},{id:'b',name:'Alpaca'}]}};
+  assert.equal(evaluationBenchmarkLabel([start,finish,completed],'Final Test'),'Completed');
+  assert.deepEqual(benchmarkCounts([completed],undefined,'evaluation'),{completed:2,total:2});
+});
+
+
+test('queued evaluation retry does not inherit a previous execution progress bar', () => {
+  const previous = {...event('10', 'a', 'old', 'A'), phase: 'scoring',
+    extras: {execution_id: 'old', phase: 'benchmark_complete', benchmark_total: 1, benchmark_id: 'a'}};
+  const activations = [hb('a', '09', 'submit'), hb('b', '12', 'collect')];
+  const queued = workload('new', '12', 'PENDING');
+  const selected = activationExecution([previous], activations[1], activations, queued);
+  assert.equal(benchmarkCounts(selected, undefined, 'evaluation'), null);
+  assert.deepEqual(benchmarkCounts(activationExecution([previous], activations[0], activations), undefined, 'evaluation'), {completed: 1, total: 1});
 });

@@ -8,12 +8,7 @@ every ~5 min forever -- no escalation, no re-plan, and on a rented GPU an
 unbounded idle burn (hit live: an inference ticket's payload failed
 InferenceTaskInput validation every wakeup).
 
-These tests prove the fix:
-  * the runner escalates each such wakeup to the orchestrator and, after N
-    consecutive failures, fails the ticket terminally instead of looping;
-  * run_ticket actually routes a build-time ValidationError through that path;
-  * the reconciler is a safety net for a stuck-queued ticket the runner's
-    terminal step never reached.
+These tests cover immediate review, deduplication, and the legacy reconciler.
 """
 from __future__ import annotations
 
@@ -108,9 +103,8 @@ async def _orch_wakeups(db) -> list[AgentWakeupRequest]:
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_first_failures_escalate_and_do_not_loop_terminally() -> None:
-    """Below the cap: escalate to the orchestrator, keep the ticket queued
-    (recoverable), and raise so the wakeup is recorded failed."""
+async def test_first_failure_stops_automatic_dispatch_and_requests_review() -> None:
+    """The first rejection stops dispatch and leaves the Run recoverable."""
     Session = await _session()
     async with Session() as db:
         await _seed_run_with_child(db)
@@ -123,7 +117,7 @@ async def test_first_failures_escalate_and_do_not_loop_terminally() -> None:
             )
 
         tk = await db.get(Ticket, "infer-1")
-        assert tk.status == "queued"  # not terminal yet -- orchestrator may fix it
+        assert tk.status == "failed"  # coordinator can correct the work order
         assert tk.repair_route == "orchestrator"
         assert PAYLOAD_VALIDATION_FAILURE_SIGNATURE in tk.error_message
         # Escalated: the orchestrator was woken with the error as feedback.
@@ -182,7 +176,7 @@ async def test_run_ticket_routes_build_validation_error_through_escalation(
         tk = await db.get(Ticket, "infer-1")
         # Never flipped to running (build failed before execution) and now
         # escalated rather than silently re-queued.
-        assert tk.status == "queued"
+        assert tk.status == "failed"
         assert tk.repair_route == "orchestrator"
         assert PAYLOAD_VALIDATION_FAILURE_SIGNATURE in tk.error_message
         assert len(await _orch_wakeups(db)) == 1
@@ -316,14 +310,13 @@ async def test_run_ticket_routes_a_released_device_value_error_through_escalatio
             await run_ticket(db, ticket_id="infer-1", work_dir_root=str(tmp_path))
 
         tk = await db.get(Ticket, "infer-1")
-        assert tk.status == "queued"
+        assert tk.status == "failed"
         assert tk.repair_route == "orchestrator"
         assert "cloud instance has been released" in tk.error_message
         assert PAYLOAD_VALIDATION_FAILURE_SIGNATURE in tk.error_message
         assert len(await _orch_wakeups(db)) == 1
 
-        # Two more identical wakes and the ticket fails terminally instead of
-        # being re-driven by the alarm clock forever.
+        # An explicit duplicate validation request still does not notify twice.
         await _add_failed_validation_wakeups(db, "infer-1", 2)
         with pytest.raises(StoredPayloadValidationError):
             await run_ticket(db, ticket_id="infer-1", work_dir_root=str(tmp_path))

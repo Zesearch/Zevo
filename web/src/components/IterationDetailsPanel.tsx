@@ -108,6 +108,7 @@ function datasetName(meta: Record<string, unknown>): string {
 }
 
 function numberText(value: unknown): string {
+  if (value == null || value === "") return "—";
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric >= 0 ? numeric.toLocaleString() : "—";
 }
@@ -177,7 +178,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
   }, [artifacts, run.tickets]);
 
   if (error) return <div className="rounded-bezel border border-coral-500/30 p-4 text-sm text-coral-300">Failed to load iteration details.</div>;
-  if (!groups.length) return <div className="rounded-bezel border border-dashed border-hair p-8 text-center text-sm text-dim">No iteration evidence yet.</div>;
+  if (!groups.length) return <div className="rounded-bezel border border-dashed border-hair p-8 text-center text-sm text-dim">—</div>;
 
   const ticketById = new Map(run.tickets.map((ticket) => [ticket.id, ticket]));
   const selectedParameters = selection?.kind === "train"
@@ -271,6 +272,8 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
         );
         const testRows = preparedTestRows || predictionRows
           || testMeta.n_rows || testMeta.question_rows || testMeta.n_rows_out;
+        const validationCount = numberText(validationRows || inferMeta.n_rows);
+        const testCount = numberText(testRows);
         const validationAggregate = numericScore(journal?.score);
         const testAggregate = numericScore(journal?.test_score);
         const validationPerformance = benchmarkPerformance(
@@ -357,7 +360,8 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
               />
               <Fact
                 label="Predictions"
-                value={`Val ${numberText(validationRows || inferMeta.n_rows)} · Test ${numberText(testRows)}`}
+                value={validationCount === "—" && testCount === "—"
+                  ? "—" : `Val ${validationCount} · Test ${testCount}`}
                 onClick={infer || testPrediction ? () => {
                   setPreviewPage(1);
                   setResultLane(infer ? "validation" : "test");
@@ -379,10 +383,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
                 label="Evaluation"
                 value={hasEvaluation
                   ? `Val ${fmtScore(validationAggregate, run.validation_metric)} · Test ${fmtScore(testAggregate, run.metric)}`
-                  : infer ? "Awaiting scores" : "—"}
-                hint={!hasEvaluation && infer
-                  ? "Available after deterministic Evaluation finishes"
-                  : undefined}
+                  : "—"}
                 onClick={hasEvaluation ? () => setSelection({
                   title: "Benchmark performance",
                   kind: "evaluation",
@@ -485,7 +486,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
                 : <div className={`${selection.kind === "inference" ? "mt-3" : ""} rounded-md border border-dashed border-hair p-8 text-center text-sm text-dim`}>
                     {previewError ? "Unable to load preview. Please try again."
                       : detail ? (selection.kind === "data" && detail.preview
-                          ? detail.preview : "No tabular preview is available.")
+                          ? detail.preview : "—")
                         : "Loading preview…"}
                   </div>
             )}
@@ -504,14 +505,12 @@ function EvaluationPerformancePanel({ value }: { value: EvaluationPerformance })
         rows={value.validation}
         aggregate={value.validationAggregate}
         aggregateMetric={value.validationMetric}
-        empty="Validation Evaluation has not finished."
       />
       <PerformanceSuite
         title="Final Test performance"
         rows={value.test}
         aggregate={value.testAggregate}
         aggregateMetric={value.testMetric}
-        empty="Final Test Evaluation has not finished."
       />
     </div>
   );
@@ -523,13 +522,12 @@ function displayedScoreScale(metric: string): string {
 }
 
 function PerformanceSuite({
-  title, rows, aggregate, aggregateMetric, empty,
+  title, rows, aggregate, aggregateMetric,
 }: {
   title: string;
   rows: BenchmarkPerformance[];
   aggregate?: number;
   aggregateMetric: string;
-  empty: string;
 }) {
   const accent = "text-brass-300";
   const frame = "border-brass-500/25";
@@ -581,7 +579,7 @@ function PerformanceSuite({
           </table>
         </div>
       ) : (
-        <div className="p-8 text-center text-sm text-dim">{empty}</div>
+        <div className="p-8 text-center text-sm text-dim">—</div>
       )}
     </section>
   );
