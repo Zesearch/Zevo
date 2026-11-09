@@ -275,6 +275,8 @@ export type HeartbeatDTO = {
   activation_phase: string;
   repair_source_ticket_id?: string;
   repair_source_agent_id?: string;
+  repair_target_ticket_ids?: string[];
+  repair_only?: boolean;
   execution_phase?: string;
   execution_transport?: string;
   training_finalization?: boolean;

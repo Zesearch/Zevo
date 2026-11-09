@@ -18,7 +18,7 @@ class FailureRecovery(BaseModel):
         "Authority needed for the next action. current_task covers implementation repair "
         "or a bounded diagnostic within the existing work order, including executing a "
         "corrected workload again on the same resources (use execution_retry_reason). "
-        "resource_plan means the resource requirements or allocation must CHANGE; needing "
+        "Replacing unusable compute within the same requirements uses execution_retry_action=replace_resource. resource_plan means the resource requirements must CHANGE; needing "
         "a new submit contract alone is current_task. Other scopes request "
         "Orchestrator review; they do not authorize changing resources, pins or decisions."
     ))

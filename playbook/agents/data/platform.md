@@ -1,3 +1,14 @@
+## Resource recovery
+
+For an unusable allocation, return a failed collect result with
+`execution_retry_reason`, `execution_retry_action="replace_resource"`, and
+`failure_recovery.scope="current_task"` with verified evidence. The engine
+replaces resources within the unchanged plan and resumes this same Ticket.
+Use the default `resubmit` for corrected workloads on healthy resources. Do not
+release resources yourself. A changed resource requirement still requires review.
+Preserve complete checkpoints and committed output receipts; never silently
+restart completed work when a replacement host lacks the durable artifacts.
+
 ## Execution transport
 
 `COMPLETED`/exit 0 is not task completion. Failed collect requiring execution:

@@ -13,6 +13,7 @@ from zevo.engine.run import cloud_recovery as recovery, direct_jobs, resource_cl
 @pytest_asyncio.fixture
 async def setup(tmp_path, monkeypatch):
     engine, db, run, ticket, owner, inp = await database(tmp_path)
+    ticket.inputs = {"device_info": {"path": inp.device_info_path, "artifact_role": "device_info"}}
     run.cloud_backend = "aws"
     run.supervisor_ticket_id = "orch"
     owner.meta = {"backend": "aws", "region": "us-west-2"}
@@ -63,18 +64,17 @@ async def test_terminated_allocation_hands_off_once_and_never_republishes(setup,
     assert await tick(s) == 1
     assert s.owner.released_at is not None and s.job.released_at is not None
     assert s.job.meta["scheduler_state"] == "NODE_FAIL"
-    assert s.ticket.status == "failed" and s.ticket.repair_route == "orchestrator"
+    assert s.ticket.status == "waiting_external" and s.ticket.repair_route == "self"
     assert s.ticket.repair_attempts == 1
     assert s.run.lifecycle["cloud_resource_recovery_attempts"] == 1
-    wakes = (await s.db.scalars(select(AgentWakeupRequest))).all()
-    assert len(wakes) == 1 and wakes[0].source == "resource_recovery"
-    assert wakes[0].payload["cloud_resource_recovery"]["replacement_allowed"]
-    assert "checkpoint" in wakes[0].reason and "Remote-only" in wakes[0].reason
+    assert not (await s.db.scalars(select(AgentWakeupRequest))).all()
+    event = s.run.lifecycle["stage_resource_recoveries"][s.ticket.id]
+    assert event["owner_id"] == s.owner.id and event["phase"] == "stopping"
     assert await recovery.reconcile(s.db) == 0
     async def forbidden(*args, **kwargs): pytest.fail("lost allocation must not be republished")
     monkeypatch.setattr(direct_jobs, "remote_call", forbidden)
     assert await direct_jobs.reconcile(s.db) == (0, 0)
-    assert len((await s.db.scalars(select(AgentWakeupRequest))).all()) == 1
+    assert not (await s.db.scalars(select(AgentWakeupRequest))).all()
 
 
 @pytest.mark.asyncio
@@ -171,11 +171,11 @@ async def test_new_ready_allocation_is_reused_in_coordinator_context(setup):
 
 @pytest.mark.asyncio
 async def test_failed_handoff_rolls_back_release_and_retries(setup, monkeypatch):
-    from zevo.engine.run import wakeup
+    from zevo.engine.run import resource_recovery
     s = setup
-    original = wakeup.queue_wakeup
+    original = resource_recovery.request_replacement
     async def broken(*args, **kwargs): raise RuntimeError("queue unavailable")
-    monkeypatch.setattr(wakeup, "queue_wakeup", broken)
+    monkeypatch.setattr(resource_recovery, "request_replacement", broken)
     s.provider.state = "terminated"
     assert await tick(s) == 0
     await s.db.refresh(s.owner)
@@ -183,7 +183,7 @@ async def test_failed_handoff_rolls_back_release_and_retries(setup, monkeypatch)
     await s.db.refresh(s.run)
     assert s.owner.released_at is None and s.job.released_at is None
     assert not s.run.lifecycle.get("cloud_resource_recoveries")
-    monkeypatch.setattr(wakeup, "queue_wakeup", original)
+    monkeypatch.setattr(resource_recovery, "request_replacement", original)
     assert await tick(s) == 1
 
 
@@ -211,10 +211,10 @@ async def test_private_workload_failure_exposes_only_allocation_facts(setup):
     s.ticket.error_message = "private answer and score"
     s.provider.state = "terminated"
     await tick(s)
-    assert s.ticket.repair_route == "terminal"
-    wake = (await s.db.scalars(select(AgentWakeupRequest))).one()
-    assert "private answer" not in str(wake.payload) + wake.reason
-    assert s.ticket.id not in str(wake.payload)
+    assert s.ticket.repair_route == "self"
+    assert not (await s.db.scalars(select(AgentWakeupRequest))).all()
+    assert "private answer" not in str(s.run.lifecycle)
+    assert s.ticket.id not in str(await recovery.recovery_context(s.db, s.run))
 
 
 @pytest.mark.asyncio
@@ -266,7 +266,7 @@ async def test_loss_also_closes_agents_outside_a_live_workload(setup, tmp_path, 
         s.job.meta = {**s.job.meta, "scheduler_state": "COMPLETED"}
     s.provider.state = "terminated"
     assert await tick(s) == 1
-    assert s.ticket.status == "failed"
+    assert s.ticket.status == "waiting_external"
     assert await recovery.binding_lost(s.db, s.run.id, str(device))
     info = info_for("cloud").model_copy(update={"instance_id": "new-host"})
     device.write_text(info.model_dump_json())
@@ -300,23 +300,20 @@ async def test_unknown_aws_region_never_uses_ambient_default(setup, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_recovery_review_can_emit_infrastructure_through_normal_api(setup):
-    from zevo.api.routers.shared.tickets import create_ticket
-    from zevo.contracts.tickets import CreateTicketBody
-    from zevo.db import HeartbeatRun
+async def test_engine_emits_one_replacement_infrastructure_without_coordinator(setup):
+    from zevo.engine.run import resource_recovery
     s = setup
     s.provider.state = "terminated"
     await tick(s)
-    s.db.add(Agent(id="infrastructure", name="Infrastructure", title="Infra", identity_path=""))
-    s.db.add(HeartbeatRun(id="recovery-review", ticket_id="orch", agent_id="orchestrator", driver="test", model="test"))
-    await s.db.commit()
-    created = await create_ticket(CreateTicketBody(run_id=s.run.id, agent_id="infrastructure",
-        payload={"operation": "provision", "purpose": "train"}), s.db)
-    replacement = await s.db.get(Ticket, created.id)
+    await resource_recovery.reconcile(s.db)
+    event = s.run.lifecycle[resource_recovery.KEY][s.ticket.id]
+    replacement = await s.db.get(Ticket, event["infra_ticket_id"])
     assert replacement.agent_id == "infrastructure" and replacement.payload["operation"] == "provision"
-    # Infra dispatch still waits for this review's validated completion.
-    assert not (await s.db.scalars(select(AgentWakeupRequest).where(
-        AgentWakeupRequest.ticket_id == replacement.id))).all()
+    wakes = (await s.db.scalars(select(AgentWakeupRequest))).all()
+    assert len(wakes) == 1 and wakes[0].ticket_id == replacement.id
+    assert wakes[0].source == "resource_recovery" and "infer-one" not in str(wakes[0].payload)
+    await resource_recovery.reconcile(s.db)
+    assert len((await s.db.scalars(select(AgentWakeupRequest))).all()) == 1
 
 
 @pytest.mark.asyncio

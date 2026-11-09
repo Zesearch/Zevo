@@ -439,7 +439,7 @@ function PipelineTimeline({
     [heartbeats, supervisorId],
   );
   const orchestratorWakes = useMemo(
-    () => heartbeatGroups(rawOrchestratorWakes.filter((heartbeat) => !isMidTrainingActivation(heartbeat))).map(settledHeartbeat),
+    () => heartbeatGroups(rawOrchestratorWakes.filter((heartbeat) => !isMidTrainingActivation(heartbeat) && !heartbeat.repair_only)).map(settledHeartbeat),
     [rawOrchestratorWakes],
   );
   const midTrainingWakes = rawOrchestratorWakes.filter(isMidTrainingActivation);
@@ -906,7 +906,7 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
   // finishes — so `limit=1` showed one wake's tokens and cost while the run
   // header summed them all, and the stages never added up to the total.
   const { data: heartbeats = [] } = useSWR<HeartbeatDTO[]>(
-    ticketId ? `/api/heartbeats?ticket_id=${encodeURIComponent(ticketId)}&limit=500` : null,
+    ticketId ? `/api/heartbeats?ticket_id=${encodeURIComponent(ticketId)}&include_repairs=true&limit=500` : null,
     { refreshInterval: 3000 },
   );
   // A cluster allocation is recorded immediately after `sbatch`, before Slurm
@@ -926,7 +926,8 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
   const [events, setEvents] = useState<EventEnvelope[]>([]);
   const [seek, setSeek] = useState<{ ts: string; n: number }>({ ts: "", n: 0 });
   const [selectedActivation, setSelectedActivation] = useState<string | undefined>(undefined);
-  const chronological = [...heartbeats].sort((a, b) => a.started_at.localeCompare(b.started_at));
+  const history = [...heartbeats].sort((a, b) => a.started_at.localeCompare(b.started_at));
+  const chronological = history.filter((heartbeat) => heartbeat.ticket_id === ticketId);
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<string | undefined>(undefined);
   const allMidActivations = midTrainingTicketId ? chronological.filter((heartbeat) =>
     isMidTrainingActivation(heartbeat) && heartbeat.mid_training?.train_ticket_id === midTrainingTicketId) : [];
@@ -942,7 +943,7 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
   const effectiveHeartbeatId = selectedActivation ?? defaultWake?.id ?? heartbeatId;
   const picked = showUnrecordedFailure
     ? undefined
-    : effectiveHeartbeatId !== undefined ? chronological.find((heartbeat) => heartbeat.id === effectiveHeartbeatId)
+    : effectiveHeartbeatId !== undefined ? history.find((heartbeat) => heartbeat.id === effectiveHeartbeatId)
       : midTrainingTicketId ? undefined : heartbeats[0];
   const hbId = picked?.id;
   useEffect(() => {
@@ -1021,7 +1022,8 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
       : Date.parse(attemptStart) >= Date.parse(picked.started_at));
   const currentTrainingActivity = t.agent_id === "train" && workloadCanProgress(selectedWorkload)
     ? trainingActivity(phaseEvents, t.mid_training_validation, t.status, paused || needsInput) : null;
-  const activations = midTrainingTicketId ? midActivations : t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : chronological;
+  const activations = midTrainingTicketId ? midActivations : t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : history;
+  const reviewingRepair = picked?.agent_id === "orchestrator" && t.agent_id !== "orchestrator";
   return (
     <Bezel className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hair p-4">
@@ -1056,11 +1058,13 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
       {(activations.length > 1 || midTrainingTicketId) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
           <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation history" : "Stage history"}</span>
-          {activations.map((heartbeat, index) => {
+          {activations.map((heartbeat) => {
             const active = heartbeat.id === picked?.id;
-            const label = midTrainingTicketId
+            const label = heartbeat.agent_id === "orchestrator" && t.agent_id !== "orchestrator"
+              ? "Orchestrator · Repair decision"
+              : midTrainingTicketId
               ? withRepairLabel(midTrainingActivationLabel(heartbeat, activations), heartbeat)
-              : stageAttemptLabel(t, heartbeat, index + 1,
+              : stageAttemptLabel(t, heartbeat, chronological.findIndex((h) => h.id === heartbeat.id) + 1,
                 t.agent_id === "train" && heartbeat.id === chronological.at(-1)?.id ? currentTrainingActivity || "" : "");
             return (
               <button
@@ -1091,6 +1095,8 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
               </p>
             </div>
           )}
+          {reviewingRepair && <p className="mb-3 text-sm text-slate-300">{picked?.action_summary || "Reviewing this stage's recovery."}</p>}
+          {!reviewingRepair && <>
           <GenerationReport report={t.generation_report} />
           <ExecutionPhase events={t.agent_id === "inference" ? inferenceEvents : phaseEvents} agent={t.agent_id} active={phaseActive} workload={selectedWorkload} />
           <BenchmarkStageProgress ticket={t} events={inferenceEvents} useCurrentAttempt={useCurrentAttempt} active={phaseActive} />
@@ -1103,6 +1109,7 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
           {activeResourceRequest && (
             <ResourceRequestStatus instance={activeResourceRequest} />
           )}
+          </>}
           {/* What it did, in order, read off the feed below — so a step appears
               because it happened, not because a script remembered to say so. */}
           <StepTimeline
@@ -1115,7 +1122,7 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
           />
           {/* Loss chart is a TRAIN-only thing (inference has no loss); guard on the
               agent so a stray/contaminated loss row can't surface it elsewhere. */}
-          {t.agent_id === "train" && t.execution_events.some(
+          {!reviewingRepair && t.agent_id === "train" && t.execution_events.some(
             (p) => p.event_type === "attempt" || p.loss > 0,
           ) && (
             <TrainingMonitor executionEvents={t.execution_events} renderContainer={(content) => (

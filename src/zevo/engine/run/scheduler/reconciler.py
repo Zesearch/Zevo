@@ -2095,6 +2095,9 @@ async def reconcile_runs_and_tickets(
             from zevo.engine.run.cloud_recovery import reconcile as reconcile_cloud_allocations
             report["cloud_allocations_lost"] = await reconcile_cloud_allocations(s)
         async with Session() as s:
+            from zevo.engine.run.resource_recovery import reconcile as reconcile_resource_recovery
+            report["resources_recovered"] = await reconcile_resource_recovery(s)
+        async with Session() as s:
             from zevo.engine.run.direct_jobs import reconcile as reconcile_direct_workloads
             checked, resumed = await reconcile_direct_workloads(s)
             report["direct_jobs_checked"] = checked

@@ -802,6 +802,14 @@ async def _build_infra_input(
         # honoring explicit false.
         auto_release = True
 
+    recovery_plan = next((e.get("resource_plan") for e in (run.lifecycle or {}).get("stage_resource_recoveries", {}).values()
+        if e.get("infra_ticket_id") == ticket.id), None)
+    if recovery_plan and provider == "cloud":
+        backend = recovery_plan.get("cloud_backend")
+        if backend not in available_cloud_backends:
+            raise ValueError("Recovery requires credentials for the original cloud backend")
+        available_cloud_backends = [backend]
+        preferred_cloud_backend = backend
     return InfraTaskInput(
         ticket_id=ticket.id,
         run_id=str(ticket.run_id or ""),
@@ -814,7 +822,7 @@ async def _build_infra_input(
         release=release,
         num_gpus=_num_gpus(run),
         max_queue_wait_hours=float(run.max_queue_wait_hours or 0.0),
-        resource_context=dict(specialist_context or {}),
+        resource_context={**dict(specialist_context or {}), **({"recovery_resource_plan": recovery_plan} if recovery_plan else {})},
         gpu_allocation_mode=getattr(run, "gpu_allocation_mode", None) or "per_stage",
         gpu_lease_request_schema=GpuLeaseRequest.model_json_schema(),
         gpu_lease_grant_schema=GpuLeaseGrant.model_json_schema(),
@@ -1936,6 +1944,8 @@ async def _bind_evaluation_compute(session, run, ticket, inputs, work_dir, inp):
         binding = dict((source.inputs or {}).get("device_info") or {})
     if not binding:
         raise ValueError("Evaluation has no compute route; provision resources before scoring")
+    from zevo.engine.run.resource_recovery import current_device_binding
+    binding = (await current_device_binding(session, run, {"device_info": binding}))["device_info"]
     resolved = await resolve_input_bindings(session, run_id=run.id, inputs={"device_info": binding})
     path = input_path(resolved, "device_info")
     info = InfrastructureDeviceInfo.model_validate_json(Path(path).read_text())
@@ -4839,6 +4849,12 @@ async def _apply_ticket_failure_policy(
 
 
 async def _queue_ticket_repair(session: AsyncSession, tk: Ticket) -> None:
+    from zevo.engine.run.resource_recovery import request_replacement
+    row = await _latest_slurm_resource_request(session, tk)
+    if row and (row.meta or {}).get("execution_repair", {}).get("action") == "replace_resource":
+        await request_replacement(session, tk, row)
+        await session.commit()
+        return
     # Repair remains inside the same Ticket and must not wake the
     # Orchestrator between attempts. The new activation sees the exact
     # system repair message above plus every existing artifact in work_dir.
@@ -4934,8 +4950,18 @@ async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket
     previous = (await session.scalars(select(HeartbeatRun).where(
         HeartbeatRun.ticket_id == ticket.id,
     ).order_by(HeartbeatRun.started_at.desc()).limit(1))).first()
+    recovery = None
+    if resumable_stage_interruption(ticket, row):
+        from zevo.contracts._base import AgentResult
+        from zevo.contracts.failure import FailureRecovery
+        recovery = AgentResult(ticket_id=ticket.id, status="failed", error_message=error, notes="", failure_recovery=FailureRecovery(
+            scope="current_task", reason="Engine-confirmed workload interruption",
+            evidence=[f"Registered execution {row.id}: {state}"],
+            next_action="Resume this Ticket on usable compute, reusing verified checkpoints and receipts.",
+        ))
+        record_execution_repair(row, action="resubmit", reason=error, heartbeat_id="")
     allowed = await _apply_ticket_failure_policy(
-        session, ticket, error_message=error, origin="external_workload",
+        session, ticket, error_message=error, origin="external_workload", result=recovery,
         can_diagnose=previous is None or previous.driver not in {"evaluation_runner", "holdout_data_runner"},
     )
     ticket.error_message = error[:2000]
@@ -4943,7 +4969,7 @@ async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket
         f"Repairing failed workload {row.instance_id}"
         if allowed else f"Workload {row.instance_id} failed; {ticket.repair_route} action required"
     )
-    row.meta = {**meta, "repair_activation_authorized": allowed}
+    row.meta = {**row.meta, "repair_activation_authorized": allowed}
     await session.commit()
     return allowed
 
@@ -5036,7 +5062,8 @@ async def run_ticket(
     # immediately so the orchestrator sees a terminal status and can
     # decide whether to retry the upstream or mark the run failed.
     try:
-        binding_inputs = dict(tk.inputs or {})
+        from zevo.engine.run.resource_recovery import current_device_binding
+        binding_inputs = await current_device_binding(session, run, dict(tk.inputs or {}))
         if tk.agent_id == "train":
             # Validation metadata comes from the Run's engine-owned suite,
             # not caller-supplied artifact bindings (including legacy ones).
@@ -5050,13 +5077,8 @@ async def run_ticket(
             session, run_id=tk.run_id, inputs=binding_inputs
         )
     except ValueError as binding_err:
-        tk.status = "failed"
-        tk.repair_route = "orchestrator"
-        tk.error_message = (f"inputs unresolvable: {binding_err}")[:2000]
-        tk.summary = (f"inputs unresolvable: {binding_err}")[:400]
-        await session.commit()
-        if tk.agent_id != "orchestrator":
-            await _maybe_wake_supervisor(session, tk)
+        from zevo.engine.run.input_validation import report_input_failure
+        await report_input_failure(session, tk, run, f"inputs unresolvable: {binding_err}")
         raise
     tk.inputs = resolved_inputs
     resolved_payload = _resolve_heldout_payload_assets(tk, tk.payload or {})
@@ -5809,7 +5831,11 @@ async def run_ticket(
                                 select(Ticket).where(Ticket.id == tk.id)
                             )).scalar_one_or_none()
                             activation = await cs.get(HeartbeatRun, heartbeat_id)
-                            if (tk_row is not None and tk_row.status != "cancelled"
+                            if activation is not None and (activation.resolved_config or {}).get("resource_recovery_requested"):
+                                process_registry.cancel(heartbeat_id)
+                                process_registry.cancel(tk.id)
+                                stopped = True
+                            elif (tk_row is not None and tk_row.status != "cancelled"
                                 and activation is not None
                                 and activation.superseded_by_instruction_id):
                                 process_registry.cancel(heartbeat_id)
@@ -6045,7 +6071,7 @@ async def run_ticket(
                     )).scalar_one_or_none()
                     if live_hb is not None:
                         live_hb.resolved_config = {**config, **{key: value for key, value in (live_hb.resolved_config or {}).items()
-                            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization", "orchestration_trigger"}}}
+                            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization", "orchestration_trigger", "repair_target_ticket_ids", "orchestration_child_ticket_ids", "resource_recovery_requested"}}}
                 await live_session.commit()
             for row in rows:
                 row.pop("_live_inflight", None)
@@ -6217,8 +6243,9 @@ async def run_ticket(
             continue
         session.add(ExecutionEvent(ticket_id=tk.id, heartbeat_id=heartbeat_id, **values))
     if config_rows:
+        await session.refresh(hb, attribute_names=["resolved_config"])
         hb.resolved_config = {**dict(config_rows[-1]["extras"]), **{key: value for key, value in (hb.resolved_config or {}).items()
-            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization", "orchestration_trigger"}}}
+            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization", "orchestration_trigger", "repair_target_ticket_ids", "orchestration_child_ticket_ids", "resource_recovery_requested"}}}
 
     # Did the measured stage go looking at its grader?
     #
@@ -7241,7 +7268,7 @@ async def run_ticket(
             and getattr(getattr(inp, "slurm_job", None), "phase", "") == "collect"):
             stage_row = await _latest_slurm_resource_request(session, tk)
             if stage_row is not None:
-                record_execution_repair(stage_row, action="resubmit",
+                record_execution_repair(stage_row, action=output.execution_retry_action,
                     reason=output.execution_retry_reason, heartbeat_id=heartbeat_id)
 
         if status == "deferred" and prepared_slurm_submission:
@@ -9204,6 +9231,9 @@ async def _maybe_wake_supervisor(
     # A supervisor failure must stop when its bounded repair stops. Treating
     # that same Ticket as a completed child requeues it outside the repair cap.
     if child.agent_id == "orchestrator" or child.lane == "held_out_test":
+        return
+    from zevo.engine.run.resource_recovery import is_recovery_infrastructure
+    if await is_recovery_infrastructure(session, child):
         return
     from zevo.engine.run.adaptive_training import is_checkpoint_stage
     if is_checkpoint_stage(child):

@@ -1354,6 +1354,14 @@ async def create_ticket(
         body=f"Ticket created via /api/tickets for agent {body.agent_id}.",
     ))
     if defer_wakeup:
+        from zevo.db import HeartbeatRun
+        decision = await db.scalar(select(HeartbeatRun).join(Ticket, Ticket.id == HeartbeatRun.ticket_id).where(
+            Ticket.run_id == run_id, HeartbeatRun.agent_id == "orchestrator", HeartbeatRun.finished_at.is_(None),
+        ).order_by(HeartbeatRun.started_at.desc()).limit(1))
+        if decision is not None:
+            cfg = decision.resolved_config or {}
+            decision.resolved_config = {**cfg, "orchestration_child_ticket_ids": sorted(set(
+                list(cfg.get("orchestration_child_ticket_ids", [])) + [tid]))}
         db.add(TicketNotice(
             ticket_id=tid,
             code="ticket.awaiting_supervisor_completion",
