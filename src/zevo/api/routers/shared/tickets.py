@@ -86,6 +86,19 @@ from zevo.contracts.tickets import TERMINAL_RUN_STATUSES
 
 router = APIRouter()
 
+from zevo.engine.run.execution_repair import RepairTicketRequest
+
+
+@router.post("/tickets/{ticket_id}/repair")
+async def repair_existing_ticket(
+    ticket_id: str, body: RepairTicketRequest, db: AsyncSession = Depends(get_db),
+) -> dict:
+    from zevo.engine.run.execution_repair import repair_ticket
+    ticket = await db.get(Ticket, ticket_id)
+    if ticket is None:
+        raise HTTPException(404, "Ticket not found")
+    return await repair_ticket(db, ticket, body)
+
 
 class TicketDTO(CreateTicketResponse):
     """The canonical Ticket row returned by list/detail APIs."""

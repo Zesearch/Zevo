@@ -80,6 +80,13 @@ class AgentResult(StrictResult):
         ..., description="Empty on succeeded/degraded/deferred; specific failure detail otherwise."
     )
     notes: str = Field(..., description="Concise execution notes; empty is allowed.")
+    execution_retry_reason: str = Field("", max_length=2000, description=(
+        "For a failed collect Result only: explain why verified existing artifacts cannot "
+        "finish this work and another execution is necessary on the same Ticket. Pair with "
+        "failure_recovery.scope=current_task and concrete evidence. The engine owns submission "
+        "and the repair limit. Leave empty for artifact/collection fixes. This grants no "
+        "permission to change frozen settings, inputs, resources or the training plan."
+    ))
     failure_recovery: FailureRecovery | None = Field(
         None, description=(
             "For failed results, explain the evidence, attempted actions and authority "
@@ -101,6 +108,11 @@ class AgentResult(StrictResult):
 
     @model_validator(mode="after")
     def require_status_error_consistency(self) -> "AgentResult":
+        if self.execution_retry_reason.strip():
+            if self.status != "failed":
+                raise ValueError("execution_retry_reason is only valid for failed results")
+            if self.failure_recovery is not None and self.failure_recovery.scope != "current_task":
+                raise ValueError("execution retry must stay within current_task; other scopes require review")
         if self.failure_recovery is not None and self.status != "failed":
             raise ValueError("failure_recovery is only valid for failed results")
         if self.status == "failed" and not self.error_message.strip():

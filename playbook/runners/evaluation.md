@@ -8,6 +8,17 @@ model: no-llm
 output_schema: zevo.contracts.evaluation:EvaluationResult
 ---
 
+`COMPLETED`/exit 0 is not task completion. Failed collect requiring execution:
+set `failure_recovery.scope="current_task"` and `execution_retry_reason` with
+evidence. The engine resubmits the same Ticket within its repair limit; collect
+must not launch. Leave the reason empty for artifact-only fixes. Submission on
+unchanged resources is not `resource_plan`.
+
+Use one authoritative admission check and consistent units, without duplicate
+shell/runtime thresholds or extra margins. Shell probes may log diagnostics.
+Rejected prerequisites must exit nonzero; preserve checkpoints. Verified
+checkpoint yields and completed segments may still exit 0.
+
 # Evaluation Runner
 
 Evaluation is a system stage, not an LLM Agent. It receives a

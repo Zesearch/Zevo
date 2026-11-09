@@ -306,6 +306,37 @@ async def test_unchanged_failed_direct_workload_cannot_relaunch(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('provider', ['cloud', 'instance'])
+@pytest.mark.parametrize('stage', ['data', 'train', 'inference', 'evaluation'])
+async def test_completed_direct_workload_repair_gets_submit_on_same_host(tmp_path, monkeypatch, provider, stage):
+    from zevo.engine.run.runner import _slurm_stage_job_contract
+    from zevo.engine.run.repair_progress import record_execution_repair
+    engine, session, run, ticket, owner, inp = await database(tmp_path, provider)
+    async def remote(*args, **kwargs): return {}
+    monkeypatch.setattr(direct, 'remote_call', remote)
+    try:
+        row = await direct.submit(session, run=run, ticket=ticket, inp=inp, heartbeat_id='submit-hb')
+        row.meta = {**row.meta, 'scheduler_state': 'COMPLETED'}
+        row.released_at = datetime.now(timezone.utc)
+        ticket.agent_id, ticket.status, ticket.repair_attempts = stage, 'repairing', 2
+        await session.commit()
+        args = dict(run=run, ticket=ticket, work_dir=str(tmp_path), filename=f'{stage}.sh',
+                    device_info_path=inp.device_info_path, session=session, stage=stage)
+        assert (await _slurm_stage_job_contract(**args)).phase == 'collect'
+        record_execution_repair(row, action='resubmit', reason='corrected launcher must run', heartbeat_id='collect')
+        await session.commit()
+        repaired = await _slurm_stage_job_contract(**args)
+        assert repaired.transport == 'direct' and repaired.phase == 'submit' and repaired.attempt == 2
+        assert repaired.retry_of_bookkeeping_row_id == row.id
+        assert owner.released_at is None
+        assert len((await session.scalars(select(InfraInstance))).all()) == 2  # owner + original workload
+        ticket.repair_attempts = 21
+        assert (await _slurm_stage_job_contract(**args)).phase == 'collect'
+    finally:
+        await session.close(); await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_ok", [False, True])
 async def test_instruction_restart_waits_for_confirmed_direct_cleanup(tmp_path, monkeypatch, cleanup_ok):
     from zevo.engine.run import remote_jobs

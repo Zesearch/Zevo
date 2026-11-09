@@ -55,8 +55,33 @@ def _identity(path):
 
 
 def execution_retry_authorized(meta):
-    request = meta.get('inference_execution_retry') or {}
-    return bool(request.get('reason') and request.get('execution_attempt') == int(meta.get('execution_attempt') or 1))
+    request = meta.get('execution_repair') or meta.get('inference_execution_retry') or {}
+    return bool(request.get('action', 'resubmit') == 'resubmit' and request.get('reason')
+                and request.get('execution_attempt') == int(meta.get('execution_attempt') or 1))
+
+
+def collect_repair_authorized(meta):
+    request = meta.get('execution_repair') or {}
+    return bool(request.get('action') == 'collect' and request.get('reason')
+                and request.get('execution_attempt') == int(meta.get('execution_attempt') or 1))
+
+
+def record_execution_repair(row, *, action, reason, heartbeat_id):
+    """Bind permission to this execution only; a later attempt needs a new decision."""
+    meta = dict(row.meta or {})
+    meta.pop('inference_execution_retry', None)
+    row.meta = {**meta, 'execution_repair': {
+        'action': action, 'reason': reason.strip(), 'heartbeat_id': heartbeat_id,
+        'execution_attempt': int(meta.get('execution_attempt') or 1),
+    }}
+
+
+def verify_repair_training_config(previous, path):
+    if previous is None or not execution_retry_authorized(previous.meta or {}):
+        return
+    expected = (previous.meta or {}).get('training_config_sha256')
+    if not expected or hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected:
+        raise ValueError('execution repair requires the exact registered training configuration')
 
 
 async def _measured_progress(session, ticket):

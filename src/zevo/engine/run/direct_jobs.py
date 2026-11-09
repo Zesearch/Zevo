@@ -96,6 +96,9 @@ async def submit(session, *, run, ticket, inp, heartbeat_id, remote_train_config
     if run.cancel_requested_at or run.status in {"cancelled", "failed", "success", "degraded"} or ticket.status == "cancelled":
         raise ValueError("workload cancelled before publication")
     previous = await _latest_slurm_resource_request(session, ticket)
+    if ticket.agent_id == "train":
+        from zevo.engine.run.repair_progress import verify_repair_training_config
+        verify_repair_training_config(previous, Path(contract.script_path).with_name("train_config.yaml"))
     execution_id = str(uuid5(NAMESPACE_URL, f"zevo:direct:{ticket.id}:{contract.attempt}:{contract.remote_work_dir}"))
     existing = await session.get(InfraInstance, execution_id)
     if existing:
@@ -131,7 +134,7 @@ async def submit(session, *, run, ticket, inp, heartbeat_id, remote_train_config
         restart = bool(contract.restart_instruction_id or restarts_workload(run, ticket.id, previous.id)
                        or checkpoint_resume_authorized(run, ticket, previous) or continuing
                        or resumable_stage_interruption(ticket, previous)
-                       or (ticket.agent_id == "inference" and execution_retry_authorized(previous.meta)))
+                       or execution_retry_authorized(previous.meta))
         if previous.meta.get("implementation_sha256") == implementation and not restart:
             raise ValueError("unchanged failed workload requires a verified continuation or authorized restart")
         if continuing:

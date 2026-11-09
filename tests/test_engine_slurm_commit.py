@@ -21,10 +21,10 @@ from zevo.engine.run.runner import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry', 'walltime', 'data_timeout', 'inference_timeout', 'data_yield', 'inference_yield', 'train_timeout', 'evaluation_timeout', 'evaluation_yield'])
+@pytest.mark.parametrize('mode', ['repair', 'remeasure', 'checkpoint', 'collect_retry', 'train_retry', 'data_retry', 'evaluation_retry', 'walltime', 'data_timeout', 'inference_timeout', 'data_yield', 'inference_yield', 'train_timeout', 'evaluation_timeout', 'evaluation_yield'])
 async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, monkeypatch, mode) -> None:
     batch_resume = mode.endswith(("_timeout", "_yield"))
-    stage = mode.split("_")[0] if batch_resume else "train"
+    stage = mode.split("_")[0] if batch_resume or mode in {"train_retry", "data_retry", "evaluation_retry"} else "train"
     remeasure = mode != "repair" and not batch_resume
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -156,6 +156,9 @@ async def test_engine_submits_exact_uploaded_script_after_validation(tmp_path, m
                         "scheduler_exit_code": "0:0" if mode.endswith("_timeout") else "75:0"}
         elif mode == "collect_retry":
             row.meta = {**row.meta, "inference_execution_retry": {"execution_attempt": 1, "reason": "prediction output lost after job completed"}}
+        elif mode.endswith("_retry"):
+            from zevo.engine.run.repair_progress import record_execution_repair
+            record_execution_repair(row, action="resubmit", reason="workload never produced its required output", heartbeat_id="collect")
         elif mode == "walltime":
             row.meta = {**row.meta, "training_continuation": {
                 "source_resource_id": row.id, "source_job_id": row.instance_id,

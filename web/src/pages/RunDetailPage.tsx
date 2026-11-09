@@ -1,4 +1,5 @@
 import { operationCaption, stageAttemptLabel, withRepairLabel } from "../lib/stageLabels";
+import { withOrchestratorRepairLabel } from "../lib/orchestratorLabel";
 import { ExecutionPhase } from "../components/ExecutionPhase";
 import { GenerationReport } from "../components/GenerationReport";
 import { latestBenchmarkEvent, activationExecution, activationWorkload, workloadCanProgress, shortBenchmarkName, executionPhase as workloadPhase } from "../lib/executionProgress";
@@ -209,6 +210,10 @@ function stageLabel(t: TLTicket): string {
 }
 
 function orchestratorLabel(h: HeartbeatDTO, tickets: Map<string, TLTicket>): string {
+  return withOrchestratorRepairLabel(h, orchestratorActionLabel(h, tickets));
+}
+
+function orchestratorActionLabel(h: HeartbeatDTO, tickets: Map<string, TLTicket>): string {
   const child = h.child_ticket_id ? tickets.get(h.child_ticket_id) : undefined;
   const children = child ? [child] : [];
   if (h.action === "emit_ticket") {

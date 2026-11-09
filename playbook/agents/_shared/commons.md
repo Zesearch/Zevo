@@ -65,11 +65,10 @@ publishes `Done:` only after the typed Result and every required artifact have
 passed engine validation. Thus `Done:` always means the stage is genuinely
 complete, never merely submitted or deferred.
 
-When execution fails, use the engine-supplied activation contract and repair
-route. The engine owns retry admission, resource lifetime, and submission.
-Reuse verified artifacts and change only what the diagnosis requires. A
-submission and a collection are separate activations of the same Ticket;
-configuration and execution provenance remain durable across them.
+When execution fails, follow the activation contract and repair route. The engine
+owns retry admission, resources and submission. Read the operational guide's
+repair and admission rules; reuse verified artifacts. Submit and collect are
+separate activations of the same Ticket with durable configuration and provenance.
 
 The Task fixes metric, direction, evaluator, answer fields, and submission
 shape before Baseline. Baseline Inference fixes the complete model-side
