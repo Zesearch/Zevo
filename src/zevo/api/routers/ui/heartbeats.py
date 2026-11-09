@@ -75,6 +75,7 @@ class HeartbeatDTO(BaseModel):
     operation: str = ""
     activation_phase: str = ""
     execution_phase: str = ""
+    execution_transport: str = ""
     training_finalization: bool = False
     # A compact, UI-safe projection of an Orchestrator result. The Timeline
     # needs the real action/child to represent sequential supervision.
@@ -115,6 +116,7 @@ def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict 
         operation=str(h.operation or output.get("operation") or ""),
         activation_phase=str(h.activation_phase or ""),
         execution_phase=str((h.resolved_config or {}).get("execution_phase") or ""),
+        execution_transport=str((h.resolved_config or {}).get("execution_transport") or ""),
         training_finalization=training_finalization,
         action=str(output.get("action") or "") if h.agent_id == "orchestrator" else "",
         action_summary=str(output.get("summary") or "") if h.agent_id == "orchestrator" else "",

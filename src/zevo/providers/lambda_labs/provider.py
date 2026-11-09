@@ -291,7 +291,10 @@ class LambdaCloudProvider:
 
     async def list_instances(self) -> list[dict]:
         """List all instances currently on this account (raw Lambda dicts)."""
-        return (await self._request("GET", "/instances")).get("data", []) or []
+        response = await self._request("GET", "/instances")
+        if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+            raise ValueError("Lambda returned an incomplete instance inventory")
+        return response["data"]
 
     async def destroy_instance(self, instance_id: str) -> bool:
         """Terminate an instance (stops billing). Returns True on success."""

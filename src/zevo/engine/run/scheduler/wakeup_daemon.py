@@ -375,6 +375,13 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                         target = (await s.execute(
                             select(Ticket).where(Ticket.id == w.ticket_id)
                         )).scalar_one_or_none()
+                        from zevo.engine.run.input_validation import obsolete_input_review
+                        if await obsolete_input_review(s, w, target):
+                            w.status = "completed"
+                            w.finished_at = datetime.now(timezone.utc)
+                            w.reason = (f"{w.reason or ''} | skipped obsolete input-validation review")[:2000]
+                            await s.commit()
+                            return "obsolete"
                         wake_payload = w.payload if isinstance(w.payload, dict) else {}
                         instruction_id = str(
                             wake_payload.get("run_instruction_id") or ""

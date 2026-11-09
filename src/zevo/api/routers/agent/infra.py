@@ -41,6 +41,9 @@ router = APIRouter()
 # These fields are the deterministic runner/watcher ownership handshake. They
 # are never Agent claims, even though provider-specific facts share `meta`.
 _ENGINE_OWNED_SUBMISSION_META = {
+    "direct_workload", "direct_manifest", "execution_contract",
+    "allocation_owner_row_id", "device_info_path", "supervisor_source",
+    "cloud_health", "allocation_lost",
     "superseded_by_instruction_id",
     "log_path",
     "stderr_path",

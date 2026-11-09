@@ -255,6 +255,10 @@ async def run(args) -> int:
         out.write_text(json.dumps(state, indent=1), encoding="utf-8")
 
     provider = make_provider(args.backend)
+    # Pin the effective region even when --region was omitted. Later recovery
+    # must not query whatever default happens to be configured at that time.
+    effective_region = str(getattr(provider, "region", "") or args.region)
+    state["region"] = effective_region
     try:
         instance_id = await create(provider, args.backend, args)
     except Exception as exc:  # noqa: BLE001
@@ -266,7 +270,7 @@ async def run(args) -> int:
     row_id = ""
     try:
         row_id = register_row(instance_id=instance_id, run_id=args.run_id, ticket_id=args.ticket_id,
-                              dph=args.dph, backend=args.backend, offer_id=args.offer_id, region=args.region)
+                              dph=args.dph, backend=args.backend, offer_id=args.offer_id, region=effective_region)
         state.update(row_id=row_id, phase="waiting_ready"); save()
         _log(f"BOOKKEEPING_ROW {row_id}")
 

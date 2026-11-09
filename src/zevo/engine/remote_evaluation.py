@@ -176,7 +176,7 @@ def launch_script(inp: EvaluationTaskInput, info: InfrastructureDeviceInfo, remo
     route = info.cluster or info.instance
     contract = inp.slurm_job
     lines = ['#!/bin/bash']
-    if contract.enabled:
+    if contract.enabled and contract.transport == "slurm":
         plan = info.resource_plan
         lines += [f'#SBATCH --job-name={contract.job_name}', f'#SBATCH --nodes={contract.nodes}',
                   '#SBATCH --ntasks-per-node=1', f'#SBATCH --gpus-per-node={contract.gpus_per_node}',
@@ -206,7 +206,7 @@ def launch_script(inp: EvaluationTaskInput, info: InfrastructureDeviceInfo, remo
               # activations from scoring concurrently in the same work directory.
               'exec 9>.evaluation.lock', 'flock -n 9 || exit 0',
               'zevo_eval_finish() { rc=$?; trap - EXIT; rm -f .judge-env.json; printf "%s\\n" "$rc" > exit-code.tmp; mv exit-code.tmp exit-code; '
-              + ('zevo_slurm_event EXITED "$rc"; ' if contract.enabled else '') + 'exit "$rc"; }',
+              + ('zevo_slurm_event EXITED "$rc"; ' if contract.enabled and contract.transport == 'slurm' else '') + 'exit "$rc"; }',
               'trap zevo_eval_finish EXIT', 'rm -f exit-code results/result.json',
               route.env_setup or ':',
               'tar -xzf evaluation-bundle.tar.gz',
@@ -311,11 +311,12 @@ async def run_remote(inp: EvaluationTaskInput, workspace_dir: str, event_sink=No
         script = Path(contract.script_path) if contract.enabled else local / 'evaluate-remote.sh'
         script.write_text(body)
         destination = contract.remote_work_dir if contract.enabled else remote
+        await command(ssh(info, 'mkdir -p -- ' + shlex.quote(destination)))
         for argv in build_upload_commands(info.ssh, sources=[str(script)], remote_dir=destination):
             await command(argv)
         if contract.enabled:
             result = EvaluationResult(ticket_id=inp.ticket_id, status='deferred', metrics_path='', error_message='',
-                                      notes='Evaluation prepared for engine-owned Slurm submission')
+                                      notes='Evaluation prepared for engine-owned execution')
             return DriverRunResult(output=result, driver='evaluation_runner')
         _phase(event_sink, inp.ticket_id, 'scoring_on_compute')
         # SSH is only a transport. A detached marked process owns the work;

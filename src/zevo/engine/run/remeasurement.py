@@ -84,6 +84,25 @@ def active_attempt(run: Run, ticket_id: str) -> dict:
     return {}
 
 
+def progress_attempts(run: Run, ticket_id: str) -> list[dict]:
+    """Display scopes survive publication without reactivating completed work."""
+    result = []
+    for batch in batches(run):
+        for item in batch["cohort"]:
+            for kind in ("inference", "evaluation"):
+                if item.get(f"{kind}_id") != ticket_id:
+                    continue
+                attempt = item.get(f"{kind}_attempt") or {}
+                if not attempt.get("revision") or not attempt.get("started_at"):
+                    continue
+                result.append({
+                    "revision": attempt["revision"],
+                    "started_at": attempt["started_at"],
+                    "active_members": list(attempt.get("active_members", item.get("active_members", []))),
+                })
+    return sorted(result, key=lambda attempt: attempt["started_at"])
+
+
 def restarts_workload(run: Run, ticket_id: str, resource_id: str) -> bool:
     attempt = active_attempt(run, ticket_id)
     return bool(resource_id and attempt.get("previous_resource_id") == resource_id)
@@ -428,6 +447,7 @@ async def _begin_attempt(session: AsyncSession, run: Run, batch: Batch, item: di
     resource = await _latest_slurm_resource_request(session, ticket) if kind == "inference" else None
     item[f"{kind}_attempt"] = {
         "revision": batch["id"], "started_at": datetime.now(timezone.utc).isoformat(),
+        "active_members": list(item.get("active_members", [])) if kind == "inference" else evaluation_members(batch, item),
         "previous_status": ticket.status,
         "previous_summary": ticket.summary, "previous_payload": deepcopy(ticket.payload),
         "previous_inputs": deepcopy(ticket.inputs),

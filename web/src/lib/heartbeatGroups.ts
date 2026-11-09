@@ -24,3 +24,15 @@ export function settledHeartbeat(group: HeartbeatDTO[]): HeartbeatDTO {
     action: last.action || first.action,
     child_ticket_id: last.child_ticket_id || first.child_ticket_id };
 }
+
+/** Timeline rows may omit instruction wakes; selection must use identity. */
+export function heartbeatGroupFor(chronological: HeartbeatDTO[], heartbeatId?: string): HeartbeatDTO[] | undefined {
+  const id = heartbeatId ?? chronological.at(-1)?.id;
+  return heartbeatGroups(chronological).find((group) => group.some((heartbeat) => heartbeat.id === id));
+}
+
+/** A historical supervisor action has its own status, independent of later wakes. */
+export function heartbeatStatus(heartbeat: HeartbeatDTO): string {
+  if (heartbeat.is_live) return heartbeat.activation_phase === "repair" ? "repairing" : "running";
+  return heartbeat.exit_code !== 0 || heartbeat.action === "mark_failed" ? "failed" : "succeeded";
+}

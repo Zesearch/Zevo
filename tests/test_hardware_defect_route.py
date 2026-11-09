@@ -1,16 +1,9 @@
-"""A defective GPU is routed to whoever can replace it, never self-repaired.
-
-Smoke run 5b4a67e0 landed on a Lambda A10 with an exhausted row remapper
-(Xid 48, ~249k uncorrectable ECC errors). Inference asked for a swap; the
-orchestrator re-woke inference and then train on the same card, and the train
-agent spent three activations finding a 13 GiB reservation that avoided the
-bad rows: ~40 minutes and ~$10. The failure policy now names that failure and
-sends it upstream.
-"""
+"""Hardware replacement requires a structured resource-plan review request."""
 from __future__ import annotations
 
 import pytest
 
+from zevo.contracts.failure import FailureRecovery
 from zevo.engine.run.failure_policy import HARDWARE_DEFECT_PREFIX, classify_failure
 
 
@@ -24,9 +17,12 @@ from zevo.engine.run.failure_policy import HARDWARE_DEFECT_PREFIX, classify_fail
 ])
 @pytest.mark.parametrize("agent_id", ["inference", "train", "infrastructure"])
 def test_defective_gpu_goes_to_the_orchestrator(message: str, agent_id: str) -> None:
-    disposition = classify_failure(message, agent_id=agent_id)
+    assert classify_failure(message, agent_id=agent_id).route == "self"  # diagnostic only
+    request = FailureRecovery(scope="resource_plan", reason="Verified defective GPU requires replacement",
+                              evidence=[message], next_action="Request replacement of the assigned GPU")
+    disposition = classify_failure(message, agent_id=agent_id, recovery=request)
     assert disposition.route == "orchestrator"
-    assert disposition.code == "hardware_defect"
+    assert disposition.code == "recovery_resource_plan"
     assert "replacement" in disposition.reason
 
 

@@ -87,8 +87,11 @@ def test_probe_parser_reads_nvidia_smi_csv() -> None:
 
 
 @pytest.mark.asyncio
-async def test_healthy_path_registers_then_marks_the_row_ready(tmp_path, monkeypatch, api) -> None:
+@pytest.mark.parametrize("effective_region", [None, "us-west-2"])
+async def test_healthy_path_registers_then_marks_the_row_ready(tmp_path, monkeypatch, api, effective_region) -> None:
     provider = FakeProvider()
+    if effective_region:
+        provider.region = effective_region
     monkeypatch.setattr(acquire, "make_provider", lambda backend: provider)
     monkeypatch.setattr(acquire, "probe", lambda route, key: {
         "devices": [{"index": 0, "name": "NVIDIA A10", "vram_mb": 23028}],
@@ -102,6 +105,7 @@ async def test_healthy_path_registers_then_marks_the_row_ready(tmp_path, monkeyp
     methods = [(m, p) for m, p, _ in api]
     assert methods[0] == ("POST", "/api/infra/instances")
     assert api[0][2]["status"] == "provisioning" and api[0][2]["meta"]["auto_release"] is True
+    assert api[0][2]["meta"]["region"] == (effective_region or "us-east-1")
     assert methods[-1] == ("PATCH", "/api/infra/instances/row-1") and api[-1][2]["status"] == "ready"
     assert api[-1][2]["vram_gb"] == 22 and provider.destroyed == []
 

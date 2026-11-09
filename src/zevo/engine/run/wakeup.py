@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from zevo.db import AgentWakeupRequest
 from zevo.db.session import get_engine
+from zevo.engine.run.input_validation import merge_input_reviews
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ async def queue_wakeup(
                     AgentWakeupRequest.agent_id == agent_id,
                     AgentWakeupRequest.ticket_id == ticket_id,
                     AgentWakeupRequest.status == "queued",
-                )
+                ).with_for_update()
             )
         ).scalars().first()
         if existing is not None:
@@ -86,7 +87,9 @@ async def queue_wakeup(
                 existing.trigger_detail = trigger_detail
                 existing.reason = reason
                 completion_key = (existing.payload or {}).get("optimization_completion_key")
+                reviews = merge_input_reviews(existing.payload, payload)
                 existing.payload = {
+                    **({k: v for k, v in reviews.items() if k.startswith("input_validation_")}),
                     **({"optimization_completion_key": completion_key} if completion_key else {}),
                     **(payload or {}),
                 }
@@ -94,11 +97,12 @@ async def queue_wakeup(
                 await session.commit()
                 await session.refresh(existing)
                 return existing
+            existing.payload = merge_input_reviews(existing.payload, payload)
             incoming_job_id = str((payload or {}).get("job_id") or "")
             existing_job_id = str((existing.payload or {}).get("job_id") or "")
             if (
-                source == "slurm_watcher"
-                and existing.source == "slurm_watcher"
+                source in {"slurm_watcher", "workload_watcher"}
+                and existing.source == source
                 and incoming_job_id
                 and incoming_job_id != existing_job_id
             ):
@@ -131,23 +135,29 @@ async def queue_wakeup(
         status="queued", trigger_detail=trigger_detail, reason=reason,
         payload=payload or {},
     )
-    session.add(row)
+    await session.flush()
     try:
-        await session.commit()
+        # A competing enqueue may win the unique-index race. Roll back only
+        # this insert, retaining the failed-ticket state and its review notice
+        # in the caller's transaction.
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
     except IntegrityError:
         # Lost the race against a concurrent enqueue: the partial unique
         # index (one 'queued' row per agent+ticket) rejected the insert.
         # Record the coalescing the same way the SELECT path does.
-        await session.rollback()
         existing = (
             await session.execute(
                 select(AgentWakeupRequest).where(
                     AgentWakeupRequest.agent_id == agent_id,
                     AgentWakeupRequest.ticket_id == ticket_id,
                     AgentWakeupRequest.status == "queued",
-                )
+                ).with_for_update()
             )
         ).scalars().first()
+        if existing is not None:
+            existing.payload = merge_input_reviews(existing.payload, payload)
         row = AgentWakeupRequest(
             agent_id=agent_id, ticket_id=ticket_id, source=source,
             status="coalesced", trigger_detail=trigger_detail,
@@ -157,6 +167,7 @@ async def queue_wakeup(
         session.add(row)
         await session.commit()
         return row
+    await session.commit()
     await session.refresh(row)
     return row
 

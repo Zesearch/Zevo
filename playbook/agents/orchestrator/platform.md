@@ -192,9 +192,9 @@ the supplied stage resource contract and does not imply a GPU requirement.
 
 Read `runtime.gpu_allocation_mode`; this is fixed for the Run.
 The retained modes, per_run and per_stage, retain resources during repair.
-Do not emit a release or replacement merely because a generated program failed;
-a `GPU hardware defect:` failure is the exception described under Failure and
-completion.
+Do not emit a release or replacement merely because a generated program failed.
+Resource changes require a reviewed recovery proposal and supporting evidence,
+as described under Failure and completion.
 
 - `per_submission` (Slurm only): each workload gets a fresh allocation.
   After worker cleanup the controller exits on success or failure. Repair and
@@ -705,6 +705,28 @@ or require exhaustive search before honoring those boundaries.
 
 ## Failure and completion
 
+`runtime.cloud_resource_recoveries` contains engine-confirmed cloud allocation
+losses, including their provider state and recovery allowance. A resource-loss
+wake is an Infrastructure recovery event, not an invitation to change the
+optimization plan. When `replacement_allowed=true` and there is no
+`replacement_allocation_id`, emit one Infrastructure provision with the same
+purpose and existing Run limits. The old allocation is already confirmed gone;
+do not issue remote cleanup commands to its dead SSH address. Check for an
+already queued/running replacement Infra ticket before creating one. Once a
+replacement is ready, use its new device artifact and do not provision again
+for that event. Do not treat historical recovery events as new failures.
+
+Keep validated local/durable artifacts. A path on the lost instance is not a
+checkpoint or dataset on the replacement. Resume only from verified complete
+state available on durable storage; restore/rebuild inputs within the original
+work order where possible, or stop with the precise missing-artifact reason.
+Resource recovery consumes the affected Ticket's repair allowance. Replacement
+Tickets for the same stage, iteration and model inherit that count; changing
+the Ticket ID does not reset the existing 20-repair limit.
+When `replacement_allowed=false`, finish or report the blocking limit instead
+of creating another allocation. Resource notifications contain no held-out
+scores or answers and never authorize inspecting private evaluation artifacts.
+
 The runner keeps Specialist-owned defects on the same Ticket in `repairing`
 for at most twenty repair activations and does not wake you between attempts.
 When you receive a failed child, inspect its `repair_route`: change upstream
@@ -721,9 +743,10 @@ Specialist, state the concrete next action and why it can resolve the blocker;
 do not send back the identical work order with only "try again". Respect user
 pins and accumulated repair limits; escalation is not a budget reset.
 
-A failure whose `error_message` begins `GPU hardware defect:` (route
-`orchestrator`, code `hardware_defect`) means the device, not the work, is
-broken. Never re-emit the stage bound to the same `device_info`, and never ask
+A `failure_recovery` proposal with scope `resource_plan` requests review of the
+allocation. Error prefixes alone do not establish a hardware defect or authorize
+replacement. If the evidence confirms a defective device, never re-emit the
+stage bound to the same `device_info`, and never ask
 the Specialist to work around the card. For cloud and instance: create an
 Infrastructure `release` for that allocation, then a fresh `provision` with the
 same purpose, then re-emit the failed stage bound to the new `device_info`

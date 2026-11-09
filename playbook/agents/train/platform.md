@@ -1,3 +1,12 @@
+## Execution transport
+
+For an enabled execution contract, follow the shared engine-owned workload
+protocol first. `slurm_job.transport="direct"` prepares a `.sh` on the existing
+cloud/instance host and returns `deferred`; the engine runs it and later wakes
+collection. The cluster submission sections below apply only to
+`slurm_job.transport="slurm"`. Inline execution instructions apply only to
+historical/CPU work orders with `slurm_job.enabled=false`.
+
 For `per_stage` cloud Train, download and verify the final and selectable
 intermediate checkpoints under backend `work_dir` before reporting success;
 return local paths and `checkpoint_is_remote=false`. Retain logs on failure.
@@ -781,9 +790,11 @@ dies with uncorrectable ECC errors, `Remapping Failure Occurred: Yes`,
 or the device falls off the bus, do not diagnose the framebuffer, reserve
 memory regions, pin a device fraction, or relaunch on the same card. Return
 `status="failed"` with `error_message` beginning `GPU hardware defect:` and the
-exact evidence (device index, Xid lines, ECC counters, instance id). The engine
-routes that failure to the Orchestrator for a replacement device, and the Train
-Ticket resumes from its last complete checkpoint there.
+exact evidence (device index, Xid lines, ECC counters, instance id). Include
+`failure_recovery` with scope `resource_plan`, this evidence, and a concrete
+request to review replacement while preserving the last complete checkpoint.
+The engine routes the structured proposal to the Orchestrator; the error
+prefix alone does not select the route.
 
 ## Training completion and final publication
 

@@ -236,6 +236,7 @@ class RuntimeSpec(BaseModel):
     adaptive_mid_training_evaluation: bool = False
     adaptive_checkpoints: list[dict[str, Any]] = Field(default_factory=list)
     adaptive_training_requests: list[dict[str, Any]] = Field(default_factory=list)
+    cloud_resource_recoveries: list[dict[str, Any]] = Field(default_factory=list)
     validation_generation_reports: list[dict[str, Any]] = Field(default_factory=list)
     generation_backend: Literal["hf", "vllm"]
     gpu_allocation_mode: Literal["per_stage", "per_run", "per_submission"] = "per_stage"

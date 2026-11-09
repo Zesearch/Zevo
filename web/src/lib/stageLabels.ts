@@ -74,6 +74,7 @@ export function operationCaption(t: {
 
 export function evaluationAttemptLabel(phase: string, sequence: number, lane: string): string {
   const suite = lane === "held_out_test" ? "Held-Out" : "Validation";
+  if (phase === "submit") return `Submit ${suite} Evaluation`;
   if (phase === "collect") return `Collect ${suite} Results`;
   if (phase === "repair") return `Evaluate ${suite} · Repair`;
   return sequence > 1 ? `Re-evaluate ${suite}` : `Evaluate ${suite}`;
@@ -86,7 +87,7 @@ export function withRepairLabel(label: string, heartbeat: {activation_phase: str
 
 export function stageAttemptLabel(
   ticket: Parameters<typeof operationCaption>[0],
-  heartbeat: {operation: string; activation_phase: string; execution_phase?: string; training_finalization?: boolean},
+  heartbeat: {operation: string; activation_phase: string; execution_phase?: string; execution_transport?: string; training_finalization?: boolean},
   sequence = 1, activity = "",
 ): string {
   let phase = ["remeasure", "remeasure_collect", "instruction", "continue"].includes(heartbeat.activation_phase)
@@ -98,5 +99,7 @@ export function stageAttemptLabel(
       ? evaluationAttemptLabel(phase, heartbeat.activation_phase === "repair" ? 1 : sequence, ticket.lane || "")
     : ticket.agent_id === "orchestrator" ? sequence === 1 ? "Plan Run" : "Review Run"
     : operationCaption(ticket, heartbeat.operation, phase));
-  return withRepairLabel(label, heartbeat);
+  const display = heartbeat.execution_transport === "direct" && phase === "submit"
+    ? label.replace(/^Submit /, "Prepare ") : label;
+  return withRepairLabel(display, heartbeat);
 }

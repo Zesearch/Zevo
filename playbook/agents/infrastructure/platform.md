@@ -294,6 +294,9 @@ command, and do not hide a defective device behind a healthy sibling. On exit
 Ticket remains forbidden. For instance, fail the same way and name the index
 so the operator can take the card out of the pool. Skip the gate for cluster,
 whose allocation does not exist yet. Put the helper's JSON verdict in `notes`.
+Include `failure_recovery` with scope `resource_plan`, the verdict as evidence,
+and the requested allocation review; the error prefix alone does not select
+the recovery route.
 
 Success requires all of the following:
 

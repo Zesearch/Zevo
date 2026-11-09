@@ -1,3 +1,12 @@
+## Execution transport
+
+For an enabled execution contract, follow the shared engine-owned workload
+protocol first. `slurm_job.transport="direct"` prepares a `.sh` on the existing
+cloud/instance host and returns `deferred`; the engine runs it and later wakes
+collection. The cluster submission sections below apply only to
+`slurm_job.transport="slurm"`. Inline execution instructions apply only to
+historical/CPU work orders with `slurm_job.enabled=false`.
+
 
 ## Large-scale preprocessing performance
 

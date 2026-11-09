@@ -1,10 +1,10 @@
-import { activationExecution, benchmarkCounts } from "../lib/executionProgress";
+import { activationExecution, benchmarkCounts, evaluationBenchmarkLabel } from "../lib/executionProgress";
 import { StageProgress } from "./StageProgress";
 import type { ExecutionEventDTO, HeartbeatDTO } from "../lib/api";
 
 export { evaluationAttemptLabel } from "../lib/stageLabels";
 
-export function EvaluationProgress({ events, heartbeat, lane, paused = false, benchmarkName = "", scopedEvents, activations }: {
+export function EvaluationProgress({ events, heartbeat, lane, paused = false, scopedEvents, activations }: {
   events: ExecutionEventDTO[];
   activations?: HeartbeatDTO[];
   scopedEvents?: ExecutionEventDTO[];
@@ -17,13 +17,13 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
   // the Run's aggregate scores. A new execution starts its own progress.
   const scoped = scopedEvents ?? activationExecution(events, heartbeat, activations);
   const count = benchmarkCounts(scoped, undefined, "evaluation");
-  let current = "";
+  const current = evaluationBenchmarkLabel(scoped, lane === "held_out_test" ? "Final Test" : "Validation");
   let judge: ExecutionEventDTO | undefined;
   for (const event of scoped) {
     const scoring = /^scoring (\d+)\/(\d+): (.+)$/.exec(event.phase);
     if (scoring) {
       judge = undefined;
-      current = scoring[3];
+
     }
     if (event.event_type === "progress" && event.extras?.phase === "model_judge") {
       judge = event;
@@ -31,7 +31,7 @@ export function EvaluationProgress({ events, heartbeat, lane, paused = false, be
   }
   if (!count) return null;
   const { completed: done, total } = count;
-  if (!current) current = benchmarkName || (lane === "held_out_test" ? "Final Test" : "Validation");
+
   const judgeModel = typeof judge?.extras?.model === "string" ? judge.extras.model : "";
   const judgeCached = Number(judge?.extras?.cached || 0);
   const suite = lane === "held_out_test" ? "Final Test" : "Validation";

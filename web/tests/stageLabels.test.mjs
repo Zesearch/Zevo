@@ -7,6 +7,18 @@ const { code } = await transformWithEsbuild(source, 'stageLabels.ts', { loader: 
 const { stageAttemptLabel: label } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const normal = {operation: '', activation_phase: '', execution_phase: ''};
 
+test('direct preparation is distinct from Slurm submission and shares collection', () => {
+  const ticket = {agent_id:'inference', model_source:'base_model'};
+  const heartbeat = {...normal, execution_phase:'submit', execution_transport:'direct'};
+  assert.equal(label(ticket, heartbeat), 'Prepare Baseline Inference');
+  assert.equal(label(ticket, {...heartbeat, execution_transport:'slurm'}), 'Submit Baseline Inference');
+  assert.equal(label(ticket, {...heartbeat, execution_phase:'collect'}), 'Collect Baseline Inference Results');
+  assert.equal(label(ticket, {...heartbeat, activation_phase:'repair'}), 'Prepare Baseline Inference · Repair');
+  assert.equal(label({agent_id:'evaluation'}, heartbeat), 'Prepare Validation Evaluation');
+  assert.equal(label({agent_id:'evaluation'}, {...heartbeat, execution_transport:'slurm'}), 'Submit Validation Evaluation');
+  assert.equal(label({agent_id:'evaluation'}, {...heartbeat, execution_phase:'collect'}), 'Collect Validation Results');
+});
+
 test('every role has a semantic name even for old records with no operation', () => {
   const expected = {
     infrastructure: 'Provision Compute', data: 'Prepare Data', train: 'Select config and train candidate',

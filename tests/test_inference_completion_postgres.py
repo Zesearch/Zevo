@@ -90,5 +90,6 @@ async def test_database_failure_rolls_back_and_immediately_closes_activation(pg)
         ticket = await db.get(Ticket, 'infer')
         assert hb.finished_at is not None
         assert 'character varying(36)' in hb.error_message
-        assert ticket.status == 'failed' and ticket.error_message == hb.error_message
+        assert ticket.status == 'repairing' and ticket.error_message == hb.error_message
+        assert ticket.repair_attempts == 1
         assert await db.scalar(select(func.count()).select_from(WorkloadExecution)) == 0

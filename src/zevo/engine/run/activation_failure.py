@@ -6,7 +6,8 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from zevo.db import HeartbeatRun, Ticket
+from zevo.db import HeartbeatRun, HeartbeatResult, Run, Ticket
+from zevo.contracts.tickets import TERMINAL_RUN_STATUSES
 
 log = logging.getLogger(__name__)
 ACTIVATION_KEY = 'zevo_active_heartbeat'
@@ -54,10 +55,33 @@ async def persist_activation_failure(factory, identity, error):
             HeartbeatRun.ticket_id == ticket_id).order_by(
                 HeartbeatRun.started_at.desc()).limit(1))).first()
         # Preserve cancellation, external jobs, completed results, and any
-        # newer activation. This is a backend failure, not an agent repair.
+        # newer activation. A backend failure still needs a bounded diagnosis;
+        # it does not authorize an Agent to modify engine code.
+        retry = False
+        handled = False
+        run = await db.get(Run, ticket.run_id)
         if newest == heartbeat_id and ticket.status == 'running':
             ticket.status = 'failed'
             ticket.error_message = message
             ticket.summary = message
-            ticket.repair_route = 'terminal'
+            if run is not None and run.status not in TERMINAL_RUN_STATUSES:
+                from zevo.engine.run.runner import _apply_ticket_failure_policy
+                retry = await _apply_ticket_failure_policy(
+                    db, ticket, error_message=message, origin='runner',
+                    can_diagnose=hb.driver not in {'evaluation_runner', 'holdout_data_runner'},
+                )
+                handled = True
+                db.add(HeartbeatResult(
+                    ticket_id=ticket.id, heartbeat_id=hb.id, agent_id=ticket.agent_id,
+                    status='failed', output={'status': 'failed', 'ticket_id': ticket.id,
+                                             'error_message': message},
+                ))
+            else:
+                ticket.repair_route = 'terminal'
         await db.commit()
+        if handled:
+            from zevo.engine.run.runner import _queue_ticket_repair, _maybe_wake_supervisor
+            if retry:
+                await _queue_ticket_repair(db, ticket)
+            else:
+                await _maybe_wake_supervisor(db, ticket)

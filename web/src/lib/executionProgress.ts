@@ -44,7 +44,7 @@ export function workloadCanProgress(workload?: InfraInstanceDTO): boolean {
   if (!workload) return true;
   const state = String(workload.meta?.scheduler_state || "").trim().toUpperCase().split(/\s+/)[0].replace(/\+$/, "");
   if (workload.released_at || ["released", "failed"].includes(workload.status)) return false;
-  if (workload.provider === "cluster") return state === "RUNNING";
+  if (workload.provider === "cluster" || workload.meta?.direct_workload) return state === "RUNNING";
   return workload.status === "ready";
 }
 
@@ -64,7 +64,11 @@ export function activationExecution(events: ExecutionEventDTO[], heartbeat?: Hea
         && (!workload.released_at || Date.parse(event.ts) <= Date.parse(workload.released_at))))
       .sort(compareEvents);
   }
-  const available = events.filter((event) => !next || event.ts < next.started_at);
+  const collecting = (heartbeat.execution_phase || heartbeat.activation_phase) === "collect";
+  // Older servers incorrectly emitted a new suite_start while collecting.
+  const available = events.filter((event) => (!next || event.ts < next.started_at)
+    && !(collecting && event.phase === "suite_start"
+      && (event.heartbeat_id === heartbeat.id || event.ts >= heartbeat.started_at)));
   const own = available.filter((event) => event.heartbeat_id === heartbeat.id
     || event.ts >= heartbeat.started_at);
   const selected = latestExecution(own);
@@ -76,13 +80,34 @@ export function activationExecution(events: ExecutionEventDTO[], heartbeat?: Hea
     ? latestExecution(available) : [];
 }
 
+/** Assignments and suite announcements precede compute allocation. Wait for
+ * generation/scoring telemetry, including completed work read back later. */
+export function benchmarkExecutionStarted(events: ExecutionEventDTO[], stage: "inference" | "evaluation"): boolean {
+  return events.some(event => {
+    const extras = event.extras || {};
+    if (["preflight", "test", "mock", "diagnostic"].includes(String(extras.progress_scope))
+      || ["preflight", "test", "mock", "diagnostic"].includes(String(extras.execution_purpose))
+      || extras.benchmark_id === "probe") return false;
+    const phases = [event.phase || "", String(extras.phase || "")];
+    if (stage === "evaluation") {
+      return phases.some(phase => /^(scoring|model_judge|benchmark_start|benchmark_complete|benchmark_finished|completed)(?:$|[ :])/.test(phase))
+        || Array.isArray(extras.completed_benchmarks) && extras.completed_benchmarks.length > 0;
+    }
+    return extras.benchmark_complete === true
+      || phases.some(phase => /^(generate|generating|inference)(?:$|[ :])/.test(phase))
+      || event.event_type === "progress" && event.total_steps > 0
+        && !!(extras.benchmark_id || extras.benchmark_name);
+  });
+}
+
 export function benchmarkCounts(events: ExecutionEventDTO[], members?: string[], stage: "inference" | "evaluation" = "inference") {
+  if (stage === "evaluation" && !benchmarkExecutionStarted(events, stage)) return null;
   const done = new Set<string>();
   let total = members?.length || 0;
   for (const event of events) {
     if (stage === "evaluation" && !event.phase?.startsWith("scoring")
       && !["completed", "suite_start"].includes(event.phase || "")
-      && !["suite_start", "model_judge", "benchmark_complete"].includes(String(event.extras?.phase))) continue;
+      && !["suite_start", "model_judge", "benchmark_complete", "benchmark_start", "benchmark_finished"].includes(String(event.extras?.phase))) continue;
     const scoring = /^scoring (\d+)\/(\d+): /.exec(event.phase || "");
     if (!members && scoring) total = Math.max(total, Number(scoring[2]));
     if (stage === "evaluation" && Array.isArray(event.extras?.completed_benchmarks)) {
@@ -175,4 +200,29 @@ export function executionPhase(events: ExecutionEventDTO[], agent: string) {
   let start = ordered.length - 1;
   while (start > 0 && ordered[start - 1].phase === event.phase) start--;
   return { label: phaseLabel(event.phase, agent), startedAt: ordered[start].ts };
+}
+
+/** Progress labels omit the domain prefix from each benchmark name. */
+export function shortBenchmarkName(name: string): string {
+  const pieces = name.split("·");
+  return (pieces.length > 1 ? pieces.slice(1).join("·") : name).trim();
+}
+
+/** Structured remote telemetry also supports several simultaneous scorers. */
+export function evaluationBenchmarkLabel(events: ExecutionEventDTO[], fallback: string): string {
+  let current = fallback;
+  for (const event of events) {
+    if (event.phase === "completed") { current = "Completed"; continue; }
+    const active = event.extras?.active_benchmarks;
+    if (Array.isArray(active)) {
+      current = active.filter((name): name is string => typeof name === "string").map(shortBenchmarkName).join(" · ") || fallback;
+    } else if (typeof event.extras?.benchmark_name === "string" && event.extras.benchmark_name) {
+      current = shortBenchmarkName(event.extras.benchmark_name);
+    } else {
+      const scoring = /^scoring (\d+)\/(\d+): (.+)$/.exec(event.phase);
+      if (scoring) current = shortBenchmarkName(scoring[3]);
+    }
+  }
+  if (events.at(-1)?.phase === "completed") return "Completed";
+  return current;
 }

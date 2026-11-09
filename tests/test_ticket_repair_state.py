@@ -35,9 +35,9 @@ def test_recovery_keeps_repairable_oom_local_and_respects_boundaries():
     local = recovery("current_task")
     assert classify_failure("CUDA out of memory", agent_id="train", recovery=local).route == "self"
     assert classify_failure("CUDA out of memory", agent_id="train", recovery=recovery()).route == "orchestrator"
-    assert classify_failure("authentication failed", agent_id="train", recovery=recovery()).route == "terminal"
+    assert classify_failure("authentication failed", agent_id="train", recovery=recovery()).route == "orchestrator"
     assert classify_failure("OOM", agent_id="train", recovery=recovery(), cancelled=True).route == "terminal"
-    assert classify_failure("upstream ticket is missing", agent_id="train", recovery=local).route == "orchestrator"
+    assert classify_failure("upstream ticket is missing", agent_id="train", recovery=local).route == "self"
 
 
 def test_recovery_contract_requires_actionable_evidence_and_failed_status():
@@ -97,19 +97,19 @@ def test_failure_ownership_is_deterministic() -> None:
     ).route == "self"
     assert classify_failure(
         "inputs unresolvable: upstream ticket has no Work Product", agent_id="train"
-    ).route == "orchestrator"
+    ).route == "self"
     assert classify_failure(
-        "held-out test isolation violated", agent_id="inference"
+        "held-out test isolation violated", agent_id="inference", boundary="held_out_isolation"
     ).route == "terminal"
     assert classify_failure(
         "engine could not prepare frozen Validation artifacts: "
         "Validation sample submission must be an absolute path",
         agent_id="data",
-    ).route == "terminal"
+    ).route == "self"
 
 
 @pytest.mark.asyncio
-async def test_missing_code_adapter_does_not_schedule_a_repair(session: AsyncSession) -> None:
+async def test_deterministic_executor_requests_diagnosis_instead_of_blind_retry(session: AsyncSession) -> None:
     session.add(Run(
         id="r", task_name="t", agent_objective="t", metric="score", status="running",
     ))
@@ -122,16 +122,17 @@ async def test_missing_code_adapter_does_not_schedule_a_repair(session: AsyncSes
     retry = await _apply_ticket_failure_policy(
         session, ticket,
         error_message="Coding: pass_at_1 requires a registered code execution adapter",
+        can_diagnose=False,
     )
     assert not retry
     assert ticket.status == "failed"
-    assert ticket.repair_route == "terminal"
+    assert ticket.repair_route == "orchestrator"
     assert not ticket.repair_attempts
     assert not (await session.execute(select(TicketMessage))).scalars().all()
 
 
 @pytest.mark.asyncio
-async def test_upstream_method_conflict_is_not_retried_by_train(session: AsyncSession) -> None:
+async def test_upstream_method_change_requires_a_structured_review_request(session: AsyncSession) -> None:
     session.add(Run(id="r", task_name="t", metric="score", status="running"))
     ticket = Ticket(id="train-r-013", run_id="r", agent_id="train", status="running")
     session.add(ticket)
@@ -140,6 +141,8 @@ async def test_upstream_method_conflict_is_not_retried_by_train(session: AsyncSe
         session, ticket,
         error_message="runtime experiment contract violated: configuration_yaml: "
         "upstream method branch conflict: sft -> rft requires transition evidence",
+        result=AgentResult(status="failed", ticket_id=ticket.id, error_message="Method change needed",
+                           notes="", failure_recovery=recovery("run_decision")),
     )
     assert not retry
     assert ticket.status == "failed"
@@ -197,24 +200,24 @@ async def test_terminal_failure_never_enters_repairing(session: AsyncSession) ->
 
 
 @pytest.mark.asyncio
-async def test_engine_scoring_failure_does_not_retry_data_agent(
-    session: AsyncSession,
-) -> None:
-    ticket = Ticket(
-        id="data-r-001", run_id="r", agent_id="data", status="running",
-        repair_attempts=0,
-    )
-    scheduled = await _apply_ticket_failure_policy(
-        session, ticket,
-        error_message=(
-            "engine could not prepare frozen Validation artifacts: "
-            "Validation sample submission does not exist"
-        ),
-    )
-    assert scheduled is False
-    assert ticket.status == "failed"
-    assert ticket.repair_attempts == 0
-    assert ticket.repair_route == "terminal"
+async def test_engine_postprocessing_failure_returns_to_the_same_data_ticket(session):
+    import json
+    from zevo.db import TicketNotice
+    session.add(Run(id="r", metric="accuracy"))
+    ticket = Ticket(id="data-r-001", run_id="r", agent_id="data", status="running", repair_attempts=2)
+    session.add(ticket)
+    await session.flush()
+    message = "engine could not prepare frozen Validation artifacts: ModuleNotFoundError: No module named 'pydantic'"
+    assert await _apply_ticket_failure_policy(session, ticket, error_message=message,
+                                             origin="engine_postprocessing")
+    assert ticket.status == "repairing" and ticket.repair_attempts == 3
+    assert ticket.repair_route == "self"
+    repair = (await session.scalars(select(TicketMessage))).one()
+    assert repair.ticket_id == "data-r-001" and message in repair.body
+    assert "preserve the already prepared artifacts" in repair.body
+    assert "Do not change engine code" in repair.body
+    context = (await session.scalars(select(TicketNotice).where(TicketNotice.code == "failure.context"))).one()
+    assert json.loads(context.body)["origin"] == "engine_postprocessing"
 
 
 @pytest.mark.asyncio
@@ -481,3 +484,40 @@ async def test_success_breaks_failure_streak_but_waiting_does_not(session, statu
             assert await _apply_ticket_failure_policy(session, ticket, error_message='same error')
     assert not await _apply_ticket_failure_policy(session, ticket, error_message='same error')
     assert ticket.repair_route == 'orchestrator'
+
+
+@pytest.mark.parametrize("agent", ["data", "train", "inference", "evaluation", "infrastructure", "registry", "orchestrator"])
+@pytest.mark.parametrize("message", [
+    "engine could not prepare frozen Validation artifacts: missing pydantic",
+    "unauthorized in an old log; the current failure is a missing local file",
+    "budget exceeded is mentioned in the test fixture",
+    "upstream ticket is missing", "GPU hardware defect: Xid 48",
+    "sample_submission parser failed", "pass_at_1 requires a registered code execution adapter",
+])
+def test_error_prose_cannot_override_semantic_recovery(agent, message):
+    assert classify_failure(message, agent_id=agent).route == "self"
+    assert classify_failure(message, agent_id=agent, recovery=recovery("current_task")).route == "self"
+    disposition = classify_failure(message, agent_id=agent, recovery=recovery("resource_plan"))
+    assert disposition.route == ("terminal" if agent == "orchestrator" else "orchestrator")
+
+
+@pytest.mark.parametrize("boundary", ["cancelled", "held_out_isolation", "budget"])
+@pytest.mark.parametrize("scope", ["current_task", "resource_plan"])
+def test_engine_boundaries_override_every_proposed_recovery(boundary, scope):
+    assert classify_failure("any message", agent_id="data", boundary=boundary,
+                            recovery=recovery(scope)).route == "terminal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", ["agent_execution", "result_validation", "engine_postprocessing", "external_workload", "runner"])
+@pytest.mark.parametrize("agent", ["data", "train", "inference", "evaluation", "infrastructure", "registry"])
+async def test_all_failure_origins_share_the_twenty_repair_limit(session, origin, agent):
+    session.add(Run(id="r", metric="accuracy"))
+    ticket = Ticket(id="stage", run_id="r", agent_id=agent, status="running", repair_attempts=19)
+    session.add(ticket)
+    await session.flush()
+    assert await _apply_ticket_failure_policy(session, ticket, error_message="diagnose before retry", origin=origin)
+    assert ticket.repair_attempts == 20
+    assert not await _apply_ticket_failure_policy(session, ticket, error_message="still failing", origin=origin)
+    assert ticket.repair_attempts == 20 and ticket.repair_route == "orchestrator"
+    assert len((await session.scalars(select(TicketMessage))).all()) == 1
