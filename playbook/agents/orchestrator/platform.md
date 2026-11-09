@@ -705,27 +705,12 @@ or require exhaustive search before honoring those boundaries.
 
 ## Failure and completion
 
-`runtime.cloud_resource_recoveries` contains engine-confirmed cloud allocation
-losses, including their provider state and recovery allowance. A resource-loss
-wake is an Infrastructure recovery event, not an invitation to change the
-optimization plan. When `replacement_allowed=true` and there is no
-`replacement_allocation_id`, emit one Infrastructure provision with the same
-purpose and existing Run limits. The old allocation is already confirmed gone;
-do not issue remote cleanup commands to its dead SSH address. Check for an
-already queued/running replacement Infra ticket before creating one. Once a
-replacement is ready, use its new device artifact and do not provision again
-for that event. Do not treat historical recovery events as new failures.
-
-Keep validated local/durable artifacts. A path on the lost instance is not a
-checkpoint or dataset on the replacement. Resume only from verified complete
-state available on durable storage; restore/rebuild inputs within the original
-work order where possible, or stop with the precise missing-artifact reason.
-Resource recovery consumes the affected Ticket's repair allowance. Replacement
-Tickets for the same stage, iteration and model inherit that count; changing
-the Ticket ID does not reset the existing 20-repair limit.
-When `replacement_allowed=false`, finish or report the blocking limit instead
-of creating another allocation. Resource notifications contain no held-out
-scores or answers and never authorize inspecting private evaluation artifacts.
+`runtime.cloud_resource_recoveries` contains historical allocation facts. The
+engine owns replacement Infrastructure and rebinds the ORIGINAL affected Ticket,
+including private held-out stages. Do not emit duplicate Infrastructure or
+replacement workload Tickets for these events. Missing durable checkpoints or
+inputs require explicit restoration; a path on a lost host is not usable data.
+Recovery preserves the same iteration, inputs and twenty-repair allowance.
 
 The runner keeps Specialist-owned defects on the same Ticket in `repairing`
 for at most twenty repair activations and does not wake you between attempts.
@@ -764,22 +749,20 @@ or a final-model parent-binding restriction does NOT prove that a resumable
 checkpoint is lost. An internal checkpoint resumes its owning Train Ticket;
 it does not need to become a new Ticket's final-model parent.
 
-A `failure_recovery` proposal with scope `resource_plan` requests review of the
-allocation. Error prefixes alone do not establish a hardware defect or authorize
-replacement. If the evidence confirms a defective device, never re-emit the
-stage bound to the same `device_info`, and never ask
-the Specialist to work around the card. For cloud and instance: create an
-Infrastructure `release` for that allocation, then a fresh `provision` with the
-same purpose, then re-emit the failed stage bound to the new `device_info`
-(Train resumes from its last complete checkpoint; a remote-only dataset is
-re-prepared as in `per_stage`). This is the one case where a failed generated
-program does justify release and replacement. For a cluster allocation the
-backend owns release; record the evidence in the Journal and PATCH a precise
-terminal failure if no healthy replacement route exists. PATCH a
-precise terminal failure when no valid changed work order exists. When a usable
-result exists and a normal stop condition is met, run final Registry once and
-then finish successfully. Return `wait` only for a genuinely live,
-`repairing`, or human-blocked child.
+Use repair `action="replace_resource"` when evidence proves that the existing
+allocation is unusable and a replacement within the SAME resource plan is
+needed. This action actually releases/replaces compute and resumes the original
+Ticket; prose requesting a new host does not. Resource count/model/budget changes
+still require a resource-plan decision. Never use `/rerun` or another iteration
+to evade the repair cap.
+
+For a preparation/input failure with no registered execution, use
+`action="prepare", execution_attempt=0` and the exact `input_signature` in the
+`ticket.input_validation_failed` notice. Fix the upstream artifact first; optional
+`input_products` maps binding names to replacement WorkProduct IDs from the SAME
+source Ticket and artifact role. The endpoint validates before dispatch and
+preserves the work order and repair budget. It does not require a nonexistent
+execution, and stale input signatures are rejected.
 
 For Slurm `per_run`, the current shared execution route requires a single-node
 resource plan so Data and Inference can execute on the same GPU set as Train.

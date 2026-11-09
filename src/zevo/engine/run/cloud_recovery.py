@@ -12,11 +12,9 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from types import SimpleNamespace
 
 from sqlalchemy import select
 
-from zevo.contracts.failure import FailureRecovery
 from zevo.contracts.tickets import TERMINAL_RUN_STATUSES, TERMINAL_TICKET_STATUSES
 from zevo.db import InfraInstance, Run, Ticket, TicketNotice
 from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
@@ -125,8 +123,6 @@ async def observe(session, run, owner, health):
 
 async def handoff(session, run, owner, health):
     from zevo.engine.cost.budget import snapshot_for_run
-    from zevo.engine.run.runner import _apply_ticket_failure_policy
-    from zevo.engine.run.wakeup import queue_wakeup
     events = dict((run.lifecycle or {}).get("cloud_resource_recoveries", {}))
     if owner.id in events:
         return False
@@ -165,18 +161,19 @@ async def handoff(session, run, owner, health):
     blocked = ("Run budget exhausted" if budget.over_budget or budget.over_time_limit else
                "Run is finalizing" if (run.lifecycle or {}).get("finalization") else "")
     active = [ticket for ticket in candidates if ticket.id in affected_ids]
-    if any(int(ticket.repair_attempts or 0) >= MAX_REPAIR_ATTEMPTS for ticket in active):
+    eligible = {ticket.id for ticket in active if int(ticket.repair_attempts or 0) < MAX_REPAIR_ATTEMPTS}
+    if active and not eligible:
         blocked = blocked or "Ticket repair limit reached"
-    allowed = not blocked and bool(run.supervisor_ticket_id)
+    allowed = not blocked
     if allowed:
         attempts += 1
     action = (
-        "Provision replacement compute through Infrastructure with the same purpose and Run resource limits; "
-        "bind affected work to its new device_info. Reuse durable artifacts only; verify any full-state "
+        "The engine will provision replacement compute through Infrastructure with the unchanged resource plan "
+        "and bind the original Tickets to its device_info. Reuse durable artifacts only; verify any full-state "
         "checkpoint on storage accessible from the new host before resuming. Remote-only paths on the lost "
         "instance are invalid: rebuild missing Data or report that recovery is impossible. Preserve repair "
-        "counts when re-emitting work; do not restart completed expensive work when durable outputs exist."
-        if allowed else "Do not provision a replacement: " + (blocked or "no Run coordinator")
+        "counts on the same work orders; do not restart completed expensive work when durable outputs exist."
+        if allowed else "Do not provision a replacement: " + blocked
     )
     event = {"allocation_id": owner.id, "instance_id": owner.instance_id,
         "backend": health["backend"], "region": health.get("region", ""), "provider_state": health["state"],
@@ -185,28 +182,26 @@ async def handoff(session, run, owner, health):
     events[owner.id] = event
     run.lifecycle = {**(run.lifecycle or {}), "cloud_resource_recoveries": events,
                      "cloud_resource_recovery_attempts": attempts}
-    recovery = FailureRecovery(scope="resource_plan", reason=owner.release_reason,
-        evidence=[f"{health['backend']} instance {owner.instance_id}: {health['state']} at {now.isoformat()}"], next_action=action)
     for ticket in active:
-        if allowed:
+        ticket_allowed = allowed and ticket.id in eligible
+        if ticket_allowed:
             ticket.repair_attempts = int(ticket.repair_attempts or 0) + 1
-        await _apply_ticket_failure_policy(session, ticket, error_message=owner.release_reason,
-            result=SimpleNamespace(failure_recovery=recovery), origin="external_workload")
+        ticket.status = "failed"
+        ticket.repair_route = "terminal"
         ticket.error_message = owner.release_reason
-        ticket.summary = "Cloud allocation lost; " + ("resource recovery requested" if allowed else "recovery stopped")
-        if not allowed:
+        ticket.summary = "Cloud allocation lost; " + ("resource recovery requested" if ticket_allowed else "recovery stopped")
+        if not ticket_allowed:
             ticket.repair_route = "terminal"
         session.add(TicketNotice(ticket_id=ticket.id, code="resource.allocation_lost", severity="error",
                                 body=json.dumps(event)))
-    # The event concerns Infrastructure, never held-out results. Keep private
-    # ticket diagnostics out of the coordinator payload and preserve its lane.
-    if run.supervisor_ticket_id:
-        await queue_wakeup(session, agent_id="orchestrator", ticket_id=run.supervisor_ticket_id,
-            source="resource_recovery", trigger_detail=f"allocation_lost:{owner.id}",
-            reason=f"Cloud allocation {owner.instance_id} is confirmed lost. {action}",
-            payload={"cloud_resource_recovery": event})
-    else:
-        await session.commit()
+        if ticket_allowed:
+            from zevo.engine.run.resource_recovery import request_replacement
+            from zevo.engine.run.runner import _latest_slurm_resource_request
+            await request_replacement(session, ticket, await _latest_slurm_resource_request(session, ticket),
+                                      owner=owner, reason=owner.release_reason)
+    # Recovery stays within the engine, including private stages. No private
+    # ticket/diagnostic is handed to the optimization supervisor.
+    await session.commit()
     return True
 
 

@@ -137,3 +137,92 @@ async def test_timeline_uses_historical_trigger_not_mutable_ticket_status(repair
     ticket.lane = 'held_out_test'
     await db.commit()
     assert await _repair_sources(db, [hb]) == {}
+
+
+@pytest.mark.asyncio
+async def test_preparation_repair_resolves_corrected_upstream_without_execution(repair_db, tmp_path):
+    import json
+    from zevo.db import TicketNotice
+    from zevo.engine.run.input_validation import input_signature, NOTICE_CODE
+    db, ticket, execution = repair_db
+    await db.delete(execution)
+    ticket.input_format = 'freeform'
+    ticket.payload = {'request': 'Prepare the existing experiment', 'attachments': []}
+    upstream = Ticket(id='upstream', run_id='r', agent_id='infrastructure', status='succeeded')
+    path = tmp_path / 'device.json'
+    path.write_text('{}')
+    db.add_all([upstream, WorkProduct(id='corrected', ticket_id='upstream', role='device_info', path=str(path))])
+    ticket.inputs = {'device_info': {'source_ticket_id':'upstream', 'artifact_role':'device_info', 'work_product_id':'missing'}}
+    signature = input_signature(ticket)
+    db.add(TicketNotice(ticket_id=ticket.id,code=NOTICE_CODE,severity='error',body=json.dumps({'input_signature':signature})))
+    await db.commit()
+    req = RepairTicketRequest(action='prepare',execution_attempt=0,input_signature=signature,
+        input_products={'device_info':'corrected'},reason='Upstream republished the valid device artifact',evidence=['registered corrected product'])
+    with pytest.raises(HTTPException):
+        await repair_ticket(db,ticket,req.model_copy(update={'input_signature':'stale'}))
+    assert ticket.repair_attempts == 2
+    result = await repair_ticket(db,ticket,req)
+    assert result['repair_attempts'] == 3 and ticket.iteration == 2
+    assert ticket.inputs['device_info']['work_product_id'] == 'corrected'
+    assert (await db.get(HeartbeatRun,'decision')).resolved_config['repair_target_ticket_ids'] == ['train']
+    assert not (await db.scalars(select(InfraInstance))).all()
+
+
+@pytest.mark.asyncio
+async def test_replacement_review_defers_dispatch_until_resources_are_ready(repair_db):
+    from zevo.engine.run.resource_recovery import KEY
+    db,ticket,execution = repair_db
+    result = await repair_ticket(db,ticket,request('replace_resource'))
+    assert result['status'] == 'waiting_external'
+    assert ticket.repair_attempts == 3 and execution_retry_authorized(execution.meta)
+    assert (await db.get(Run,'r')).lifecycle[KEY][ticket.id]['phase'] == 'stopping'
+    assert not (await db.scalars(select(AgentWakeupRequest))).all()
+
+
+def test_replacement_proposal_requires_explicit_actionable_evidence():
+    args=dict(ticket_id='train',status='failed',error_message='bad device',notes='',execution_retry_action='replace_resource')
+    with pytest.raises(ValidationError): AgentResult(**args)
+    with pytest.raises(ValidationError): AgentResult(**args,execution_retry_reason='need fresh allocation')
+    result=AgentResult(**args,execution_retry_reason='need fresh allocation',failure_recovery={
+        'scope':'current_task','reason':'registered GPU health check failed','evidence':['gpu-health.json: defective'],
+        'next_action':'replace compute within the unchanged plan'})
+    assert result.execution_retry_action == 'replace_resource'
+
+
+@pytest.mark.asyncio
+async def test_pure_repair_is_nested_but_mixed_decision_stays_on_timeline(repair_db):
+    from zevo.api.routers.ui.heartbeats import _dto
+    db, ticket, _ = repair_db
+    await repair_ticket(db,ticket,request())
+    h=await db.get(HeartbeatRun,'decision')
+    assert not _dto(h,{'action':'wait'}).repair_only  # live decisions may still do more
+    h.finished_at=datetime.now(timezone.utc)
+    dto=_dto(h,{'action':'wait','summary':'Resubmit the existing stage'})
+    assert dto.repair_only and dto.repair_target_ticket_ids == [ticket.id]
+    assert not _dto(h,{'action':'continue','child_ticket_id':'next'}).repair_only
+    h.resolved_config={**h.resolved_config,'orchestration_child_ticket_ids':['new-stage']}
+    assert not _dto(h,{'action':'wait'}).repair_only
+    h.resolved_config={'orchestration_trigger':{'ticket_id':ticket.id,'status':'failed'}}
+    assert not _dto(h,{'action':'wait'}).repair_only  # no guess based on error prose/trigger
+
+
+@pytest.mark.asyncio
+async def test_stage_history_includes_explicit_reviews_only_within_run(repair_db, monkeypatch):
+    from zevo.api.routers.ui import heartbeats
+    db, ticket, execution = repair_db
+    decision = await db.get(HeartbeatRun, 'decision')
+    decision.resolved_config = {'repair_target_ticket_ids': [ticket.id]}
+    db.add_all([Run(id='other-run', metric='accuracy', status='running'),
+        Ticket(id='other-orch', run_id='other-run', agent_id='orchestrator', status='running'),
+        HeartbeatRun(id='foreign-review', ticket_id='other-orch', agent_id='orchestrator', driver='mock', model='test',
+            resolved_config={'repair_target_ticket_ids': [ticket.id]})])
+    await db.commit()
+    monkeypatch.setattr(heartbeats, 'is_trusted_ui_request', lambda request: False)
+    async def history(**kwargs):
+        return await heartbeats.list_heartbeats(SimpleNamespace(), ticket_id=ticket.id,
+            include_repairs=True, limit=500, db=db, **kwargs)
+    assert [h.id for h in await history()] == ['decision']
+    assert await history(run_id='other-run') == []
+    ticket.lane = 'held_out_test'
+    await db.commit()
+    assert await history() == []

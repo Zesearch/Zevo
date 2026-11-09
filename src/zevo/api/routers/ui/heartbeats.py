@@ -85,6 +85,8 @@ class HeartbeatDTO(BaseModel):
     mid_training: MidTrainingActivationDTO | None = None
     repair_source_ticket_id: str = ""
     repair_source_agent_id: str = ""
+    repair_target_ticket_ids: list[str] = Field(default_factory=list)
+    repair_only: bool = False
 
 
 def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict | None = None,
@@ -100,7 +102,12 @@ def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict 
                 size = 0
     output = result_output if isinstance(result_output, dict) else {}
     child_id = str(output.get("child_ticket_id") or "")
+    cfg = h.resolved_config or {}
+    targets = cfg.get("repair_target_ticket_ids", []) if h.agent_id == "orchestrator" else []
+    repair_only = bool(targets and h.finished_at and output.get("action") == "wait"
+        and not child_id and not cfg.get("orchestration_child_ticket_ids") and not mid_training)
     return HeartbeatDTO(
+        repair_target_ticket_ids=targets, repair_only=repair_only,
         repair_source_ticket_id=(repair_source or {}).get("ticket_id", ""),
         repair_source_agent_id=(repair_source or {}).get("agent_id", ""),
         mid_training=mid_training,
@@ -268,6 +275,7 @@ async def list_heartbeats(
     request: Request,
     agent_id: str = "",
     ticket_id: str = "",
+    include_repairs: bool = False,
     run_id: str = "",
     limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
@@ -300,6 +308,18 @@ async def list_heartbeats(
             select(Ticket.id).where(Ticket.run_id == run_id)
         ))
     rows = (await db.execute(q)).scalars().all()
+    if ticket_id and include_repairs:
+        target = await db.get(Ticket, ticket_id)
+        # Only optimization reviews can be associated with public stages.
+        # Do not use caller-provided run_id to cross a Ticket visibility boundary.
+        if target is not None and target.lane == "optimization" and (not run_id or target.run_id == run_id):
+            reviews = (await db.scalars(select(HeartbeatRun).join(Ticket, Ticket.id == HeartbeatRun.ticket_id).where(
+                Ticket.run_id == target.run_id, Ticket.lane == "optimization",
+                HeartbeatRun.agent_id == "orchestrator",
+            ).order_by(HeartbeatRun.started_at.desc()).limit(limit))).all()
+            rows = sorted({row.id: row for row in [*rows, *[
+                h for h in reviews if ticket_id in (h.resolved_config or {}).get("repair_target_ticket_ids", [])
+            ]]}.values(), key=lambda h: h.started_at, reverse=True)[:limit]
     outputs = await _result_outputs(db, [row.id for row in rows])
     contexts = await _mid_training_contexts(db, rows)
     finalizations = await _training_finalizations(db, rows)

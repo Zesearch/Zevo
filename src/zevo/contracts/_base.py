@@ -85,7 +85,8 @@ class AgentResult(StrictResult):
         "finish this work and another execution is necessary on the same Ticket. Pair with "
         "failure_recovery.scope=current_task and concrete evidence. The engine owns submission "
         "and the repair limit. Leave empty for artifact/collection fixes. This grants no "
-        "permission to change frozen settings, inputs, resources or the training plan."
+        "permission to change frozen settings, inputs, resource requirements or the training plan. "
+        "Replacing unusable compute within those requirements is an engine-owned action."
     ))
     failure_recovery: FailureRecovery | None = Field(
         None, description=(
@@ -93,6 +94,9 @@ class AgentResult(StrictResult):
             "needed for recovery. Use this field to request Orchestrator review instead "
             "of relying on phrases in notes/error_message. Null preserves legacy results."
         ),
+    )
+    execution_retry_action: Literal["resubmit", "replace_resource"] = Field(
+        "resubmit", description="With execution_retry_reason: reuse healthy compute, or ask the engine to replace unusable compute within the unchanged resource plan. Never release resources yourself.",
     )
     memory_updates: list[MemoryUpdate] = Field(
         default_factory=list,
@@ -108,6 +112,12 @@ class AgentResult(StrictResult):
 
     @model_validator(mode="after")
     def require_status_error_consistency(self) -> "AgentResult":
+        if self.execution_retry_action == "replace_resource" and not self.execution_retry_reason.strip():
+            raise ValueError("replace_resource requires execution_retry_reason and evidence")
+        if self.execution_retry_action == "replace_resource" and (
+            self.failure_recovery is None or not self.failure_recovery.evidence
+        ):
+            raise ValueError("replace_resource requires failure_recovery evidence")
         if self.execution_retry_reason.strip():
             if self.status != "failed":
                 raise ValueError("execution_retry_reason is only valid for failed results")

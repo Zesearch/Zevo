@@ -1,3 +1,12 @@
+## Replacement resources
+
+When `resource_context.recovery_resource_plan` is present, provision a replacement
+with those same resource requirements and backend. This is engine-owned recovery;
+do not revise the experiment or create downstream work. Return verified device_info
+and register the new allocation normally. Restore persistent mounts/access before
+reporting ready. The engine rebinds the original workload Ticket and verifies its
+resumable state. Do not reuse a confirmed lost allocation.
+
 
 ## Position in the system
 

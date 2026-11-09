@@ -105,9 +105,24 @@ def _cloud_provider(backend: str, api_key: str | None = None, secret_key: str = 
     raise ValueError("cloud backend is unknown; refusing cross-provider destruction")
 
 
-async def release_cloud(row: InfraInstance, run: Run) -> bool:
+async def release_cloud(row: InfraInstance, run: Run, *, session=None) -> bool:
     backend = str((row.meta or {}).get("backend") or (row.meta or {}).get("cloud_backend") or run.cloud_backend or "")
-    provider = _cloud_provider(backend)
+    if session is not None:
+        keys = await cloud_recovery_keys(session, run, row)
+        name = {"aws": "AWS_ACCESS_KEY_ID", "lambda": "LAMBDA_API_KEY", "vastai": "VASTAI_API_KEY"}.get(backend)
+        if not name or not keys.get(name):
+            raise ValueError("Allocation release requires scoped provider credentials")
+        options = {}
+        if backend == "aws":
+            region = (row.meta or {}).get("region") or (row.meta or {}).get("cloud_health", {}).get("region") or keys.get("AWS_REGION")
+            if not region:
+                raise ValueError("Allocation release requires its verified AWS region")
+            options["region"] = region
+            if keys.get("AWS_SESSION_TOKEN"):
+                options["session_token"] = keys["AWS_SESSION_TOKEN"]
+        provider = _cloud_provider(backend, keys[name], keys.get("AWS_SECRET_ACCESS_KEY", ""), **options)
+    else:
+        provider = _cloud_provider(backend)
 
     async def gone() -> bool:
         instances = await provider.list_instances()

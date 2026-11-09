@@ -56,7 +56,7 @@ def _identity(path):
 
 def execution_retry_authorized(meta):
     request = meta.get('execution_repair') or meta.get('inference_execution_retry') or {}
-    return bool(request.get('action', 'resubmit') == 'resubmit' and request.get('reason')
+    return bool(request.get('action', 'resubmit') in {'resubmit', 'replace_resource'} and request.get('reason')
                 and request.get('execution_attempt') == int(meta.get('execution_attempt') or 1))
 
 
