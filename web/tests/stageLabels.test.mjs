@@ -37,3 +37,17 @@ test('repeated execution alone is not mislabeled as repair and special stages re
   assert.equal(label({agent_id:'infrastructure'}, {...normal,operation:'release',activation_phase:'repair'}),
     'Release resources · Repair');
 });
+
+test('checkpoint finalization is distinct from continuing optimizer steps', () => {
+  const train = {agent_id: 'train'};
+  const resume = {...normal, activation_phase: 'continue'};
+  assert.equal(label(train, resume), 'Continue Candidate Training');
+  assert.equal(label(train, {...resume, training_finalization: false}), 'Continue Candidate Training');
+  const finalize = {...resume, training_finalization: true};
+  assert.equal(label(train, finalize), 'Finalize Candidate Training');
+  assert.equal(label(train, {...finalize, activation_phase: 'repair', execution_phase: 'submit'}),
+    'Finalize Candidate Training · Repair');
+  assert.equal(label(train, {...finalize, activation_phase: 'instruction'}), 'Apply Instruction');
+  assert.equal(label(train, finalize, 1, 'Saving model'), 'Saving model');
+  assert.equal(label({agent_id: 'inference'}, finalize), 'Continue Candidate Inference');
+});

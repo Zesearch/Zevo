@@ -223,8 +223,25 @@ async def decide_adaptive_training(session, run_id, ticket_id, body):
     return {"status": "decided", "decision": decision}
 
 
+def is_training_finalization(lifecycle, ticket_id, request_id):
+    """Describe a verified checkpoint resumption without changing its routing."""
+    stage = lifecycle.get("adaptive_checkpoints", {}).get(request_id, {})
+    request = stage.get("request", {})
+    if (request.get("ticket_id") != ticket_id or not stage.get("resume_queued")
+            or not stage.get("metrics_delivered")):
+        return False
+    step, total = request.get("step"), request.get("planned_steps")
+    if type(step) is int and type(total) is int and 0 < step == total:
+        return True
+    decision = lifecycle.get("adaptive_training_requests", {}).get(request_id, {})
+    return (decision.get("ticket_id") == ticket_id and decision.get("status") == "decided"
+            and (decision.get("decision") or {}).get("action") == "stop")
+
+
 def validation_summary(ticket, lifecycle, events):
     """Project this Train's Validation telemetry and server-approved decisions."""
+    import math
+
     if ticket.agent_id != "train" or ticket.lane != "optimization":
         return None
     digest = lifecycle.get("adaptive_validation_contracts", {}).get(ticket.id)
@@ -233,6 +250,28 @@ def validation_summary(ticket, lifecycle, events):
     requests = [r for r in lifecycle.get("adaptive_training_requests", {}).values()
                 if r.get("ticket_id") == ticket.id and r.get("contract_sha256") == digest]
     snapshots = list(requests)
+    # The plan-end score goes directly to Train, without a decision request.
+    # Display it as soon as the backend delivers the verified measurement,
+    # even while Train is still selecting/publishing the final model.
+    for stage in lifecycle.get("adaptive_checkpoints", {}).values():
+        request = stage.get("request", {})
+        measurement = stage.get("measurement", {})
+        metrics = measurement.get("metrics")
+        if (not stage.get("metrics_delivered")
+                or request.get("ticket_id") != ticket.id
+                or request.get("contract_sha256") != digest
+                or measurement.get("contract_sha256") != digest
+                or measurement.get("split") != "validation"
+                or measurement.get("request_id") != request.get("request_id")
+                or measurement.get("step") != request.get("step")
+                or request.get("step") != request.get("planned_steps")
+                or not isinstance(metrics, dict) or not metrics
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in metrics.values())):
+            continue
+        snapshots.append({**request, "complete": False, "measurements": [
+            *request.get("measurements", []),
+            {"step": measurement["step"], "score": sum(metrics.values()) / len(metrics), "metrics": metrics},
+        ]})
     final_report = lifecycle.get("adaptive_training_reports", {}).get(ticket.id)
     if isinstance(final_report, dict) and final_report.get("contract_sha256") == digest:
         snapshots.append(final_report)
@@ -242,7 +281,6 @@ def validation_summary(ticket, lifecycle, events):
             if (isinstance(row, dict) and row.get("ticket_id") == ticket.id
                     and row.get("contract_sha256") == digest):
                 snapshots.append(row)
-    import math
     valid = []
     for row in snapshots:
         measures, total = row.get("measurements"), row.get("planned_steps")
@@ -272,12 +310,13 @@ def validation_summary(ticket, lifecycle, events):
         decision = decisions.get(m["step"])
         rows.append({"step": m["step"], "score": m["score"], "metrics": m["metrics"],
                      "decision": decision,
-                     "plan_completed": complete and m["step"] == latest["planned_steps"]})
+                     "plan_completed": m["step"] == latest["planned_steps"]})
     last_decision = decisions.get(rows[-1]["step"])
     return {"planned_steps": latest["planned_steps"], "direction": latest["direction"],
             "measurements": rows, "best_step": best["step"], "complete": complete,
             "next_step": last_decision.get("next_step") if last_decision and last_decision.get("action") == "continue" and not complete else None,
-            "awaiting_decision": not complete and not last_decision and ticket.status in ("running", "waiting_external")}
+            "awaiting_decision": not complete and not rows[-1]["plan_completed"] and not last_decision
+            and ticket.status in ("running", "waiting_external")}
 
 
 def is_checkpoint_stage(ticket):

@@ -274,6 +274,7 @@ export type HeartbeatDTO = {
   /** submit | collect | repair | continue for multi-activation work. */
   activation_phase: string;
   execution_phase?: string;
+  training_finalization?: boolean;
   /** Compact Orchestrator result used to place sequential actions on
    * the Run Timeline. Empty for Specialist heartbeats. */
   action: string;
@@ -559,6 +560,7 @@ export type MidTrainingValidation = {
 
 export type TicketDetail = TicketDTO & {
   measurement_attempt?: { revision?: string; started_at?: string; active_members?: string[] };
+  measurement_members?: { id: string; name: string }[] | null;
   generation_report?: Record<string, unknown>;
   checkpoint_handoff_failure?: { step: number; error: string; first_seen_at: string; attempts: number } | null;
   mid_training_validation?: MidTrainingValidation | null;

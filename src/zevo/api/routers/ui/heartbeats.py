@@ -75,6 +75,7 @@ class HeartbeatDTO(BaseModel):
     operation: str = ""
     activation_phase: str = ""
     execution_phase: str = ""
+    training_finalization: bool = False
     # A compact, UI-safe projection of an Orchestrator result. The Timeline
     # needs the real action/child to represent sequential supervision.
     action: str = ""
@@ -83,7 +84,8 @@ class HeartbeatDTO(BaseModel):
     mid_training: MidTrainingActivationDTO | None = None
 
 
-def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict | None = None) -> HeartbeatDTO:
+def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict | None = None,
+         training_finalization: bool = False) -> HeartbeatDTO:
     size = 0
     is_live = h.finished_at is None
     if h.stdout_path:
@@ -113,6 +115,7 @@ def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict 
         operation=str(h.operation or output.get("operation") or ""),
         activation_phase=str(h.activation_phase or ""),
         execution_phase=str((h.resolved_config or {}).get("execution_phase") or ""),
+        training_finalization=training_finalization,
         action=str(output.get("action") or "") if h.agent_id == "orchestrator" else "",
         action_summary=str(output.get("summary") or "") if h.agent_id == "orchestrator" else "",
         child_ticket_id=child_id if h.agent_id == "orchestrator" else "",
@@ -168,6 +171,40 @@ async def _mid_training_contexts(db: AsyncSession, rows: list[HeartbeatRun]) -> 
     legacy = await legacy_contexts(db, [row for row in rows if row.id not in contexts], lifecycles)
     contexts.update(legacy)
     return contexts
+
+
+async def _training_finalizations(db: AsyncSession, rows: list[HeartbeatRun]) -> dict[str, bool]:
+    """Use activation snapshots; recover old plan-end resumes from scored work.
+
+    The completed Evaluation must precede this activation. A later final score
+    must never relabel earlier training continuations on the same ticket.
+    """
+    trains = [row for row in rows if row.agent_id == "train"]
+    flags = {row.id: (row.resolved_config or {})["training_finalization"] is True
+             for row in trains if "training_finalization" in (row.resolved_config or {})}
+    legacy = [row for row in trains if row.id not in flags and row.activation_phase == "continue"]
+    if not legacy:
+        return flags
+    lifecycles = dict((await db.execute(select(Ticket.id, Run.lifecycle)
+        .join(Run, Run.id == Ticket.run_id).where(Ticket.id.in_({row.ticket_id for row in legacy})))).all())
+    from zevo.engine.run.adaptive_training import is_training_finalization
+    for row in legacy:
+        lifecycle = lifecycles.get(row.ticket_id) or {}
+        for key, stage in lifecycle.get("adaptive_checkpoints", {}).items():
+            req = stage.get("request", {})
+            if (req.get("step") != req.get("planned_steps")
+                    or not is_training_finalization(lifecycle, row.ticket_id, key)):
+                continue
+            # Compare timestamps in SQL to support both SQLite and PostgreSQL.
+            scored = (await db.execute(select(HeartbeatResult.id).where(
+                HeartbeatResult.ticket_id == stage.get("evaluation_ticket_id"),
+                HeartbeatResult.status == "succeeded",
+                HeartbeatResult.created_at <= row.started_at,
+            ).limit(1))).first()
+            if scored:
+                flags[row.id] = True
+                break
+    return flags
 
 
 async def _heartbeat_is_visible(
@@ -226,7 +263,8 @@ async def list_heartbeats(
     rows = (await db.execute(q)).scalars().all()
     outputs = await _result_outputs(db, [row.id for row in rows])
     contexts = await _mid_training_contexts(db, rows)
-    return [_dto(row, outputs.get(row.id), contexts.get(row.id)) for row in rows]
+    finalizations = await _training_finalizations(db, rows)
+    return [_dto(row, outputs.get(row.id), contexts.get(row.id), finalizations.get(row.id, False)) for row in rows]
 
 
 @router.get("/heartbeats/{heartbeat_id}", response_model=HeartbeatDTO)
@@ -241,7 +279,8 @@ async def get_heartbeat(
         raise HTTPException(404, f"heartbeat {heartbeat_id} not found")
     outputs = await _result_outputs(db, [r.id])
     contexts = await _mid_training_contexts(db, [r])
-    return _dto(r, outputs.get(r.id), contexts.get(r.id))
+    finalizations = await _training_finalizations(db, [r])
+    return _dto(r, outputs.get(r.id), contexts.get(r.id), finalizations.get(r.id, False))
 
 
 @router.post("/heartbeats/{heartbeat_id}/cancel")

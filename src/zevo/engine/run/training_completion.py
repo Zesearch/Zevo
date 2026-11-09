@@ -6,9 +6,47 @@ import hashlib
 import json
 import runpy
 import shlex
+from decimal import Decimal, ROUND_DOWN, localcontext
 from pathlib import Path
 
 from zevo.contracts.configuration import load_train_config
+
+
+def _same_metric_value(left, right) -> bool:
+    """Compare finite metric values through five decimal places, without rounding."""
+    truncated = []
+    for value in (left, right):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        number = Decimal(str(value))
+        if not number.is_finite():
+            return False
+        # Decimal strings avoid introducing binary-float errors at the cutoff.
+        with localcontext() as context:
+            context.prec = max(28, number.adjusted() + 6)
+            truncated.append(number.quantize(Decimal("0.00001"), rounding=ROUND_DOWN))
+    return truncated[0] == truncated[1]
+
+
+def _same_measurements(measured, approved) -> bool:
+    if not isinstance(measured, list) or not isinstance(approved, list) or len(measured) != len(approved):
+        return False
+    for actual, expected in zip(measured, approved):
+        if not isinstance(actual, dict) or not isinstance(expected, dict) or actual.keys() != expected.keys():
+            return False
+        if not _same_metric_value(actual.get("score"), expected.get("score")):
+            return False
+        actual_metrics, expected_metrics = actual.get("metrics"), expected.get("metrics")
+        if (not isinstance(actual_metrics, dict) or not isinstance(expected_metrics, dict)
+                or actual_metrics.keys() != expected_metrics.keys()):
+            return False
+        if any(not _same_metric_value(value, expected_metrics[key]) for key, value in actual_metrics.items()):
+            return False
+        # Only scores receive decimal tolerance; all other evidence stays exact.
+        if ({k: v for k, v in actual.items() if k not in {"score", "metrics"}}
+                != {k: v for k, v in expected.items() if k not in {"score", "metrics"}}):
+            return False
+    return True
 
 
 async def verify_completed_training(session, ticket, result, helper_path: Path) -> dict:
@@ -89,7 +127,7 @@ async def _verify_adaptive_decisions(session, ticket, completion):
                 or request.get("decision") != decision):
             raise ValueError("adaptive completion contains a decision not approved by the Orchestrator")
         measured = report["measurements"][:len(request["measurements"])]
-        if measured != request["measurements"]:
+        if not _same_measurements(measured, request["measurements"]):
             raise ValueError("adaptive completion changed the measurements used for its decision")
 
     # Retain verified final telemetry even if the last worker log marker is lost.

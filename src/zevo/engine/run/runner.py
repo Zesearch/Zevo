@@ -5380,6 +5380,12 @@ async def run_ticket(
         hb.resolved_config = {**(hb.resolved_config or {}),
                               "execution_phase": str(slurm_contract.phase or "")}
 
+    if tk.agent_id == "train":
+        from zevo.engine.run.adaptive_training import is_training_finalization
+        resume = (getattr(inp, "run_context", None) or {}).get("adaptive_resume", {})
+        hb.resolved_config = {**(hb.resolved_config or {}), "training_finalization":
+            is_training_finalization(run.lifecycle or {}, tk.id, resume.get("request_id"))}
+
     if tk.agent_id == "inference" and status_at_pickup != "repairing":
         from zevo.engine.run.remeasurement import active_attempt
         attempt = active_attempt(run, tk.id)
@@ -6032,7 +6038,7 @@ async def run_ticket(
                     )).scalar_one_or_none()
                     if live_hb is not None:
                         live_hb.resolved_config = {**config, **{key: value for key, value in (live_hb.resolved_config or {}).items()
-                            if key in {"mid_training", "execution_phase", "measurement_revision"}}}
+                            if key in {"mid_training", "execution_phase", "measurement_revision", "training_finalization"}}}
                 await live_session.commit()
             for row in rows:
                 row.pop("_live_inflight", None)
@@ -6204,7 +6210,7 @@ async def run_ticket(
         session.add(ExecutionEvent(ticket_id=tk.id, heartbeat_id=heartbeat_id, **values))
     if config_rows:
         hb.resolved_config = {**dict(config_rows[-1]["extras"]), **{key: value for key, value in (hb.resolved_config or {}).items()
-            if key in {"mid_training", "execution_phase", "measurement_revision"}}}
+            if key in {"mid_training", "execution_phase", "measurement_revision", "training_finalization"}}}
 
     # Did the measured stage go looking at its grader?
     #

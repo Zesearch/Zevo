@@ -370,6 +370,24 @@ def test_validation_panel_projects_live_decisions_and_final_measurement():
     assert validation_summary(ticket, lifecycle, events) is None
 
 
+def test_training_finalization_requires_a_delivered_resumption_or_accepted_stop():
+    from zevo.engine.run.adaptive_training import is_training_finalization
+    stage = {"request": {"ticket_id": "train", "step": 80, "planned_steps": 100},
+             "metrics_delivered": True, "resume_queued": True}
+    lifecycle = {"adaptive_checkpoints": {"r": stage}}
+    assert not is_training_finalization(lifecycle, "train", "r")
+    lifecycle["adaptive_training_requests"] = {"r": {"ticket_id": "train", "status": "decided",
+                                                    "decision": {"action": "stop"}}}
+    assert is_training_finalization(lifecycle, "train", "r")
+    lifecycle["adaptive_training_requests"] = {}
+    stage["request"]["step"] = 100
+    assert is_training_finalization(lifecycle, "train", "r")
+    assert not is_training_finalization(lifecycle, "other", "r")
+    assert not is_training_finalization(lifecycle, "train", "unknown")
+    stage["metrics_delivered"] = False
+    assert not is_training_finalization(lifecycle, "train", "r")
+
+
 def test_validation_panel_min_metric_stop_and_untrusted_history():
     from types import SimpleNamespace
     from zevo.engine.run.adaptive_training import validation_summary
@@ -386,6 +404,48 @@ def test_validation_panel_min_metric_stop_and_untrusted_history():
     for bad in [{**report, "contract_sha256": "other"}, {**report, "ticket_id": "other"},
                 {**report, "measurements": [{"step": 10, "score": float('nan'), "metrics": {}}]}]:
         assert validation_summary(ticket, life, [SimpleNamespace(extras={"adaptive_report": bad})]) is None
+
+
+@pytest.mark.parametrize("direction,best_step", [("max", 100), ("min", 20)])
+def test_plan_end_score_visible_without_orchestrator_decision_or_final_train_report(direction, best_step):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from zevo.engine.run.adaptive_training import validation_summary
+
+    ticket = SimpleNamespace(id="t", agent_id="train", lane="optimization", status="running")
+    previous = [{"step": step, "score": value, "metrics": {"math": value, "code": value}}
+                for step, value in [(20, .6), (60, .65), (80, .66)]]
+    request = {"request_id": "final", "ticket_id": "t", "contract_sha256": "h",
+               "step": 100, "planned_steps": 100, "direction": direction, "measurements": previous}
+    stage = {"request": request, "metrics_delivered": True, "measurement": {
+        "request_id": "final", "step": 100, "split": "validation", "contract_sha256": "h",
+        "metrics": {"math": .64, "code": .70}}}
+    lifecycle = {"adaptive_validation_contracts": {"t": "h"}, "adaptive_checkpoints": {"final": stage}}
+    original = deepcopy(lifecycle)
+    summary = validation_summary(ticket, lifecycle, [])
+    assert [m["step"] for m in summary["measurements"]] == [20, 60, 80, 100]
+    assert summary["measurements"][-1]["score"] == pytest.approx(.67)
+    assert summary["measurements"][-1]["plan_completed"]
+    assert summary["measurements"][-1]["decision"] is None
+    assert summary["best_step"] == best_step
+    assert not summary["awaiting_decision"] and summary["next_step"] is None
+    assert not summary["complete"]  # Train still needs to finish its own report/publication.
+    assert lifecycle == original  # Display projection does not create a decision or wake an agent.
+
+    report = {**request, "complete": True, "measurements": [*previous,
+              {"step": 100, "score": .67, "metrics": stage["measurement"]["metrics"]}]}
+    lifecycle["adaptive_training_reports"] = {"t": report}
+    summary = validation_summary(ticket, lifecycle, [])
+    assert summary["complete"] and len(summary["measurements"]) == 4
+    assert summary["best_step"] == best_step
+
+    for changes in [{"split": "test"}, {"contract_sha256": "other"}, {"step": 80},
+                    {"request_id": "other"}, {"metrics": {"math": float("nan")}}]:
+        invalid = deepcopy(original)
+        invalid["adaptive_checkpoints"]["final"]["measurement"].update(changes)
+        assert validation_summary(ticket, invalid, []) is None
+    original["adaptive_checkpoints"]["final"]["metrics_delivered"] = False
+    assert validation_summary(ticket, original, []) is None
 
 
 def test_activation_context_requires_explicit_request_or_repair_parent():
