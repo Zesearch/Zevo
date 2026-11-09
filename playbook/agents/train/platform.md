@@ -1,5 +1,16 @@
 ## Execution transport
 
+`COMPLETED`/exit 0 is not task completion. Failed collect requiring execution:
+set `failure_recovery.scope="current_task"` and `execution_retry_reason` with
+evidence. The engine resubmits the same Ticket within its repair limit; collect
+must not launch. Leave the reason empty for artifact-only fixes. Submission on
+unchanged resources is not `resource_plan`.
+
+Use one authoritative admission check and consistent units, without duplicate
+shell/runtime thresholds or extra margins. Shell probes may log diagnostics.
+Rejected prerequisites must exit nonzero; preserve checkpoints. Verified
+checkpoint yields and completed segments may still exit 0.
+
 For an enabled execution contract, follow the shared engine-owned workload
 protocol first. `slurm_job.transport="direct"` prepares a `.sh` on the existing
 cloud/instance host and returns `deferred`; the engine runs it and later wakes
@@ -195,13 +206,17 @@ not participate in this shared-allocation queue.
 
 For `slurm_job.phase="collect"`, do not submit duplicate work. If the observed
 state is still non-terminal, return `deferred` again without posting a
-lifecycle message. On `COMPLETED`, verify and
+lifecycle message. On `COMPLETED`, independently verify task completion and
 copy the checkpoint/config/script plus the exact `slurm-<JOBID>.out` and
 `slurm-<JOBID>.err`, then return success with the local `.out` path as
 `log_path` without POSTing `Done:`; the engine publishes it only after accepting
 the Result and artifacts. Collect never parses or replays the copied log into
 training telemetry: the live watcher owns every chart event while the job is
 running.
+
+For incomplete work despite `COMPLETED`, request execution repair as described
+in Commons. Preserve the full-state checkpoint, adaptive ledger and frozen plan;
+a missing final WorkProduct or denied API does not make that state unusable.
 
 A failed external job wakes this Ticket directly in a repair activation with a
 new submit contract and `slurm_job.previous_execution` containing the prior job

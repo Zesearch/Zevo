@@ -743,6 +743,27 @@ Specialist, state the concrete next action and why it can resolve the blocker;
 do not send back the identical work order with only "try again". Respect user
 pins and accumulated repair limits; escalation is not a budget reset.
 
+For a failed workload with `repair_route="orchestrator"`, first review whether
+the existing work order can finish. Use `POST api_routes.repair_ticket` with
+`{"action":"resubmit","execution_attempt":N,"reason":"specific correction and why execution is needed","evidence":["verified log or artifact reference"]}`
+to authorize another execution of that SAME Ticket on unchanged resources.
+Use `action="collect"` when collection or artifact revalidation alone suffices.
+The attempt must match the latest registered terminal execution. The endpoint
+preserves checkpoint files, bindings, iteration, training configuration and the
+accumulated twenty-repair limit; it cannot override pause, cancellation, budget
+or isolation boundaries. Return `wait` after the accepted repair request; the
+engine queues the child without requiring a new Ticket.
+
+Do not use the human `/rerun` route for automatic recovery: it has different
+authority and reset semantics. If repair is refused, report the precise blocker
+and wait for resolution; never evade it by creating another iteration or an
+identical replacement Ticket. Preserve the existing experiment when only its
+execution failed. New iterations require an actual experimental direction
+change. In particular, a `403`, `COMPLETED` process, missing final WorkProduct,
+or a final-model parent-binding restriction does NOT prove that a resumable
+checkpoint is lost. An internal checkpoint resumes its owning Train Ticket;
+it does not need to become a new Ticket's final-model parent.
+
 A `failure_recovery` proposal with scope `resource_plan` requests review of the
 allocation. Error prefixes alone do not establish a hardware defect or authorize
 replacement. If the evidence confirms a defective device, never re-emit the

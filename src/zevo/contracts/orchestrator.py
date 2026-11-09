@@ -289,6 +289,9 @@ class OrchestratorApiRoutes(BaseModel):
     rerun_ticket: Literal[
         "/api/tickets/{ticket_id}/rerun"
     ] = "/api/tickets/{ticket_id}/rerun"
+    repair_ticket: Literal[
+        "/api/tickets/{ticket_id}/repair"
+    ] = "/api/tickets/{ticket_id}/repair"
     adaptive_training_decision: Literal[
         "/api/runs/{run_id}/adaptive-training/{ticket_id}/decision"
     ] = "/api/runs/{run_id}/adaptive-training/{ticket_id}/decision"

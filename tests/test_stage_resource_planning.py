@@ -454,6 +454,21 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     assert asyncio.run(contract("inference")).phase == "collect"
     job_row.meta["inference_execution_retry"] = {"execution_attempt": 1, "reason": "verified output loss"}
     assert asyncio.run(contract("inference")).phase == "submit"
+    # A completed process is not proof of completed work for any stage.
+    from zevo.engine.run.repair_progress import record_execution_repair
+    record_execution_repair(job_row, action="resubmit", reason="corrected launcher never executed", heartbeat_id="collect")
+    for stage in ("data", "train", "inference", "evaluation"):
+        ticket.agent_id = stage
+        retry = asyncio.run(contract(stage))
+        assert retry.phase == "submit" and retry.attempt == 2
+        assert retry.retry_of_bookkeeping_row_id == job_row.id
+        assert retry.num_gpus == 6  # preserve the original resource geometry
+        assert observed == ["probe"]
+    record_execution_repair(job_row, action="collect", reason="only output parsing needs correction", heartbeat_id="review")
+    job_row.meta["scheduler_state"] = "FAILED"
+    assert asyncio.run(contract("train")).phase == "collect"
+    job_row.meta["scheduler_state"] = "COMPLETED"
+    record_execution_repair(job_row, action="resubmit", reason="corrected launcher", heartbeat_id="review")
     job_row.meta.update({"execution_attempt": 2, "retry_of_bookkeeping_row_id": "request-0", "retry_of_job_id": "12344"})
     assert asyncio.run(contract("inference")).phase == "collect"  # authorization was for attempt 1 only
     # Walltime is an execution continuation even when exit=0 and repair budget

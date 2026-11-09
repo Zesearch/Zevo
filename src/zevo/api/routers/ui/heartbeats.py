@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.api.database import get_db
 from zevo.api.ui_access import is_trusted_ui_request
-from zevo.db import HeartbeatResult, HeartbeatRun, Run
+from zevo.db import AgentWakeupRequest, HeartbeatResult, HeartbeatRun, Run
 from zevo.contracts.tickets import TERMINAL_RUN_STATUSES
 from zevo.db.models import Ticket
 
@@ -83,10 +83,12 @@ class HeartbeatDTO(BaseModel):
     action_summary: str = ""
     child_ticket_id: str = ""
     mid_training: MidTrainingActivationDTO | None = None
+    repair_source_ticket_id: str = ""
+    repair_source_agent_id: str = ""
 
 
 def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict | None = None,
-         training_finalization: bool = False) -> HeartbeatDTO:
+         training_finalization: bool = False, repair_source: dict | None = None) -> HeartbeatDTO:
     size = 0
     is_live = h.finished_at is None
     if h.stdout_path:
@@ -99,6 +101,8 @@ def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict 
     output = result_output if isinstance(result_output, dict) else {}
     child_id = str(output.get("child_ticket_id") or "")
     return HeartbeatDTO(
+        repair_source_ticket_id=(repair_source or {}).get("ticket_id", ""),
+        repair_source_agent_id=(repair_source or {}).get("agent_id", ""),
         mid_training=mid_training,
         id=h.id, ticket_id=h.ticket_id, agent_id=h.agent_id,
         driver=h.driver, model=h.model,
@@ -122,6 +126,39 @@ def _dto(h: HeartbeatRun, result_output: dict | None = None, mid_training: dict 
         action_summary=str(output.get("summary") or "") if h.agent_id == "orchestrator" else "",
         child_ticket_id=child_id if h.agent_id == "orchestrator" else "",
     )
+
+
+async def _repair_sources(db: AsyncSession, rows: list[HeartbeatRun]) -> dict[str, dict]:
+    """Use activation provenance, never today's mutable child/supervisor status."""
+    supervisors = [row for row in rows if row.agent_id == "orchestrator"
+                   and row.activation_phase != "instruction"]
+    if not supervisors:
+        return {}
+    wakes = (await db.scalars(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.heartbeat_run_id.in_([row.id for row in supervisors]),
+    ).order_by(AgentWakeupRequest.created_at))).all()
+    payloads = {wake.heartbeat_run_id: wake.payload or {} for wake in wakes}
+    contexts = {}
+    for row in supervisors:
+        cfg = row.resolved_config or {}
+        payload = payloads.get(row.id, {})
+        trigger = cfg.get("orchestration_trigger", payload.get("orchestration_trigger"))
+        if not isinstance(trigger, dict):
+            # Older engine wakes have a structured completion identity even
+            # though they predate the activation snapshot.
+            parts = str(payload.get("optimization_completion_key") or "").split(":")
+            trigger = {"ticket_id": parts[0], "status": parts[-1]} if len(parts) == 3 else {}
+        if trigger.get("status") == "failed" and trigger.get("ticket_id"):
+            contexts[row.id] = trigger
+    ids = {row.ticket_id for row in supervisors} | {c["ticket_id"] for c in contexts.values()}
+    tickets = {t.id: t for t in (await db.scalars(select(Ticket).where(Ticket.id.in_(ids)))).all()}
+    result = {}
+    for row in supervisors:
+        source = tickets.get(contexts.get(row.id, {}).get("ticket_id"))
+        owner = tickets.get(row.ticket_id)
+        if source and owner and source.run_id == owner.run_id and source.lane == owner.lane == "optimization":
+            result[row.id] = {"ticket_id": source.id, "agent_id": source.agent_id}
+    return result
 
 
 async def _result_outputs(
@@ -266,7 +303,8 @@ async def list_heartbeats(
     outputs = await _result_outputs(db, [row.id for row in rows])
     contexts = await _mid_training_contexts(db, rows)
     finalizations = await _training_finalizations(db, rows)
-    return [_dto(row, outputs.get(row.id), contexts.get(row.id), finalizations.get(row.id, False)) for row in rows]
+    repairs = await _repair_sources(db, rows)
+    return [_dto(row, outputs.get(row.id), contexts.get(row.id), finalizations.get(row.id, False), repairs.get(row.id)) for row in rows]
 
 
 @router.get("/heartbeats/{heartbeat_id}", response_model=HeartbeatDTO)
@@ -282,7 +320,8 @@ async def get_heartbeat(
     outputs = await _result_outputs(db, [r.id])
     contexts = await _mid_training_contexts(db, [r])
     finalizations = await _training_finalizations(db, [r])
-    return _dto(r, outputs.get(r.id), contexts.get(r.id), finalizations.get(r.id, False))
+    repairs = await _repair_sources(db, [r])
+    return _dto(r, outputs.get(r.id), contexts.get(r.id), finalizations.get(r.id, False), repairs.get(r.id))
 
 
 @router.post("/heartbeats/{heartbeat_id}/cancel")

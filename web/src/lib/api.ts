@@ -273,6 +273,8 @@ export type HeartbeatDTO = {
   operation: string;
   /** submit | collect | repair | continue for multi-activation work. */
   activation_phase: string;
+  repair_source_ticket_id?: string;
+  repair_source_agent_id?: string;
   execution_phase?: string;
   execution_transport?: string;
   training_finalization?: boolean;

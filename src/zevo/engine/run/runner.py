@@ -99,7 +99,7 @@ from zevo.engine.remote_transfer import (
 )
 from zevo.engine.observe.score_monitor import extract_score, materialize_metrics_artifact
 from zevo.engine.run.adaptive_training import checkpoint_orchestration_context
-from zevo.engine.run.repair_progress import execution_retry_authorized
+from zevo.engine.run.repair_progress import execution_retry_authorized, collect_repair_authorized, record_execution_repair
 from zevo.engine.observe.run_metrics import (
     baseline_and_best_test,
     upsert_history_fact,
@@ -926,10 +926,11 @@ async def _slurm_stage_job_contract(
             or checkpoint_resume or walltime_resume
             or (
                 str(getattr(ticket, "status", "")) == "repairing"
+                and not collect_repair_authorized(meta)
                 and ((prior_state not in {"COMPLETED", "CANCELLED"} and (
                     stage != "evaluation" or resumable_stage_interruption(ticket, job_row)
                 )) or (stage == "train" and meta.get("training_completion_repair"))
-                    or (stage == "inference" and execution_retry_authorized(meta)))
+                    or execution_retry_authorized(meta))
                 and int(getattr(ticket, "repair_attempts", 0) or 0) <= MAX_REPAIR_ATTEMPTS
             )
         )
@@ -4512,6 +4513,8 @@ async def _submit_validated_slurm_stage_once(
     resume_proof = dict((previous.meta or {}).get("training_continuation") or {}) if walltime_resume else {}
     training_digest = ""
     if isinstance(inp, TrainTaskInput):
+        from zevo.engine.run.repair_progress import verify_repair_training_config
+        verify_repair_training_config(previous, Path(contract.script_path).with_name("train_config.yaml"))
         training_digest = hashlib.sha256(Path(contract.script_path).with_name("train_config.yaml").read_bytes()).hexdigest()
         if walltime_resume and training_digest != resume_proof["config_sha256"]:
             raise ValueError("walltime continuation must preserve the frozen training configuration")
@@ -4553,7 +4556,7 @@ async def _submit_validated_slurm_stage_once(
             or (previous_state == "COMPLETED" and not contract.restart_instruction_id and not measurement_restart
                 and not (ticket.agent_id == "train" and (previous_meta.get("training_completion_repair")
                     or checkpoint_resume or walltime_resume))
-                and not (ticket.agent_id == "inference" and execution_retry_authorized(previous_meta)))):
+                and not execution_retry_authorized(previous_meta))):
             raise ValueError("Slurm replacement requires the prior workload to be terminal")
         if int(previous_meta.get("execution_attempt") or 1) + 1 != contract.attempt:
             raise ValueError("the Slurm retry attempt is not consecutive")
@@ -4580,7 +4583,7 @@ async def _submit_validated_slurm_stage_once(
             previous_implementation_sha256
             and previous_implementation_sha256 == implementation_sha256
             and not measurement_restart and not checkpoint_resume and not walltime_resume
-            and not (ticket.agent_id == "inference" and execution_retry_authorized(previous.meta or {}))
+            and not execution_retry_authorized(previous.meta or {})
             and not resumable_stage_interruption(ticket, previous)
         ):
             raise ValueError(
@@ -5392,6 +5395,10 @@ async def run_ticket(
             hb.resolved_config = {**(hb.resolved_config or {}), "measurement_revision": attempt["revision"]}
 
     if tk.agent_id == "orchestrator" and hb.activation_phase != "instruction":
+        trigger = activation_payload.get("orchestration_trigger") or (tk.payload or {}).get("trigger")
+        if isinstance(trigger, dict):
+            hb.resolved_config = {**(hb.resolved_config or {}), "orchestration_trigger": {
+                key: str(trigger.get(key) or "") for key in ("type", "ticket_id", "agent_id", "status")}}
         from zevo.engine.run.adaptive_training import activation_validation_context
         previous_context = None
         if status_at_pickup == "repairing":
@@ -5401,10 +5408,13 @@ async def run_ticket(
             )).scalar_one_or_none()
             if previous_heartbeat:
                 previous_context = (previous_heartbeat.resolved_config or {}).get("mid_training")
+                previous_trigger = (previous_heartbeat.resolved_config or {}).get("orchestration_trigger")
+                if isinstance(previous_trigger, dict):
+                    hb.resolved_config = {**(hb.resolved_config or {}), "orchestration_trigger": previous_trigger}
         context = activation_validation_context(run.lifecycle or {}, activation_reason,
                                                 activation_payload, previous_context)
         if context:
-            hb.resolved_config = {"mid_training": context}
+            hb.resolved_config = {**(hb.resolved_config or {}), "mid_training": context}
 
     session.add(hb)
     await session.flush()  # populates hb.id without committing
@@ -6035,7 +6045,7 @@ async def run_ticket(
                     )).scalar_one_or_none()
                     if live_hb is not None:
                         live_hb.resolved_config = {**config, **{key: value for key, value in (live_hb.resolved_config or {}).items()
-                            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization"}}}
+                            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization", "orchestration_trigger"}}}
                 await live_session.commit()
             for row in rows:
                 row.pop("_live_inflight", None)
@@ -6208,7 +6218,7 @@ async def run_ticket(
         session.add(ExecutionEvent(ticket_id=tk.id, heartbeat_id=heartbeat_id, **values))
     if config_rows:
         hb.resolved_config = {**dict(config_rows[-1]["extras"]), **{key: value for key, value in (hb.resolved_config or {}).items()
-            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization"}}}
+            if key in {"mid_training", "execution_phase", "execution_transport", "measurement_revision", "training_finalization", "orchestration_trigger"}}}
 
     # Did the measured stage go looking at its grader?
     #
@@ -7226,14 +7236,13 @@ async def run_ticket(
                 artifact = ""
                 artifact_meta = {}
 
-        if (isinstance(output, InferenceResult) and status == "failed"
+        if (isinstance(output, (DataResult, TrainResult, InferenceResult, EvaluationResult)) and status == "failed"
             and output.execution_retry_reason.strip()
             and getattr(getattr(inp, "slurm_job", None), "phase", "") == "collect"):
             stage_row = await _latest_slurm_resource_request(session, tk)
             if stage_row is not None:
-                stage_row.meta = {**dict(stage_row.meta or {}), "inference_execution_retry": {
-                    "heartbeat_id": heartbeat_id, "execution_attempt": int((stage_row.meta or {}).get("execution_attempt") or 1),
-                    "reason": output.execution_retry_reason.strip()}}
+                record_execution_repair(stage_row, action="resubmit",
+                    reason=output.execution_retry_reason, heartbeat_id=heartbeat_id)
 
         if status == "deferred" and prepared_slurm_submission:
             try:
@@ -9410,7 +9419,7 @@ async def _maybe_wake_supervisor(
         session, agent_id="orchestrator", ticket_id=sup_id,
         source="handoff",
         reason=f"child ticket {child.id} finished ({child.status})",
-        payload={"optimization_completion_key": completion_key},
+        payload={"optimization_completion_key": completion_key, "orchestration_trigger": trigger},
     )
 
 
