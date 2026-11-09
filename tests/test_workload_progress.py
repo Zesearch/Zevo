@@ -39,6 +39,53 @@ async def setup(db, agent, provider="cluster"):
 
 
 @pytest.mark.asyncio
+async def test_ticket_detail_exposes_assigned_inference_members_before_any_progress(db):
+    run, ticket, _ = await setup(db, "inference")
+    run.holdout = {"validation_sets": [{"name": f"Benchmark {i}"} for i in range(12)]}
+    await db.commit()
+    detail = await get_ticket(ticket.id, Request({"type": "http"}), db)
+    assert detail.execution_events == []
+    assert detail.measurement_members == [
+        {"id": f"validation:{i}", "name": f"Benchmark {i}"} for i in range(12)]
+    ticket.payload = {"test_set_name": "validation:Benchmark 11"}
+    await db.commit()
+    detail = await get_ticket(ticket.id, Request({"type": "http"}), db)
+    assert detail.measurement_members == [{"id": "validation:11", "name": "Benchmark 11"}]
+
+
+@pytest.mark.asyncio
+async def test_finalization_label_recovers_old_resume_without_relabeling_prior_training(db):
+    from zevo.api.routers.ui.heartbeats import _training_finalizations, _dto
+    from zevo.db import HeartbeatResult
+    run, ticket, prior = await setup(db, "train")
+    def at(hour):
+        return datetime(2026, 11, 8, hour, tzinfo=timezone.utc)
+    prior.activation_phase = "continue"
+    prior.started_at = at(10)
+    current = HeartbeatRun(id="final", ticket_id=ticket.id, agent_id="train", driver="test", model="test",
+                           started_at=at(12), activation_phase="continue", exit_code=0)
+    recorded = HeartbeatRun(id="recorded", ticket_id=ticket.id, agent_id="train", driver="test", model="test",
+                            started_at=at(13), activation_phase="continue", resolved_config={"training_finalization": False})
+    evaluation = Ticket(id="mid-eval", run_id=run.id, agent_id="evaluation", status="succeeded")
+    evaluation_hb = HeartbeatRun(id="eval-hb", ticket_id=evaluation.id, agent_id="evaluation", driver="test", model="test")
+    score = HeartbeatResult(ticket_id=evaluation.id, heartbeat_id=evaluation_hb.id, agent_id="evaluation",
+                            status="succeeded", output={}, created_at=at(11))
+    run.lifecycle = {"adaptive_checkpoints": {"final": {"request": {
+        "ticket_id": ticket.id, "step": 100, "planned_steps": 100},
+        "evaluation_ticket_id": evaluation.id, "resume_queued": True, "metrics_delivered": True}}}
+    db.add_all([current, recorded, evaluation, evaluation_hb, score])
+    await db.commit()
+    flags = await _training_finalizations(db, [prior, current, recorded])
+    assert flags == {"final": True, "recorded": False}
+    assert _dto(current, training_finalization=flags[current.id]).training_finalization
+    assert prior.activation_phase == current.activation_phase == "continue"  # Display metadata only.
+    current.resolved_config = {"training_finalization": True}
+    run.lifecycle = {}
+    await db.commit()
+    assert await _training_finalizations(db, [current]) == {"final": True}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("agent", ["train", "inference"])
 async def test_api_cannot_claim_scheduler_source_but_real_job_progress_is_visible(db, agent):
     _, ticket, heartbeat = await setup(db, agent)

@@ -42,6 +42,7 @@ from zevo.engine.run.benchmark_telemetry import (
     canonical_benchmark_marker,
     is_preflight_progress,
     is_workload_progress,
+    inference_members,
 )
 from zevo.contracts._base import StrictBody
 from zevo.contracts.tickets import (
@@ -144,6 +145,7 @@ class ExecutionEventDTO(BaseModel):
 
 class TicketDetail(TicketDTO):
     measurement_attempt: dict[str, Any] = Field(default_factory=dict)
+    measurement_members: list[dict[str, str]] | None = None
     generation_report: dict[str, Any] = Field(default_factory=dict)
     checkpoint_handoff_failure: dict[str, Any] | None = None
     mid_training_validation: dict[str, Any] | None = None
@@ -1408,6 +1410,9 @@ async def get_ticket(
                    if v["ticket_id"] == t.id), {}) if owning_run else {}
     base = _to_dto(t)
     return TicketDetail(
+        measurement_members=(inference_members(owning_run.holdout or {}, t.payload or {}, t.lane,
+                                              remeasurement=bool(item))
+                             if owning_run and t.agent_id == "inference" else None),
         measurement_attempt={"revision": attempt.get("revision"), "started_at": attempt.get("started_at"),
                              "active_members": item.get("active_members", [])} if attempt else {},
         generation_report=report,

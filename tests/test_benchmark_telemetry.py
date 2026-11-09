@@ -1,8 +1,27 @@
 from zevo.engine.run.benchmark_telemetry import (
     benchmark_progress_phase,
     canonical_benchmark_marker,
+    inference_members,
     resolve_benchmark_id,
 )
+
+
+def test_assigned_inference_suite_includes_all_batches_and_both_lanes():
+    holdout = {"validation_sets": [{"name": f"V{i}"} for i in range(12)],
+               "test_sets": [{"name": "T0"}, {"name": "T1"}]}
+    expected = [{"id": f"validation:{i}", "name": f"V{i}"} for i in range(12)]
+    assert inference_members(holdout, {}, "optimization") == expected
+    assert inference_members(holdout, {"mid_training_checkpoint": {"step": 11817}}, "optimization") == expected
+    assert inference_members(holdout, {"test_set_name": "validation:V11"}, "optimization") == [expected[11]]
+    assert inference_members(holdout, {"test_set_name": "validation:V1"}, "optimization",
+                             remeasurement=True) == expected
+    assert inference_members(holdout, {"test_set_name": "T1"}, "held_out_test") == [
+        {"id": "test:0", "name": "T0"}, {"id": "test:1", "name": "T1"}]
+    assert inference_members({}, {}, "optimization") is None
+    assert inference_members(holdout, {"test_set_name": "unknown"}, "optimization") is None
+    assert inference_members(holdout, {"test_set_name": "unknown"}, "held_out_test") is None
+    assert inference_members({"validation_set": "legacy.csv"}, {}, "optimization") == [
+        {"id": "validation:0", "name": "Validation"}]
 
 
 def test_equal_steps_from_different_benchmarks_have_distinct_progress_keys() -> None:

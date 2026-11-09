@@ -8,12 +8,12 @@ import { DialogOwner, useDialogFocus } from "../lib/dialog";
 import type { ExecutionEventDTO, MidTrainingValidation, IterationHistoryEntry, RunDetail } from "../lib/api";
 
 type Measurement = MidTrainingValidation["measurements"][number];
-const decisionLabel = (row: Measurement) => row.plan_completed ? "Plan completed"
+const decisionLabel = (row: Measurement) => row.plan_completed ? "Plan completed · No decision required"
   : row.decision?.action === "stop" ? "Stop"
   : row.decision?.action === "continue" ? `Continue → step ${row.decision.next_step?.toLocaleString()}`
   : "Awaiting decision";
 
-function Reason({ text }: { text: string }) {
+function Reason({ text, title = "Reason" }: { text: string; title?: string }) {
   const [expanded, setExpanded] = useState(false);
   const [overflow, setOverflow] = useState(false);
   const ref = useRef<HTMLParagraphElement>(null);
@@ -26,7 +26,7 @@ function Reason({ text }: { text: string }) {
     observer.observe(element);
     return () => observer.disconnect();
   }, [text, expanded]);
-  return <section><h3 className="mb-2 font-medium">Reason</h3>
+  return <section><h3 className="mb-2 font-medium">{title}</h3>
     <p ref={ref} className={`whitespace-pre-wrap break-words text-slate-300 leading-6 ${expanded ? "" : "line-clamp-4"}`}>{text}</p>
     {(overflow || expanded) && <button type="button" aria-expanded={expanded} className="mt-2 text-xs text-sky-300 hover:underline"
       onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
@@ -77,8 +77,10 @@ function ValidationDetails({ data, baseline, runId, inferenceTickets, step, onSt
               <td className="py-2 pr-4 break-words">{name}</td><td className="py-2 text-right font-mono">{fmtScore(score, "validation_score")}</td>
             </tr>)}</tbody></table>
           </section>
-          <Reason key={selected.step} text={selected.decision?.reason || (selected.plan_completed
-            ? "Full training plan completed; selected the best measured checkpoint." : "Decision not recorded yet.")} />
+          <Reason key={selected.step} title={selected.plan_completed ? "Outcome" : "Reason"}
+            text={selected.plan_completed
+              ? "Final checkpoint evaluated at the end of the training plan. This result is included in best-checkpoint selection; no continue/stop decision is required."
+              : selected.decision?.reason || "Decision not recorded yet."} />
         </div>}
         </>}
       </div>

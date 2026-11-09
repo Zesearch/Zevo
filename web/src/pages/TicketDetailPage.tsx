@@ -192,6 +192,13 @@ export function TicketDetailPage() {
   const resolvedConfig = tk.resolved_configs[curHbId]
     || Object.values(tk.resolved_configs).at(-1)
     || {};
+  const currentFailure = ["failed", "degraded"].includes(tk.status);
+  const showFailure = !!tk.error_message && !["succeeded", "skipped"].includes(tk.status);
+  const repairing = tk.status === "repairing" || (
+    tk.repair_attempts > 0 && showFailure
+    && ["queued", "running", "waiting_external"].includes(tk.status)
+    && !["orchestrator", "terminal"].includes(tk.repair_route)
+  );
 
   // The newest clarification request, with its machine tag stripped. The backend
   // writes `__CLARIFY__` at the head of the body "so it stands out in the
@@ -263,23 +270,31 @@ export function TicketDetailPage() {
       {hbMsg && <div className="mt-3 rounded-lg border border-hair bg-panel/60 px-3 py-2 text-xs text-slate-300">{hbMsg}</div>}
 
       {tk.repair_attempts > 0 && (
-        <div className="mt-3 flex items-center gap-2 rounded-lg border border-lilac-500/30 bg-lilac-500/10 px-3 py-2 text-xs text-lilac-200">
-          <RotateCw size={13} className={tk.status === "repairing" ? "animate-spin" : ""} />
+        <div className={`mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${repairing
+          ? "border-lilac-500/30 bg-lilac-500/10 text-lilac-200"
+          : "border-hair bg-panel/60 text-slate-400"}`}>
+          <RotateCw size={13} className={repairing ? "animate-spin" : ""} />
           <span>
-            Automatic repair {tk.repair_attempts}/20
-            {tk.repair_route ? ` · ${tk.repair_route}` : ""}
+            {repairing ? "Repairing" : "Repair history"} · {tk.repair_attempts}/20
+            {repairing && tk.repair_route ? ` · ${tk.repair_route}` : ""}
           </span>
         </div>
       )}
 
-      {tk.error_message && (
-        <div className="mt-4 space-y-2">
-          <div className="rounded-lg border border-coral-500/30 bg-coral-500/10 p-3 text-sm text-coral-300">
-            {tk.error_message}
-          </div>
-          <FailureClassificationPanel errorMessage={tk.error_message} />
+      {showFailure && (currentFailure ? (
+        <div className="mt-4 space-y-2 rounded-lg border border-coral-500/30 bg-coral-500/10 p-3">
+          <div className="whitespace-pre-wrap break-words text-sm text-coral-300">{tk.error_message}</div>
+          <FailureClassificationPanel key={tk.error_message} errorMessage={tk.error_message} />
         </div>
-      )}
+      ) : (
+        <details key={tk.error_message} className="mt-4 rounded-lg border border-hair bg-panel/60 p-3">
+          <summary className="cursor-pointer text-xs text-slate-400">Previous failure</summary>
+          <div className="mt-3 space-y-2">
+            <div className="whitespace-pre-wrap break-words text-sm text-slate-300">{tk.error_message}</div>
+            <FailureClassificationPanel errorMessage={tk.error_message} />
+          </div>
+        </details>
+      ))}
 
       {tk.agent_id === "orchestrator" && (
         <EmittedTicketsPanel
@@ -734,7 +749,8 @@ function FailureClassificationPanel({ errorMessage }: { errorMessage: string }) 
 
   const [expanded, setExpanded] = useState(false);
 
-  if (error || !data) return null;
+  // An unmatched classifier adds no diagnosis or recovery advice.
+  if (error || !data || data.verdict === "unknown" || !data.catalog_entry) return null;
 
   const pillColor =
     data.verdict === "transient"  ? "border-amber-500/40 bg-amber-500/10 text-amber-300" :

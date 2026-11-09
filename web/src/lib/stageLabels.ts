@@ -86,13 +86,14 @@ export function withRepairLabel(label: string, heartbeat: {activation_phase: str
 
 export function stageAttemptLabel(
   ticket: Parameters<typeof operationCaption>[0],
-  heartbeat: {operation: string; activation_phase: string; execution_phase?: string},
+  heartbeat: {operation: string; activation_phase: string; execution_phase?: string; training_finalization?: boolean},
   sequence = 1, activity = "",
 ): string {
   let phase = ["remeasure", "remeasure_collect", "instruction", "continue"].includes(heartbeat.activation_phase)
     ? heartbeat.activation_phase : heartbeat.execution_phase || heartbeat.activation_phase;
   if (phase === "repair") phase = "";
   const label = activity || (phase === "instruction" ? "Apply Instruction"
+    : ticket.agent_id === "train" && heartbeat.training_finalization ? "Finalize Candidate Training"
     : ticket.agent_id === "evaluation"
       ? evaluationAttemptLabel(phase, heartbeat.activation_phase === "repair" ? 1 : sequence, ticket.lane || "")
     : ticket.agent_id === "orchestrator" ? sequence === 1 ? "Plan Run" : "Review Run"

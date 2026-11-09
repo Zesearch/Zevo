@@ -23,6 +23,29 @@ def benchmark_names(holdout: Mapping[str, Any], suite: str) -> list[str]:
     return names or ([fallback] if holdout.get(singular) else [])
 
 
+def inference_members(holdout: Mapping[str, Any], payload: Mapping[str, Any],
+                      lane: str, *, remeasurement: bool = False) -> list[dict[str, str]] | None:
+    """Assigned suite identities, independent of a worker's batching strategy.
+
+    Named legacy Validation tickets own a single member; normal Validation,
+    checkpoint Validation and combined held-out tickets own the frozen suite.
+    Unknown legacy contracts retain the telemetry fallback.
+    """
+    suite = "test" if lane == "held_out_test" else "validation"
+    names = benchmark_names(holdout, suite)
+    if not names:
+        return None
+    members = [{"id": benchmark_id(suite, index), "name": name}
+               for index, name in enumerate(names)]
+    primary = str(payload.get("test_set_name") or "")
+    if suite == "validation" and primary and not payload.get("mid_training_checkpoint") and not remeasurement:
+        primary = primary.removeprefix("validation:")
+        return [member for member in members if member["name"] == primary] or None
+    if suite == "test" and primary not in names:
+        return None
+    return members
+
+
 def is_preflight_progress(marker: Mapping[str, Any]) -> bool:
     """Separate implementation checks from measurements of the scoring suite."""
     scope = str(marker.get("progress_scope") or "").strip()
