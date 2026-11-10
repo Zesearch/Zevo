@@ -4,7 +4,7 @@ import type { HeartbeatDTO, TicketDetail, RunDetail } from "../lib/api";
 import { midTrainingHasStarted, midTrainingDecisionHasStarted, pendingCheckpointStep } from "../lib/midTrainingStatus";
 import { StatusBadge, statusToneFor } from "./StatusBadge";
 
-export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations, selectedId, onSelect, displayStatuses, evaluations = [], inferences = [] }: {
+export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations, selectedId, onSelect, displayStatuses, paused, evaluations = [], inferences = [] }: {
   displayStatuses: Map<string, string>;
   evaluations?: RunDetail["tickets"];
   inferences?: RunDetail["tickets"];
@@ -17,7 +17,12 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
   const inference = inferences.find((item) => item.id === selectedId) || inferences.at(-1);
   const evaluation = evaluations.find((item) => item.id === selectedId) || evaluations.at(-1);
   const checkpointStep = pendingCheckpointStep(ticket, activations);
-  const startup = checkpointOrchestrationView(activations, ticket?.checkpoint_orchestrations ?? []).pendingAttempt;
+  const orchestration = checkpointOrchestrationView(activations, ticket?.checkpoint_orchestrations ?? []);
+  const startup = orchestration.pendingAttempt;
+  const currentActivation = orchestration.activations.find((item) => item.id === orchestration.defaultHeartbeatId);
+  // Only this checkpoint's current activation can light the Orchestrator lamp.
+  // A queued startup or a heartbeat still loading must not inherit an old pulse.
+  const orchestratorLive = !paused && !startup && checkpointStep === null && !!currentActivation?.is_live;
   const handoff = !!ticket?.checkpoint_handoff_failure || checkpointStep !== null || !!startup;
   const handoffLabel = ticket?.checkpoint_handoff_failure ? "Repair"
     : startup?.phase === "decision" ? "Review validation"
@@ -43,13 +48,14 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
         const orchestrator = child.selection.includes("#mid:") || child.label === "Repair" || child.label === "Validate checkpoint" || child.label === "Start Inference";
         const active = selectedId === child.selection;
         const tone = statusToneFor(child.status);
+        const live = orchestrator ? orchestratorLive : ["running", "repairing"].includes(child.status);
         return <li key={child.selection} className="relative">
           {index < children.length - 1 && <span className="absolute left-[14px] top-6 h-[calc(100%-12px)] w-px bg-hair/60" />}
           <button type="button" onClick={() => onSelect(child.selection)}
             className={`flex w-full items-start gap-2.5 rounded-lg px-2 py-1 text-left transition ${active ? orchestrator ? "bg-lilac-500/10" : "bg-skyx-500/10" : "hover:bg-raised/40"}`}>
             <span className="relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
-              {!orchestrator && tone.live && <span className={`absolute inline-flex h-full w-full animate-ping ${orchestrator ? "rotate-45 bg-lilac-400" : `rounded-full ${tone.dot}`} opacity-60`} />}
-              <span className={`relative h-2 w-2 ${orchestrator ? "rotate-45 bg-lilac-400/70" : `rounded-full ${tone.dot}`}`} />
+              {live && <span className={`absolute inline-flex h-full w-full animate-ping ${orchestrator ? "rotate-45 bg-lilac-400" : `rounded-full ${tone.dot}`} opacity-60`} />}
+              <span className={`relative h-2 w-2 ${orchestrator ? live ? "rotate-45 bg-lilac-300 shadow-[0_0_8px] shadow-lilac-500/60" : "rotate-45 bg-lilac-400/70" : `rounded-full ${tone.dot}`} ${live ? "animate-lamp-pulse" : ""}`} />
             </span>
             <span className="min-w-0 flex-1">
               <span className="flex items-center justify-between gap-2">
