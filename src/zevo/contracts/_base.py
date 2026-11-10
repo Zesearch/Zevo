@@ -81,8 +81,10 @@ class AgentResult(StrictResult):
     )
     notes: str = Field(..., description="Concise execution notes; empty is allowed.")
     execution_retry_reason: str = Field("", max_length=2000, description=(
-        "For a failed collect Result only: explain why verified existing artifacts cannot "
-        "finish this work and another execution is necessary on the same Ticket. Pair with "
+        "For a failed Result: explain why recovery is necessary on the same Ticket. "
+        "resubmit is for collection failures needing another execution; replace_resource "
+        "is valid in preparation/submission or collection, including checkpoint continuation. "
+        "Pair with "
         "failure_recovery.scope=current_task and concrete evidence. The engine owns submission "
         "and the repair limit. Leave empty for artifact/collection fixes. This grants no "
         "permission to change frozen settings, inputs, resource requirements or the training plan. "
@@ -96,7 +98,7 @@ class AgentResult(StrictResult):
         ),
     )
     execution_retry_action: Literal["resubmit", "replace_resource"] = Field(
-        "resubmit", description="With execution_retry_reason: reuse healthy compute, or ask the engine to replace unusable compute within the unchanged resource plan. Never release resources yourself.",
+        "resubmit", description="With execution_retry_reason: reuse healthy compute after collection, or request replacement of assigned unusable compute in any execution phase within the unchanged resource plan. Never release resources yourself.",
     )
     memory_updates: list[MemoryUpdate] = Field(
         default_factory=list,

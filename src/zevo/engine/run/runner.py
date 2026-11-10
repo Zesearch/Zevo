@@ -4784,6 +4784,8 @@ async def _apply_ticket_failure_policy(
     origin: FailureOrigin = "agent_execution",
     boundary: FailureBoundary | None = None,
     can_diagnose: bool = True,
+    inp: BaseModel | None = None,
+    heartbeat_id: str = "",
 ) -> bool:
     """Set the Ticket's failure/repair state; return True when reactivation is due."""
     recovery = getattr(result, "failure_recovery", None)
@@ -4828,6 +4830,19 @@ async def _apply_ticket_failure_policy(
         disposition.route == "self"
         and int(ticket.repair_attempts or 0) < MAX_REPAIR_ATTEMPTS
     ):
+        replacement = None
+        if getattr(result, "execution_retry_action", "") == "replace_resource":
+            from zevo.engine.run.resource_recovery import replacement_target
+            try:
+                replacement = await replacement_target(session, ticket, inp)
+            except (OSError, ValueError) as exc:
+                # A proposal with no current resource identity must not loop as
+                # another specialist repair or release unrelated compute.
+                ticket.status = "failed"
+                ticket.repair_route = "terminal" if ticket.lane == "held_out_test" or ticket.agent_id == "orchestrator" else "orchestrator"
+                session.add(TicketNotice(ticket_id=ticket.id, code="resource.replacement_rejected",
+                    severity="error", body=str(exc)))
+                return False
         ticket.repair_attempts = int(ticket.repair_attempts or 0) + 1
         ticket.repair_route = "self"
         ticket.status = "repairing"
@@ -4840,6 +4855,14 @@ async def _apply_ticket_failure_policy(
                 error_message=error_message, origin=origin,
             ),
         ))
+        if replacement is not None:
+            from zevo.engine.run.resource_recovery import request_replacement
+            execution, owner = replacement
+            if execution is not None:
+                record_execution_repair(execution, action="replace_resource",
+                    reason=result.execution_retry_reason, heartbeat_id=heartbeat_id)
+            await request_replacement(session, ticket, execution, owner=owner,
+                                      reason=result.execution_retry_reason)
         return True
     ticket.status = "failed"
     ticket.repair_route = (
@@ -4855,7 +4878,14 @@ async def _apply_ticket_failure_policy(
 
 
 async def _queue_ticket_repair(session: AsyncSession, tk: Ticket) -> None:
-    from zevo.engine.run.resource_recovery import request_replacement
+    from zevo.engine.run.resource_recovery import KEY, request_replacement
+    run = await session.get(Run, tk.run_id)
+    recovery = (run.lifecycle or {}).get(KEY, {}).get(tk.id, {}) if run else {}
+    if recovery and recovery.get("phase") != "resumed":
+        # The durable recovery reconciler owns the next action, including
+        # first-submit failures that have an owner but no execution row yet.
+        await session.commit()
+        return
     row = await _latest_slurm_resource_request(session, tk)
     if row and (row.meta or {}).get("execution_repair", {}).get("action") == "replace_resource":
         await request_replacement(session, tk, row)
@@ -7280,6 +7310,7 @@ async def run_ticket(
 
         if (isinstance(output, (DataResult, TrainResult, InferenceResult, EvaluationResult)) and status == "failed"
             and output.execution_retry_reason.strip()
+            and output.execution_retry_action == "resubmit"
             and getattr(getattr(inp, "slurm_job", None), "phase", "") == "collect"):
             stage_row = await _latest_slurm_resource_request(session, tk)
             if stage_row is not None:
@@ -7344,6 +7375,7 @@ async def run_ticket(
                     error_message=error_message or summary,
                     cancelled=False,
                     result=output, origin=failure_origin,
+                    inp=inp, heartbeat_id=heartbeat_id,
                     boundary="held_out_isolation" if heldout_access_hits else None,
                     can_diagnose=not is_system_runner,
                 )

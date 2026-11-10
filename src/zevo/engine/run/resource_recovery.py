@@ -25,6 +25,69 @@ KEY = "stage_resource_recoveries"
 log = logging.getLogger(__name__)
 
 
+async def replacement_target(session, ticket, inp):
+    """Resolve a failed activation's resource, never a newer execution's resource.
+
+    Replacement is independent of submit/collect and of the workload agent.
+    Preparation on a direct host can fail before its first execution exists.
+    Cluster preparation without a registered execution has no assigned allocation
+    to replace; it must not guess at another stage's retained allocation.
+    """
+    from zevo.contracts.infrastructure import InfrastructureDeviceInfo
+    from zevo.engine.run.remote_jobs import _device_info_for_ticket
+    from zevo.engine.run.runner import _latest_slurm_resource_request
+
+    contract = getattr(inp, "slurm_job", None)
+    if not contract or not contract.enabled:
+        raise ValueError("Resource replacement requires an engine-owned execution contract")
+    run = await session.get(Run, ticket.run_id)
+    info = InfrastructureDeviceInfo.model_validate_json(Path(inp.device_info_path).read_text())
+    bindings = await current_device_binding(session, run, ticket.inputs)
+    current_info = await _device_info_for_ticket(session, SimpleNamespace(inputs=bindings))
+    if (info.run_id != run.id or info.provider != run.gpu_provider
+        or current_info is None or info != current_info):
+        raise ValueError("Resource replacement refers to a stale or foreign device binding")
+
+    collecting = contract.phase == "collect"
+    row_id = contract.bookkeeping_row_id if collecting else contract.retry_of_bookkeeping_row_id
+    job_id = contract.job_id if collecting else contract.retry_of_job_id
+    execution = await _latest_slurm_resource_request(session, ticket)
+    if row_id:
+        if (execution is None or execution.id != row_id or execution.instance_id != job_id
+            or int((execution.meta or {}).get("execution_attempt") or 1) != contract.attempt - (not collecting)
+            or (execution.meta or {}).get("superseded_by_instruction_id")):
+            raise ValueError("Resource replacement does not name the current execution attempt")
+    elif collecting or execution is not None or contract.attempt != 1:
+        raise ValueError("Resource replacement is missing its execution identity")
+
+    if info.provider == "cluster":
+        if execution is None:
+            raise ValueError("No allocation is assigned to this cluster activation yet")
+        owner_id = (execution.meta or {}).get("allocation_owner_row_id") or execution.id
+        owner = await session.get(InfraInstance, owner_id)
+    else:
+        # device_info is the assignment before any workload is launched, and
+        # remains authoritative after a previous host has been replaced.
+        owners = (await session.scalars(select(InfraInstance).where(
+            InfraInstance.run_id == run.id, InfraInstance.provider == info.provider,
+            InfraInstance.instance_id == info.instance_id,
+            InfraInstance.released_at.is_(None),
+        ))).all()
+        owners = [row for row in owners if not (row.meta or {}).get("allocation_owner_row_id")
+                  and not (row.meta or {}).get("direct_workload")]
+        owner = owners[0] if len(owners) == 1 else None
+        if execution and (execution.meta or {}).get("allocation_owner_row_id") != getattr(owner, "id", None):
+            if collecting:
+                raise ValueError("Collected execution belongs to a different allocation")
+            # A new host may fail preparation before its first execution. Keep
+            # the prior workload immutable and bind recovery to the new owner.
+            execution = None
+    if (owner is None or owner.run_id != run.id or owner.provider != info.provider
+        or owner.released_at is not None or (owner.meta or {}).get("allocation_owner_row_id")):
+        raise ValueError("Resource replacement requires the exact unreleased allocation owner")
+    return execution, owner
+
+
 def save(run, ticket_id, event):
     run.lifecycle = {**(run.lifecycle or {}), KEY: {**(run.lifecycle or {}).get(KEY, {}), ticket_id: event}}
 

@@ -1,6 +1,7 @@
 ## Resource recovery
 
-For an unusable allocation, return a failed collect result with
+For an assigned unusable resource, return a failed result in either submit or
+collect, including preparation and checkpoint continuation, with
 `execution_retry_reason`, `execution_retry_action="replace_resource"`, and
 `failure_recovery.scope="current_task"` with verified evidence. The engine
 replaces resources within the unchanged plan and resumes this same Ticket.
@@ -8,6 +9,9 @@ Use the default `resubmit` for corrected workloads on healthy resources. Do not
 release resources yourself. A changed resource requirement still requires review.
 Preserve complete checkpoints and committed output receipts; never silently
 restart completed work when a replacement host lacks the durable artifacts.
+Report verified inability to reuse the resource, not just unexplained usage.
+Separate active workloads, reclaimable usage and confirmed capacity or health
+failures; stable usage alone does not establish that replacement is necessary.
 
 ## Execution transport
 
