@@ -20,7 +20,7 @@ import { relPath, scrubPaths } from "../lib/format";
 import { assignIterations, iterationOrder } from "../lib/iterations";
 import { api } from "../lib/api";
 import type { HeartbeatDTO, TicketDetail, RunDetail, RunInstructionDTO } from "../lib/api";
-import { instructionBlocks } from "../lib/stageStatus";
+import { instructionBlocks, ticketRepairing } from "../lib/stageStatus";
 import { Bezel, Kicker } from "../components/zevo/primitives";
 
 export function TicketDetailPage() {
@@ -194,11 +194,7 @@ export function TicketDetailPage() {
     || {};
   const currentFailure = ["failed", "degraded"].includes(tk.status);
   const showFailure = !!tk.error_message && !["succeeded", "skipped"].includes(tk.status);
-  const repairing = tk.status === "repairing" || (
-    tk.repair_attempts > 0 && showFailure
-    && ["queued", "running", "waiting_external"].includes(tk.status)
-    && !["orchestrator", "terminal"].includes(tk.repair_route)
-  );
+  const repairing = ticketRepairing(tk);
 
   // The newest clarification request, with its machine tag stripped. The backend
   // writes `__CLARIFY__` at the head of the body "so it stands out in the
@@ -238,7 +234,7 @@ export function TicketDetailPage() {
           <Kicker strong>Work Ticket</Kicker>
           <div className="mt-2 flex flex-wrap items-center gap-3">
             <h1 className="font-mono text-xl text-ink">{tk.id}</h1>
-            <StatusBadge status={tk.status} />
+            <StatusBadge status={repairing && tk.status === "running" ? "repairing" : tk.status} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-400">
             <span className="font-mono text-2xs uppercase tracking-wider text-slate-500">

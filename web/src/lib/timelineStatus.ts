@@ -33,6 +33,11 @@ export function timelineTicketStatus(tickets: StageTicket[]): string {
   if (current.some((t) => ["running", "repairing"].includes(t.status))) return "running";
   if (current.some((t) => t.status === "failed")) return "failed";
   if (current.some((t) => t.status === "degraded")) return "degraded";
+  if (current.some((t) => t.status === "needs_input")) return "needs_input";
+  if (current.some((t) => t.status === "paused")) return "paused";
+  if (current.some((t) => ["queued", "planning", "awaiting_input", "waiting_external"].includes(t.status))) {
+    return "queued";
+  }
   if (current.length > 0 && current.every((t) => ["succeeded", "skipped"].includes(t.status))) {
     return "succeeded";
   }

@@ -563,12 +563,27 @@ export type MidTrainingValidation = {
   }[];
 };
 
+export type CheckpointOrchestrationDTO = {
+  request_id: string;
+  train_ticket_id: string;
+  step: number;
+  phase: string;
+  wakeup_id: string;
+  status: string;
+  created_at: string;
+  heartbeat_id: string;
+  activation_link_known?: boolean;
+  deferred_reason?: string;
+  error: string;
+};
+
 export type TicketDetail = TicketDTO & {
   measurement_attempt?: { revision?: string; started_at?: string; active_members?: string[] };
   measurement_attempts?: { revision?: string; started_at?: string; active_members?: string[] }[];
   measurement_members?: { id: string; name: string }[] | null;
   generation_report?: Record<string, unknown>;
   checkpoint_handoff_failure?: { step: number; error: string; first_seen_at: string; attempts: number } | null;
+  checkpoint_orchestrations?: CheckpointOrchestrationDTO[];
   mid_training_validation?: MidTrainingValidation | null;
   messages: MessageDTO[];
   notices: NoticeDTO[];
@@ -665,6 +680,8 @@ export type RunDetail = RunSummary & {
     status: TicketStatus;
     summary: string;
     error_message: string;
+    repair_attempts?: number;
+    repair_route?: string;
     created_at: string;
     updated_at: string;
   }>;

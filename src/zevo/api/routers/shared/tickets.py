@@ -162,6 +162,7 @@ class TicketDetail(TicketDTO):
     measurement_members: list[dict[str, str]] | None = None
     generation_report: dict[str, Any] = Field(default_factory=dict)
     checkpoint_handoff_failure: dict[str, Any] | None = None
+    checkpoint_orchestrations: list[dict[str, Any]] = Field(default_factory=list)
     mid_training_validation: dict[str, Any] | None = None
     messages: list[MessageDTO]
     notices: list[NoticeDTO]
@@ -1437,7 +1438,7 @@ async def get_ticket(
         WorkloadExecution.ticket_id == ticket_id,
     ).order_by(WorkloadExecution.created_at))).scalars().all()
     registrations = {item.id: item for item in registered}
-    from zevo.engine.run.adaptive_training import validation_summary
+    from zevo.engine.run.adaptive_training import validation_summary, checkpoint_orchestration_history
     owning_run = await db.get(Run, t.run_id) if t.run_id else None
     mid_training = validation_summary(t, (owning_run.lifecycle or {}) if owning_run else {}, events)
     from zevo.engine.run.remeasurement import progress_attempts
@@ -1456,6 +1457,7 @@ async def get_ticket(
             ((owning_run.lifecycle or {}).get("adaptive_checkpoint_failures", {}) if owning_run else {}).values()
             if f.get("train_ticket_id") == t.id and not f.get("resolved")), None),
         mid_training_validation=mid_training,
+        checkpoint_orchestrations=await checkpoint_orchestration_history(db, owning_run, t),
         **base.model_dump(),
         messages=[
             MessageDTO(id=m.id, author=m.author, body=_host_text(m.body),

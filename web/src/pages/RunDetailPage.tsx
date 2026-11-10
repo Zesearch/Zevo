@@ -5,13 +5,14 @@ import { GenerationReport } from "../components/GenerationReport";
 import { latestBenchmarkEvent, activationExecution, activationWorkload, workloadCanProgress, shortBenchmarkName, executionPhase as workloadPhase } from "../lib/executionProgress";
 import { measurementProgress } from "../lib/measurementProgress";
 import { MidTrainingPhaseDetail } from "../components/MidTrainingPhaseDetail";
-import { isMidTrainingActivation, midTrainingActivationLabel, midTrainingActionLabel } from "../lib/midTrainingActivations";
+import { isMidTrainingActivation, midTrainingActivationLabel, midTrainingActionLabel, checkpointOrchestrationView } from "../lib/midTrainingActivations";
 import { MidTrainingTimelineBranch } from "../components/MidTrainingTimelineBranch";
 import { StageProgress } from "../components/StageProgress";
 import { trainingActivity } from "../lib/trainingTelemetry";
 import { heartbeatGroups, settledHeartbeat, heartbeatGroupFor, heartbeatStatus } from "../lib/heartbeatGroups";
-import { instructionBlocks, stageStatus } from "../lib/stageStatus";
+import { instructionBlocks, stageStatus, ticketRepairing } from "../lib/stageStatus";
 import { latestTimelineTickets, timelineTicketStatus } from "../lib/timelineStatus";
+import { PIPELINE_LAMPS, pipelineState, pipelineTicketStatuses, stationStateFromTickets } from "../lib/pipelineStatus";
 import { useState, useMemo, useEffect, Fragment } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import useSWR from "swr";
@@ -67,36 +68,15 @@ function isTerminalResourceRequest(instance: InfraInstanceDTO): boolean {
       && TERMINAL_SLURM_STATES.has(slurmState(instance)));
 }
 
-type StationTicket = Pick<RunDetail["tickets"][number], "status" | "created_at" | "updated_at">;
-
-/** Summarize a stage by its current work, otherwise by its latest attempt.
- * Historical failures must not keep a stage red after a newer retry succeeds. */
-function stationStateFromTickets(tickets: StationTicket[]): StationState {
-  if (!tickets.length) return "idle";
-  if (tickets.some((ticket) => ticket.status === "running" || ticket.status === "repairing")) {
-    return "active";
-  }
-
-  const latest = [...tickets].sort((a, b) =>
-    a.created_at.localeCompare(b.created_at) || a.updated_at.localeCompare(b.updated_at),
-  ).at(-1)!;
-
-  if (["queued", "awaiting_input", "waiting_external"].includes(latest.status)) return "waiting";
-  if (["succeeded", "skipped"].includes(latest.status)) return "done";
-  if (latest.status === "degraded") return "degraded";
-  if (latest.status === "failed") return "failed";
-  if (latest.status === "cancelled") return "cancelled";
-  return "idle";
-}
-
 // Aggregate a run's tickets into the six loop stations by Ticket.agent_id.
 function stationsFrom(
   detail: RunDetail | undefined,
   wakesByAgent: Record<string, number>,
+  statuses: Map<string, string>,
 ): Station[] {
   return LOOP_STATIONS.map((st) => {
     const t = (detail?.tickets ?? []).filter((x) => ticketAtStation(x, st));
-    const state = stationStateFromTickets(t);
+    const state = stationStateFromTickets(t.map((ticket) => ({ ...ticket, status: statuses.get(ticket.id) || ticket.status })));
     // WAKES, not tickets. The caption always said "how many times this stage's
     // agent has been called", and the number underneath was how many tickets it
     // owned — the same thing only while every ticket runs exactly once. A stage
@@ -405,23 +385,15 @@ function PerTicketGroups({ run }: { run: RunDetail }) {
 }
 
 function PipelineTimeline({
-  run, heartbeats, activeInstructions,
+  run, heartbeats, activeInstructions, displayStatuses,
 }: {
   run: RunDetail;
   heartbeats: HeartbeatDTO[];
   activeInstructions: RunInstructionDTO[];
+  displayStatuses: Map<string, string>;
 }) {
   const groups = useMemo(() => groupByIteration(run.tickets), [run.tickets]);
-  const { data: resources = [] } = useSWR<InfraInstanceDTO[]>(
-    `/api/infra/instances?active_only=false&run_id=${encodeURIComponent(run.id)}`,
-    { refreshInterval: 3000 },
-  );
   const needsInstructionInput = activeInstructions.some((i) => i.status === "needs_input");
-  const resourceState = (id: string) => {
-    const resource = resources.find((r) => r.ticket_id === id
-      && !!r.meta?.resource_request && !r.meta?.superseded_by_instruction_id);
-    return resource ? slurmState(resource) : "";
-  };
   // A run has ONE supervisor ticket with one heartbeat per activation, spanning
   // every iteration. groupByIteration can only file it under one block, so the
   // other blocks' markers had no ticket to point at and simply did nothing when
@@ -507,49 +479,12 @@ function PipelineTimeline({
     () => [...groups.flatMap((g) => [...g.tickets, ...g.mirror]), ...run.tickets.filter((t) => t.mid_training_parent)],
     [groups, run.tickets],
   );
-  const pausedTicketIds = useMemo(() => {
-    const blocking = activeInstructions.filter((i) => instructionBlocks(i.status));
-    if (blocking.length === 0) return new Set<string>();
-    const ids = new Set(
-      blocking
-        .map((instruction) => instruction.target_ticket_id)
-        .filter((id): id is string => !!id),
-    );
-    // While the Orchestrator is still reviewing, it may not have selected a
-    // target yet. The instruction gate has already stopped every live
-    // optimization Specialist, so reflect those pauses immediately.
-    for (const ticket of allTickets) {
-      if (
-        ticket.lane !== "held_out_test"
-        && agentIdOf(ticket) !== "orchestrator"
-        && (ticket.status === "running" || ticket.status === "repairing")
-      ) ids.add(ticket.id);
-    }
-    // A submitted cluster stage is represented as waiting_external. Its remote
-    // job may continue, but the pipeline itself is paused until the instruction
-    // decision. Keep the current stage visible instead of leaving no Paused row.
-    if (ids.size === 0) {
-      const current = [...allTickets]
-        .filter((ticket) => (
-          ticket.lane !== "held_out_test"
-          && agentIdOf(ticket) !== "orchestrator"
-          && ["queued", "awaiting_input", "waiting_external"].includes(ticket.status)
-        ))
-        .sort((a, b) => a.created_at.localeCompare(b.created_at))
-        .at(-1);
-      if (current) ids.add(current.id);
-    }
-    for (const ticket of allTickets) {
-      if (["succeeded", "degraded", "failed", "skipped", "cancelled"].includes(ticket.status)
-        || (ticket.status === "waiting_external" && ["RUNNING", "COMPLETING", "PENDING", "CONFIGURING"].includes(resourceState(ticket.id)))) {
-        ids.delete(ticket.id);
-      }
-    }
-    return ids;
-  }, [activeInstructions, allTickets, resources]);
+  const pausedTicketIds = new Set(allTickets.filter((ticket) =>
+    ["paused", "needs_input"].includes(displayStatuses.get(ticket.id) || ""),
+  ).map((ticket) => ticket.id));
   const paused = allTickets.find((ticket) => pausedTicketIds.has(ticket.id));
-  const running = paused
-    || allTickets.find((t) => t.status === "running" || t.status === "repairing");
+  const running = paused || allTickets.find((ticket) =>
+    pipelineState(displayStatuses.get(ticket.id) || ticket.status) === "active");
   const runningOrchestrator = rawOrchestratorWakes.find((heartbeat) => heartbeat.is_live);
   const [sel, setSel] = useState<string>("");
   // While the run is LIVE the right panel follows the running stage — a click
@@ -596,8 +531,12 @@ function PipelineTimeline({
       <div className="space-y-2">
         {groups.map((g) => {
           const open = expanded.has(g.key);
-          const groupTickets = [...g.tickets, ...g.mirror];
-          const currentTickets = latestTimelineTickets(groupTickets);
+          const groupTickets = [...g.tickets, ...g.mirror,
+            ...run.tickets.filter((ticket) => g.tickets.some((parent) => ticket.mid_training_parent === parent.id)),
+          ];
+          const currentTickets = latestTimelineTickets(groupTickets.map((ticket) => ({
+            ...ticket, status: displayStatuses.get(ticket.id) || ticket.status,
+          })));
           const ticketStatus = timelineTicketStatus(currentTickets);
           const groupOrchestrator = orchestratorByGroup.get(g.key) || [];
           const groupHasUnrecordedFailure = unrecordedOrchestratorFailure
@@ -609,19 +548,9 @@ function PipelineTimeline({
           const groupFailed = ticketStatus === "failed"
             || groupOrchestrator.at(-1)?.action === "mark_failed"
             || groupHasUnrecordedFailure;
-          const groupDegraded = ticketStatus === "degraded";
-          const groupDone = ticketStatus === "succeeded";
-          const headDot = groupPaused
-            ? statusToneFor("paused").dot
-            : groupRunning
-            ? "bg-brass-400"
-            : groupFailed
-              ? "bg-coral-500"
-              : groupDegraded
-                ? "bg-lilac-400"
-                : groupDone
-                  ? "bg-phosphor-400"
-                  : statusToneFor(ticketStatus).dot;
+          const groupStatus = groupPaused ? "paused" : groupRunning ? "running"
+            : groupFailed ? "failed" : ticketStatus;
+          const headLamp = PIPELINE_LAMPS[pipelineState(groupStatus)];
           return (
             <Fragment key={g.key}>
               <div className="rounded-bezel border border-hair bg-panel/40">
@@ -631,7 +560,7 @@ function PipelineTimeline({
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left"
                 >
                   <span className="font-mono text-[13px] text-dim">{open ? "▾" : "▸"}</span>
-                  <span className={`h-2 w-2 rounded-full ${headDot} ${groupRunning ? "animate-lamp-pulse" : ""}`} />
+                  <span title={`Iteration status: ${groupStatus}`} className={`h-2 w-2 rounded-full ${headLamp.dot} ${groupRunning ? "animate-lamp-pulse" : ""}`} />
                   <span className="inline-flex items-baseline gap-1.5 font-mono text-xs font-semibold uppercase tracking-[0.14em] text-brass-300">
                     <span>Iteration</span>
                     <span>{g.num}</span>
@@ -723,9 +652,7 @@ function PipelineTimeline({
                       ? activationCaptions.join(" → ")
                       : activationCaptions[0] || operationCaption(t);
                     const active = selectedId === t.id;
-                    const isPaused = pausedTicketIds.has(t.id);
-                    const livePhase = (heartbeatsByTicket.get(t.id) || []).find((h) => h.is_live)?.activation_phase;
-                    const displayStatus = stageStatus(t.status, isPaused, resourceState(t.id), isPaused && needsInstructionInput, livePhase);
+                    const displayStatus = displayStatuses.get(t.id) || t.status;
                     const applying = activeInstructions.some((i) => i.target_ticket_id === t.id && i.activity_status === "applying");
                     const isRunning = displayStatus === "running" || displayStatus === "repairing";
                     const dot = statusToneFor(displayStatus).dot;
@@ -764,7 +691,7 @@ function PipelineTimeline({
                     const checkpoints = midTrainingWakes.filter((heartbeat) => heartbeat.mid_training?.train_ticket_id === t.id);
                     if (t.mid_training_enabled || checkpoints.length) {
                       rows.push(<MidTrainingTimelineBranch key={`mid-training-${t.id}`} ticketId={t.id}
-                        supervisorId={supervisorId} inferences={run.tickets.filter((item) => item.mid_training_parent === t.id && item.agent_id === "inference")}
+                        supervisorId={supervisorId} displayStatuses={displayStatuses} inferences={run.tickets.filter((item) => item.mid_training_parent === t.id && item.agent_id === "inference")}
                         evaluations={run.tickets.filter((item) => item.mid_training_parent === t.id && item.agent_id === "evaluation")} activations={checkpoints} selectedId={selectedId} onSelect={setSel}
                         paused={pausedTicketIds.has(t.id) || needsInstructionInput} />);
                     }
@@ -788,8 +715,9 @@ function PipelineTimeline({
                           <ol className="relative">
                             {g.mirror.map((t, i) => {
                               const active = selectedId === t.id;
-                              const isRunning = t.status === "running" || t.status === "repairing";
-                              const dot = statusToneFor(t.status).dot;
+                              const displayStatus = displayStatuses.get(t.id) || t.status;
+                              const isRunning = displayStatus === "running" || displayStatus === "repairing";
+                              const dot = statusToneFor(displayStatus).dot;
                               return (
                                 <li key={t.id} className="relative">
                                   {i < g.mirror.length - 1 && (
@@ -812,7 +740,7 @@ function PipelineTimeline({
                                         <span className={`text-[13px] ${active ? "text-skyx-200" : "text-skyx-300/80"}`}>
                                           {stageLabel(t)}
                                         </span>
-                                        <StatusBadge status={t.status} />
+                                        <StatusBadge status={displayStatus} />
                                       </span>
                                       <span className="block truncate font-mono text-[11px] text-dim">{operationCaption(t)}</span>
                                       <span className="block truncate font-mono text-[10px] text-slate-600">{t.id}</span>
@@ -896,6 +824,8 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
   needsInput?: boolean;
   applying?: boolean;
 }) {
+  const { data: midTrainingTicket } = useSWR<TicketDetail>(
+    midTrainingTicketId ? `/api/tickets/${midTrainingTicketId}` : null, { refreshInterval: 3000 });
   const { data: t } = useSWR<TicketDetail>(
     ticketId ? `/api/tickets/${ticketId}` : null, {
     refreshInterval: (latest) =>
@@ -929,19 +859,25 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
   const history = [...heartbeats].sort((a, b) => a.started_at.localeCompare(b.started_at));
   const chronological = history.filter((heartbeat) => heartbeat.ticket_id === ticketId);
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<string | undefined>(undefined);
+  const [selectedStartup, setSelectedStartup] = useState<string | undefined>(undefined);
   const allMidActivations = midTrainingTicketId ? chronological.filter((heartbeat) =>
     isMidTrainingActivation(heartbeat) && heartbeat.mid_training?.train_ticket_id === midTrainingTicketId) : [];
-  const midCheckpoints = [...new Map(allMidActivations.map((heartbeat) =>
-    [heartbeat.mid_training!.request_id, heartbeat.mid_training!])).values()];
-  const currentCheckpoint = midCheckpoints.find((item) => item.request_id === selectedCheckpoint)?.request_id
-    ?? midCheckpoints.at(-1)?.request_id;
-  const midActivations = allMidActivations.filter((heartbeat) => heartbeat.mid_training?.request_id === currentCheckpoint);
+  const checkpointView = checkpointOrchestrationView(allMidActivations,
+    midTrainingTicket?.checkpoint_orchestrations ?? [], selectedCheckpoint);
+  const midCheckpoints = checkpointView.checkpoints;
+  const currentCheckpoint = checkpointView.requestId;
+  const midActivations = checkpointView.activations;
+  const validSelectedActivation = midTrainingTicketId
+    ? midActivations.find((h) => h.id === selectedActivation)?.id : selectedActivation;
+  const startup = validSelectedActivation ? undefined
+    : checkpointView.attempts.find((a) => a.wakeup_id === selectedStartup && !a.heartbeat_id) ?? checkpointView.pendingAttempt;
   const orchestrationGroup = t?.agent_id === "orchestrator"
     ? heartbeatGroupFor(chronological, heartbeatId)
     : undefined;
   const defaultWake = midTrainingTicketId ? midActivations.at(-1) : orchestrationGroup?.at(-1);
-  const effectiveHeartbeatId = selectedActivation ?? defaultWake?.id ?? heartbeatId;
-  const picked = showUnrecordedFailure
+  const effectiveHeartbeatId = validSelectedActivation
+    ?? (midTrainingTicketId ? checkpointView.defaultHeartbeatId : defaultWake?.id ?? heartbeatId);
+  const picked = showUnrecordedFailure || startup || (midTrainingTicketId && !midTrainingTicket)
     ? undefined
     : effectiveHeartbeatId !== undefined ? history.find((heartbeat) => heartbeat.id === effectiveHeartbeatId)
       : midTrainingTicketId ? undefined : heartbeats[0];
@@ -949,6 +885,7 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
   useEffect(() => {
     setSelectedActivation(undefined);
     setSelectedCheckpoint(undefined);
+    setSelectedStartup(undefined);
   }, [ticketId, heartbeatId, midTrainingTicketId]);
   // Clear on switch. LiveTranscript resets its own feed per heartbeat, but this
   // copy would otherwise keep the previous activation's steps on screen until
@@ -1024,14 +961,19 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
     ? trainingActivity(phaseEvents, t.mid_training_validation, t.status, paused || needsInput) : null;
   const activations = midTrainingTicketId ? midActivations : t.agent_id === "orchestrator" ? orchestrationGroup ?? [] : history;
   const reviewingRepair = picked?.agent_id === "orchestrator" && t.agent_id !== "orchestrator";
+  const livePhase = heartbeats.find((h) => h.is_live)?.activation_phase;
+  const visibleStageStatus = stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, livePhase);
+  const displayStageStatus = ["running", "waiting_external"].includes(visibleStageStatus) && ticketRepairing(t, livePhase)
+    ? "repairing" : visibleStageStatus;
   return (
     <Bezel className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hair p-4">
         <div className="flex items-center gap-2 font-mono text-sm">
-          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? midTrainingActionLabel(picked) : t.id}</Link>
+          <Link to={`/tickets/${t.id}`} className="text-slate-200 hover:text-brass-300">{midTrainingTicketId ? startup ? "Orchestrator" : midTrainingActionLabel(picked) : t.id}</Link>
+          {startup && <StatusBadge status={startup.status === "failed" ? "failed" : startup.status === "completed" ? "succeeded" : paused ? "paused" : "queued"} />}
           {!midTrainingTicketId && (t.agent_id === "orchestrator" && !showUnrecordedFailure
             ? picked && <StatusBadge status={stageStatus(heartbeatStatus(picked), paused, "", needsInput, picked.activation_phase)} />
-            : <StatusBadge status={stageStatus(t.status, paused, submittedResourceRequest ? slurmState(submittedResourceRequest) : "", needsInput, heartbeats.find((h) => h.is_live)?.activation_phase)} />)}
+            : <StatusBadge status={displayStageStatus} />)}
           {applying && <span className="text-xs text-dim">Applying instruction</span>}
         </div>
         <div className="flex items-center gap-3">
@@ -1043,7 +985,7 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
       {midTrainingTicketId && midCheckpoints.length > 0 && <div className="flex items-center gap-3 border-b border-hair px-4 py-2.5">
         <label htmlFor="orchestrator-checkpoint" className="text-xs text-dim">Checkpoint</label>
         <select id="orchestrator-checkpoint" value={currentCheckpoint}
-          onChange={(event) => { setSelectedCheckpoint(event.target.value); setSelectedActivation(undefined); }}
+          onChange={(event) => { setSelectedCheckpoint(event.target.value); setSelectedActivation(undefined); setSelectedStartup(undefined); }}
           className="rounded border border-hair bg-panel px-2 py-1 text-xs">
           {midCheckpoints.map((item) => <option key={item.request_id} value={item.request_id}>Step {item.step}</option>)}
         </select>
@@ -1058,6 +1000,13 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
       {(activations.length > 1 || midTrainingTicketId) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-hair px-4 py-2.5">
           <span className="font-mono text-[11px] uppercase tracking-wider text-dim">{t.agent_id === "evaluation" ? "Evaluation history" : "Stage history"}</span>
+          {midTrainingTicketId && checkpointView.attempts.filter((a) => !a.heartbeat_id && (a.activation_link_known !== false || a.status === "failed")).map((attempt) =>
+            <button key={attempt.wakeup_id} type="button" title={new Date(attempt.created_at).toLocaleString()}
+              onClick={() => { setSelectedStartup(attempt.wakeup_id); setSelectedActivation(undefined); }}
+              className={`rounded-full border px-2.5 py-1 font-mono text-[11px] ${startup?.wakeup_id === attempt.wakeup_id ? "border-brass-500/60 text-brass-300" : "border-hair text-slate-400"}`}>
+              {attempt.phase === "decision" ? "Decision" : attempt.phase.includes("evaluation") ? "Start evaluation" : "Start inference"}
+              {attempt.status === "failed" ? attempt.activation_link_known === false ? " · Request failed" : " · Startup failed" : attempt.status === "completed" ? " · No activation" : attempt.status === "deferred" ? " · Deferred" : " · Waiting to start"}
+            </button>)}
           {activations.map((heartbeat) => {
             const active = heartbeat.id === picked?.id;
             const label = heartbeat.agent_id === "orchestrator" && t.agent_id !== "orchestrator"
@@ -1071,7 +1020,7 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
                 key={heartbeat.id}
                 title={heartbeat.started_at ? new Date(heartbeat.started_at).toLocaleString() : undefined}
                 type="button"
-                onClick={() => setSelectedActivation(heartbeat.id)}
+                onClick={() => { setSelectedActivation(heartbeat.id); setSelectedStartup(undefined); }}
                 className={`rounded-full border px-2.5 py-1 font-mono text-[11px] transition ${
                   active
                     ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
@@ -1087,6 +1036,12 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
       <div className="space-y-4 p-4">
         <div className="rounded-bezel border border-hair bg-canvas/40 p-3">
           <div className="mb-2"><Kicker strong>Overview</Kicker></div>
+          {startup && <div className={`mb-3 rounded-bezel border p-3 text-sm ${startup.status === "failed" ? "border-coral-500/30 text-coral-200" : "border-hair text-slate-300"}`}>
+            <p>Step {startup.step.toLocaleString()} · {startup.status === "failed" ? startup.activation_link_known === false ? "Orchestrator request failed; the legacy activation link was not recorded" : "Orchestrator failed before the agent started" : startup.status === "completed" ? "Request completed without an agent activation" : startup.status === "deferred" ? "Waiting for length remeasurement to finish" : "Waiting for Orchestrator to start"}</p>
+            {startup.error && <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{startup.error}</pre>}
+          </div>}
+          {midTrainingTicketId && checkpointView.awaitingHeartbeat && !validSelectedActivation && !startup &&
+            <p className="mb-3 text-sm text-dim">Loading the current Orchestrator activation…</p>}
           {showUnrecordedFailure && (
             <div className="mb-3 rounded-bezel border border-coral-500/30 bg-coral-500/[0.07] p-3 text-sm text-coral-200">
               <div className="font-semibold">The next Orchestrator activation failed before the agent started</div>
@@ -1113,7 +1068,7 @@ function StageDetail({ ticketId, heartbeatId, midTrainingTicketId, checkpointTic
           {/* What it did, in order, read off the feed below — so a step appears
               because it happened, not because a script remembered to say so. */}
           <StepTimeline
-            events={showUnrecordedFailure ? [] : events}
+            events={showUnrecordedFailure || startup ? [] : events}
             executionEvents={executionEvents}
             empty={showUnrecordedFailure
               ? "No agent activation was recorded for this failure."
@@ -1293,6 +1248,10 @@ export function RunDetailPage() {
     runId ? `/api/runs/${encodeURIComponent(runId)}/instructions` : null,
     { refreshInterval: 3000 },
   );
+  const { data: resources = [] } = useSWR<InfraInstanceDTO[]>(
+    runId ? `/api/infra/instances?active_only=false&run_id=${encodeURIComponent(runId)}` : null,
+    { refreshInterval: 3000 },
+  );
   const activeInstructions = useMemo(
     () => instructions.filter((instruction) =>
       instructionBlocks(instruction.status) || ["waiting", "applying"].includes(instruction.activity_status)),
@@ -1304,6 +1263,10 @@ export function RunDetailPage() {
   const executionHeartbeats = useMemo(
     () => heartbeats.filter((h) => h.activation_phase !== "instruction"),
     [heartbeats],
+  );
+  const displayStatuses = useMemo(
+    () => pipelineTicketStatuses(run?.tickets ?? [], resources, executionHeartbeats, activeInstructions),
+    [run?.tickets, resources, executionHeartbeats, activeInstructions],
   );
   const wakesByTicket = useMemo(() => {
     const m: Record<string, number> = {};
@@ -1320,8 +1283,8 @@ export function RunDetailPage() {
   // an agent and can be running, done or failed like any other.
   const supervisorState: StationState = useMemo(() => {
     const ts = (run?.tickets ?? []).filter((x) => agentIdOf(x) === "orchestrator");
-    return stationStateFromTickets(ts);
-  }, [run?.tickets]);
+    return stationStateFromTickets(ts.map((ticket) => ({ ...ticket, status: displayStatuses.get(ticket.id) || ticket.status })));
+  }, [run?.tickets, displayStatuses]);
   const ws = useRunWebsocket(runId);
   // Keep the active tab in the URL (?tab=...) so navigating into a ticket and
   // hitting "back" returns to the SAME tab (e.g. Per-ticket) instead of resetting
@@ -1363,7 +1326,7 @@ export function RunDetailPage() {
   }
 
   const live = !["success", "degraded", "failed", "cancelled"].includes(run.status);
-  const stations = stationsFrom(run, wakesByTicket);
+  const stations = stationsFrom(run, wakesByTicket, displayStatuses);
   const terminalIssues = run.lifecycle?.terminal_outcome?.issues ?? [];
   const stopTrigger = run.lifecycle?.terminal_outcome?.stop_trigger;
   const preservationFailed = run.cancel_outcome.status === "preservation_failed";
@@ -1598,11 +1561,12 @@ export function RunDetailPage() {
           {/* The station order is already drawn by the ring itself, so the
               legend only has to explain the lamp colours. */}
           <div className="mt-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm text-slate-400">
-            <span className="flex items-center gap-1.5"><span className="lamp lamp-running" /> running</span>
-            <span className="flex items-center gap-1.5"><span className="lamp lamp-waiting" /> waiting</span>
-            <span className="flex items-center gap-1.5"><span className="lamp lamp-idle" /> idle</span>
-            <span className="flex items-center gap-1.5"><span className="lamp lamp-live" /> done</span>
-            <span className="flex items-center gap-1.5"><span className="lamp lamp-coral" /> failed</span>
+            {(["active", "waiting", "idle", "done", "failed"] as const).map((state) => (
+              <span key={state} className="flex items-center gap-1.5">
+                <span className={`lamp ${PIPELINE_LAMPS[state].dot} ${state === "active" ? "animate-lamp-pulse" : ""}`} />
+                {PIPELINE_LAMPS[state].label}
+              </span>
+            ))}
           </div>
           <CostStrip run={run} runId={runId!} />
         </Bezel>
@@ -1634,6 +1598,7 @@ export function RunDetailPage() {
             run={run}
             heartbeats={executionHeartbeats}
             activeInstructions={activeInstructions}
+            displayStatuses={displayStatuses}
           />
         ) : tab === "journal" ? (
           <JournalPanel run={run} />

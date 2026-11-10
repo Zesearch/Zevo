@@ -14,6 +14,8 @@ is assembled in exactly one place.
 from __future__ import annotations
 
 from typing import Any
+import hashlib
+import json
 
 from zevo.contracts.orchestrator import UserRequest
 from zevo.contracts.tickets import validate_stored_payload
@@ -23,6 +25,43 @@ from zevo.db import Run, Ticket
 def supervisor_ticket_id(run: Run) -> str:
     """`orchestrate-<run8>-001`: the stable id re-woken for the whole Run."""
     return f"orchestrate-{run.id[:8]}-001"
+
+
+def supervisor_runtime(run: Run) -> dict[str, Any]:
+    """Current engine-owned configuration, not a ticket's cached copy."""
+    return {
+        "gpu_provider": run.gpu_provider,
+        "num_gpus": run.num_gpus,
+        "generation_backend": run.generation_backend,
+        "gpu_allocation_mode": run.gpu_allocation_mode or "per_stage",
+        "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
+        "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),
+    }
+
+
+def supervisor_activation_payload(run, payload, activation_payload=None, *, source="", reason=""):
+    """Rebuild only engine-owned fields; preserve decisions and frozen inputs."""
+    from zevo.engine.run.adaptive_training import activation_validation_context
+    activation = activation_payload or {}
+    context = activation_validation_context(run.lifecycle or {}, reason, activation)
+    if context:
+        trigger = {"type": "checkpoint_ready", "ticket_id": context["train_ticket_id"],
+                   "agent_id": "train", "status": ""}
+    elif activation.get("orchestration_trigger"):
+        trigger = activation["orchestration_trigger"]
+    elif source == "assignment":
+        trigger = {"type": "run_created", "status": "running"}
+    else:
+        trigger = {"type": "on_demand", "status": ""}
+    return {**payload, "runtime": supervisor_runtime(run), "trigger": trigger}
+
+
+def supervisor_input_signature(run, ticket, activation_payload):
+    """Identify corrected inputs without hashing changing execution telemetry."""
+    payload = supervisor_activation_payload(run, ticket.payload or {}, activation_payload)
+    envelope = {"payload": payload, "inputs": ticket.inputs, "customization": ticket.customization,
+                "input_format": ticket.input_format}
+    return hashlib.sha256(json.dumps(envelope, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def initial_supervisor_payload(
@@ -38,13 +77,7 @@ def initial_supervisor_payload(
         "history": [],  # empty until the baseline lands — nothing measured yet
         "mode": run.mode,
         "customizations": run.customizations or {},
-        "runtime": {
-            "gpu_provider": run.gpu_provider,
-            "num_gpus": run.num_gpus,
-            "generation_backend": run.generation_backend,
-            "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
-            "max_queue_wait_hours": float(run.max_queue_wait_hours or 0.0),
-        },
+        "runtime": supervisor_runtime(run),
         "validation_rows": int(holdout.get("validation_rows", 0) or 0),
         "dataset_profile": dataset_profile or {},
         "budget": {

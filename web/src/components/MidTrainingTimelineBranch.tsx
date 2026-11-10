@@ -1,10 +1,11 @@
 import useSWR from "swr";
-import { midTrainingActionLabel } from "../lib/midTrainingActivations";
+import { midTrainingActionLabel, checkpointOrchestrationView } from "../lib/midTrainingActivations";
 import type { HeartbeatDTO, TicketDetail, RunDetail } from "../lib/api";
 import { midTrainingHasStarted, midTrainingDecisionHasStarted, pendingCheckpointStep } from "../lib/midTrainingStatus";
 import { StatusBadge, statusToneFor } from "./StatusBadge";
 
-export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations, selectedId, onSelect, evaluations = [], inferences = [] }: {
+export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations, selectedId, onSelect, displayStatuses, evaluations = [], inferences = [] }: {
+  displayStatuses: Map<string, string>;
   evaluations?: RunDetail["tickets"];
   inferences?: RunDetail["tickets"];
   ticketId: string; supervisorId: string; activations: HeartbeatDTO[]; selectedId: string;
@@ -16,17 +17,21 @@ export function MidTrainingTimelineBranch({ ticketId, supervisorId, activations,
   const inference = inferences.find((item) => item.id === selectedId) || inferences.at(-1);
   const evaluation = evaluations.find((item) => item.id === selectedId) || evaluations.at(-1);
   const checkpointStep = pendingCheckpointStep(ticket, activations);
-  const handoff = !!ticket?.checkpoint_handoff_failure || checkpointStep !== null;
+  const startup = checkpointOrchestrationView(activations, ticket?.checkpoint_orchestrations ?? []).pendingAttempt;
+  const handoff = !!ticket?.checkpoint_handoff_failure || checkpointStep !== null || !!startup;
   const handoffLabel = ticket?.checkpoint_handoff_failure ? "Repair"
+    : startup?.phase === "decision" ? "Review validation"
+    : startup?.phase.includes("evaluation") ? "Start Evaluation"
+    : startup ? "Start Inference"
     : ticket?.summary?.includes("waiting for Orchestrator") ? "Start Inference" : "Validate checkpoint";
   const children = [
-    ...(handoff || midTrainingDecisionHasStarted(ticket, activations.length) ? [{ label: handoff ? handoffLabel : midTrainingActionLabel(latest), selection: handoff && (checkpointStep !== null || !latest) ? `${ticketId}#validation:overview` : `${supervisorId}#mid:${ticketId}`,
+    ...(handoff || midTrainingDecisionHasStarted(ticket, activations.length) ? [{ label: handoff ? handoffLabel : midTrainingActionLabel(latest), selection: `${supervisorId}#mid:${ticketId}`,
       status: "",
-      description: checkpointStep !== null ? `Step ${checkpointStep.toLocaleString()}` : latest?.mid_training ? `Step ${latest.mid_training.step.toLocaleString()}` : "Checkpoint orchestration" }] : []),
+      description: startup ? `Step ${startup.step.toLocaleString()}${startup.status === "failed" ? " · Startup failed" : ""}` : checkpointStep !== null ? `Step ${checkpointStep.toLocaleString()}` : latest?.mid_training ? `Step ${latest.mid_training.step.toLocaleString()}` : "Checkpoint orchestration" }] : []),
     ...(inference ? [{label: "Inference", selection: inference.id,
-      status: inference.status, description: `Checkpoint ${inference.mid_training_step} · Validation predictions`}] : []),
+      status: displayStatuses.get(inference.id) || inference.status, description: `Checkpoint ${inference.mid_training_step} · Validation predictions`}] : []),
     ...(evaluation ? [{label: "Evaluation", selection: evaluation.id,
-      status: evaluation.status, description: `Checkpoint ${evaluation.mid_training_step} · Validation scoring`}] : []),
+      status: displayStatuses.get(evaluation.id) || evaluation.status, description: `Checkpoint ${evaluation.mid_training_step} · Validation scoring`}] : []),
   ];
   return <li className="relative">
     <span className="absolute left-[18px] top-0 h-5 w-4 rounded-bl-[10px] border-b border-l border-hair" />

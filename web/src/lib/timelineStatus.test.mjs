@@ -21,7 +21,7 @@ for (const differentStage of [
 assert.equal(timelineTicketStatus([failed, { ...success, status: 'running' }]), 'running');
 assert.equal(timelineTicketStatus([failed, { ...success, status: 'repairing' }]), 'running');
 assert.equal(timelineTicketStatus([failed, { ...success, status: 'skipped' }]), 'succeeded');
-assert.equal(timelineTicketStatus([failed, success, { ...success, agent_id: 'evaluation', status: 'queued' }]), 'pending');
+assert.equal(timelineTicketStatus([failed, success, { ...success, agent_id: 'evaluation', status: 'queued' }]), 'queued');
 assert.equal(timelineTicketStatus([{ ...failed, status: 'degraded' }, success]), 'succeeded');
 assert.equal(timelineTicketStatus([{ ...failed, status: 'cancelled' }, success]), 'succeeded');
 assert.equal(timelineTicketStatus([failed, { ...failed, created_at: '2026-10-08T04:30:00Z' }, success]), 'succeeded');
@@ -32,7 +32,7 @@ console.log('timeline recovery regression checks passed');
 const cancelled = { ...failed, status: 'cancelled' };
 assert.equal(timelineTicketStatus([cancelled]), 'cancelled');
 assert.equal(timelineTicketStatus([cancelled, { ...success, agent_id: 'data' }]), 'cancelled');
-assert.equal(timelineTicketStatus([cancelled, { ...success, status: 'queued' }]), 'pending');
+assert.equal(timelineTicketStatus([cancelled, { ...success, status: 'queued' }]), 'queued');
 assert.equal(timelineTicketStatus([cancelled, { ...success, status: 'running' }]), 'running');
 assert.equal(timelineTicketStatus([cancelled, success]), 'succeeded');
 assert.equal(timelineTicketStatus([success, { ...cancelled, created_at: '2026-10-08T06:00:00Z' }]), 'cancelled');
@@ -44,10 +44,10 @@ const replacementTrain = { ...oldTrain, created_at: success.created_at, model_so
 assert.equal(timelineTicketStatus([oldTrain, replacementTrain]), 'succeeded');
 assert.equal(timelineTicketStatus([replacementTrain, oldTrain]), 'succeeded');
 assert.equal(timelineTicketStatus([oldTrain, { ...replacementTrain, iteration: 4 }]), 'cancelled');
-assert.equal(timelineTicketStatus([oldTrain, { ...replacementTrain, status: 'queued' }]), 'pending');
+assert.equal(timelineTicketStatus([oldTrain, { ...replacementTrain, status: 'queued' }]), 'queued');
 
 for (const oldStatus of ['failed', 'cancelled', 'running', 'repairing', 'queued', 'succeeded']) {
-  for (const [newStatus, expected] of Object.entries({succeeded: 'succeeded', queued: 'pending', awaiting_input: 'pending', waiting_external: 'pending', running: 'running', repairing: 'running', failed: 'failed', cancelled: 'cancelled'})) {
+  for (const [newStatus, expected] of Object.entries({succeeded: 'succeeded', queued: 'queued', awaiting_input: 'queued', waiting_external: 'queued', running: 'running', repairing: 'running', failed: 'failed', cancelled: 'cancelled'})) {
     const old = { ...failed, status: oldStatus };
     const latest = { ...success, status: newStatus, model_source: 'checkpoint' };
     assert.equal(timelineTicketStatus([old, latest]), expected);

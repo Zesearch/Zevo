@@ -1287,6 +1287,8 @@ async def get_run(
                 "status": t.status,
                 "summary": t.summary or "",
                 "error_message": t.error_message or "",
+                "repair_attempts": int(t.repair_attempts or 0),
+                "repair_route": t.repair_route or "",
                 "created_at": t.created_at.isoformat() if t.created_at else "",
                 "updated_at": t.updated_at.isoformat() if t.updated_at else "",
             }

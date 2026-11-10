@@ -3,6 +3,13 @@ export function instructionBlocks(status: string): boolean {
   return ["queued", "delivered", "needs_input"].includes(status);
 }
 
+export function ticketRepairing(ticket: { status: string; repair_attempts?: number; repair_route?: string; error_message?: string }, activePhase = ""): boolean {
+  if (ticket.status === "repairing") return true;
+  if (!["queued", "running", "waiting_external"].includes(ticket.status)) return false;
+  return activePhase === "repair" || (!!ticket.error_message && (ticket.repair_attempts ?? 0) > 0
+    && !["orchestrator", "terminal"].includes(ticket.repair_route || ""));
+}
+
 export function stageStatus(
   status: string, paused: boolean, schedulerState = "", needsInput = false, activePhase = "",
 ): string {

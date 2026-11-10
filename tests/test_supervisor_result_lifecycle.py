@@ -65,15 +65,21 @@ async def test_supervisor_action_settles_without_specialist_status(database, tmp
             "runtime": {"gpu_provider": "instance", "num_gpus": 1, "generation_backend": "vllm"},
         }))
         await db.commit()
-        ticket = await runner.run_ticket(db, ticket_id=supervisor_id, work_dir_root=str(tmp_path), driver_name="test")
+        wake = AgentWakeupRequest(id="original-wake", agent_id="orchestrator", ticket_id=supervisor_id,
+                                  source="assignment", status="running")
+        db.add(wake)
+        await db.commit()
+        ticket = await runner.run_ticket(db, ticket_id=supervisor_id, work_dir_root=str(tmp_path), driver_name="test", wakeup_id=wake.id)
         assert ticket.status == "succeeded", ticket.error_message
         assert ticket.repair_attempts == 0
         result = (await db.scalars(select(HeartbeatResult))).one()
         assert result.status == "succeeded" and result.output["action"] == action
         hb = (await db.scalars(select(HeartbeatRun))).one()
         assert hb.finished_at is not None and hb.exit_code == 0
+        await db.refresh(wake)
+        assert wake.heartbeat_run_id == hb.id
         wakes = (await db.scalars(select(AgentWakeupRequest))).all()
-        assert [w.ticket_id for w in wakes] == ([child_id] if action == "emit_ticket" else [])
+        assert [w.ticket_id for w in wakes if w.id != wake.id] == ([child_id] if action == "emit_ticket" else [])
 
 
 @pytest.mark.asyncio

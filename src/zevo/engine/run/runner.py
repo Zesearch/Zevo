@@ -1966,6 +1966,9 @@ async def _build_input(
     work_dir: str,
     generation_backend: str, run: Run, session: AsyncSession,
     specialist_context: dict | None = None,
+    activation_payload: dict | None = None,
+    activation_source: str = "",
+    activation_reason: str = "",
 ) -> BaseModel:
     # Freeform tickets (a direct user call) bypass the per-agent typed
     # builders -- a single FreeformInput is built and passed through. The agent's
@@ -1976,7 +1979,10 @@ async def _build_input(
         )
     if agent_id == "orchestrator":
         from zevo.engine.run.cloud_recovery import recovery_context
-        payload = {**payload, "runtime": {**payload.get("runtime", {}),
+        from zevo.engine.run.supervisor import supervisor_activation_payload
+        payload = supervisor_activation_payload(run, payload, activation_payload,
+            source=activation_source, reason=activation_reason)
+        payload = {**payload, "runtime": {**payload["runtime"],
             "cloud_resource_recoveries": await recovery_context(session, run),
             "adaptive_mid_training_evaluation": bool((run.lifecycle or {}).get("adaptive_mid_training_evaluation")),
             "validation_generation_reports": validation_generation_reports(run),
@@ -4985,6 +4991,7 @@ async def run_ticket(
     activation_source: str = "",
     activation_reason: str = "",
     activation_payload: dict[str, Any] | None = None,
+    wakeup_id: str = "",
 ) -> Ticket:
     """Run one ticket through the appropriate Driver. Persists everything."""
     tk = (
@@ -5005,6 +5012,9 @@ async def run_ticket(
         return tk
     from zevo.engine.run.remeasurement import pending
     if pending(run, "optimization") and tk.agent_id in {"orchestrator", "train"}:
+        if wakeup_id and tk.agent_id == "orchestrator":
+            from zevo.engine.run.wakeup import WakeupDeferred
+            raise WakeupDeferred("measurement_revision_pending")
         return tk  # the complete cohort, not a partial score, releases the loop
     if finalization(run) and not finalization_allows(tk.agent_id, tk.lane):
         tk.status = "cancelled"
@@ -5226,6 +5236,9 @@ async def run_ticket(
             run=run,
             session=session,
             specialist_context=specialist_context,
+            activation_payload=activation_payload,
+            activation_source=activation_source,
+            activation_reason=activation_reason,
         )
         progress_notice = (await session.execute(select(TicketNotice).where(
             TicketNotice.ticket_id == tk.id, TicketNotice.code == "repair.progress",
@@ -5417,7 +5430,7 @@ async def run_ticket(
             hb.resolved_config = {**(hb.resolved_config or {}), "measurement_revision": attempt["revision"]}
 
     if tk.agent_id == "orchestrator" and hb.activation_phase != "instruction":
-        trigger = activation_payload.get("orchestration_trigger") or (tk.payload or {}).get("trigger")
+        trigger = inp.trigger.model_dump() if isinstance(inp, OrchestratorTaskInput) else None
         if isinstance(trigger, dict):
             hb.resolved_config = {**(hb.resolved_config or {}), "orchestration_trigger": {
                 key: str(trigger.get(key) or "") for key in ("type", "ticket_id", "agent_id", "status")}}
@@ -5440,6 +5453,8 @@ async def run_ticket(
 
     session.add(hb)
     await session.flush()  # populates hb.id without committing
+    from zevo.engine.run.wakeup import bind_wakeup_heartbeat
+    await bind_wakeup_heartbeat(session, wakeup_id, tk, hb)
     stdout_path = str(Path(log_dir) / f"{tk.id}__{hb.id}.stdout.log")
     hb.stdout_path = stdout_path
     tk.status = "running"
