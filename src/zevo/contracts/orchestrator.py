@@ -217,7 +217,7 @@ def verifiable_reward_available(metric: str, metric_type: str) -> bool:
     )
 class SupervisorTrigger(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    type: Literal["run_created", "ticket_completed"]
+    type: Literal["run_created", "ticket_completed", "checkpoint_ready", "on_demand"]
     ticket_id: str = ""
     agent_id: str = ""
     status: TicketStatus | Literal[""] = ""

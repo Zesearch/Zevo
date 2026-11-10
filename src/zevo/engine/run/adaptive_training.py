@@ -655,13 +655,10 @@ async def reconcile_checkpoint_stages(session):
                             "metrics": values, "checkpoint": request["checkpoint"]}]}
                     lifecycle["adaptive_training_requests"] = decisions
                 run.lifecycle = lifecycle
-                if request["step"] < request["planned_steps"] and run.supervisor_ticket_id:
-                    await queue_wakeup(session, agent_id="orchestrator", ticket_id=run.supervisor_ticket_id,
-                        source="on_demand", reason=f"mid-training Validation decision {key}",
-                        payload={"adaptive_training_request_id": key})
-                else:
-                    await session.commit()
+                await session.commit()
             decision = (run.lifecycle or {}).get("adaptive_training_requests", {}).get(key, {})
+            if decision.get("status") == "pending" and run.supervisor_ticket_id:
+                await wake_checkpoint_orchestrator(session, run, key, "decision")
             if request["step"] == request["planned_steps"] or decision.get("status") == "decided":
                 from zevo.db import HeartbeatRun
                 live = (await session.execute(select(HeartbeatRun.id).where(
@@ -696,21 +693,94 @@ def checkpoint_orchestration_context(run):
 
 async def wake_checkpoint_orchestrator(session, run, key, phase, child=None):
     from zevo.engine.run.wakeup import queue_wakeup
+    from zevo.engine.run.supervisor import supervisor_input_signature
+    from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
+    from zevo.db import AgentWakeupRequest
+    # Serialize the decision and enqueue, including concurrent reconciler ticks.
+    await session.execute(select(Run).where(Run.id == run.id).with_for_update()
+                          .execution_options(populate_existing=True))
+    from zevo.engine.run.remeasurement import pending
+    from zevo.engine.run.steering import instruction_gate_active
+    if (run.status != "running" or run.cancel_requested_at is not None
+            or pending(run, "optimization") or await instruction_gate_active(session, run.id)):
+        await session.commit()
+        return
     stages = dict((run.lifecycle or {}).get("adaptive_checkpoints", {}))
     stage = dict(stages[key])
     token = {"phase": phase, "ticket_id": child.id if child else "",
              "updated_at": str(child.updated_at) if child else ""}
-    if stage.get("orchestrator_wake") == token:
-        await session.commit()
-        return
     if not run.supervisor_ticket_id:
         raise ValueError("checkpoint orchestration requires the Run supervisor")
+    supervisor = await session.get(Ticket, run.supervisor_ticket_id)
+    payload = ({"adaptive_training_request_id": key} if phase == "decision" else
+               {"adaptive_checkpoint_request_id": key, "adaptive_checkpoint_phase": phase})
+    signature = supervisor_input_signature(run, supervisor, payload)
+    rows = (await session.scalars(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == run.supervisor_ticket_id,
+        AgentWakeupRequest.status != "coalesced",
+    ).order_by(AgentWakeupRequest.created_at.desc(), AgentWakeupRequest.id.desc()))).all()
+    matching = [row for row in rows if
+        ((row.payload or {}).get("adaptive_training_request_id") == key if phase == "decision" else
+         (row.payload or {}).get("adaptive_checkpoint_request_id") == key
+         and (row.payload or {}).get("adaptive_checkpoint_phase") == phase)
+        and ((row.payload or {}).get("checkpoint_handoff_token") == token
+             or ("checkpoint_handoff_token" not in (row.payload or {})
+                 and (child is None or stage.get("orchestrator_wake") == token)))]
+    last = matching[0] if matching else None
+    previous_signature = (last.payload or {}).get("supervisor_input_signature") if last else None
+    # An enqueue is not success. Retry a failed startup only after a known
+    # input correction, bounded by the same repair ceiling. Legacy wakes
+    # without an input identity require an explicit operator retry.
+    # Check actual requests even when a legacy phase token is missing: rolling
+    # out this code must not enqueue a second decision behind a live one.
+    deferred = bool(last and last.status == "deferred"
+                    and (last.payload or {}).get("deferred_reason") == "measurement_revision_pending")
+    if last and not deferred and (last.status != "failed" or not previous_signature
+            or previous_signature == signature
+            or sum(row.status == "failed" for row in matching) >= MAX_REPAIR_ATTEMPTS
+            or int(supervisor.repair_attempts or 0) >= MAX_REPAIR_ATTEMPTS):
+        await session.commit()
+        return
     stage["orchestrator_wake"] = token
     stages[key] = stage
     run.lifecycle = {**run.lifecycle, "adaptive_checkpoints": stages}
     await queue_wakeup(session, agent_id="orchestrator", ticket_id=run.supervisor_ticket_id,
         source="on_demand", reason=f"mid-training checkpoint {phase} {key}",
-        payload={"adaptive_checkpoint_request_id": key, "adaptive_checkpoint_phase": phase})
+        payload={**payload, "checkpoint_handoff_token": token, "supervisor_input_signature": signature})
+
+
+async def checkpoint_orchestration_history(session, run, train):
+    """Expose startup failures even when no Agent heartbeat could be created."""
+    from zevo.db import AgentWakeupRequest, HeartbeatRun
+    if train.agent_id != "train" or not run or not run.supervisor_ticket_id:
+        return []
+    wakes = (await session.scalars(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.ticket_id == run.supervisor_ticket_id,
+        AgentWakeupRequest.status != "coalesced",
+    ).order_by(AgentWakeupRequest.created_at, AgentWakeupRequest.id))).all()
+    heartbeats = (await session.scalars(select(HeartbeatRun).where(
+        HeartbeatRun.ticket_id == run.supervisor_ticket_id,
+    ).order_by(HeartbeatRun.started_at))).all()
+    by_id = {h.id: h for h in heartbeats}
+    result = []
+    for wake in wakes:
+        previous = {"request_id": wake.payload["adaptive_training_request_id"]} if (wake.payload or {}).get("adaptive_training_request_id") else None
+        context = activation_validation_context(run.lifecycle or {}, wake.reason or "", wake.payload or {}, previous)
+        if not context or context["train_ticket_id"] != train.id:
+            continue
+        heartbeat = by_id.get(wake.heartbeat_run_id)
+        # Legacy rows did not record this foreign key. Do not assign an Agent
+        # execution by queue timestamps: a later request may precede its start.
+        known = bool(heartbeat or (wake.payload or {}).get("activation_link_recorded")
+                     or "stored-payload-validation-failed" in (wake.reason or ""))
+        result.append({**context, "phase": context.get("phase", "decision"),
+            "wakeup_id": wake.id, "status": wake.status,
+            "created_at": wake.created_at.isoformat(),
+            "heartbeat_id": heartbeat.id if heartbeat else "",
+            "activation_link_known": known,
+            "deferred_reason": (wake.payload or {}).get("deferred_reason", ""),
+            "error": wake.reason if wake.status == "failed" else ""})
+    return result
 
 
 async def create_checkpoint_stage(session, run, body):

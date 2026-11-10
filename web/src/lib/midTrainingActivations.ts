@@ -1,4 +1,26 @@
-import type { HeartbeatDTO } from "./api";
+import type { HeartbeatDTO, CheckpointOrchestrationDTO } from "./api";
+
+export function checkpointOrchestrationView(activations: HeartbeatDTO[], attempts: CheckpointOrchestrationDTO[], selected?: string) {
+  const checkpoints = [...new Map([
+    ...activations.filter((h) => h.mid_training).map((h) => [h.mid_training!.request_id,
+      { request_id: h.mid_training!.request_id, step: h.mid_training!.step }] as const),
+    ...attempts.map((a) => [a.request_id, { request_id: a.request_id, step: a.step }] as const),
+  ]).values()].sort((a, b) => a.step - b.step);
+  const requestId = checkpoints.find((item) => item.request_id === selected)?.request_id ?? checkpoints.at(-1)?.request_id;
+  const currentActivations = activations.filter((h) => h.mid_training?.request_id === requestId);
+  const currentAttempts = attempts.filter((a) => a.request_id === requestId);
+  const latest = currentAttempts.at(-1);
+  const latestHeartbeat = currentActivations.at(-1);
+  // A later startup failure must not fall back to this checkpoint's old success.
+  const pendingAttempt = latest && !latest.heartbeat_id
+    && (latest.activation_link_known !== false || latest.status === "failed")
+    && (!latestHeartbeat || latest.created_at >= latestHeartbeat.started_at) ? latest : undefined;
+  const newestLinked = latest?.heartbeat_id && (!latestHeartbeat || latest.created_at >= latestHeartbeat.started_at)
+    ? latest.heartbeat_id : latestHeartbeat?.id;
+  const awaitingHeartbeat = !!newestLinked && !currentActivations.some((h) => h.id === newestLinked);
+  return { checkpoints, requestId, activations: currentActivations, attempts: currentAttempts,
+    pendingAttempt, defaultHeartbeatId: newestLinked, awaitingHeartbeat };
+}
 
 export function isMidTrainingActivation(heartbeat: HeartbeatDTO): boolean {
   return !!heartbeat.mid_training && heartbeat.activation_phase !== "instruction";

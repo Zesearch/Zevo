@@ -5,8 +5,9 @@
 // Pure SVG, responsive.
 
 import type { ReactNode } from "react";
+import { PIPELINE_LAMPS, type PipelineState } from "../../lib/pipelineStatus";
 
-export type StationState = "idle" | "waiting" | "active" | "done" | "degraded" | "failed" | "cancelled";
+export type StationState = PipelineState;
 
 export type Station = {
   key: string;
@@ -36,15 +37,8 @@ export function ticketAtStation(
 
 // Active is BRASS, done is PHOSPHOR. They used to share phosphor, so a station
 // mid-flight looked identical to one that had finished.
-const COL = {
-  idle: "#3B4C5B",
-  waiting: "#5FB0DD",
-  active: "#E08D38",
-  done: "#4FD1B5",
-  degraded: "#A98FD6",
-  failed: "#F26F58",
-  cancelled: "#66788A",
-};
+const COL = Object.fromEntries(Object.entries(PIPELINE_LAMPS)
+  .map(([state, lamp]) => [state, lamp.color])) as Record<StationState, string>;
 const ACTIVE_GLOW = "rgba(224,141,56,";
 
 export function PipelineRing({
@@ -111,7 +105,7 @@ export function PipelineRing({
           stations that have done nothing it stays the plain grey ring. */}
       {stations.map((s, i) => {
         const dest = stations[(i + 1) % n];
-        const travelled = ["done", "degraded", "failed", "cancelled"].includes(s.state);
+        const travelled = ["done", "failed"].includes(s.state);
         const arrived = dest.state !== "idle";
         if (!travelled || !arrived) return null;
         const flowing = dest.state === "active";
@@ -174,6 +168,7 @@ export function PipelineRing({
         const stationNote = stationNotes[s.key];
         return (
           <g key={s.key}>
+            <title>{s.label}: {PIPELINE_LAMPS[s.state].label}</title>
             {/* station disc — running is the disc itself pulsing. It used to be
                 a 6px lamp pinned to the disc's shoulder, which is a second
                 thing to notice for a state the disc could carry on its own. */}

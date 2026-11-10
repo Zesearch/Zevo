@@ -7,7 +7,7 @@ Loop (every ~1s):
   4. For each available slot:
        try acquire the per-wakeup advisory lock
        mark wakeup 'running', run the ticket in-process (own task + session)
-  5. When the runner finishes, mark wakeup 'completed' or 'failed'
+  5. When the runner finishes, mark wakeup 'completed', 'failed' or 'deferred'
 
 Cron tick (every 5 min, configurable):
   Enqueue a wakeup for one unattended queued Ticket per agent in this daemon's
@@ -124,8 +124,8 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
     """Run one wakeup: mark running -> execute -> mark done/failed.
 
     Robust to any exception inside `run_ticket` or downstream code: we
-    always end with the wakeup row in a terminal status ('completed' or
-    'failed'), in a fresh transaction, so a single bad wakeup cannot
+    always end with the wakeup row settled ('completed', 'failed' or
+    'deferred'), in a fresh transaction, so a single bad wakeup cannot
     leak slot accounting and cannot poison the daemon's session.
     """
     wakeup_id = w.id
@@ -133,6 +133,7 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
     ticket_id = w.ticket_id
 
     w.status = "running"
+    w.payload = {**(w.payload or {}), "activation_link_recorded": True}
     try:
         await session.commit()
     except SQLAlchemyError:
@@ -140,8 +141,10 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
         raise
 
     error_message = ""
+    deferred_reason = ""
+    from zevo.engine.run.wakeup import WakeupDeferred
     try:
-        payload = w.payload if isinstance(w.payload, dict) else {}
+        payload = {key: value for key, value in w.payload.items() if key != "activation_link_recorded"} if isinstance(w.payload, dict) else {}
         driver_name = str(payload.get("driver") or "")
         model_override = str(payload.get("model") or "")
         # work_dir_root() already honors ZEVO_WORK_DIR. Ticket artifacts,
@@ -157,6 +160,7 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
                 activation_source=w.source,
                 activation_reason=w.reason,
                 activation_payload=payload,
+                wakeup_id=wakeup_id,
             )
         else:
             # Join on the run: a ticket queued before the user cancelled is
@@ -186,7 +190,11 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
                     activation_source=w.source,
                     activation_reason=w.reason,
                     activation_payload=payload,
+                    wakeup_id=wakeup_id,
                 )
+    except WakeupDeferred as exc:
+        deferred_reason = str(exc)
+        await session.rollback()
     except Exception as e:
         error_message = f"{type(e).__name__}: {e}"
         log.exception("wakeup %s failed", wakeup_id)
@@ -197,10 +205,10 @@ async def _process_wakeup(session: AsyncSession, w: AgentWakeupRequest) -> None:
         except SQLAlchemyError:
             pass
 
-    await _mark_wakeup_terminal(wakeup_id, error_message)
+    await _mark_wakeup_terminal(wakeup_id, error_message, deferred_reason=deferred_reason)
 
 
-async def _mark_wakeup_terminal(wakeup_id: str, error_message: str) -> None:
+async def _mark_wakeup_terminal(wakeup_id: str, error_message: str, *, deferred_reason: str = "") -> None:
     """Mark a wakeup completed/failed in its OWN fresh session.
 
     Using a new session here is deliberate -- the caller's session may
@@ -215,7 +223,9 @@ async def _mark_wakeup_terminal(wakeup_id: str, error_message: str) -> None:
             )).scalar_one_or_none()
             if w is None:
                 return
-            w.status = "failed" if error_message else "completed"
+            w.status = "failed" if error_message else "deferred" if deferred_reason else "completed"
+            if deferred_reason:
+                w.payload = {**(w.payload or {}), "deferred_reason": deferred_reason}
             w.finished_at = datetime.now(timezone.utc)
             if error_message:
                 w.reason = ((w.reason or "") + " | " + error_message)[:2000]

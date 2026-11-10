@@ -51,6 +51,7 @@ export function midTrainingHasStarted(ticket: TicketDetail | undefined, activati
   if (activationCount > 0) return true;
   if (!ticket) return false;
   if (ticket.checkpoint_handoff_failure) return true;
+  if (ticket.checkpoint_orchestrations?.length) return true;
   const validation = ticket.mid_training_validation;
   if (validation?.measurements?.length || validation?.awaiting_decision || validation?.complete) return true;
   return ticket.execution_events.some((event) => event.extras?.execution_purpose === "workload"
@@ -59,7 +60,7 @@ export function midTrainingHasStarted(ticket: TicketDetail | undefined, activati
 
 /** Reveal Orchestrator when its first checkpoint activation starts. */
 export function midTrainingDecisionHasStarted(ticket: TicketDetail | undefined, activationCount = 0): boolean {
-  return activationCount > 0 || !!ticket?.mid_training_validation?.awaiting_decision;
+  return activationCount > 0 || !!ticket?.checkpoint_orchestrations?.length || !!ticket?.mid_training_validation?.awaiting_decision;
 }
 
 /** A yielded checkpoint is visible before its first supervisor activation. */

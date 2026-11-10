@@ -950,7 +950,7 @@ class AgentWakeupRequest(Base):
     # 'assignment' | 'on_demand' | 'handoff' | 'retry' | 'scheduler' |
     # 'cron' | 'reassignment'
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
-    # 'queued' | 'running' | 'completed' | 'failed' | 'coalesced'
+    # 'queued' | 'running' | 'completed' | 'failed' | 'coalesced' | 'deferred'
 
     heartbeat_run_id: Mapped[str | None] = mapped_column(
         ForeignKey("heartbeat_runs.id", ondelete="SET NULL"), nullable=True

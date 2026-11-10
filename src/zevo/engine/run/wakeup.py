@@ -47,6 +47,24 @@ from zevo.engine.run.input_validation import merge_input_reviews
 log = logging.getLogger(__name__)
 
 
+class WakeupDeferred(Exception):
+    """A temporary engine gate prevented an activation, rather than completing it."""
+
+
+async def bind_wakeup_heartbeat(session, wakeup_id, ticket, heartbeat):
+    """Persist the exact request/activation link in the activation transaction."""
+    if not wakeup_id:
+        return
+    wake = await session.get(AgentWakeupRequest, wakeup_id)
+    if (wake is None or wake.agent_id != ticket.agent_id
+            or wake.ticket_id not in {None, ticket.id} or wake.status != "running"):
+        raise ValueError("Activation does not belong to this running wakeup")
+    if wake.heartbeat_run_id and wake.heartbeat_run_id != heartbeat.id:
+        raise ValueError("Wakeup already has a different activation")
+    wake.ticket_id = ticket.id
+    wake.heartbeat_run_id = heartbeat.id
+
+
 async def queue_wakeup(
     session: AsyncSession,
     *,

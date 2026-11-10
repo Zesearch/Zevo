@@ -49,7 +49,9 @@ async def report_input_failure(session, ticket, run, message):
     ).with_for_update())
     await session.refresh(ticket)
     await session.refresh(run)
-    if (ticket.status in {"cancelled", "succeeded", "degraded"}
+    reusable_supervisor = ticket.agent_id == "orchestrator" and ticket.id == run.supervisor_ticket_id
+    if (ticket.status == "cancelled"
+            or (ticket.status in {"succeeded", "degraded"} and not reusable_supervisor)
             or run.status in TERMINAL_RUN_STATUSES or run.cancel_requested_at is not None):
         await session.commit()
         return
