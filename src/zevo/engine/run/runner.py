@@ -58,6 +58,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from zevo.contracts.training_selection import get_selected_training_method
 from zevo.paths import work_dir_root as paths_work_dir_root
 from zevo.api.artifacts import host_path
 from zevo.providers import resolve_ssh_key
@@ -331,7 +332,7 @@ def _build_data_input(
             f"expected {expected_operation!r}"
         )
     dataset = "" if held_out else str(payload.get("dataset") or "")
-    remote_preparation = not held_out
+    remote_preparation = not held_out and (getattr(run, "mode", "") != "single_stage" or bool(inputs.get("device_info")))
     device_info_path = (
         ""
         if held_out
@@ -984,9 +985,9 @@ async def _slurm_stage_job_contract(
                 if stage == "train" else ""
             ),
             train_use_peft=(
-                bool(((ticket.payload or {}).get("method_config_pins") or {}).get(
-                    "use_peft", False,
-                )) if stage == "train" else False
+                ((ticket.payload or {}).get("method_config_pins") or {}).get(
+                    "use_peft"
+                ) if stage == "train" else None
             ),
             info=info,
             live_capacity=capacity,
@@ -1026,8 +1027,8 @@ async def _slurm_stage_job_contract(
             raise ValueError("per_run currently requires a single-node allocation so Data and Inference can reuse it; use per_stage for multi-node training")
         if maximum_gpus and info.resource_plan.num_gpus > maximum_gpus:
             raise ValueError("run allocation exceeds the Run GPU maximum")
-        if info.resource_plan.num_gpus < selection.estimated_gpus:
-            raise ValueError("stage does not fit the retained run allocation; Infrastructure must plan enough GPUs for Train")
+        if stage == "inference" and configured_tp > info.resource_plan.num_gpus:
+            raise ValueError("resolved inference tensor parallel size exceeds the retained allocation")
         selection = replace(
             selection, num_gpus=int(info.resource_plan.num_gpus),
             nodes=int(info.resource_plan.nodes),
@@ -1172,7 +1173,7 @@ async def _build_train_input(
     active_method = active_training_method(run.history or [], before_iteration=iteration)
     branch_problem = method_branch_problem(
         active_method,
-        str((payload.get("configuration_suggestions") or {}).get("training_method") or ""),
+        get_selected_training_method(payload),
         pin=str(payload.get("training_method_pin") or ""),
         transition=payload.get("branch_transition"),
     )
@@ -1223,6 +1224,12 @@ async def _build_train_input(
     dataset_rows = int(
         dataset_meta.get("training_rows") or dataset_meta.get("n_rows_out") or 0
     )
+    if dataset_rows < 1 and getattr(run, "mode", "") == "single_stage" and not dataset_binding.get("source_ticket_id"):
+        source_path = input_path(inputs, "training_dataset")
+        from zevo.engine.artifact_validation import validate_training_data_artifact
+        dataset_rows = validate_training_data_artifact(source_path)
+        if file_sha256(source_path) != payload.get("data_signature"):
+            raise ValueError("standalone Training dataset changed after request resolution")
     if dataset_rows < 1:
         raise ValueError("bound Training dataset has no verified source-row count")
     dataset_is_remote = str(dataset_meta.get("location") or "") == "remote"
@@ -1310,6 +1317,7 @@ async def _build_train_input(
             input_path(inputs, "parent_train_config") if parent_model else ""
         ),
         branch_transition=dict(payload.get("branch_transition") or {}),
+        selected_training_method=get_selected_training_method(payload),
         active_training_method=active_method,
         training_method_pin=str(payload.get("training_method_pin") or ""),
         method_config_pins=dict(payload.get("method_config_pins") or {}),
@@ -2351,6 +2359,8 @@ def _validate_specialist_yaml(
     remains visible without invalidating an otherwise reproducible experiment.
     """
     warnings = advisory_warnings if advisory_warnings is not None else []
+    from zevo.contracts.configuration import inference_execution_contract
+
     def assigned(value: object) -> bool:
         return value not in (None, "", 0, {}, [])
 
@@ -2410,15 +2420,9 @@ def _validate_specialist_yaml(
         require_suggestion_decisions(config, inp.configuration_suggestions)
         if inp.inference_config_path:
             supplied = load_inference_config(inp.inference_config_path)
-            if config.model_dump(mode="json") != supplied.model_dump(mode="json"):
+            if inference_execution_contract(config) != inference_execution_contract(supplied):
                 raise ValueError(
                     "trained-model inference changed baseline inference_config.yaml"
-                )
-            if file_sha256(result.inference_config_path) != file_sha256(
-                inp.inference_config_path
-            ):
-                raise ValueError(
-                    "trained-model inference must report the exact supplied config file"
                 )
         if (
             inp.reusable_predict_script_path
@@ -2521,13 +2525,9 @@ def _validate_specialist_yaml(
                     )
             if member.inference_config_path:
                 supplied = load_inference_config(member.inference_config_path)
-                if member_config.model_dump(mode="json") != supplied.model_dump(
-                    mode="json"
-                ) or file_sha256(
-                    member_result.inference_config_path
-                ) != file_sha256(member.inference_config_path):
+                if inference_execution_contract(member_config) != inference_execution_contract(supplied):
                     raise ValueError(
-                        f"suite member {name!r} must reuse its exact baseline config"
+                        f"suite member {name!r} must reuse its baseline execution config"
                     )
         return config.model_dump(mode="json")
 
@@ -2619,9 +2619,8 @@ def _validate_specialist_yaml(
                 "train_config.yaml rephrased the Orchestrator's parent selection "
                 "rationale; parent_model and parent_kind still match"
             )
-        selected_method = str(inp.configuration_suggestions.get("training_method") or "").strip().lower()
+        selected_method = get_selected_training_method(inp)
         if (not inp.training_method_pin
-                and inp.activation_contract.get("method_selection_owner", "orchestrator") == "orchestrator"
                 and selected_method and config.training_method != selected_method):
             raise ValueError("train_config.yaml differs from the Orchestrator-selected method")
         if inp.training_method_pin:
@@ -2640,9 +2639,7 @@ def _validate_specialist_yaml(
                 )
         else:
             if config.training_method != inp.active_training_method:
-                suggested_method = str(
-                    inp.configuration_suggestions.get("training_method") or ""
-                ).strip().lower()
+                suggested_method = get_selected_training_method(inp)
                 if suggested_method != config.training_method:
                     raise ValueError(
                         "an unpinned method may change only when the Orchestrator "
@@ -2753,7 +2750,9 @@ def _validate_specialist_yaml(
             script_body = script_path.read_text(encoding="utf-8")
         except OSError as exc:
             raise ValueError(f"cannot read train_script_path: {exc}") from exc
-        if "ZevoTrainerTelemetryCallback" not in script_body:
+        from zevo.engine.run.python_capabilities import capability_problem
+        if capability_problem(str(script_path), {"zevo_train_telemetry.ZevoTrainerTelemetryCallback"},
+                              "missing training telemetry callback"):
             raise ValueError(
                 "train.py must import and install the system-owned "
                 "ZevoTrainerTelemetryCallback"
@@ -2764,117 +2763,25 @@ def _validate_specialist_yaml(
 
 
 def _python_memory_helper_problem(path: str) -> str:
-    """Require a semantic call to Zevo's vLLM memory calculator.
-
-    A substring check was too weak: a comment or an unused import satisfied it
-    while ``predict.py`` could still hard-code ``gpu_memory_utilization``.
-    """
-    try:
-        body = Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
-        return f"cannot read predict_script_path: {exc}"
-    try:
-        tree = ast.parse(body, filename=path)
-    except SyntaxError as exc:
-        return f"cannot parse predict_script_path: {exc}"
-
-    direct_names: set[str] = set()
-    module_names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "zevo_inference_memory":
-            for imported in node.names:
-                if imported.name == "gpu_memory_utilization":
-                    direct_names.add(imported.asname or imported.name)
-        elif isinstance(node, ast.Import):
-            for imported in node.names:
-                if imported.name == "zevo_inference_memory":
-                    module_names.add(imported.asname or imported.name)
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Name) and node.func.id in direct_names:
-            return ""
-        if (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "gpu_memory_utilization"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in module_names
-        ):
-            return ""
-    return (
-        "vLLM predict.py must import and call the system-owned "
-        "zevo_inference_memory.gpu_memory_utilization helper"
-    )
+    from zevo.engine.run.python_capabilities import capability_problem
+    return capability_problem(path, {"zevo_inference_memory.gpu_memory_utilization"},
+        "vLLM implementation must import and call zevo_inference_memory.gpu_memory_utilization")
 
 
 def _python_stage_resume_problem(path: str) -> str:
-    """New generated Data/custom Inference jobs must call the durable batch helper."""
-    try:
-        tree = ast.parse(Path(path).read_text(), filename=path)
-    except (OSError, SyntaxError) as exc:
-        return f"cannot inspect resumable stage implementation: {exc}"
-    functions, modules = set(), set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "zevo_stage_resume":
-            functions.update(item.asname or item.name for item in node.names if item.name == "run_batches")
-        elif isinstance(node, ast.Import):
-            modules.update(item.asname or item.name for item in node.names if item.name == "zevo_stage_resume")
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        call = node.func
-        if isinstance(call, ast.Name) and call.id in functions:
-            return ""
-        if (isinstance(call, ast.Attribute) and call.attr == "run_batches"
-                and isinstance(call.value, ast.Name) and call.value.id in modules):
-            return ""
-    return "Data/custom Inference must import and call zevo_stage_resume.run_batches to preserve completed work"
+    from zevo.engine.run.python_capabilities import capability_problem
+    return capability_problem(path, {"zevo_stage_resume.run_batches"},
+        "Data/custom Inference must call zevo_stage_resume.run_batches to preserve completed work")
 
 
 def _python_checkpoint_helper_problem(path: str) -> str:
-    """Require generated Train code to use the checkpoint transaction helper."""
-    try:
-        body = Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
-        return f"cannot read train_script_path: {exc}"
-    try:
-        tree = ast.parse(body, filename=path)
-    except SyntaxError as exc:
-        return f"cannot parse train_script_path: {exc}"
-    direct_names: set[str] = set()
-    module_names: set[str] = set()
-    accepted = {
-        "save_transformers_model_rank_zero",
-        "commit_checkpoint_directory",
-        "commit_training_checkpoint",
-        "publish_adaptive_checkpoint",
-    }
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in {"zevo_train_checkpoint", "zevo_adaptive_training"}:
-            for imported in node.names:
-                if imported.name in accepted:
-                    direct_names.add(imported.asname or imported.name)
-        elif isinstance(node, ast.Import):
-            for imported in node.names:
-                if imported.name in {"zevo_train_checkpoint", "zevo_adaptive_training"}:
-                    module_names.add(imported.asname or imported.name)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Name) and node.func.id in direct_names:
-            return ""
-        if (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr in accepted
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in module_names
-        ):
-            return ""
-    return (
-        "train.py must import and call the system-owned zevo_train_checkpoint "
-        "transaction helper"
-    )
+    from zevo.engine.run.python_capabilities import capability_problem
+    return capability_problem(path, {
+        "zevo_train_checkpoint.save_transformers_model_rank_zero",
+        "zevo_train_checkpoint.commit_checkpoint_directory",
+        "zevo_train_checkpoint.commit_training_checkpoint",
+        "zevo_adaptive_training.publish_adaptive_checkpoint",
+    }, "Train must call the system checkpoint transaction helper")
 
 
 def _python_undefined_name_problem(path: str) -> str:
@@ -3003,10 +2910,10 @@ def _slurm_stage_result_problem(
         # These engine-owned launchers invoke the wrapper internally. All other
         # GPU stages must wrap their foreground command directly, regardless of
         # stage name (preparation, scoring, training, generation, etc.).
-        runtime_launchers = ("zevo_gpu_runtime.py", "zevo_parallel_inference.py", "zevo_adaptive_training.py")
-        commands = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
-        if not any(name in commands for name in runtime_launchers):
-            return "GPU workload must launch through zevo_gpu_runtime.py or a system runner that invokes it"
+        from zevo.engine.run.python_capabilities import gpu_launch_problem
+        problem = gpu_launch_problem(body, path.with_name(executable_name))
+        if problem:
+            return problem
     if (contract.phase == "submit" and getattr(inp, "stage_resume_helper_path", "")
             and executable_name in {"prepare_data.py", "predict.py"}):
         commands = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
@@ -3621,27 +3528,14 @@ def _relocate_artifact(path: str, work_dir: str) -> str:
 
 
 def _referenced_paths(guarded: list[str], events: list[dict]) -> list[str]:
-    """Which of `guarded` this activation's tool calls actually named.
+    """Protected paths in explicit read attempts, excluding comments/prose.
 
-    Matched on a PATH-ISH substring, not on the bare file name. The check used
-    to compare `Path(p).name` against the whole tool input, which on the
-    commonest names in this system — `eval.py`, `test.csv` — flags any command
-    that merely contains the string: the agent writing its own `eval.py`,
-    a comment body quoting one, a `find` whose pattern spells it. Those false
-    positives are expensive, because the comment they raise tells the reader
-    the run's headline number is unattributable.
-
-    So require the enclosing directory too when the guarded path has one. Two
-    different files called `test.csv` in two different directories stop
-    colliding, while a stage that really did open the guarded path still names
-    it in full — nobody reads a file without saying where it is.
+    This is tool-call evidence, not proof that a read succeeded. Sandbox access
+    controls are independent; mere textual references cannot fail a result.
     """
-    if not guarded:
-        return []
-    inputs = [
-        str((e.get("payload") or {}).get("input") or "")
-        for e in events if e.get("type") == "tool_call"
-    ]
+    from zevo.engine.run.path_access import access_arguments
+    inputs = [value for event in events if event.get("type") == "tool_call"
+              for value in access_arguments(event)]
     hits: set[str] = set()
     for path in guarded:
         if not path:
@@ -3720,12 +3614,12 @@ def _artifact_problem(path: str) -> str:
     return ""
 
 
-def _essential_artifact_fields(result: BaseModel) -> list[str]:
+def _essential_artifact_fields(result: BaseModel, *, has_scoring_contract: bool = True) -> list[str]:
     """Artifacts whose absence changes execution, lineage, or measured output."""
     if isinstance(result, DataResult):
         if result.operation == "scope_problem":
             return ["scoping_result_path"]
-        fields = ["scoring_public_path"]
+        fields = ["scoring_public_path"] if has_scoring_contract else []
         if result.operation == "prepare_run_data":
             fields.extend([
                 (
@@ -3733,10 +3627,10 @@ def _essential_artifact_fields(result: BaseModel) -> list[str]:
                     if result.remote_dataset_path
                     else "training_dataset_path"
                 ),
-                "validation_dataset_path",
-                "inference_data_profile_path",
                 "data_recipe_path",
             ])
+            if has_scoring_contract:
+                fields.extend(["validation_dataset_path", "inference_data_profile_path"])
             if result.remote_dataset_path:
                 fields.extend([
                     "remote_dataset_spec_path", "remote_training_package_path",
@@ -4132,6 +4026,11 @@ def _validate_remote_data_output(result: DataResult, inp: DataTaskInput):
             raise ValueError(
                 "remote data recipe fingerprint does not bind the realized source"
             )
+        from zevo.contracts.data import validate_synthesis_authorization
+        validate_synthesis_authorization(recipe, inp.recipe_intent,
+            generated_rows=result.synthesis_generated_rows,
+            teacher_model=result.synthesis_teacher_model,
+            synthetic_source=spec.source.kind == "synthetic")
     except (ValueError, OSError) as exc:
         raise DataOutputValidationError(f"Data output validation failed: {exc}") from exc
     return spec, recipe
@@ -4149,13 +4048,36 @@ async def _bind_system_validation_artifacts(
     artifact and recipe already exist.
     """
     holdout = dict(run.holdout or {})
-    if holdout.get("test_semantic_fingerprints") and holdout.get("semantic_fingerprint_version") != 2:
+    fingerprint_version = int(holdout.get("semantic_fingerprint_version") or
+                              (0 if holdout.get("test_semantic_fingerprints") else 2))
+    if holdout.get("test_semantic_fingerprints") and fingerprint_version not in {2, 3}:
         raise ValueError("This Run uses legacy scoring fingerprints. Start a new Run to rebuild its protected scoring contract before preparing Training data.")
     if inp.device_info_path and not result.remote_dataset_path:
         raise ValueError(
             "Training data must stay on the assigned remote data plane"
         )
     validation_suite = _validation_sets(holdout)
+    if not validation_suite and getattr(run, "mode", "") == "single_stage":
+        if any((result.validation_source_path, result.validation_dataset_path,
+                result.scoring_public_path, result.inference_data_profile_path,
+                result.sample_submission_path, result.system_scoring_duplicates_removed)):
+            raise DataOutputValidationError("standalone Data without a scoring contract cannot report scoring artifacts")
+        if not result.remote_dataset_path:
+            return result
+        spec, recipe = _validate_remote_data_output(result, inp)
+        package = build_remote_training_package(spec=spec, recipe=recipe.model_dump(mode="json"),
+            prepare_script_path=result.prepare_script_path, blocked_semantic_fingerprints=[],
+            data_intent_signature=inp.data_intent_signature, recipe_path=result.data_recipe_path,
+            semantic_fingerprint_version=3)
+        package_path = str(Path(work_dir) / "remote_training_package.json")
+        Path(package_path).write_text(package.model_dump_json(indent=2))
+        dataset, receipt_path, rows, removed, mode, retries = await _finalize_remote_data_artifact(
+            result=result, inp=inp, package_path=package_path,
+            package_signature=package.data_signature, work_dir=work_dir)
+        return result.model_copy(update={"remote_training_package_path": package_path,
+            "remote_data_receipt_path": receipt_path, "remote_dataset_path": dataset,
+            "n_rows_out": rows, "system_scoring_duplicates_removed": removed,
+            "remote_materialization_mode": mode, "remote_control_retries": retries})
     if not validation_suite:
         raise ValueError("engine Validation suite is empty after Data selection")
     primary = validation_suite[0]
@@ -4177,7 +4099,7 @@ async def _bind_system_validation_artifacts(
     remote_control_retries = 0
     if result.remote_dataset_path:
         spec, recipe = _validate_remote_data_output(result, inp)
-        blocked = semantic_record_fingerprints(validation_source)
+        blocked = semantic_record_fingerprints(validation_source, semantic_fingerprint_version=fingerprint_version)
         blocked.update(str(value) for value in (
             holdout.get("test_semantic_fingerprints") or []
         ) if value)
@@ -4188,6 +4110,7 @@ async def _bind_system_validation_artifacts(
             blocked_semantic_fingerprints=blocked,
             data_intent_signature=inp.data_intent_signature,
             recipe_path=result.data_recipe_path,
+            semantic_fingerprint_version=fingerprint_version,
         )
         package_file = Path(work_dir) / "remote_training_package.json"
         package_file.write_text(package.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -4210,6 +4133,7 @@ async def _bind_system_validation_artifacts(
         sanitized = sanitize_training_against_scoring(
             training_dataset=result.training_dataset_path,
             validation_source=validation_source,
+            semantic_fingerprint_version=fingerprint_version,
             blocked_fingerprints=list(
                 holdout.get("test_semantic_fingerprints") or []
             ),
@@ -5335,7 +5259,7 @@ async def run_ticket(
             "agent": tk.agent_id,
             "method_selection_owner": method_selection_owner(
                 agent_id=tk.agent_id, input_format=tk.input_format, run_mode=run.mode,
-                selected_method=str(getattr(inp, "configuration_suggestions", {}).get("training_method") or ""),
+                selected_method=get_selected_training_method(inp),
                 active_method=str(getattr(inp, "active_training_method", "") or ""),
             ),
             "operation": getattr(inp, "operation", ""),
@@ -6239,6 +6163,35 @@ async def run_ticket(
     output: BaseModel | None = None
     exit_code = 0
     try:
+        if isinstance(inp, FreeformInput) and tk.agent_id != "orchestrator":
+            from zevo.engine.run.freeform_resolution import resolve_work_order
+            freeform_request = inp.request
+            async def build_resolved(payload, bindings):
+                built = await _build_input(agent_id=tk.agent_id, ticket=tk, payload=payload,
+                    inputs=bindings, work_dir=work_dir, generation_backend=run.generation_backend,
+                    run=run, session=session, specialist_context=specialist_context)
+                job = getattr(built, "slurm_job", None)
+                resolved_contract = {**contract, "operation": getattr(built, "operation", ""),
+                    "phase": getattr(job, "phase", ""),
+                    "completion_boundary": "submission" if job and job.enabled else "execution"}
+                if isinstance(built, DataTaskInput):
+                    resolved_contract["data_plane"] = "remote" if built.device_info_path else "local"
+                built = built.model_copy(update={"activation_contract": resolved_contract})
+                built = _stage_gpu_runtime_helper(built, work_dir)
+                if isinstance(built, InferenceTaskInput):
+                    from zevo.engine.run.inference_launch import prepare_launch
+                    built = await prepare_launch(session, run, tk, built)
+                return built
+            inp = await resolve_work_order(driver=driver, blueprint=blueprint, inp=inp,
+                ticket=tk, run=run, session=session, bindings=resolved_inputs,
+                driver_kwargs={"workspace_dir": work_dir, "stdout_sink": stdout_sink,
+                    "event_sink": event_sink, "conversation": conversation_for_prompt,
+                    "model_override": effective_model, "sandbox_mode": effective_sandbox},
+                build_input=build_resolved)
+            resolved_payload = dict(tk.payload)
+            resolved_inputs = dict(tk.inputs)
+            blueprint = load_agent(tk.agent_id, input_format="typed")
+            conversation_for_prompt.append({"author": "user", "body": freeform_request})
         result = await driver.run_agent(
             blueprint=blueprint,
             input_payload=inp,
@@ -6853,35 +6806,23 @@ async def run_ticket(
                 pinned_methods = inp.configuration_pins.get("method_ids")
                 if pinned_methods is not None and list(pinned_methods) != stored_recipe.method_ids:
                     raise ValueError("data_recipe.method_ids violates pinned method_ids")
-                pinned_size = inp.configuration_pins.get("target_size")
-                if pinned_size is not None and int(pinned_size) != output.n_rows_out:
-                    raise ValueError("DataResult.n_rows_out violates pinned target_size")
-                if stored_recipe.direction != inp.recipe_intent.direction:
-                    # `direction` is explanatory prose, not an execution
-                    # control. Surface drift for review, but do not discard a
-                    # byte-identifiable dataset whose operative recipe fields
-                    # still match exactly.
+                from zevo.contracts.data import (
+                    validate_recipe_intent, validate_synthesis_authorization,
+                    validate_prepared_row_target,
+                )
+                validate_prepared_row_target(inp.configuration_pins,
+                    final_rows=output.n_rows_out,
+                    removed_rows=output.system_scoring_duplicates_removed)
+                validate_synthesis_authorization(stored_recipe, inp.recipe_intent,
+                    generated_rows=output.synthesis_generated_rows,
+                    teacher_model=output.synthesis_teacher_model)
+                drift = validate_recipe_intent(stored_recipe, inp.recipe_intent)
+                if drift:
                     session.add(TicketNotice(
-                        ticket_id=tk.id,
-                        code="data.recipe_direction_drift",
-                        severity="warning",
-                        body=(
-                            "Data's recipe rationale differs from the requested "
-                            "direction. Operative recipe fields and artifact "
-                            "identity still matched, so the result was accepted."
-                        ),
+                        ticket_id=tk.id, code="data.recipe_realization", severity="warning",
+                        body="Realized recipe differs in descriptive fields: " + ", ".join(drift)
+                        + ". Explicit constraints passed; inspect recipe and preparation evidence for semantic compliance.",
                     ))
-                for field in (
-                    "subset", "filters", "sampling", "weighting",
-                    "transformations", "field_mapping", "seed",
-                ):
-                    requested = getattr(inp.recipe_intent, field)
-                    if requested not in (None, "", 0, [], {}) and (
-                        getattr(stored_recipe, field) != requested
-                    ):
-                        raise ValueError(
-                            f"data_recipe.{field} differs from the requested recipe intent"
-                        )
                 if output.remote_dataset_path:
                     package = load_remote_training_package(
                         output.remote_training_package_path
@@ -6943,69 +6884,79 @@ async def run_ticket(
                             "engine-bound Validation answer fields differ from Run state"
                         )
             except (OSError, ValueError) as exc:
+                from zevo.contracts.data import EngineDataCountDeficit
+                if isinstance(exc, EngineDataCountDeficit):
+                    from zevo.contracts.failure import FailureRecovery
+                    failure_origin = "engine_postprocessing"
+                    output.failure_recovery = FailureRecovery(
+                        scope="fixed_configuration", reason=str(exc),
+                        evidence=[f"engine removed {output.system_scoring_duplicates_removed} rows; final count {output.n_rows_out}"],
+                        next_action="Review the final row target or authorize an answer-blind replacement preparation; preserve the verified artifacts.",
+                    )
                 runtime_contract_mismatches["data_recipe"] = {
                     "declared": "exact recipe identity with frozen Validation artifacts",
                     "reported": str(exc),
                 }
-            try:
-                profile = InferenceDataProfile.model_validate_json(
-                    Path(output.inference_data_profile_path).read_text(encoding="utf-8")
-                )
-                expected_removed = set(_answer_fields(
-                    dict(run.holdout or {}), "validation",
-                ))
-                if set(profile.answer_fields_removed) != expected_removed:
-                    raise ValueError(
-                        "profile answer_fields_removed differs from Validation contract"
+            if _validation_sets(run) or getattr(run, "mode", "") != "single_stage":
+                try:
+                    profile = InferenceDataProfile.model_validate_json(
+                        Path(output.inference_data_profile_path).read_text(encoding="utf-8")
                     )
-                shape = _tabular_shape(output.scoring_public_path)
-                if shape is not None:
-                    n_rows, record_fields = shape
-                    if profile.n_rows != n_rows:
-                        raise ValueError(
-                            "profile n_rows differs from questions-only Validation "
-                            f"data ({profile.n_rows} != {n_rows})"
-                        )
-                    if set(profile.record_fields) != record_fields:
-                        raise ValueError(
-                            "profile record_fields differ from questions-only Validation data"
-                        )
-                    missing_inputs = sorted(set(profile.input_fields) - record_fields)
-                    if missing_inputs:
-                        raise ValueError(
-                            f"profile input_fields are absent from Validation data: {missing_inputs}"
-                        )
-                else:
-                    session.add(TicketNotice(
-                        ticket_id=tk.id,
-                        code="data.profile_shape_unverified",
-                        severity="warning",
-                        body=(
-                            "The inference profile schema is valid, but row/field "
-                            "cross-checking is unavailable for this Validation file format."
-                        ),
+                    expected_removed = set(_answer_fields(
+                        dict(run.holdout or {}), "validation",
                     ))
-                submission_path = (
-                    output.sample_submission_path
-                    or str((run.holdout or {}).get("validation_sample_submission") or "")
-                )
-                if not submission_path:
-                    raise ValueError(
-                        "Data did not preserve or create the required sample submission"
+                    if set(profile.answer_fields_removed) != expected_removed:
+                        raise ValueError(
+                            "profile answer_fields_removed differs from Validation contract"
+                        )
+                    shape = _tabular_shape(output.scoring_public_path)
+                    if shape is not None:
+                        n_rows, record_fields = shape
+                        if profile.n_rows != n_rows:
+                            raise ValueError(
+                                "profile n_rows differs from questions-only Validation "
+                                f"data ({profile.n_rows} != {n_rows})"
+                            )
+                        if set(profile.record_fields) != record_fields:
+                            raise ValueError(
+                                "profile record_fields differ from questions-only Validation data"
+                            )
+                        missing_inputs = sorted(set(profile.input_fields) - record_fields)
+                        if missing_inputs:
+                            raise ValueError(
+                                f"profile input_fields are absent from Validation data: {missing_inputs}"
+                            )
+                    else:
+                        session.add(TicketNotice(
+                            ticket_id=tk.id,
+                            code="data.profile_shape_unverified",
+                            severity="warning",
+                            body=(
+                                "The inference profile schema is valid, but row/field "
+                                "cross-checking is unavailable for this Validation file format."
+                            ),
+                        ))
+                    submission_path = (
+                        output.sample_submission_path
+                        or str((run.holdout or {}).get("validation_sample_submission") or "")
                     )
-                with Path(submission_path).open(
-                    "r", encoding="utf-8-sig", newline=""
-                ) as handle:
-                    columns = list(next(csv.reader(handle), []))
-                if columns != profile.submission_columns:
-                    raise ValueError(
-                        "profile submission_columns differ from sample submission"
-                    )
-            except (OSError, ValueError) as exc:
-                runtime_contract_mismatches["inference_data_profile"] = {
-                    "declared": "valid closed answer-free profile",
-                    "reported": str(exc),
-                }
+                    if not submission_path:
+                        raise ValueError(
+                            "Data did not preserve or create the required sample submission"
+                        )
+                    with Path(submission_path).open(
+                        "r", encoding="utf-8-sig", newline=""
+                    ) as handle:
+                        columns = list(next(csv.reader(handle), []))
+                    if columns != profile.submission_columns:
+                        raise ValueError(
+                            "profile submission_columns differ from sample submission"
+                        )
+                except (OSError, ValueError) as exc:
+                    runtime_contract_mismatches["inference_data_profile"] = {
+                        "declared": "valid closed answer-free profile",
+                        "reported": str(exc),
+                    }
         if (
             isinstance(output, DataResult)
             and output.status == "succeeded"
@@ -7072,19 +7023,29 @@ async def run_ticket(
                         else str(holdout.get("validation_sample_submission") or "")
                     )
                 )
-                report = validate_data_artifacts(
-                    operation=output.operation,
-                    scoring_source=scoring_source,
-                    questions=output.scoring_public_path,
-                    sample_submission=sample_submission,
-                    answer_fields=answer_fields,
-                    training_dataset=output.training_dataset_path,
-                    remote_training_rows=(
-                        output.n_rows_out if output.remote_dataset_path else None
-                    ),
-                    validation_dataset=output.validation_dataset_path,
-                    profile_path=output.inference_data_profile_path,
-                )
+                if getattr(run, "mode", "") == "single_stage" and not _validation_sets(run) and not is_private:
+                    if output.remote_dataset_path:
+                        from zevo.engine.artifact_validation import DataArtifactReport
+                        report = DataArtifactReport(training_rows=output.n_rows_out, validation_rows=0, question_rows=0)
+                    else:
+                        from zevo.engine.artifact_validation import DataArtifactReport, validate_training_data_artifact
+                        report = DataArtifactReport(validate_training_data_artifact(output.training_dataset_path), 0, 0)
+                    if report.training_rows != output.n_rows_out:
+                        raise ValueError("DataResult row count differs from the prepared dataset")
+                else:
+                    report = validate_data_artifacts(
+                        operation=output.operation,
+                        scoring_source=scoring_source,
+                        questions=output.scoring_public_path,
+                        sample_submission=sample_submission,
+                        answer_fields=answer_fields,
+                        training_dataset=output.training_dataset_path,
+                        remote_training_rows=(
+                            output.n_rows_out if output.remote_dataset_path else None
+                        ),
+                        validation_dataset=output.validation_dataset_path,
+                        profile_path=output.inference_data_profile_path,
+                    )
                 artifact_meta.update({
                     "training_rows": report.training_rows,
                     "validation_rows": report.validation_rows,
@@ -7253,7 +7214,9 @@ async def run_ticket(
                 ))
         if status in ("succeeded", "degraded"):
             essential_problems: list[str] = []
-            for field in _essential_artifact_fields(output):
+            for field in _essential_artifact_fields(output, has_scoring_contract=(
+                run.mode != "single_stage" or bool(_validation_sets(run)) or tk.lane == "held_out_test"
+            )):
                 claimed = str(getattr(output, field, "") or "")
                 if not claimed:
                     essential_problems.append(f"{field} is empty")

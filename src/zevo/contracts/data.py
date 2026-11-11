@@ -23,7 +23,7 @@ from argparse import ArgumentParser
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, model_serializer
 
 from zevo.contracts._base import AgentResult, AgentTaskInput
 from zevo.contracts.infrastructure import SlurmStageJobContract
@@ -53,11 +53,94 @@ DataMethodId = Literal[
     "reformat_jsonl",
     "synthesize_llm",
 ]
-_DATA_CONFIGURATION_KEYS = frozenset({"method_ids", "target_size"})
+_DATA_CONFIGURATION_KEYS = frozenset({"method_ids", "target_size", "target_size_basis"})
 DISTILLATION_OUTPUT_FORMATS = frozenset(
     {"irac_rationale", "instruction_distillation"}
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validate_target_size_basis(values: dict[str, Any]) -> None:
+    if "target_size_basis" in values:
+        if values["target_size_basis"] not in {"prepared", "final"} or "target_size" not in values:
+            raise ValueError("target_size_basis requires target_size and must be prepared or final")
+
+
+def recipe_constraint_mismatches(expected: dict, actual: dict, prefix: str = "data_recipe") -> list[str]:
+    """Check explicit pins, allowing additional keys in a realized mapping."""
+    problems = []
+    for key, wanted in expected.items():
+        name = f"{prefix}.{key}"
+        if key not in actual:
+            problems.append(f"{name} is missing")
+        elif isinstance(wanted, dict) and isinstance(actual[key], dict):
+            problems.extend(recipe_constraint_mismatches(wanted, actual[key], name))
+        elif actual[key] != wanted or (isinstance(wanted, bool) != isinstance(actual[key], bool)):
+            problems.append(f"{name} differs from its explicit constraint")
+    return problems
+
+
+def validate_recipe_intent(recipe: "DataRecipe", intent: "DataRecipeIntent") -> list[str]:
+    """Reject concrete pins together; retain prose drift as review evidence.
+
+    Natural-language requirements still apply, but text equality cannot prove
+    compliance. The request remains bound by data_intent_signature, and the
+    realized recipe/script/bytes separately describe the implementation.
+    """
+    realized = recipe.model_dump(mode="json")
+    pins = dict(intent.constraints)
+    # Preserve existing structured mappings as partial requirements.
+    for name in ("weighting", "field_mapping"):
+        if getattr(intent, name):
+            pins.setdefault(name, getattr(intent, name))
+    if intent.seed:
+        pins.setdefault("seed", intent.seed)
+    errors = recipe_constraint_mismatches(pins, realized)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return [name for name in ("direction", "subset", "filters", "sampling", "transformations")
+            if getattr(intent, name) and getattr(intent, name) != getattr(recipe, name)]
+
+
+def validate_synthesis_authorization(recipe: "DataRecipe", intent: "DataRecipeIntent", *,
+                                     generated_rows: int = 0, teacher_model: str = "",
+                                     synthetic_source: bool = False) -> None:
+    requested = intent.teacher_distillation
+    realized = recipe.teacher_distillation
+    generated = (synthetic_source or generated_rows > 0 or realized.enabled
+                 or any(m in {"synthesize_llm", "distill_augment"} for m in recipe.method_ids))
+    if generated and not requested.enabled:
+        raise ValueError("training-data generation requires enabled teacher_distillation for every source kind")
+    if generated and requested.enabled:
+        if not realized.enabled or realized.teacher_model != requested.teacher_model:
+            raise ValueError("realized synthesis teacher differs from the authorized teacher")
+        if teacher_model and teacher_model != requested.teacher_model:
+            raise ValueError("reported synthesis teacher differs from the authorized teacher")
+        if generated_rows > requested.target_augmentation_count:
+            raise ValueError("generated rows exceed authorized target_augmentation_count")
+        errors = recipe_constraint_mismatches(requested.generation_params, realized.generation_params,
+                                            "teacher_distillation.generation_params")
+        if errors:
+            raise ValueError("; ".join(errors))
+
+
+class EngineDataCountDeficit(ValueError):
+    """The engine reduced a valid preparation below an exact final target."""
+
+
+def validate_prepared_row_target(pins: dict, *, final_rows: int, removed_rows: int) -> None:
+    target = pins.get("target_size")
+    if target is None:
+        return
+    # Legacy targets retain their exact final-row meaning. New requests can
+    # explicitly pin the preparation count before the engine removes overlap.
+    basis = pins.get("target_size_basis", "final")
+    rows = final_rows + removed_rows if basis == "prepared" else final_rows
+    if rows != int(target):
+        if basis == "final" and removed_rows and final_rows + removed_rows == int(target):
+            raise EngineDataCountDeficit(f"engine decontamination reduced the pinned final target from {target} to {final_rows}; "
+                             "the supervisor must revise the data plan or target, not reformat the Data result")
+        raise ValueError(f"Data {basis} row count {rows} violates pinned target_size={target}")
 
 
 def is_sha256(value: str) -> bool:
@@ -173,6 +256,23 @@ class DataRecipeIntent(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1] = 1
+    constraints: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Explicit machine-checkable recipe pins. Nested mappings constrain only "
+            "the named keys; scalar/list values are exact. Other intent fields "
+            "describe the requested behavior, not a required textual rendering. "
+            "Use e.g. {sampling: {strategy: uniform}, seed: 0} for exact controls."
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def serialize_intent(self, handler):
+        value = handler(self)
+        if not self.constraints:
+            # Existing stored intents and dataset signatures retain their bytes.
+            value.pop("constraints", None)
+        return value
     direction: str = Field(
         "",
         description=(
@@ -204,6 +304,11 @@ class DataRecipeIntent(BaseModel):
 
     @model_validator(mode="after")
     def require_clean_recipe(self) -> "DataRecipeIntent":
+        allowed = {"subset", "filters", "sampling", "weighting", "transformations", "field_mapping", "seed"}
+        if set(self.constraints) - allowed:
+            raise ValueError("recipe constraints contain unsupported fields")
+        if self.constraints:
+            DataRecipeIntent.model_validate(self.constraints)
         string_lists = {"filters": self.filters, "transformations": self.transformations}
         for name, values in string_lists.items():
             if any(not isinstance(value, str) or not value.strip() for value in values):
@@ -272,9 +377,7 @@ class DataRecipe(DataRecipeIntent):
     )
 
     @model_validator(mode="after")
-    def require_unique_method_ids_and_clean_audit(self) -> "DataRecipe":
-        if len(self.method_ids) != len(set(self.method_ids)):
-            raise ValueError("method_ids must not contain duplicates")
+    def require_clean_audit(self) -> "DataRecipe":
         if any(not step.strip() for step in self.audit_steps):
             raise ValueError("audit_steps must contain only non-empty strings")
         return self
@@ -797,6 +900,7 @@ class DataTaskInput(AgentTaskInput):
             ("configuration_suggestions", self.configuration_suggestions),
             ("configuration_pins", self.configuration_pins),
         ):
+            validate_target_size_basis(values)
             if "method_ids" not in values:
                 continue
             method_ids = values["method_ids"]
@@ -807,10 +911,9 @@ class DataTaskInput(AgentTaskInput):
                     or method_id not in DATA_METHOD_IDS
                     for method_id in method_ids
                 )
-                or len(method_ids) != len(set(method_ids))
             ):
                 raise ValueError(
-                    f"{owner}.method_ids must be a unique list of installed "
+                    f"{owner}.method_ids must be an ordered list of installed "
                     "canonical Data method ids"
                 )
         if self.operation == "prepare_holdout_data" and (

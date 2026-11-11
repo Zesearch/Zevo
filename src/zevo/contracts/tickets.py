@@ -50,13 +50,13 @@ TicketStatus = Literal[
 TERMINAL_TICKET_STATUSES = frozenset(
     {"succeeded", "failed", "degraded", "skipped", "cancelled"}
 )
-_DATA_CONFIGURATION_KEYS = frozenset({"method_ids", "target_size"})
+_DATA_CONFIGURATION_KEYS = frozenset({"method_ids", "target_size", "target_size_basis"})
 _TRAIN_CONFIGURATION_KEYS = frozenset({
     "batch_size", "learning_rate", "num_epochs", "lora_r", "lora_alpha",
     "max_seq_len",
 })
 _TRAIN_SUGGESTION_KEYS = _TRAIN_CONFIGURATION_KEYS | frozenset({
-    "direction", "training_method",
+    "direction",
 })
 _INFERENCE_CONFIGURATION_KEYS = frozenset({
     "prompt_framing", "system_prompt", "inference_config",
@@ -293,10 +293,10 @@ class PipelineDataRequestPayload(StoredPayload):
                     not isinstance(value, str) or value not in DATA_METHOD_IDS
                     for value in methods
                 )
-                or len(methods) != len(set(methods))
+
             ):
                 raise ValueError(
-                    "suggested Data method_ids must be a unique list of "
+                    "suggested Data method_ids must be an ordered list of "
                     "installed canonical ids"
                 )
         return self
@@ -304,6 +304,16 @@ class PipelineDataRequestPayload(StoredPayload):
 
 class PipelineTrainRequestPayload(StoredPayload):
     """Orchestrator-authored Train request; user pins are API-stamped."""
+
+    selected_training_method: str = Field(
+        "", description="Explicit experiment method selected by the coordinator; binding unless superseded by a user pin. Empty retains the active method or delegates choice when authorized.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_method_selection(cls, value):
+        from zevo.contracts.training_selection import normalize_method_selection
+        return normalize_method_selection(value)
 
     first_validation_fraction: float | None = Field(
         default=None, gt=0, lt=1, allow_inf_nan=False,
@@ -321,11 +331,11 @@ class PipelineTrainRequestPayload(StoredPayload):
     @model_validator(mode="after")
     def validate_high_level_advice(self) -> "PipelineTrainRequestPayload":
         unknown = sorted(
-            set(self.configuration_suggestions) - {"direction", "training_method"}
+            set(self.configuration_suggestions) - {"direction"}
         )
         if unknown:
             raise ValueError(
-                "pipeline Train suggestions support only direction/training_method; "
+                "pipeline Train suggestions support only direction; use selected_training_method for a decision; "
                 f"unsupported keys: {unknown}"
             )
         return self
@@ -471,9 +481,12 @@ class DataPayload(StoredPayload):
         )
         if unknown_config:
             raise ValueError(
-                "Data configuration may contain only method_ids/target_size; "
+                "Data configuration may contain only method_ids/target_size/target_size_basis; "
                 f"training or inference hyperparameters are forbidden: {unknown_config}"
             )
+        from zevo.contracts.data import validate_target_size_basis
+        validate_target_size_basis(self.configuration_pins)
+        validate_target_size_basis(self.configuration_suggestions)
         if "target_size" in self.configuration_pins:
             target_size = self.configuration_pins["target_size"]
             if isinstance(target_size, bool) or not isinstance(target_size, int) or target_size < 1:
@@ -491,10 +504,10 @@ class DataPayload(StoredPayload):
                     not isinstance(value, str) or value not in DATA_METHOD_IDS
                     for value in methods
                 )
-                or len(methods) != len(set(methods))
+
             ):
                 raise ValueError(
-                    f"{owner} Data method_ids must be a unique list of "
+                    f"{owner} Data method_ids must be an ordered list of "
                     "installed canonical ids"
                 )
         if self.operation == "prepare_holdout_data" and any((
@@ -533,6 +546,16 @@ class DataPayload(StoredPayload):
 
 
 class TrainPayload(StoredPayload):
+    selected_training_method: str = Field(
+        "", description="Explicit experiment method selected by the coordinator; binding unless superseded by a user pin. Empty retains the active method or delegates choice when authorized.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_method_selection(cls, value):
+        from zevo.contracts.training_selection import normalize_method_selection
+        return normalize_method_selection(value)
+
     first_validation_fraction: float | None = Field(
         default=None, gt=0, lt=1, allow_inf_nan=False,
         description="Orchestrator-selected fraction of the full optimizer-step plan for the first Validation check; required when mid-training evaluation is enabled.",
@@ -576,7 +599,7 @@ class TrainPayload(StoredPayload):
         if unknown_suggestions:
             raise ValueError(
                 "Train configuration_suggestions may contain only a high-level "
-                "direction/training_method or documented advisory Train controls; "
+                "direction or documented advisory Train controls; "
                 f"unsupported keys: {unknown_suggestions}"
             )
         positive_ints = {"batch_size", "num_epochs", "max_seq_len"}
@@ -596,15 +619,6 @@ class TrainPayload(StoredPayload):
                 or float(value) <= 0
             ):
                 raise ValueError("pinned Train learning_rate must be a number > 0")
-        suggested_method = self.configuration_suggestions.get("training_method")
-        if suggested_method:
-            method = str(suggested_method).strip().lower()
-            if method not in METHOD_CONFIG_KEYS:
-                raise ValueError(
-                    f"unsupported suggested training_method={method!r}; installed "
-                    f"methods: {', '.join(sorted(SELECTABLE_TRAINING_METHODS))}"
-                )
-            self.configuration_suggestions["training_method"] = method
         if (self.method_config_pins or self.loss_objective_pins) and not self.training_method_pin:
             raise ValueError(
                 "method_config_pins/loss_objective_pins require training_method_pin"
@@ -741,27 +755,19 @@ def specialist_request_payload_schemas() -> dict[str, Any]:
                 "items": {"type": "string", "enum": sorted(DATA_METHOD_IDS)},
             },
             "target_size": {"type": "integer", "minimum": 1},
+            "target_size_basis": {"type": "string", "enum": ["prepared", "final"]},
         },
         "description": (
             "Optional Data-only advice. Omit a key to delegate it; no other "
             "keys or value shapes are accepted."
         ),
     }
+    schemas["train"]["properties"]["selected_training_method"]["enum"] = ["", *sorted(SELECTABLE_TRAINING_METHODS)]
     schemas["train"]["properties"]["configuration_suggestions"] = {
         "type": "object",
         "additionalProperties": False,
-        "properties": {
-            "direction": {"type": "string"},
-            "training_method": {
-                "type": "string",
-                "enum": sorted(SELECTABLE_TRAINING_METHODS),
-            },
-        },
-        "description": (
-            "training_method selects the pipeline experiment method and is binding when supplied; "
-            "direction is advisory. Omit training_method to delegate the choice to Train; "
-            "detailed hyperparameters are not accepted here."
-        ),
+        "properties": {"direction": {"type": "string"}},
+        "description": "Advisory direction only. Use selected_training_method for an explicit method decision; detailed hyperparameters are not accepted here.",
     }
     schemas["inference"]["properties"]["configuration_suggestions"] = {
         "type": "object",

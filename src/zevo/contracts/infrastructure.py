@@ -621,9 +621,9 @@ class InfrastructureResourcePlan(BaseModel):
                 f"result ({formula_value} GiB)"
             )
         requested = max(formula_value, self.site_min_ram_gib)
-        if self.min_ram_gb != requested:
+        if self.min_ram_gb < requested:
             raise ValueError(
-                "min_ram_gb must equal max(host_memory_formula_gib, "
+                "min_ram_gb must be at least max(host_memory_formula_gib, "
                 f"site_min_ram_gib) ({requested} GiB)"
             )
         self.host_memory_components_gib = components

@@ -19,15 +19,15 @@
 | `dataset_source` | Provenance label. Resolve its exact realized identity into `data_recipe.json`; do not repeat it in `DataResult`. |
 | `training_method` | Required semantic-shape selector for Run data; never a hyperparameter bundle. Empty for private held-out stripping. |
 | `max_training_rows` | Engine-stamped Run cap on prepared Training rows; 0 = no cap. The only authority for a row cap (prose limits are not applied). Selection is allowed at every iteration and must respect this cap across real plus synthetic rows. See platform.md Training row quantities for targets and conflicts. |
-| `recipe_intent` | Exact selection/filter/sampling/weighting/transformation/mapping/seed request for this data version. Empty fields preserve baseline behavior. |
+| `recipe_intent` | Requested selection/filter/sampling/weighting/transformation/mapping/seed behavior. Record the concrete realization in the recipe. `constraints` contains explicit machine-checkable pins; additional realized mapping keys are allowed. Empty fields preserve baseline behavior. |
 | `branch_transition` | Engine-validated experiment-transition record. It may contain scalar score/plateau evidence, never Validation records, examples, fields, or statistics. |
 | `data_intent_signature` | Engine-computed identity of source, method, recipe intent, and Data pins/suggestions. Use it to verify the work order; do not echo it in `DataResult`. |
 | `expected_source_fingerprint` | For a local source, the engine-computed bare lowercase 64-character SHA-256. Copy it exactly into `data_recipe.source_fingerprint`; an empty value is permitted only for a remote/acquired source. |
 | `expected_source_identity` | Engine-canonical source lineage. Copy it byte-for-byte into `data_recipe.source_identity`; never convert between container, host, relative, or absolute forms. |
 | `data_recipe_schema` | Exact artifact-level realized-recipe schema for `data_recipe.json`. |
 | `data_recipe_validation_command` | For remote training preparation, aliases the local source-spec validator; replace only supplied placeholders. The engine validates the recipe and stamps the final data signature after remote finalization. |
-| `artifacts_validation_command` | Operation-specific artifact check. For training preparation, execute the supplied helper command on the remote host after recording its preparation receipt. |
-| `device_info_path` | Required for every `prepare_run_data` source: the purpose=train route shared with Train, where download, analysis, transformation, and prepared rows stay. Missing means the work order needs repair; never fall back to local preparation. |
+| `artifacts_validation_command` | Operation-specific artifact check. For remote training preparation, run the supplied helper on that host after recording its preparation receipt; for standalone local preparation, use the supplied local check. |
+| `device_info_path` | Required for pipeline or explicitly remote `prepare_run_data`: the purpose=train route shared with Train, where download, analysis, transformation, and prepared rows stay. An explicit standalone local work order leaves this empty. Missing routing in a remote work order requires repair. |
 | `remote_data_helper_path` | Small system helper to upload; it receipts/finalizes remote data without returning rows. |
 | `remote_dataset_spec_schema` / `remote_dataset_spec_validation_command` | Exact remote source contract and local validator for Hub, uploaded, acquired, or synthetic sources. Pin realized provenance. |
 | `remote_hf_cache_path` | Remote cache for reusable raw Hugging Face downloads only. |
@@ -37,17 +37,22 @@
 | `secret_environment_names` | Secret names that may be forwarded without printing values, currently `HF_TOKEN`. |
 | Validation/scoring fields | Empty for `prepare_run_data` by contract. They are populated only for the private `prepare_holdout_data` operation, which cannot receive training-source fields. |
 | `configuration_suggestions` | Advisory Data-only acquisition/curation guidance. target_size is an experimental final output target, subordinate to recipe/pins and max_training_rows; no Train/Inference hyperparameters. |
-| `configuration_pins` | Binding Data-only values. A positive target_size must be compatible with the recipe and Run cap; report conflicts rather than silently adjusting it. |
+| `configuration_pins` | Binding Data-only values. A positive target_size must be compatible with the recipe and Run cap. `target_size_basis` is `final` by default (including legacy tickets); `prepared` pins the count before engine decontamination; report conflicts rather than silently adjusting it. |
 | `work_dir` | Persistent output directory. |
 
 ## Output
 
-For every source, successful `prepare_run_data` requires absolute
+For remote sources, successful `prepare_run_data` requires absolute
 `remote_dataset_path`, `remote_data_profile_path`, local
 `remote_dataset_spec_path`, `data_recipe_path`, and `prepare_script_path`; keep
 `training_dataset_path` empty. The dataset/profile stay remote. Never return local prepared training rows. Return all
 Validation/scoring paths and answer fields empty; the engine attaches its frozen
 scoring package only after validating this result.
+
+For standalone local preparation, return absolute `training_dataset_path`,
+`data_recipe_path`, and `prepare_script_path`, with measured row counts; leave
+remote and scoring fields empty. Validate the recipe and rows using the supplied
+local commands. This route requires an explicit local activation contract.
 
 Keep `remote_data_receipt_path` and `remote_training_package_path` empty in
 every Data result. The engine fills these after finalization. The preparation
@@ -65,7 +70,8 @@ The engine settles the Run's scoring contract from that file. Training data,
 model, and method pins/queries are deliberately absent from this work order.
 
 Before success, follow the operation-specific validation sequence in platform.md:
-`prepare_run_data` uses the local spec check and remote preparation receipt check;
+`prepare_run_data` on the remote plane uses the local spec and remote receipt checks;
+standalone local preparation uses the supplied recipe and training-artifact checks;
 `prepare_holdout_data` uses its supplied scoring-artifact check;
 `scope_problem` uses only `scoping_result_validation_command`. Do not execute
 empty/inapplicable commands or replace them with parallel ad-hoc validators.

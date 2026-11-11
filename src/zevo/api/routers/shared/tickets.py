@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from zevo.contracts.training_selection import get_selected_training_method
 from zevo.paths import work_dir_root
 from zevo.api.database import get_db
 from zevo.api.ui_access import is_trusted_ui_request
@@ -78,6 +79,11 @@ def _resolve_data_source_selection(payload: dict[str, Any]) -> dict[str, Any]:
     out["dataset_split"] = str(spec.split if spec is not None else "train")
     if not str(out.get("dataset_config") or "").strip() and spec is not None:
         out["dataset_config"] = str(spec.config or "")
+    # Selection is engine normalization. Sign the normalized payload, not the
+    # unresolved source that preceded it. Never discard unrelated validation.
+    if "data_intent_signature" in out:
+        from zevo.contracts.data import data_intent_signature
+        out["data_intent_signature"] = data_intent_signature(out)
     return out
 
 
@@ -530,6 +536,468 @@ async def _guard_data_revision_before_train(
         })
 
 
+async def validate_pipeline_payload(db, *, owning_run, body, payload, current_ticket_id=""):
+    """Shared semantic validation for API authors and resolved freeform work."""
+    if owning_run.mode == "single_stage":
+        return
+    run_id = owning_run.id
+    is_pipeline_request = True
+    operation = str(payload.get("operation") or "")
+    if body.agent_id == "data" and operation == "prepare_run_data":
+        iteration = int(body.iteration or 0)
+        existing_data = [item for item in await _optimization_data_tickets(db, run_id)
+                     if item.id != current_ticket_id]
+        if not existing_data and iteration != 0:
+            raise HTTPException(409, "the first optimization Data ticket is iteration 0")
+        if existing_data and iteration == 0:
+            raise HTTPException(409, "iteration 0 Data is already settled or active")
+        if iteration > 0:
+            await _guard_data_revision_before_train(db, run_id, iteration, existing_data)
+        if existing_data:
+            previous_payload = dict(existing_data[-1].payload or {})
+            source_fields = (
+                "dataset_source", "dataset", "dataset_split",
+                "dataset_config", "data_query",
+            )
+            source_changed = any(
+                str(previous_payload.get(name) or "")
+                != str(payload.get(name) or "")
+                for name in source_fields
+            )
+            method_changed = str(
+                previous_payload.get("training_method") or ""
+            ) != str(payload.get("training_method") or "")
+            transition = dict(payload.get("branch_transition") or {})
+            transition_level = str(transition.get("level") or "none")
+            allowed_levels: set[str] = set()
+            if method_changed:
+                allowed_levels = {"method", "base_model"}
+            elif source_changed:
+                allowed_levels = {"data", "method", "base_model"}
+            if allowed_levels and transition_level not in allowed_levels:
+                raise HTTPException(
+                    409,
+                    {
+                        "error": "search branch transition is not authorized",
+                        "required_levels": sorted(allowed_levels),
+                        "advice": (
+                            "Keep the active branch, or provide a complete "
+                            "branch_transition naming the previous branch, "
+                            "its Validation evidence, the next branch, and the experiment rationale."
+                        ),
+                    },
+                )
+            if not allowed_levels and transition_level != "none":
+                raise HTTPException(
+                    409,
+                    "branch_transition was supplied but the Data source and "
+                    "training method remain in the active branch",
+                )
+        requested_signature = str(payload.get("data_intent_signature") or "")
+        reusable = next((
+            ticket for ticket in reversed(existing_data)
+            if str((ticket.payload or {}).get("data_intent_signature") or "")
+            == requested_signature
+        ), None)
+        if reusable is not None:
+            raise HTTPException(
+                409,
+                {
+                    "error": "training data recipe is unchanged",
+                    "reusable_ticket_id": reusable.id,
+                    "data_intent_signature": requested_signature,
+                    "advice": (
+                        "Do not run Data again. Bind this Ticket's training_dataset to Train."
+                    ),
+                },
+            )
+    if body.agent_id == "train" and payload.get("operation") == "train":
+        base_model = str(payload.get("base_model") or "")
+        from zevo.engine.method.branch import active_training_method, method_branch_problem
+        previous_method = active_training_method(owning_run.history or [])
+        suggested_method = get_selected_training_method(payload)
+        problem = method_branch_problem(
+            previous_method, suggested_method,
+            pin=str(payload.get("training_method_pin") or ""),
+            transition=payload.get("branch_transition"),
+        )
+        if is_pipeline_request and problem:
+            raise HTTPException(409, {
+                "error": "training method change requires a decision record",
+                "previous_method": previous_method,
+                "next_method": suggested_method,
+                "advice": problem,
+            })
+        baseline_exists = any(
+            isinstance(row, dict)
+            and row.get("source") == "baseline"
+            and row.get("base_model") == base_model
+            and isinstance(row.get("score"), (int, float))
+            and not isinstance(row.get("score"), bool)
+            for row in (owning_run.history or [])
+        )
+        if not baseline_exists:
+            raise HTTPException(
+                409,
+                {
+                    "error": "base-model baseline is missing",
+                    "base_model": base_model,
+                    "advice": (
+                        "Run baseline Inference and Evaluation for this "
+                        "model lineage before creating Train."
+                    ),
+                },
+            )
+
+
+async def validate_pipeline_bindings(db, *, owning_run, body, payload, inputs, current_ticket_id=""):
+    """Bind the same experiment graph regardless of request authoring format."""
+    if owning_run.mode == "single_stage":
+        return payload, inputs
+    run_id = owning_run.id
+    async def source_ticket(name: str, expected_agent: str) -> Ticket:
+        binding = (inputs or {}).get(name) or {}
+        source_id = str(binding.get("source_ticket_id") or "")
+        if not source_id:
+            raise ValueError(
+                f"pipeline input {name!r} must bind a {expected_agent} Ticket"
+            )
+        source = (await db.execute(
+            select(Ticket).where(Ticket.id == source_id, Ticket.run_id == run_id)
+        )).scalar_one_or_none()
+        if source is None or source.agent_id != expected_agent:
+            raise ValueError(
+                f"pipeline input {name!r} must come from a {expected_agent} Ticket"
+            )
+        return source
+
+    if body.agent_id in {"train", "inference"} or (
+        body.agent_id == "data" and "device_info" in (inputs or {})
+    ):
+        infra_ticket = await source_ticket("device_info", "infrastructure")
+        purpose = str((infra_ticket.payload or {}).get("purpose") or "")
+        allowed_purposes = (
+            {"train"}
+            if body.agent_id in {"data", "train"}
+            else {"train", "inference"}
+        )
+        if purpose not in allowed_purposes:
+            raise ValueError(
+                f"{body.agent_id} requires an Infrastructure plan with "
+                f"purpose in {sorted(allowed_purposes)!r}, got {purpose!r}"
+            )
+
+    if body.agent_id == "train" and payload.get("operation") == "train":
+        data_ticket = await source_ticket("training_dataset", "data")
+        if int(data_ticket.iteration or 0) > int(body.iteration or 0):
+            raise ValueError("Train cannot use Data prepared for a later iteration")
+        current_revisions = (await db.execute(select(Ticket.id).where(
+            Ticket.run_id == run_id,
+            Ticket.agent_id == "data",
+            Ticket.lane == "optimization",
+            Ticket.iteration == int(body.iteration or 0),
+            Ticket.status.in_(("succeeded", "degraded")),
+        ).order_by(Ticket.created_at.desc()))).scalars().all()
+        if current_revisions and data_ticket.id != current_revisions[0]:
+            raise ValueError(
+                "this iteration produced a revised Data artifact; Train must "
+                f"bind {current_revisions[0]} instead of an older recipe"
+            )
+        data_product = (await db.execute(
+            select(WorkProduct).where(
+                WorkProduct.ticket_id == data_ticket.id,
+                WorkProduct.role == "training_dataset",
+            ).order_by(WorkProduct.created_at.desc()).limit(1)
+        )).scalar_one_or_none()
+        data_signature = str(
+            ((data_product.meta or {}).get("data_signature") if data_product else "")
+            or ""
+        )
+        if not is_sha256(data_signature):
+            raise ValueError(
+                "Train requires a verified data_signature from its Data ticket"
+            )
+        payload["data_signature"] = data_signature
+        data_device = dict((data_ticket.inputs or {}).get("device_info") or {})
+        train_device = dict((inputs or {}).get("device_info") or {})
+        if (
+            data_device.get("source_ticket_id")
+            and data_device.get("source_ticket_id")
+            != train_device.get("source_ticket_id")
+        ):
+            raise ValueError(
+                "Train must reuse the same remote data plane that prepared "
+                "its Data artifact; create a new Data ticket after changing host"
+            )
+        payload = TrainPayload.model_validate(payload).model_dump()
+        baseline_config = await source_ticket("inference_config", "inference")
+        if (
+            int(baseline_config.iteration or 0) > int(body.iteration or 0)
+            or (baseline_config.payload or {}).get("model_source") != "base_model"
+            or str((baseline_config.payload or {}).get("base_model") or "")
+            != str(payload.get("base_model") or "")
+        ):
+            raise ValueError(
+                "Train must use the matching base-model lineage's baseline "
+                "inference_config.yaml"
+            )
+        iteration = int(body.iteration or 0)
+        if payload.get("model_source") == "base_model":
+            if "parent_checkpoint" in (inputs or {}) or "parent_train_config" in (inputs or {}):
+                raise ValueError(
+                    "a baseline Train branch cannot bind parent checkpoint artifacts"
+                )
+        else:
+            if iteration < 2:
+                raise ValueError("a checkpoint branch is valid only after iteration 1")
+            parent = await source_ticket("parent_checkpoint", "train")
+            parent_config = await source_ticket("parent_train_config", "train")
+            if (
+                int(parent.iteration or 0) >= iteration
+                or int(parent.iteration or 0) < 1
+                or parent.id != parent_config.id
+                or str((parent.payload or {}).get("base_model") or "")
+                != str(payload.get("base_model") or "")
+            ):
+                raise ValueError(
+                    "Train must bind checkpoint and config from the same "
+                    "successful earlier Train iteration and base-model "
+                    "lineage in this Run"
+                )
+    elif body.agent_id == "inference" and payload.get("model_source") == "checkpoint":
+        train_ticket = await source_ticket("checkpoint", "train")
+        if int(train_ticket.iteration or 0) != int(body.iteration or 0):
+            raise ValueError("checkpoint must come from Train in the same iteration")
+        baseline_config = await source_ticket("inference_config", "inference")
+        if (
+            int(baseline_config.iteration or 0) > int(body.iteration or 0)
+            or (baseline_config.payload or {}).get("model_source") != "base_model"
+            or str((baseline_config.payload or {}).get("base_model") or "")
+            != str(payload.get("base_model") or "")
+        ):
+            raise ValueError(
+                "trained-model Inference must reuse the matching base-model "
+                "lineage's baseline inference_config.yaml"
+            )
+        if str((train_ticket.payload or {}).get("base_model") or "") != str(
+            payload.get("base_model") or ""
+        ):
+            raise ValueError(
+                "checkpoint Inference cannot cross base-model lineages"
+            )
+        if "predict_script" not in (inputs or {}):
+            baseline_script = (await db.execute(
+                select(WorkProduct).where(
+                    WorkProduct.ticket_id == baseline_config.id,
+                    WorkProduct.role == "script",
+                ).order_by(WorkProduct.created_at.desc()).limit(1)
+            )).scalar_one_or_none()
+            if baseline_script is not None and str(baseline_script.path or ""):
+                inputs["predict_script"] = {
+                    "artifact_role": "script",
+                    "source_ticket_id": baseline_config.id,
+                    "work_product_id": baseline_script.id,
+                    "path": baseline_script.path,
+                }
+        if "predict_script" in (inputs or {}):
+            script_ticket = await source_ticket("predict_script", "inference")
+            if (
+                int(script_ticket.iteration or 0) > int(body.iteration or 0)
+                or (script_ticket.payload or {}).get("model_source") != "base_model"
+                or str((script_ticket.payload or {}).get("base_model") or "")
+                != str(payload.get("base_model") or "")
+            ):
+                raise ValueError(
+                    "candidate Inference may reuse predict.py only from the "
+                    "matching base-model lineage's baseline Inference"
+                )
+    elif body.agent_id == "inference" and payload.get("model_source") == "base_model":
+        profile_ticket = await source_ticket("inference_data_profile", "data")
+        if int(profile_ticket.iteration or 0) != 0:
+            raise ValueError(
+                "baseline Inference must use the iteration-0 Data "
+                "inference_data_profile"
+            )
+        previous_baselines = (await db.execute(select(Ticket).where(
+            Ticket.run_id == run_id,
+            Ticket.agent_id == "inference",
+            Ticket.lane == "optimization",
+            Ticket.status.in_(("succeeded", "degraded")),
+        ).order_by(Ticket.created_at))).scalars().all()
+        previous_models = [
+            str((candidate.payload or {}).get("base_model") or "")
+            for candidate in previous_baselines
+            if (candidate.payload or {}).get("model_source") == "base_model"
+        ]
+        selected_model = str(payload.get("base_model") or "")
+        transition_level = str(
+            (payload.get("branch_transition") or {}).get("level") or "none"
+        )
+        if (
+            previous_models
+            and selected_model != previous_models[-1]
+            and transition_level != "base_model"
+        ):
+            raise ValueError(
+                "a new Base-model branch requires a complete base_model "
+                "branch_transition with Validation evidence and an experiment rationale"
+            )
+        if not previous_models and transition_level != "none":
+            raise ValueError(
+                "the initial Base-model selection is not a branch change"
+            )
+    elif body.agent_id == "registry":
+        existing_registry = (await db.execute(select(Ticket).where(
+            Ticket.run_id == run_id,
+            Ticket.agent_id == "registry",
+            Ticket.id != current_ticket_id,
+        ).limit(1))).scalar_one_or_none()
+        if existing_registry is not None:
+            raise ValueError(
+                "Registry is a once-per-Run finalization stage; repair "
+                f"the existing Ticket {existing_registry.id} instead of creating another"
+            )
+
+        score_rows = (await db.execute(select(ScoreEvent).where(
+            ScoreEvent.run_id == run_id,
+            ScoreEvent.split == "validation",
+            ScoreEvent.source == "trained",
+        ).order_by(ScoreEvent.ts.asc()))).scalars().all()
+        # Best fine-tuned candidate, however small its margin: see
+        # champion_index for the policy.
+        champion_at = champion_index(
+            (float(row.score) for row in score_rows),
+            owning_run.validation_metric_direction,
+        )
+        champion = None if champion_at is None else score_rows[champion_at]
+        if champion is None:
+            raise ValueError(
+                "final Registry requires at least one measured trained candidate"
+            )
+        if int(body.iteration or 0) != int(champion.iteration or 0):
+            raise ValueError(
+                "Registry must bind the engine-selected Validation champion: "
+                f"iteration {champion.iteration}, not iteration {body.iteration}"
+            )
+        train_ticket = await source_ticket("checkpoint", "train")
+        train_config_ticket = await source_ticket("train_config", "train")
+        eval_ticket = await source_ticket("metrics", "evaluation")
+        if (
+            int(train_ticket.iteration or 0) != int(body.iteration or 0)
+            or train_config_ticket.id != train_ticket.id
+            or int(eval_ticket.iteration or 0) != int(body.iteration or 0)
+        ):
+            raise ValueError(
+                "Registry checkpoint and metrics must come from the same iteration"
+            )
+        prediction_binding = (eval_ticket.inputs or {}).get("predictions") or {}
+        inference_id = str(prediction_binding.get("source_ticket_id") or "")
+        inference_ticket = (await db.execute(
+            select(Ticket).where(
+                Ticket.id == inference_id,
+                Ticket.run_id == run_id,
+                Ticket.agent_id == "inference",
+            )
+        )).scalar_one_or_none()
+        if (
+            inference_ticket is None
+            or (inference_ticket.payload or {}).get("model_source") != "checkpoint"
+            or int(inference_ticket.iteration or 0) != int(body.iteration or 0)
+        ):
+            raise ValueError(
+                "Registry metrics must come from checkpoint Inference in the same iteration"
+            )
+        evaluated_checkpoint = (
+            (inference_ticket.inputs or {}).get("checkpoint") or {}
+        )
+        if str(evaluated_checkpoint.get("source_ticket_id") or "") != train_ticket.id:
+            raise ValueError(
+                "Registry metrics must evaluate the exact Train checkpoint being registered"
+            )
+        registry_checkpoint = (inputs or {}).get("checkpoint") or {}
+        evaluated_product_id = str(
+            evaluated_checkpoint.get("work_product_id") or ""
+        )
+        registry_product_id = str(
+            registry_checkpoint.get("work_product_id") or ""
+        )
+        if (
+            evaluated_product_id
+            and registry_product_id
+            and evaluated_product_id != registry_product_id
+        ):
+            raise ValueError(
+                "Registry metrics must evaluate the exact checkpoint "
+                "WorkProduct being registered"
+            )
+
+        checkpoint_products = (await db.execute(
+            select(WorkProduct).where(
+                WorkProduct.ticket_id == train_ticket.id,
+                WorkProduct.role == "checkpoint",
+            ).order_by(WorkProduct.created_at.desc())
+        )).scalars().all()
+        checkpoint_product = next((
+            product for product in checkpoint_products
+            if registry_product_id and product.id == registry_product_id
+        ), None)
+        if checkpoint_product is None:
+            checkpoint_product = next((
+                product for product in checkpoint_products
+                if (product.meta or {}).get("checkpoint_kind") == "final"
+            ), checkpoint_products[0] if checkpoint_products else None)
+        checkpoint_meta = dict(checkpoint_product.meta or {}) if checkpoint_product else {}
+        actual_method = str(checkpoint_meta.get("training_method") or "").strip()
+        actual_base_model = str(checkpoint_meta.get("base_model") or "").strip()
+        if not actual_method or not actual_base_model:
+            raise ValueError(
+                "Registry requires the successful Train result's method and base model"
+            )
+        payload.update({
+            "training_method": actual_method,
+            "base_model": actual_base_model,
+            "task_objective": owning_run.task_objective,
+                "metric": owning_run.validation_metric,
+                "metric_direction": owning_run.validation_metric_direction,
+                "checkpoint_is_remote": (
+                    str(checkpoint_meta.get("location") or "") == "remote"
+                ),
+            })
+        if payload["checkpoint_is_remote"]:
+            await source_ticket("device_info", "infrastructure")
+        elif "device_info" in (inputs or {}):
+            await source_ticket("device_info", "infrastructure")
+
+        training_data = (train_ticket.inputs or {}).get("training_dataset") or {}
+        data_id = str(training_data.get("source_ticket_id") or "")
+        data_product = (await db.execute(
+            select(WorkProduct).where(
+                WorkProduct.ticket_id == data_id,
+                WorkProduct.role == "training_dataset",
+            ).order_by(WorkProduct.created_at.desc()).limit(1)
+        )).scalar_one_or_none()
+        resolved_source = str(
+            ((data_product.meta or {}).get("dataset_source") if data_product else "")
+            or ""
+        ).strip()
+        if not resolved_source:
+            raise ValueError(
+                "Registry requires resolved data provenance from the Train checkpoint's Data ticket"
+            )
+        # Provenance is engine-stamped from the exact Data→Train chain;
+        # it is not a second planner-authored version of the source.
+        payload["dataset_source"] = resolved_source
+        expected_tag = model_tag_for_run(run_id)
+        existing_model = await db.get(RegistryModel, expected_tag)
+        if existing_model is not None:
+            raise ValueError(
+                f"Run {run_id} already has final Registry model {expected_tag}"
+            )
+        payload = RegistryPayload.model_validate(payload).model_dump(mode="json")
+
+    return payload, inputs
+
+
 @router.post("/tickets", response_model=CreateTicketResponse)
 async def create_ticket(
     body: CreateTicketBody,
@@ -823,113 +1291,7 @@ async def create_ticket(
         if body.input_format == "typed" and body.agent_id == "data":
             payload = _resolve_data_source_selection(payload)
         if body.input_format == "typed" and owning_run is not None:
-            operation = str(raw_payload.get("operation") or "")
-            if body.agent_id == "data" and operation == "prepare_run_data":
-                iteration = int(body.iteration or 0)
-                existing_data = await _optimization_data_tickets(db, run_id)
-                if not existing_data and iteration != 0:
-                    raise HTTPException(409, "the first optimization Data ticket is iteration 0")
-                if existing_data and iteration == 0:
-                    raise HTTPException(409, "iteration 0 Data is already settled or active")
-                if iteration > 0:
-                    await _guard_data_revision_before_train(db, run_id, iteration, existing_data)
-                if existing_data:
-                    previous_payload = dict(existing_data[-1].payload or {})
-                    source_fields = (
-                        "dataset_source", "dataset", "dataset_split",
-                        "dataset_config", "data_query",
-                    )
-                    source_changed = any(
-                        str(previous_payload.get(name) or "")
-                        != str(payload.get(name) or "")
-                        for name in source_fields
-                    )
-                    method_changed = str(
-                        previous_payload.get("training_method") or ""
-                    ) != str(payload.get("training_method") or "")
-                    transition = dict(payload.get("branch_transition") or {})
-                    transition_level = str(transition.get("level") or "none")
-                    allowed_levels: set[str] = set()
-                    if method_changed:
-                        allowed_levels = {"method", "base_model"}
-                    elif source_changed:
-                        allowed_levels = {"data", "method", "base_model"}
-                    if allowed_levels and transition_level not in allowed_levels:
-                        raise HTTPException(
-                            409,
-                            {
-                                "error": "search branch transition is not authorized",
-                                "required_levels": sorted(allowed_levels),
-                                "advice": (
-                                    "Keep the active branch, or provide a complete "
-                                    "branch_transition naming the previous branch, "
-                                    "its Validation evidence, the next branch, and the experiment rationale."
-                                ),
-                            },
-                        )
-                    if not allowed_levels and transition_level != "none":
-                        raise HTTPException(
-                            409,
-                            "branch_transition was supplied but the Data source and "
-                            "training method remain in the active branch",
-                        )
-                requested_signature = str(payload.get("data_intent_signature") or "")
-                reusable = next((
-                    ticket for ticket in reversed(existing_data)
-                    if str((ticket.payload or {}).get("data_intent_signature") or "")
-                    == requested_signature
-                ), None)
-                if reusable is not None:
-                    raise HTTPException(
-                        409,
-                        {
-                            "error": "training data recipe is unchanged",
-                            "reusable_ticket_id": reusable.id,
-                            "data_intent_signature": requested_signature,
-                            "advice": (
-                                "Do not run Data again. Bind this Ticket's training_dataset to Train."
-                            ),
-                        },
-                    )
-            if body.agent_id == "train" and payload.get("operation") == "train":
-                base_model = str(payload.get("base_model") or "")
-                from zevo.engine.method.branch import active_training_method, method_branch_problem
-                previous_method = active_training_method(owning_run.history or [])
-                suggested_method = str(
-                    (payload.get("configuration_suggestions") or {}).get("training_method") or ""
-                ).strip().lower()
-                problem = method_branch_problem(
-                    previous_method, suggested_method,
-                    pin=str(payload.get("training_method_pin") or ""),
-                    transition=payload.get("branch_transition"),
-                )
-                if is_pipeline_request and problem:
-                    raise HTTPException(409, {
-                        "error": "training method change requires a decision record",
-                        "previous_method": previous_method,
-                        "next_method": suggested_method,
-                        "advice": problem,
-                    })
-                baseline_exists = any(
-                    isinstance(row, dict)
-                    and row.get("source") == "baseline"
-                    and row.get("base_model") == base_model
-                    and isinstance(row.get("score"), (int, float))
-                    and not isinstance(row.get("score"), bool)
-                    for row in (owning_run.history or [])
-                )
-                if not baseline_exists:
-                    raise HTTPException(
-                        409,
-                        {
-                            "error": "base-model baseline is missing",
-                            "base_model": base_model,
-                            "advice": (
-                                "Run baseline Inference and Evaluation for this "
-                                "model lineage before creating Train."
-                            ),
-                        },
-                    )
+            await validate_pipeline_payload(db, owning_run=owning_run, body=body, payload=payload)
         inputs = validate_bindings(
             agent_id=body.agent_id, payload=payload, inputs=body.inputs or {}
         ) if body.input_format == "typed" else {}
@@ -949,349 +1311,10 @@ async def create_ticket(
         # artifact belongs to this iteration's experiment. Enforce the semantic
         # graph here so an old Data product or another iteration's checkpoint
         # cannot be wired into an otherwise valid execution Ticket.
-        if (
-            body.input_format == "typed"
-            and owning_run is not None
-            and owning_run.mode != "single_stage"
-        ):
-            async def source_ticket(name: str, expected_agent: str) -> Ticket:
-                binding = (inputs or {}).get(name) or {}
-                source_id = str(binding.get("source_ticket_id") or "")
-                if not source_id:
-                    raise ValueError(
-                        f"pipeline input {name!r} must bind a {expected_agent} Ticket"
-                    )
-                source = (await db.execute(
-                    select(Ticket).where(Ticket.id == source_id, Ticket.run_id == run_id)
-                )).scalar_one_or_none()
-                if source is None or source.agent_id != expected_agent:
-                    raise ValueError(
-                        f"pipeline input {name!r} must come from a {expected_agent} Ticket"
-                    )
-                return source
-
-            if body.agent_id in {"train", "inference"} or (
-                body.agent_id == "data" and "device_info" in (inputs or {})
-            ):
-                infra_ticket = await source_ticket("device_info", "infrastructure")
-                purpose = str((infra_ticket.payload or {}).get("purpose") or "")
-                allowed_purposes = (
-                    {"train"}
-                    if body.agent_id in {"data", "train"}
-                    else {"train", "inference"}
-                )
-                if purpose not in allowed_purposes:
-                    raise ValueError(
-                        f"{body.agent_id} requires an Infrastructure plan with "
-                        f"purpose in {sorted(allowed_purposes)!r}, got {purpose!r}"
-                    )
-
-            if body.agent_id == "train" and payload.get("operation") == "train":
-                data_ticket = await source_ticket("training_dataset", "data")
-                if int(data_ticket.iteration or 0) > int(body.iteration or 0):
-                    raise ValueError("Train cannot use Data prepared for a later iteration")
-                current_revisions = (await db.execute(select(Ticket.id).where(
-                    Ticket.run_id == run_id,
-                    Ticket.agent_id == "data",
-                    Ticket.lane == "optimization",
-                    Ticket.iteration == int(body.iteration or 0),
-                    Ticket.status.in_(("succeeded", "degraded")),
-                ).order_by(Ticket.created_at.desc()))).scalars().all()
-                if current_revisions and data_ticket.id != current_revisions[0]:
-                    raise ValueError(
-                        "this iteration produced a revised Data artifact; Train must "
-                        f"bind {current_revisions[0]} instead of an older recipe"
-                    )
-                data_product = (await db.execute(
-                    select(WorkProduct).where(
-                        WorkProduct.ticket_id == data_ticket.id,
-                        WorkProduct.role == "training_dataset",
-                    ).order_by(WorkProduct.created_at.desc()).limit(1)
-                )).scalar_one_or_none()
-                data_signature = str(
-                    ((data_product.meta or {}).get("data_signature") if data_product else "")
-                    or ""
-                )
-                if not is_sha256(data_signature):
-                    raise ValueError(
-                        "Train requires a verified data_signature from its Data ticket"
-                    )
-                payload["data_signature"] = data_signature
-                data_device = dict((data_ticket.inputs or {}).get("device_info") or {})
-                train_device = dict((inputs or {}).get("device_info") or {})
-                if (
-                    data_device.get("source_ticket_id")
-                    and data_device.get("source_ticket_id")
-                    != train_device.get("source_ticket_id")
-                ):
-                    raise ValueError(
-                        "Train must reuse the same remote data plane that prepared "
-                        "its Data artifact; create a new Data ticket after changing host"
-                    )
-                payload = TrainPayload.model_validate(payload).model_dump()
-                baseline_config = await source_ticket("inference_config", "inference")
-                if (
-                    int(baseline_config.iteration or 0) > int(body.iteration or 0)
-                    or (baseline_config.payload or {}).get("model_source") != "base_model"
-                    or str((baseline_config.payload or {}).get("base_model") or "")
-                    != str(payload.get("base_model") or "")
-                ):
-                    raise ValueError(
-                        "Train must use the matching base-model lineage's baseline "
-                        "inference_config.yaml"
-                    )
-                iteration = int(body.iteration or 0)
-                if payload.get("model_source") == "base_model":
-                    if "parent_checkpoint" in (inputs or {}) or "parent_train_config" in (inputs or {}):
-                        raise ValueError(
-                            "a baseline Train branch cannot bind parent checkpoint artifacts"
-                        )
-                else:
-                    if iteration < 2:
-                        raise ValueError("a checkpoint branch is valid only after iteration 1")
-                    parent = await source_ticket("parent_checkpoint", "train")
-                    parent_config = await source_ticket("parent_train_config", "train")
-                    if (
-                        int(parent.iteration or 0) >= iteration
-                        or int(parent.iteration or 0) < 1
-                        or parent.id != parent_config.id
-                        or str((parent.payload or {}).get("base_model") or "")
-                        != str(payload.get("base_model") or "")
-                    ):
-                        raise ValueError(
-                            "Train must bind checkpoint and config from the same "
-                            "successful earlier Train iteration and base-model "
-                            "lineage in this Run"
-                        )
-            elif body.agent_id == "inference" and payload.get("model_source") == "checkpoint":
-                train_ticket = await source_ticket("checkpoint", "train")
-                if int(train_ticket.iteration or 0) != int(body.iteration or 0):
-                    raise ValueError("checkpoint must come from Train in the same iteration")
-                baseline_config = await source_ticket("inference_config", "inference")
-                if (
-                    int(baseline_config.iteration or 0) > int(body.iteration or 0)
-                    or (baseline_config.payload or {}).get("model_source") != "base_model"
-                    or str((baseline_config.payload or {}).get("base_model") or "")
-                    != str(payload.get("base_model") or "")
-                ):
-                    raise ValueError(
-                        "trained-model Inference must reuse the matching base-model "
-                        "lineage's baseline inference_config.yaml"
-                    )
-                if str((train_ticket.payload or {}).get("base_model") or "") != str(
-                    payload.get("base_model") or ""
-                ):
-                    raise ValueError(
-                        "checkpoint Inference cannot cross base-model lineages"
-                    )
-                if "predict_script" not in (inputs or {}):
-                    baseline_script = (await db.execute(
-                        select(WorkProduct).where(
-                            WorkProduct.ticket_id == baseline_config.id,
-                            WorkProduct.role == "script",
-                        ).order_by(WorkProduct.created_at.desc()).limit(1)
-                    )).scalar_one_or_none()
-                    if baseline_script is not None and str(baseline_script.path or ""):
-                        inputs["predict_script"] = {
-                            "artifact_role": "script",
-                            "source_ticket_id": baseline_config.id,
-                            "work_product_id": baseline_script.id,
-                            "path": baseline_script.path,
-                        }
-                if "predict_script" in (inputs or {}):
-                    script_ticket = await source_ticket("predict_script", "inference")
-                    if (
-                        int(script_ticket.iteration or 0) > int(body.iteration or 0)
-                        or (script_ticket.payload or {}).get("model_source") != "base_model"
-                        or str((script_ticket.payload or {}).get("base_model") or "")
-                        != str(payload.get("base_model") or "")
-                    ):
-                        raise ValueError(
-                            "candidate Inference may reuse predict.py only from the "
-                            "matching base-model lineage's baseline Inference"
-                        )
-            elif body.agent_id == "inference" and payload.get("model_source") == "base_model":
-                profile_ticket = await source_ticket("inference_data_profile", "data")
-                if int(profile_ticket.iteration or 0) != 0:
-                    raise ValueError(
-                        "baseline Inference must use the iteration-0 Data "
-                        "inference_data_profile"
-                    )
-                previous_baselines = (await db.execute(select(Ticket).where(
-                    Ticket.run_id == run_id,
-                    Ticket.agent_id == "inference",
-                    Ticket.lane == "optimization",
-                    Ticket.status.in_(("succeeded", "degraded")),
-                ).order_by(Ticket.created_at))).scalars().all()
-                previous_models = [
-                    str((candidate.payload or {}).get("base_model") or "")
-                    for candidate in previous_baselines
-                    if (candidate.payload or {}).get("model_source") == "base_model"
-                ]
-                selected_model = str(payload.get("base_model") or "")
-                transition_level = str(
-                    (payload.get("branch_transition") or {}).get("level") or "none"
-                )
-                if (
-                    previous_models
-                    and selected_model != previous_models[-1]
-                    and transition_level != "base_model"
-                ):
-                    raise ValueError(
-                        "a new Base-model branch requires a complete base_model "
-                        "branch_transition with Validation evidence and an experiment rationale"
-                    )
-                if not previous_models and transition_level != "none":
-                    raise ValueError(
-                        "the initial Base-model selection is not a branch change"
-                    )
-            elif body.agent_id == "registry":
-                existing_registry = (await db.execute(select(Ticket).where(
-                    Ticket.run_id == run_id,
-                    Ticket.agent_id == "registry",
-                ).limit(1))).scalar_one_or_none()
-                if existing_registry is not None:
-                    raise ValueError(
-                        "Registry is a once-per-Run finalization stage; repair "
-                        f"the existing Ticket {existing_registry.id} instead of creating another"
-                    )
-
-                score_rows = (await db.execute(select(ScoreEvent).where(
-                    ScoreEvent.run_id == run_id,
-                    ScoreEvent.split == "validation",
-                    ScoreEvent.source == "trained",
-                ).order_by(ScoreEvent.ts.asc()))).scalars().all()
-                # Best fine-tuned candidate, however small its margin: see
-                # champion_index for the policy.
-                champion_at = champion_index(
-                    (float(row.score) for row in score_rows),
-                    owning_run.validation_metric_direction,
-                )
-                champion = None if champion_at is None else score_rows[champion_at]
-                if champion is None:
-                    raise ValueError(
-                        "final Registry requires at least one measured trained candidate"
-                    )
-                if int(body.iteration or 0) != int(champion.iteration or 0):
-                    raise ValueError(
-                        "Registry must bind the engine-selected Validation champion: "
-                        f"iteration {champion.iteration}, not iteration {body.iteration}"
-                    )
-                train_ticket = await source_ticket("checkpoint", "train")
-                train_config_ticket = await source_ticket("train_config", "train")
-                eval_ticket = await source_ticket("metrics", "evaluation")
-                if (
-                    int(train_ticket.iteration or 0) != int(body.iteration or 0)
-                    or train_config_ticket.id != train_ticket.id
-                    or int(eval_ticket.iteration or 0) != int(body.iteration or 0)
-                ):
-                    raise ValueError(
-                        "Registry checkpoint and metrics must come from the same iteration"
-                    )
-                prediction_binding = (eval_ticket.inputs or {}).get("predictions") or {}
-                inference_id = str(prediction_binding.get("source_ticket_id") or "")
-                inference_ticket = (await db.execute(
-                    select(Ticket).where(
-                        Ticket.id == inference_id,
-                        Ticket.run_id == run_id,
-                        Ticket.agent_id == "inference",
-                    )
-                )).scalar_one_or_none()
-                if (
-                    inference_ticket is None
-                    or (inference_ticket.payload or {}).get("model_source") != "checkpoint"
-                    or int(inference_ticket.iteration or 0) != int(body.iteration or 0)
-                ):
-                    raise ValueError(
-                        "Registry metrics must come from checkpoint Inference in the same iteration"
-                    )
-                evaluated_checkpoint = (
-                    (inference_ticket.inputs or {}).get("checkpoint") or {}
-                )
-                if str(evaluated_checkpoint.get("source_ticket_id") or "") != train_ticket.id:
-                    raise ValueError(
-                        "Registry metrics must evaluate the exact Train checkpoint being registered"
-                    )
-                registry_checkpoint = (inputs or {}).get("checkpoint") or {}
-                evaluated_product_id = str(
-                    evaluated_checkpoint.get("work_product_id") or ""
-                )
-                registry_product_id = str(
-                    registry_checkpoint.get("work_product_id") or ""
-                )
-                if (
-                    evaluated_product_id
-                    and registry_product_id
-                    and evaluated_product_id != registry_product_id
-                ):
-                    raise ValueError(
-                        "Registry metrics must evaluate the exact checkpoint "
-                        "WorkProduct being registered"
-                    )
-
-                checkpoint_products = (await db.execute(
-                    select(WorkProduct).where(
-                        WorkProduct.ticket_id == train_ticket.id,
-                        WorkProduct.role == "checkpoint",
-                    ).order_by(WorkProduct.created_at.desc())
-                )).scalars().all()
-                checkpoint_product = next((
-                    product for product in checkpoint_products
-                    if registry_product_id and product.id == registry_product_id
-                ), None)
-                if checkpoint_product is None:
-                    checkpoint_product = next((
-                        product for product in checkpoint_products
-                        if (product.meta or {}).get("checkpoint_kind") == "final"
-                    ), checkpoint_products[0] if checkpoint_products else None)
-                checkpoint_meta = dict(checkpoint_product.meta or {}) if checkpoint_product else {}
-                actual_method = str(checkpoint_meta.get("training_method") or "").strip()
-                actual_base_model = str(checkpoint_meta.get("base_model") or "").strip()
-                if not actual_method or not actual_base_model:
-                    raise ValueError(
-                        "Registry requires the successful Train result's method and base model"
-                    )
-                payload.update({
-                    "training_method": actual_method,
-                    "base_model": actual_base_model,
-                    "task_objective": owning_run.task_objective,
-                        "metric": owning_run.validation_metric,
-                        "metric_direction": owning_run.validation_metric_direction,
-                        "checkpoint_is_remote": (
-                            str(checkpoint_meta.get("location") or "") == "remote"
-                        ),
-                    })
-                if payload["checkpoint_is_remote"]:
-                    await source_ticket("device_info", "infrastructure")
-                elif "device_info" in (inputs or {}):
-                    await source_ticket("device_info", "infrastructure")
-
-                training_data = (train_ticket.inputs or {}).get("training_dataset") or {}
-                data_id = str(training_data.get("source_ticket_id") or "")
-                data_product = (await db.execute(
-                    select(WorkProduct).where(
-                        WorkProduct.ticket_id == data_id,
-                        WorkProduct.role == "training_dataset",
-                    ).order_by(WorkProduct.created_at.desc()).limit(1)
-                )).scalar_one_or_none()
-                resolved_source = str(
-                    ((data_product.meta or {}).get("dataset_source") if data_product else "")
-                    or ""
-                ).strip()
-                if not resolved_source:
-                    raise ValueError(
-                        "Registry requires resolved data provenance from the Train checkpoint's Data ticket"
-                    )
-                # Provenance is engine-stamped from the exact Data→Train chain;
-                # it is not a second planner-authored version of the source.
-                payload["dataset_source"] = resolved_source
-                expected_tag = model_tag_for_run(run_id)
-                existing_model = await db.get(RegistryModel, expected_tag)
-                if existing_model is not None:
-                    raise ValueError(
-                        f"Run {run_id} already has final Registry model {expected_tag}"
-                    )
-                payload = RegistryPayload.model_validate(payload).model_dump(mode="json")
+        if body.input_format == "typed" and owning_run is not None:
+            payload, inputs = await validate_pipeline_bindings(
+                db, owning_run=owning_run, body=body, payload=payload, inputs=inputs,
+            )
 
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc

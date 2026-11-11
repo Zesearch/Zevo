@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from zevo.contracts.configuration import InferenceRunConfig, load_inference_config
+from zevo.contracts.configuration import InferenceRunConfig, load_inference_config, inference_execution_contract
 from zevo.contracts.inference import GenerationDiagnostics
 from zevo.contracts.length_calibration import prediction_outputs, repetition_evidence
 from zevo.db.models import Run, ScoreEvent, Ticket, TicketNotice, WorkProduct
@@ -406,8 +406,8 @@ async def _plan_retention(session: AsyncSession, run: Run, batch: Batch, affecte
             if len(assets) != 3:
                 continue
             try:
-                unchanged = (load_inference_config(assets["inference_config"]["path"]).model_dump()
-                             == load_inference_config(batch["configs"][name]).model_dump())
+                unchanged = (inference_execution_contract(load_inference_config(assets["inference_config"]["path"]))
+                             == inference_execution_contract(load_inference_config(batch["configs"][name])))
             except (OSError, ValueError):
                 unchanged = False
             original = {"reason": "original_measurement", "evidence": deepcopy(ev),
@@ -556,7 +556,7 @@ async def _publish(session: AsyncSession, run: Run, batch: Batch) -> None:
                 raise ValueError(f"remeasurement prediction is missing for {name!r}")
             actual = InferenceRunConfig.model_validate((product.meta or {}).get("configuration"))
             config_path = item.get("retained", {}).get(name, {}).get("config_path") or batch["configs"][name]
-            if actual.model_dump() != load_inference_config(config_path).model_dump():
+            if inference_execution_contract(actual) != inference_execution_contract(load_inference_config(config_path)):
                 raise ValueError(f"remeasurement prediction configuration mismatch for {name!r}")
             component["prediction_work_product_id"] = product.id
         components.update({name: deepcopy(value["score"]) for name, value in retained.items()})

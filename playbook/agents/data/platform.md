@@ -101,7 +101,7 @@ reused by the DAG and never dispatched. Require the declared `training_method`.
 Resolve `DEST_DIR` from strict customization output or `work_dir`, choose only
 source-appropriate Data Skills, and write one reproducible `prepare_data.py`.
 
-All `prepare_run_data` work uses the assigned remote plane. Require
+Pipeline and explicitly remote `prepare_run_data` work uses the assigned remote plane. Require
 `device_info_path` and the remote execution fields. Download, inspect, transform,
 filter, generate, and persist training rows on that host. For a supplied local
 file, upload its exact bytes once and verify `expected_source_fingerprint`
@@ -109,6 +109,12 @@ remotely before processing. Do not copy prepared rows back to Zevo. Keep only
 scripts, specs, recipes, and compact receipts locally. Missing remote routing is
 a work-order error to report, never permission to prepare locally.
 This requirement does not change private held-out preparation or scope_problem.
+
+A standalone work order explicitly marked `activation_contract.data_plane="local"`
+with no `device_info_path` uses local preparation instead. Return a local dataset,
+recipe and reproducible script; run the supplied local validators. The remote
+spec, transfer, receipt and job-submission instructions below apply only to the
+remote plane. Never infer local authorization from a broken remote route.
 
 ### Training-data acquisition and construction
 
@@ -150,7 +156,12 @@ Never report `n_rows_out` above the cap.
   rows. Zero means no ceiling, not a request for unlimited generation.
 - `configuration_pins.target_size` is a binding experiment output target;
   `configuration_suggestions.target_size` is advisory. Neither changes the Run
-  ceiling. A pinned target_size must be positive; a missing target or zero
+  ceiling. `target_size_basis=prepared` pins the count before engine scoring
+  decontamination; `final` (the default, including legacy tickets) pins the
+  remaining count. If engine removal alone causes a final-count deficit,
+  preserve the prepared dataset and receipts and request a revised plan;
+  do not try to fix the deficit by changing the reported number or accessing
+  protected scoring rows. A pinned target_size must be positive; a missing target or zero
   advisory target means no target from that field. For acquired
   data, a positive target guides deterministic selection when enough eligible
   rows exist; it never authorizes fabricating rows to fill a shortfall.
@@ -315,6 +326,17 @@ For a later Data revision, change only the remote `dataset.jsonl` according to t
 field mapping, method format, and seed are all recipe identity. A change to any
 of them requires a new Data Ticket; a change only to Train hyperparameters does
 not.
+
+Separate the request from its realization. Natural-language subset/filter/
+transformation descriptions are behavioral requirements, not required literal
+strings. Record concrete labels, predicates, thresholds and per-stratum counts
+in the realized recipe; do not overwrite that evidence merely to copy prose.
+`recipe_intent.constraints` holds machine-checkable pins (for example
+`{"sampling": {"strategy": "uniform"}, "seed": 0}`). Nested maps constrain only
+named keys, so additional realized details are allowed. Pins remain exact;
+textual differences are surfaced together for review and do not prove either
+semantic compliance or a violation. Keep the request and executed evidence
+available for that review. Ordered `method_ids` may repeat an operation.
 
 Populate `data_recipe` exactly from `data_recipe_schema`. Copy the Ticket's
 `expected_source_identity` byte-for-byte into `source_identity`; never resolve,
@@ -519,7 +541,8 @@ validator. For training preparation, check the following on the assigned plane:
   downstream method without inventing signal;
 - local control-artifact paths and remote data/profile paths are absolute,
   persistent, and non-empty in their respective data planes;
-- the realized recipe equals `recipe_intent`, the source fingerprint is real,
+- the realized recipe implements `recipe_intent` and satisfies every explicit
+  `recipe_intent.constraints` pin, the source fingerprint is real,
   and the validation/receipt confirms the final training bytes.
 
 Emit `reading_source`, `transforming_data`, `validating_data_artifacts`, and
@@ -576,3 +599,11 @@ For a new cluster submission the engine checks that `prepare_data.py` imports
 and calls `zevo_stage_resume.run_batches`; a comment or an unused import does not
 satisfy the contract. Upload the supplied helper without modifying it. This gate
 runs before submission, not against an already executed immutable workload.
+
+Preparation receipt version 2 hashes executable recipe fields and excludes
+`direction`, `dataset_name` and `audit_steps`. Updating only these audit fields
+must not rerun preparation. Legacy receipts remain readable and retain their
+original exact-hash checks; do not relabel a legacy receipt as version 2.
+Standalone local Data work uses the typed contract resolved from the user's
+request and has no scoring artifacts unless the engine supplies a scoring
+contract. A site GPU allocation alone does not make CPU curation a GPU workload.

@@ -74,7 +74,7 @@ def test_parent_identity_is_still_enforced(tmp_path):
 
 def test_wrong_specialist_method_is_self_repairable(tmp_path):
     inp, result = case(tmp_path, active="sft")
-    inp = inp.model_copy(update={"configuration_suggestions": {"training_method": "sft"}})
+    inp = inp.model_copy(update={"selected_training_method": "sft"})
     with pytest.raises(ValueError, match="Orchestrator-selected method") as exc:
         _validate_specialist_yaml(result, inp)
     assert classify_failure(str(exc.value), agent_id="train").route == "self"

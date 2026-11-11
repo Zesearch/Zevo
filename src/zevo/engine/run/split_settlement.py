@@ -476,7 +476,7 @@ async def settle_splits(
 
     from zevo.engine.method.evaluation_identity import snapshot_test_contract
     holdout = {
-        "semantic_fingerprint_version": 2,
+        "semantic_fingerprint_version": 3,
         "evaluation_contract": None,
         "test_sets": [
             {

@@ -24,6 +24,7 @@ from typing import Any, Callable
 import yaml
 from pydantic import BaseModel
 
+from zevo.contracts.training_selection import get_selected_training_method
 from zevo.engine.agent.loader import AgentBlueprint
 from zevo.engine.agent.drivers.base import DriverRunResult
 
@@ -274,6 +275,8 @@ def _stub_infra(payload: dict, work_dir: Path) -> BaseModel:
 
 
 def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
+    from zevo.contracts.training_selection import normalize_method_selection
+    payload = normalize_method_selection(payload)
     from zevo.contracts.train import TrainResult
     from zevo.contracts.configuration import (
         PromptAlignmentEvidence, SuggestionDecision, TrainRunConfig,
@@ -294,7 +297,7 @@ def _stub_train(payload: dict, work_dir: Path) -> BaseModel:
     pinned_method = str(
         payload.get("training_method_pin") or pins.get("training_method") or ""
     )
-    suggested_method = str(suggestions.get("training_method") or "")
+    suggested_method = get_selected_training_method(payload)
     active_method = str(payload.get("active_training_method") or "")
     if pinned_method:
         method = pinned_method

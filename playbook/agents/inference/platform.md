@@ -694,8 +694,10 @@ absolute per-GPU target under `implementation_config.memory_plan`:
 - `kv_bytes_per_token`: `2 * layers * key_value_heads * head_dim * dtype_bytes`;
 - `kv_cache_gib`: `peak_live_tokens * kv_bytes_per_token / 1024^3`;
 - `tensor_parallel_size`: exactly the value in `llm_kwargs`;
-- `target_gpu_memory_gib`: the ceiling of
+- `target_gpu_memory_gib`: at least the ceiling of
   `(runtime_weight_gib * 1.2 + kv_cache_gib) / tensor_parallel_size + 4`;
+  additional measured headroom is allowed and remains subject to the actual
+  free-memory preflight and the Run allocation;
 - the exact step/min/max/free-margin constants from
   `memory_planning_contract`.
 
@@ -758,10 +760,12 @@ realized `predict_script_path`; do not echo or transform the source path.
 ## Reusing the YAML
 
 For `configuration_mode="reuse"`, validate the supplied file as
-`InferenceRunConfig`, check checkpoint compatibility, and execute it without
-mutation. The returned `inference_config_path` must identify the exact supplied
-file. A changed body, changed hash, or locally regenerated equivalent is a
-contract failure.
+`InferenceRunConfig`, check checkpoint compatibility, and preserve its execution
+contract. Prefer the supplied file; a separate equivalent copy is accepted. YAML
+formatting, comments, and `suggestion_decisions` audit records may differ. Every
+other field, including prompt examples and nested backend arguments, must match
+the parsed baseline contract. Preserve the original baseline artifact; hashes
+still identify exact files and are not interchangeable between copies.
 
 Training may have changed model weights, not the measurement. Preserve logical
 input order, prompt rendering, chat template, model reasoning type, system prompt,

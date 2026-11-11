@@ -412,7 +412,8 @@ def test_orchestrator_receives_closed_payload_and_binding_authorities() -> None:
     assert "lora_sft" not in methods
     train_advice = schemas["train"]["properties"]["configuration_suggestions"]
     assert train_advice["additionalProperties"] is False
-    assert set(train_advice["properties"]) == {"direction", "training_method"}
+    assert set(train_advice["properties"]) == {"direction"}
+    assert "selected_training_method" in schemas["train"]["properties"]
 
     bindings = specialist_input_binding_contracts()
     assert bindings["train"]["variants"]["checkpoint"]["required"] == {
@@ -817,8 +818,9 @@ def test_resource_plan_recomputes_and_enforces_host_memory() -> None:
         InfrastructureResourcePlan.model_validate({
             **valid, "host_memory_formula_gib": 128, "min_ram_gb": 128,
         })
-    with pytest.raises(ValidationError, match="must equal max"):
-        InfrastructureResourcePlan.model_validate({**valid, "min_ram_gb": 128})
+    assert InfrastructureResourcePlan.model_validate({**valid, "min_ram_gb": 128}).min_ram_gb == 128
+    with pytest.raises(ValidationError, match="must be at least max"):
+        InfrastructureResourcePlan.model_validate({**valid, "min_ram_gb": 40})
 
 
 def test_vllm_predict_script_must_call_memory_helper(tmp_path: Path) -> None:

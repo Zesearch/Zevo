@@ -84,7 +84,8 @@ Resolve one `resource_plan` before searching, submitting, or leasing anything:
   The floors are 16 GiB for inference and 32 GiB for training. Record the
   calculated peak, its components, the formula result, and any site minimum in
   the dedicated `resource_plan` fields. The typed contract recomputes the
-  formula and rejects an unexplained RAM request;
+  formula as a minimum; a larger justified request is allowed within the Run
+  budget and site limits;
 - right-size CPU independently. Start near 4 cores for inference or 8 for
   training when there is no stronger evidence; increase only for demonstrated
   CPU-side tokenization, preprocessing, compilation, or loading work. Cluster
