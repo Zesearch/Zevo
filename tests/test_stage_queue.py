@@ -22,6 +22,47 @@ async def db():
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_dispatch_uses_released_checkpoint_execution_on_live_owner(db, tmp_path, monkeypatch):
+    from zevo.engine.run import remote_jobs
+    commands = []
+    async def ssh(info, command, **kwargs):
+        commands.append(command)
+        return {'ok': True, 'stdout': 'RUNNING\n' if 'squeue -h' in command else '123\n'}
+    monkeypatch.setattr(remote_jobs, '_ssh', ssh)
+    run = Run(id='run', metric='accuracy', gpu_allocation_mode='per_run', status='running')
+    train = Ticket(id='train', run_id=run.id, agent_id='train', status='waiting_external')
+    child = Ticket(id='next', run_id=run.id, agent_id='inference', status='running')
+    now = datetime.now(timezone.utc)
+    owner = InfraInstance(id='owner', run_id=run.id, ticket_id=train.id, provider='cluster',
+        instance_id='123', gpu_count=4, created_at=now - timedelta(hours=1),
+        meta={'resource_request': True, 'controller_directory': '/controller', 'nodes': 1,
+              'scheduler_state': 'COMPLETED', 'checkpoint_yield': 'old', 'checkpoint_resume': 'old'})
+    db.add_all([run, train, child, owner]); await db.commit()
+    inp = inputs(tmp_path)
+    row = await _submit_validated_slurm_stage(db, run=run, ticket=child, inp=inp, heartbeat_id='hb')
+    _commit_slurm_submission(row, heartbeat_id='hb', stdout_path=inp.slurm_job.stdout_path,
+                            stderr_path=inp.slurm_job.stderr_path)
+    assert row.instance_id == ''
+    child.status = 'waiting_external'
+    request = {'request_id': 'latest', 'ticket_id': train.id, 'step': 2447}
+    child.payload = {'mid_training_checkpoint': request}
+    run.lifecycle = {'adaptive_checkpoints': {'latest': {
+        'request': request, 'job_row_id': 'checkpoint', 'inference_ticket_id': child.id}}}
+    db.add(InfraInstance(id='checkpoint', run_id=run.id, ticket_id=train.id, provider='cluster',
+        instance_id='123', gpu_count=4, created_at=now, released_at=now,
+        meta={'allocation_owner_row_id': owner.id, 'controller_directory': '/controller',
+              'scheduler_state': 'COMPLETED', 'checkpoint_yield': 'latest'}))
+    await db.commit()
+    async with async_sessionmaker(db.bind, expire_on_commit=False)() as restarted:
+        assert await dispatch_waiting_stages(restarted) == 1
+        assert await dispatch_waiting_stages(restarted) == 0
+    await db.refresh(row)
+    assert row.instance_id == '123' and row.meta['allocation_owner_row_id'] == owner.id
+    assert len([cmd for cmd in commands if 'requests/hb.json' in cmd]) == 1
+    assert not any('sbatch --parsable' in cmd for cmd in commands)
+
+
 def inputs(tmp_path):
     script = tmp_path / 'predict.sbatch'
     script.write_text('#!/bin/bash\necho prepared\n')

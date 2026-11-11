@@ -123,7 +123,7 @@ async def current_device_binding(session, run, inputs):
     return result
 
 
-async def request_replacement(session, ticket, execution=None, *, owner=None, reason=""):
+async def request_replacement(session, ticket, execution=None, *, owner=None, reason="", kind="repair"):
     run = (await session.scalars(select(Run).where(Run.id == ticket.run_id).with_for_update()
         .execution_options(populate_existing=True))).one()
     meta = (execution.meta or {}) if execution else {}
@@ -133,17 +133,24 @@ async def request_replacement(session, ticket, execution=None, *, owner=None, re
         return  # one replacement decision per failed execution, including after restart
     if owner is None and execution:
         owner = await session.get(InfraInstance, meta.get("allocation_owner_row_id") or execution.id)
+    if kind == "continuation":
+        from zevo.engine.run.stage_continuation import authorized
+        if (not authorized(ticket, execution) or execution.run_id != run.id
+            or owner is None or owner.run_id != run.id or owner.provider != "cluster"
+            or (owner.meta or {}).get("allocation_owner_row_id")):
+            raise ValueError("Walltime handoff requires the verified execution and its allocation owner")
     from zevo.engine.run.remote_jobs import _device_info_for_ticket
     info = await _device_info_for_ticket(session, ticket)
     save(run, ticket.id, {
-        "execution_id": identity, "owner_id": owner.id if owner else "",
+        "execution_id": identity, "owner_id": owner.id if owner else "", "kind": kind,
         "phase": "stopping", "reason": reason or meta.get("execution_repair", {}).get("reason", "Resource replacement requested"),
         "requested_at": datetime.now(timezone.utc).isoformat(),
         "resource_plan": info.resource_plan.model_dump(mode="json") if info else {},
     })
     ticket.status = "waiting_external"
-    ticket.repair_route = "self"
-    ticket.summary = "Waiting for resource recovery on this Ticket"
+    ticket.repair_route = "" if kind == "continuation" else "self"
+    ticket.summary = ("Waiting for the previous allocation to release before continuing the workload"
+                      if kind == "continuation" else "Waiting for resource recovery on this Ticket")
     # Cloud loss may arrive while a submit/collect Agent is still alive. Its
     # own consumer stops that process; the reconciler waits for it to close.
     if owner and (owner.meta or {}).get("cloud_health", {}).get("state") in {"terminated", "deleted", "destroyed", "not-found"}:
@@ -155,7 +162,7 @@ async def request_replacement(session, ticket, execution=None, *, owner=None, re
     await session.flush()
 
 
-async def _stop_owner(session, run, ticket, owner):
+async def _stop_owner(session, run, ticket, owner, *, reason="resource recovery"):
     from zevo.engine.run.remote_jobs import cancel_ticket_remote_job
     from zevo.engine.run.resource_cleanup import release_cloud, release_cluster
     if owner and owner.released_at:
@@ -190,7 +197,7 @@ async def _stop_owner(session, run, ticket, owner):
         if owner.provider != "instance":
             owner.released_at = datetime.now(timezone.utc)
             owner.status = "released"
-            owner.release_reason = "Confirmed release for resource recovery"
+            owner.release_reason = f"Confirmed release for {reason}"
     return True
 
 
@@ -242,14 +249,30 @@ async def _advance(session, run, ticket, event):
     from zevo.engine.run.runner import _latest_slurm_resource_request
     owner = await session.get(InfraInstance, event["owner_id"]) if event.get("owner_id") else None
     previous = await _latest_slurm_resource_request(session, ticket)
+    continuation = event.get("kind") == "continuation"
+    if continuation:
+        from zevo.engine.run.stage_continuation import authorized
+        if (previous is None or previous.id != event["execution_id"]
+            or not authorized(ticket, previous) or owner is None or owner.run_id != run.id
+            or owner.provider != "cluster"
+            or ((previous.meta or {}).get("allocation_owner_row_id") or previous.id) != owner.id):
+            raise ValueError("Walltime handoff no longer matches the current execution")
     info = await _device_info_for_ticket(session, ticket)
     if info is None:
         raise ValueError("Resource recovery requires the original verified device_info")
     if event["phase"] == "stopping":
-        if not await _stop_owner(session, run, ticket, owner):
+        if not await _stop_owner(session, run, ticket, owner,
+                                 reason="walltime continuation" if continuation else "resource recovery"):
             return
         event = {**event, "phase": "provisioning"}
         save(run, ticket.id, event)
+    if continuation:
+        # Only finite scheduler allocations expire with a workload window.
+        # The next submit rents a fresh window on the same shared filesystem.
+        from zevo.engine.run.stage_continuation import wake_continuation
+        save(run, ticket.id, {**event, "phase": "resumed"})
+        await wake_continuation(session, ticket, previous)
+        return
     if info.provider == "cluster":
         # The next finite submission acquires a fresh allocation; paths remain
         # on the cluster filesystem, and publication verifies them again.
@@ -404,7 +427,9 @@ async def reconcile(session):
                 HeartbeatRun.finished_at.is_(None)).limit(1)):
                 continue
             budget = await snapshot_for_run(session, run.id)
-            if (budget.over_budget or budget.over_time_limit or (run.lifecycle or {}).get("finalization")
+            from zevo.engine.run.lifecycle import finalization, finalization_allows
+            if (budget.over_budget or budget.over_time_limit
+                or (finalization(run) and not finalization_allows(ticket.agent_id, ticket.lane))
                 or int(ticket.repair_attempts or 0) > MAX_REPAIR_ATTEMPTS):
                 save(run, ticket.id, {**event, "phase": "blocked", "error": "Run budget or repair boundary reached"})
                 ticket.status = "failed"

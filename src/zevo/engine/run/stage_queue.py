@@ -20,7 +20,7 @@ from zevo.db import InfraInstance, Run, Ticket
 async def blocking_stage(session, run, ticket):
     if run.gpu_allocation_mode != "per_run":
         return None
-    from zevo.engine.run.gpu_controller import _checkpoint_allocation_handoff
+    from zevo.engine.run.gpu_controller import checkpoint_execution
 
     rows = (await session.execute(
         select(InfraInstance, Ticket).join(Ticket, Ticket.id == InfraInstance.ticket_id)
@@ -38,8 +38,13 @@ async def blocking_stage(session, run, ticket):
     first_owner = claims[0][1]
     if first_owner.id == ticket.id:
         return None
-    if any(_checkpoint_allocation_handoff(run, ticket, row, owner)
-           for row, owner in claims if owner.id == first_owner.id):
+    checkpoint = await checkpoint_execution(session, run, ticket)
+    from zevo.engine.run.lifecycle import aware
+    if checkpoint is not None and checkpoint.ticket_id == first_owner.id:
+        if any(owner.id == first_owner.id and row.id != checkpoint.id
+               and aware(row.created_at) > aware(checkpoint.created_at) and row.released_at is None
+               for row, owner in claims):
+            return first_owner
         other = next((owner for row, owner in claims
                       if owner.id not in {first_owner.id, ticket.id}
                       and row.instance_id and row.released_at is None), None)

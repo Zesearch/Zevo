@@ -125,16 +125,28 @@ async def verify_request(session, ticket, inp, output, row):
 
 
 async def queue_continuation(session, ticket, heartbeat, row, proof):
-    """Commit the checkpoint binding and next activation together, without repair."""
+    """Persist a normal handoff; retire finite allocations before waking Train."""
     from datetime import datetime, timezone
-    from zevo.engine.run.wakeup import queue_wakeup
     if proof["source_resource_id"] != row.id or proof["ticket_id"] != ticket.id:
         raise ValueError("continuation belongs to another workload")
     row.meta = {**dict(row.meta or {}), "training_continuation": proof}
-    ticket.status = "queued"
-    ticket.repair_route = ""
     heartbeat.activation_phase = "continue"
     heartbeat.finished_at = datetime.now(timezone.utc)
+    if row.provider == "cluster":
+        from zevo.engine.run.resource_recovery import request_replacement
+        await request_replacement(session, ticket, row, kind="continuation",
+                                  reason="Continue the unchanged training plan after walltime")
+        return
+    # A finite process window does not expire a cloud or fixed instance host.
+    await wake_continuation(session, ticket, row, proof)
+
+
+async def wake_continuation(session, ticket, row, proof):
+    from zevo.engine.run.wakeup import queue_wakeup
+    ticket.status = "queued"
+    ticket.repair_route = ""
+    ticket.error_message = ""
+    ticket.summary = f"Continuing training from step {proof['completed_steps']}/{proof['planned_steps']}"
     await queue_wakeup(session, agent_id="train", ticket_id=ticket.id,
         source="training_continuation",
         reason=f"Resume the unchanged training plan at step {proof['completed_steps']}/{proof['planned_steps']}; preserve configuration and full trainer state.",

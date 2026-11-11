@@ -1,3 +1,19 @@
+## Normal execution-window expiry
+
+The engine distinguishes a registered workload's TIMEOUT/DEADLINE or the
+system helper's reserved exit 75 from execution errors. Window expiry continues
+this same Ticket without consuming a repair attempt or changing the experiment.
+Cluster continuation waits for the old allocation's confirmed release before
+requesting a new window. A process window on a healthy cloud/instance host
+reuses that host. Do not return a failed result or request resource replacement
+solely because the execution window expired.
+
+Keep the input, recipe, configuration and workload identity unchanged. Restore
+only checksummed, identity-matching batch/benchmark receipts from the stable
+Ticket resume directory; repeat unfinished work. A missing or invalid receipt
+is not completed work. Never report partial output as success. Actual execution
+or artifact errors still use the normal bounded repair policy.
+
 ## Resource recovery
 
 For an assigned unusable resource, return a failed result in either submit or

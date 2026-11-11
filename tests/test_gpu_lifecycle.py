@@ -92,6 +92,7 @@ def test_release_boundary(mode, state, expected):
     ('per_stage', 'infer-1', False, True),
     ('per_run', 'infer-1', False, 'missing'),
     ('per_run', 'train-1', False, 'continuation'),
+    ('per_run', 'infer-1', False, 'retiring'),
     ('per_run', 'infer-1', False, 'COMPLETING'),
     ('per_run', 'infer-1', False, 'UNKNOWN'),
     ('per_submission', 'train-1', False, False),
@@ -131,6 +132,9 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
             meta=dict(controller_directory='/controller', scheduler_state='FAILED', nodes=1))
         session.add_all([run, ticket, owner])
         await session.commit()
+        if live == 'retiring':
+            from zevo.engine.run.resource_recovery import KEY
+            run.lifecycle = {KEY: {'train-1': {'owner_id': owner.id, 'kind': 'continuation', 'phase': 'stopping'}}}
         kwargs = dict(run=run, ticket=ticket, contract=contract,
             info=SimpleNamespace(cluster=SimpleNamespace(workdir='/remote', env_setup='export SITE_SLURM=1'), resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=4)),
             heartbeat_id='h2', sha256='digest')
@@ -155,7 +159,11 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
             event.remove(engine.sync_engine, 'before_cursor_execute', fail_retirement)
             await session.refresh(owner)
             assert owner.released_at is None
-        if mode == 'per_run' and live in ('COMPLETING', 'UNKNOWN'):
+        if live == 'retiring':
+            job, meta = await submit_workload(session, **kwargs)
+            assert job == '' and meta['scheduler_state'] == 'WAITING_RESOURCES'
+            assert not commands  # No reuse/publication while retirement owns it.
+        elif mode == 'per_run' and live in ('COMPLETING', 'UNKNOWN'):
             with pytest.raises(ValueError, match='not reusable or terminal'):
                 await submit_workload(session, **kwargs)
             assert owner.released_at is None
@@ -165,11 +173,14 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
                 await submit_workload(session, **kwargs)
             assert not any('sbatch --parsable' in c for c in commands)
         else:
-            await assert_submission(session, kwargs, reuses, commands, tmp_path, mode)
             if live == "continuation":
+                job, meta = await submit_workload(session, **kwargs)
                 assert any('/controller/release' in command for command in commands)
-                assert sum('sbatch --parsable' in command for command in commands) == 1
+                assert job == '' and meta['scheduler_state'] == 'WAITING_RESOURCES'
+                assert not any('sbatch --parsable' in c for c in commands)
                 assert owner.released_at is None  # watcher owns terminal confirmation
+                live = False
+            await assert_submission(session, kwargs, reuses, commands, tmp_path, mode)
             if live == 'missing' or not live:
                 assert owner.released_at is not None
                 assert owner.status == 'released'
@@ -433,8 +444,9 @@ async def test_retained_allocation_keeps_stage_turn_through_repair(monkeypatch, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('scenario', ['yielded', 'running', 'resumed', 'wrong_checkpoint', 'wrong_row', 'unverified', 'other_consumer', 'previous_segment'])
-async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(monkeypatch, scenario):
+@pytest.mark.parametrize('scenario', ['yielded', 'running', 'resumed', 'wrong_checkpoint', 'wrong_row', 'unverified', 'other_consumer', 'previous_segment', 'released_checkpoint', 'foreign_allocation', 'newer_train'])
+@pytest.mark.parametrize('agent', ['inference', 'evaluation'])
+async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(monkeypatch, scenario, agent):
     from zevo.engine.run import remote_jobs
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
@@ -446,7 +458,7 @@ async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(
         return dict(ok=True, stdout='RUNNING\n' if 'squeue -h' in command else '123\n')
     monkeypatch.setattr(remote_jobs, '_ssh', ssh)
     request = dict(request_id='checkpoint-111', ticket_id='train-1', step=111)
-    stage = dict(request=request, job_row_id='owner', inference_ticket_id='infer-1', resume_queued=False)
+    stage = dict(request=request, job_row_id='owner', inference_ticket_id='infer-1', evaluation_ticket_id='infer-1', resume_queued=False)
     meta = dict(controller_directory='/controller', scheduler_state='COMPLETED', nodes=1,
                 checkpoint_yield='checkpoint-111')
     if scenario == 'running':
@@ -459,11 +471,26 @@ async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(
         run = Run(id='run-1', metric='accuracy', gpu_allocation_mode='per_run',
                   lifecycle={'adaptive_checkpoints': {} if scenario == 'unverified' else {'checkpoint-111': stage}})
         train = Ticket(id='train-1', run_id=run.id, agent_id='train', status='waiting_external')
-        ticket = Ticket(id='infer-1', run_id=run.id, agent_id='inference',
+        ticket = Ticket(id='infer-1', run_id=run.id, agent_id=agent,
                         payload={'mid_training_checkpoint': {**request, 'step': 222} if scenario == 'wrong_checkpoint' else request})
         owner = InfraInstance(id='owner', run_id=run.id, ticket_id=train.id, instance_id='123',
                               provider='cluster', gpu_count=4, meta=meta)
         session.add_all([run, train, ticket, owner])
+        if scenario in {'released_checkpoint', 'foreign_allocation', 'newer_train'}:
+            from datetime import datetime, timezone, timedelta
+            now = datetime.now(timezone.utc)
+            owner.created_at = now - timedelta(hours=1)
+            owner.meta = {**meta, 'checkpoint_yield': 'previous-checkpoint', 'checkpoint_resume': 'previous-checkpoint'}
+            stage['job_row_id'] = 'latest-checkpoint'
+            run.lifecycle = {'adaptive_checkpoints': {'checkpoint-111': dict(stage)}}
+            session.add(InfraInstance(id='latest-checkpoint', run_id=run.id, ticket_id=train.id,
+                instance_id='456' if scenario == 'foreign_allocation' else '123', provider='cluster',
+                released_at=now, created_at=now, status='released',
+                meta={**meta, 'allocation_owner_row_id': 'another-owner' if scenario == 'foreign_allocation' else owner.id}))
+            if scenario == 'newer_train':
+                session.add(InfraInstance(id='newer', run_id=run.id, ticket_id=train.id,
+                    instance_id='123', provider='cluster', created_at=now + timedelta(seconds=1),
+                    meta={'controller_directory': '/controller', 'scheduler_state': 'RUNNING', 'allocation_owner_row_id': owner.id}))
         if scenario == 'previous_segment':
             from datetime import datetime, timezone, timedelta
             session.add(InfraInstance(id='previous-train-row', run_id=run.id, ticket_id=train.id,
@@ -483,7 +510,7 @@ async def test_checkpoint_inference_borrows_only_verified_idle_train_allocation(
                           remote_work_dir='/remote', stdout_path='/out', stderr_path='/err'),
                       info=SimpleNamespace(cluster=SimpleNamespace(env_setup='')),
                       heartbeat_id='infer-hb', sha256='digest')
-        if scenario in {'yielded', 'previous_segment'}:
+        if scenario in {'yielded', 'previous_segment', 'released_checkpoint'}:
             job, submitted = await submit_workload(session, **kwargs)
             assert job == '123' and submitted['allocation_owner_row_id'] == 'owner'
             assert any('infer-hb' in command for command in commands)

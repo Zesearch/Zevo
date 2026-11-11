@@ -2,14 +2,137 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from tests.test_cloud_resource_recovery import setup, tick
 from tests.test_direct_jobs import info_for
 from tests.test_ticket_repair_state import session
-from zevo.db import Run, Ticket, InfraInstance, WorkProduct, AgentWakeupRequest, RunInstruction, HeartbeatRun, ExecutionEvent
+from zevo.db import Run, Ticket, InfraInstance, WorkProduct, AgentWakeupRequest, RunInstruction, HeartbeatRun, ExecutionEvent, TicketMessage
 from zevo.engine.run import resource_recovery as recovery
 from zevo.engine.run.runner import _activate_failed_workload_repair
+
+
+@pytest_asyncio.fixture
+async def walltime(setup, tmp_path, monkeypatch):
+    from tests.test_ssh_provider_contract import _device
+    from zevo.contracts.infrastructure import InfrastructureDeviceInfo
+    from zevo.engine.run import remote_jobs, resource_cleanup, gpu_controller
+    from zevo.engine.run.training_continuation import queue_continuation
+    s = setup
+    s.run.gpu_provider = s.owner.provider = s.job.provider = 'cluster'
+    s.ticket.agent_id = 'train'
+    s.ticket.iteration = 2
+    s.ticket.repair_attempts = 20
+    s.owner.ticket_id = s.ticket.id
+    device = tmp_path / 'cluster.json'
+    device.write_text(InfrastructureDeviceInfo.model_validate(_device('cluster')).model_dump_json())
+    s.ticket.inputs = {'device_info': {'path': str(device), 'artifact_role': 'device_info'}}
+    s.job.meta = {**s.job.meta, 'monitor_terminal': True, 'scheduler_state': 'COMPLETED'}
+    proof = dict(verified=True, reason='walltime', ticket_id=s.ticket.id,
+                 source_resource_id=s.job.id, source_job_id=s.job.instance_id,
+                 completed_steps=1928, planned_steps=2447)
+    hb = HeartbeatRun(ticket_id=s.ticket.id, agent_id='train', driver='test', model='test')
+    s.db.add(hb)
+    await queue_continuation(s.db, s.ticket, hb, s.job, proof)
+    await s.db.commit()
+    s.stop = AsyncMock(return_value={'attempted': False})
+    s.state = AsyncMock(return_value='RUNNING')
+    s.release = AsyncMock(return_value=False)
+    monkeypatch.setattr(remote_jobs, 'cancel_ticket_remote_job', s.stop)
+    monkeypatch.setattr(gpu_controller, '_retained_allocation_state', s.state)
+    monkeypatch.setattr(resource_cleanup, 'release_cluster', s.release)
+    s.proof, s.hb = proof, hb
+    return s
+
+
+@pytest.mark.asyncio
+async def test_walltime_releases_exact_owner_before_normal_continuation(walltime):
+    from zevo.engine.run.training_continuation import queue_continuation
+    s = walltime
+    assert s.ticket.status == 'waiting_external' and s.ticket.repair_route == ''
+    assert s.hb.activation_phase == 'continue' and s.hb.finished_at
+    assert await recovery.reconcile(s.db) == 0
+    assert s.release.call_args.args[1] is s.owner
+    assert not (await s.db.scalars(select(AgentWakeupRequest))).all()
+    # Another scheduler pass cannot wake the Agent or reuse the retiring owner.
+    assert await recovery.reconcile(s.db) == 0
+    s.release.return_value = True
+    assert await recovery.reconcile(s.db) == 1
+    assert s.owner.released_at and s.owner.release_reason == 'Confirmed release for walltime continuation'
+    assert s.ticket.status == 'queued' and s.ticket.repair_route == ''
+    assert s.ticket.repair_attempts == 20 and s.ticket.iteration == 2
+    assert 'execution_repair' not in s.job.meta
+    assert not (await s.db.scalars(select(TicketMessage))).all()
+    wake = (await s.db.scalars(select(AgentWakeupRequest))).one()
+    assert wake.source == 'training_continuation'
+    assert wake.payload['continuation_resource_id'] == s.job.id
+    # Even after the wake is consumed, redelivery cannot enqueue it twice.
+    wake.status = 'completed'
+    await s.db.commit()
+    await queue_continuation(s.db, s.ticket, s.hb, s.job, s.proof)
+    await s.db.commit()
+    assert await recovery.reconcile(s.db) == 0
+    assert len((await s.db.scalars(select(AgentWakeupRequest))).all()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('barrier', ['pause', 'cancel', 'live_agent', 'other_workload'])
+async def test_walltime_handoff_respects_control_and_other_work(walltime, barrier):
+    s = walltime
+    if barrier == 'pause':
+        s.db.add(RunInstruction(run_id=s.run.id, status='needs_input', body='Pause'))
+    elif barrier == 'cancel':
+        s.run.cancel_requested_at = datetime.now(timezone.utc)
+    elif barrier == 'live_agent':
+        s.db.add(HeartbeatRun(ticket_id=s.ticket.id, agent_id='train', driver='test', model='test'))
+    else:
+        s.db.add_all([Ticket(id='other', run_id=s.run.id, agent_id='evaluation', status='running'),
+            InfraInstance(id='other-job', run_id=s.run.id, ticket_id='other', provider='cluster',
+                          instance_id='456', meta={'allocation_owner_row_id': s.owner.id})])
+    await s.db.commit()
+    s.release.return_value = True
+    assert await recovery.reconcile(s.db) == 0
+    s.stop.assert_not_awaited()
+    s.release.assert_not_awaited()
+    assert not (await s.db.scalars(select(AgentWakeupRequest))).all()
+
+
+@pytest.mark.asyncio
+async def test_walltime_handoff_rejects_changed_execution(walltime):
+    s = walltime
+    event = s.run.lifecycle[recovery.KEY][s.ticket.id]
+    recovery.save(s.run, s.ticket.id, {**event, 'execution_id': 'different-execution'})
+    await s.db.commit()
+    assert await recovery.reconcile(s.db) == 0
+    s.release.assert_not_awaited()
+    assert s.ticket.status == 'awaiting_input'
+    assert not (await s.db.scalars(select(AgentWakeupRequest))).all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source', ['slurm_watcher', 'reconciler', 'training_continuation'])
+async def test_old_wake_cannot_activate_train_during_walltime_handoff(walltime, source):
+    from zevo.engine.run.runner import run_ticket
+    s = walltime
+    before = set((await s.db.scalars(select(HeartbeatRun.id))).all())
+    assert await run_ticket(s.db, ticket_id=s.ticket.id, activation_source=source,
+                            activation_payload={'continuation_resource_id': s.job.id}) is s.ticket
+    assert s.ticket.status == 'waiting_external'
+    assert set((await s.db.scalars(select(HeartbeatRun.id))).all()) == before
+
+
+@pytest.mark.asyncio
+async def test_stale_continuation_wake_cannot_resume_another_execution(walltime):
+    from zevo.engine.run.runner import run_ticket
+    s = walltime
+    s.release.return_value = True
+    assert await recovery.reconcile(s.db) == 1
+    before = set((await s.db.scalars(select(HeartbeatRun.id))).all())
+    assert await run_ticket(s.db, ticket_id=s.ticket.id, activation_source='training_continuation',
+                            activation_payload={'continuation_resource_id': 'older-execution'}) is s.ticket
+    assert s.ticket.status == 'queued'
+    assert set((await s.db.scalars(select(HeartbeatRun.id))).all()) == before
 
 
 @pytest.mark.asyncio
@@ -118,11 +241,12 @@ async def test_heldout_deterministic_evaluation_retries_only_verified_interrupti
     session.add_all([ticket, HeartbeatRun(id='hb',ticket_id=ticket.id,agent_id='evaluation',driver='evaluation_runner',model='system',finished_at=datetime.now(timezone.utc)),
         InfraInstance(id='job',run_id='r',ticket_id=ticket.id,provider='cluster',instance_id='123',status='released',meta={'resource_request':True,'scheduler_state':state,'scheduler_exit_code':code,'execution_attempt':1})])
     await session.commit()
-    assert await _activate_failed_workload_repair(session,ticket) is allowed
-    assert ticket.repair_attempts == int(allowed)
-    assert ticket.repair_route == ('self' if allowed else 'terminal')
-    assert await _activate_failed_workload_repair(session,ticket) is allowed
-    assert ticket.repair_attempts == int(allowed)
+    normal_expiry = state == 'TIMEOUT' or code == '75:0'
+    assert await _activate_failed_workload_repair(session,ticket) is (allowed and not normal_expiry)
+    assert ticket.repair_attempts == int(allowed and not normal_expiry)
+    assert ticket.repair_route == ('' if normal_expiry else 'self' if allowed else 'terminal')
+    assert await _activate_failed_workload_repair(session,ticket) is (allowed and not normal_expiry)
+    assert ticket.repair_attempts == int(allowed and not normal_expiry)
 
 
 @pytest.mark.asyncio

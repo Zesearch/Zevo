@@ -133,7 +133,7 @@ async def handoff(session, run, owner, health):
     # execution row. Otherwise their late errors enqueue a second review of
     # the same lost resource and can overwrite the committed handoff.
     candidates = (await session.scalars(select(Ticket).where(Ticket.run_id == run.id,
-        Ticket.agent_id.in_(["data", "train", "inference", "evaluation"]),
+        Ticket.agent_id.in_(["data", "train", "inference", "evaluation", "registry"]),
         Ticket.status.notin_(list(TERMINAL_TICKET_STATUSES))).with_for_update())).all()
     affected_ids = set()
     from zevo.engine.run.remote_jobs import _device_info_for_ticket

@@ -870,7 +870,7 @@ async def _build_infra_input(
 async def _slurm_stage_job_contract(
     *, run: Run, ticket: Ticket, work_dir: str, filename: str,
     device_info_path: str, session: AsyncSession,
-    stage: Literal["data", "train", "inference", "evaluation"],
+    stage: Literal["data", "train", "inference", "evaluation", "registry"],
     inference_config_path: str = "",
 ) -> SlurmStageJobContract:
     """Stamp a new submission or the newest backend-observed Slurm job."""
@@ -889,7 +889,7 @@ async def _slurm_stage_job_contract(
             f"stage provider {expected_provider!r} differs from Infrastructure "
             f"provider {info.provider!r}"
         )
-    if not cluster:
+    if not cluster and stage != "registry":
         from zevo.db import GpuLease
         if expected_provider == "instance":
             recorded = list((await session.execute(select(GpuLease).where(
@@ -924,7 +924,7 @@ async def _slurm_stage_job_contract(
     requested_gpus = await requested_slurm_gpus(session, ticket.id) if cluster and session is not None else 0
     from zevo.engine.run.adaptive_training import checkpoint_resume_authorized
     checkpoint_resume = checkpoint_resume_authorized(run, ticket, job_row)
-    from zevo.engine.run.training_continuation import authorized as continuation_authorized
+    from zevo.engine.run.stage_continuation import authorized as continuation_authorized
     walltime_resume = continuation_authorized(ticket, job_row)
     repair_submission = bool(
         job_row is not None
@@ -949,9 +949,15 @@ async def _slurm_stage_job_contract(
         replan = job_row is None or (repair_submission and bool(restart_instruction_id))
         registered_gpus = int(job_row.gpu_count or 0) if not replan else 0
         registered_nodes = int(meta.get("nodes") or 0) if not replan else 0
+        if replan and stage == "registry":
+            # Offer the already verified resource envelope without probing or
+            # estimating model inference for an optional metadata-only stage.
+            # No allocation is claimed until Registry returns a prepared job.
+            registered_gpus = info.resource_plan.num_gpus
+            registered_nodes = info.resource_plan.nodes
         capacity = None
         capacity_error = ""
-        if replan:
+        if replan and stage != "registry":
             try:
                 capacity = await probe_slurm_capacity(info)
             except (OSError, ValueError) as exc:
@@ -2051,6 +2057,10 @@ async def _build_input(
             if receipt.get("identity") == identity and receipt.get("ticket_id", ticket.id) == ticket.id:
                 registry_input.saved_model_path = receipt["path"]
                 registry_input.saved_model_revision = receipt["revision"]
+        if registry_input.device_info_path:
+            registry_input.slurm_job = await _slurm_stage_job_contract(
+                run=run, ticket=ticket, work_dir=work_dir, filename="registry.sbatch",
+                device_info_path=registry_input.device_info_path, session=session, stage="registry")
         return registry_input
     raise ValueError(f"no input builder for agent_id={agent_id!r}")
 
@@ -3314,6 +3324,19 @@ def _extract_summary_artifact_meta(
                 "source_path": inp.reusable_predict_script_path if reused else "",
             }
     elif isinstance(result, RegisterResult):
+        # Registry may finish metadata/file work locally, or opt into the same
+        # finite execution contract for an operation requiring compute.
+        if result.slurm_script_path or status == "deferred" or (
+            isinstance(inp, RegisterTaskInput) and inp.slurm_job.enabled
+            and inp.slurm_job.phase == "collect"
+        ):
+            problem = _slurm_stage_result_problem(inp, result.slurm_script_path, "register.py")
+            if status == "succeeded" and inp.slurm_job.phase != "collect":
+                problem = "Registry compute must be submitted with deferred and collected before success"
+            if status == "succeeded" and inp.slurm_job.scheduler_state != "COMPLETED":
+                problem = "Registry compute has not completed successfully"
+            if status in {"succeeded", "deferred"} and problem:
+                return "failed", problem, "", {}
         meta = {}
         if status == "succeeded":
             problems: list[str] = []
@@ -3502,7 +3525,7 @@ _TICKET_ARTIFACTS: dict[str, list[tuple[str, str]]] = {
                        ("predict_script_path", "script"),
                        ("slurm_script_path", "slurm_script"), ("log_path", "log")],
     "registry": [("registry_path", "registry_entry"),
-                 ("register_script_path", "script")],
+                 ("register_script_path", "script"), ("slurm_script_path", "slurm_script")],
 }
 
 
@@ -4434,6 +4457,7 @@ def _slurm_stage_implementation_sha256(contract: SlurmStageJobContract) -> str:
         "train": "train.py",
         "inference": "predict.py",
         "evaluation": "evaluation-bundle.sha256",
+        "registry": "register.py",
     }.get(contract.stage)
     if not executable:
         raise ValueError(f"unsupported Slurm stage implementation: {contract.stage!r}")
@@ -4524,9 +4548,9 @@ async def _submit_validated_slurm_stage_once(
     if contract.phase != "submit":
         raise ValueError("engine Slurm commit is valid only during submit phase")
     previous = await _latest_slurm_resource_request(session, ticket)
-    from zevo.engine.run.training_continuation import authorized as continuation_authorized
+    from zevo.engine.run.stage_continuation import authorized as continuation_authorized
     walltime_resume = continuation_authorized(ticket, previous)
-    resume_proof = dict((previous.meta or {}).get("training_continuation") or {}) if walltime_resume else {}
+    resume_proof = dict((previous.meta or {}).get("training_continuation") or (previous.meta or {}).get("stage_continuation") or {}) if walltime_resume else {}
     training_digest = ""
     if isinstance(inp, TrainTaskInput):
         from zevo.engine.run.repair_progress import verify_repair_training_config
@@ -4955,7 +4979,7 @@ async def _escalate_stored_payload_validation_failure(
 
 def resumable_stage_interruption(ticket, row) -> bool:
     """Allow unchanged workloads after allocation loss, within repair limits."""
-    if row is None or ticket.agent_id not in {"data", "train", "inference", "evaluation"}:
+    if row is None or ticket.agent_id not in {"data", "train", "inference", "evaluation", "registry"}:
         return False
     meta = row.meta or {}
     state = str(meta.get("scheduler_state") or "").upper().split("+")[0].split(" ")[0]
@@ -4976,6 +5000,15 @@ async def _activate_failed_workload_repair(session: AsyncSession, ticket: Ticket
     state = str(meta.get("scheduler_state") or "").upper().split("+")[0].split(" ")[0]
     if state not in _SLURM_TERMINAL_STATES or state == "COMPLETED":
         return True
+    from zevo.engine.run.stage_continuation import expired, queue_continuation
+    if expired(ticket, row) and "repair_activation_authorized" not in meta:
+        if ticket.agent_id == "train":
+            # Collect must verify the full trainer state before authorizing
+            # another submission. Expiry itself is not a repair attempt.
+            return True
+        await queue_continuation(session, ticket, row)
+        await session.commit()
+        return False
     if "repair_activation_authorized" in meta:
         return bool(meta["repair_activation_authorized"])
     error = (
@@ -5052,6 +5085,16 @@ async def run_ticket(
         await session.commit()
         return tk
     activation_payload = dict(activation_payload or {})
+    from zevo.engine.run.resource_recovery import KEY as resource_handoffs_key
+    handoff = (run.lifecycle or {}).get(resource_handoffs_key, {}).get(tk.id, {})
+    if handoff.get("kind") == "continuation" and handoff.get("phase") != "resumed":
+        return tk  # The engine owns retirement; stale wakeups cannot start Train early.
+    if activation_payload.get("continuation_resource_id"):
+        from zevo.engine.run.stage_continuation import authorized as continuation_authorized
+        previous = await _latest_slurm_resource_request(session, tk)
+        if (previous is None or previous.id != activation_payload["continuation_resource_id"]
+            or not continuation_authorized(tk, previous)):
+            return tk  # A delayed continuation cannot resume a newer execution.
     from zevo.engine.run.stage_queue import preparation_already_queued
     if await preparation_already_queued(session, run, tk, activation_payload):
         return tk
@@ -5085,7 +5128,8 @@ async def run_ticket(
             return tk
     if activation_source in {"slurm_watcher", "workload_watcher"}:
         if not await _activate_failed_workload_repair(session, tk):
-            await _maybe_wake_supervisor(session, tk)
+            if tk.status not in {"queued", "waiting_external"}:
+                await _maybe_wake_supervisor(session, tk)
             return tk
 
     # Background transcript and progress writers need independent sessions, but
@@ -5280,6 +5324,7 @@ async def run_ticket(
         phase = getattr(getattr(inp, "slurm_job", None), "phase", "")
         boundary = (
             "one_decision" if tk.agent_id == "orchestrator" else
+            "execution_or_submission" if tk.agent_id == "registry" and phase == "submit" else
             "submission" if getattr(getattr(inp, "slurm_job", None), "enabled", False) and phase == "submit" else
             "collection" if getattr(getattr(inp, "slurm_job", None), "enabled", False) and phase == "collect" else
             "execution"
@@ -5433,7 +5478,13 @@ async def run_ticket(
         # This tag lets the Run Timeline omit a steering-only activation while
         # retaining the heartbeat as a complete audit record.
         hb.activation_phase = "instruction"
-    elif tk.agent_id == "train" and activation_payload.get("adaptive_resume_request_id"):
+    elif activation_payload.get("continuation_resource_id") or (
+        tk.agent_id == "train" and activation_payload.get("adaptive_resume_request_id")
+    ):
+        hb.activation_phase = "continue"
+    elif (isinstance(slurm_contract, SlurmStageJobContract)
+          and slurm_contract.phase == "collect"
+          and slurm_contract.scheduler_state in {"TIMEOUT", "DEADLINE"}):
         hb.activation_phase = "continue"
     elif status_at_pickup == "repairing":
         hb.activation_phase = "repair"
@@ -6449,7 +6500,7 @@ async def run_ticket(
     pending_continuation = None
     await session.refresh(tk)
     cancelled_by_user = tk.status == "cancelled"
-    if run.gpu_provider == "cloud" and tk.agent_id in {"data", "train", "inference", "evaluation"}:
+    if run.gpu_provider == "cloud" and tk.agent_id in {"data", "train", "inference", "evaluation", "registry"}:
         from zevo.engine.run.cloud_recovery import binding_lost
         if await binding_lost(session, run.id, getattr(inp, "device_info_path", "")):
             # The provider watcher already committed recovery. A late Agent
@@ -6465,7 +6516,7 @@ async def run_ticket(
         if (
             not cancelled_by_user
             and not heldout_access_hits
-            and tk.agent_id in {"data", "train", "inference", "evaluation"}
+            and tk.agent_id in {"data", "train", "inference", "evaluation", "registry"}
             and _slurm_job_was_submitted_by(deferred_stage_row, heartbeat_id)
         ):
             # Submission is already a durable side effect. A malformed
@@ -6637,9 +6688,9 @@ async def run_ticket(
             except (OSError, ValueError) as exc:
                 runtime_contract_mismatches["frozen_reuse_artifacts"] = {"declared": "unchanged bound files", "reported": str(exc)}
         if status == "deferred":
-            if not isinstance(output, (DataResult, TrainResult, InferenceResult, EvaluationResult)):
+            if not isinstance(output, (DataResult, TrainResult, InferenceResult, EvaluationResult, RegisterResult)):
                 runtime_contract_mismatches["deferred_status"] = {
-                    "declared": "Data, Train, Inference, or Evaluation cluster resource request",
+                    "declared": "engine-owned finite stage resource request",
                     "reported": type(output).__name__,
                 }
             elif not isinstance(
@@ -7308,7 +7359,7 @@ async def run_ticket(
                 artifact = ""
                 artifact_meta = {}
 
-        if (isinstance(output, (DataResult, TrainResult, InferenceResult, EvaluationResult)) and status == "failed"
+        if (isinstance(output, (DataResult, TrainResult, InferenceResult, EvaluationResult, RegisterResult)) and status == "failed"
             and output.execution_retry_reason.strip()
             and output.execution_retry_action == "resubmit"
             and getattr(getattr(inp, "slurm_job", None), "phase", "") == "collect"):

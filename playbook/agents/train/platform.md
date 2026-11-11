@@ -256,7 +256,8 @@ records the binding for continuation. Use a Ticket-stable `runtime/` path when
 needed; do not change configuration bytes between continuation attempts.
 Leave final `checkpoint_path` and `intermediate_checkpoints` empty. The backend
 verifies the frozen plan, progress, configuration and full-state file inventory,
-then queues a new submit activation on this SAME ticket, without a repair count
+then confirms release of the exhausted cluster allocation before queuing a new
+submit activation on this SAME ticket, without a repair count
 or an Orchestrator experiment change. Never wait on the old terminal job or
 change exit codes solely to force repair.
 
@@ -268,7 +269,12 @@ selection ledger. Verify the actual restored global step and state before the
 next scheduled update. Do not redo startup training steps, restart from the
 parent, shorten the plan to fit one allocation, or publish a partial checkpoint
 as the final model. The engine requests a fresh window instead of reusing the
-allocation that triggered the walltime stop. Only a fully completed plan may
+allocation that triggered the walltime stop. Do not return `failed` with
+`replace_resource` solely because that previous allocation ran out of walltime;
+the engine owns this normal handoff. Input `continuation` is a resume instruction,
+not an output field to echo during submit or failure. A finite process window on
+a cloud or fixed instance does not by itself require replacing that host.
+Only a fully completed plan may
 return `succeeded`. Corrupt/missing/weights-only state must fail explicitly.
 Standard Transformers/TRL full-state layouts (including sharded weights) are
 verified automatically; unsupported optimizer-state layouts need an explicit

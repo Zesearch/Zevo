@@ -109,13 +109,20 @@ async def submit(session, *, run, ticket, inp, heartbeat_id, remote_train_config
         if (not previous or previous.id != contract.retry_of_bookkeeping_row_id
                 or previous.instance_id != contract.retry_of_job_id
                 or int(previous.meta.get("execution_attempt", 1)) + 1 != contract.attempt
-                or previous.meta.get("scheduler_state") not in {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL"}):
+                or previous.meta.get("scheduler_state") not in {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "DEADLINE", "PREEMPTED", "BOOT_FAIL", "REVOKED", "OUT_OF_MEMORY"}):
             raise ValueError("replacement must supersede the exact terminal execution")
     elif previous:
         raise ValueError("a workload already exists for this ticket")
     info = InfrastructureDeviceInfo.model_validate_json(Path(inp.device_info_path).read_text())
     if info.provider not in {"cloud", "instance"} or info.provider != run.gpu_provider or not info.instance:
         raise ValueError("direct workload requires the Run's existing host")
+    if info.provider == "instance":
+        from zevo.db import GpuLease
+        leases = (await session.scalars(select(GpuLease).where(GpuLease.run_id == run.id))).all()
+        live = [lease for lease in leases if lease.released_at is None]
+        if leases and (not live or {lease.gpu_index for lease in live} != {d.index for d in info.gpu.devices}
+                       or any(lease.ticket_id and lease.ticket_id != info.ticket_id for lease in live)):
+            raise ValueError("GPU lease has been released or replaced; cannot publish a workload")
     owners = (await session.scalars(select(InfraInstance).where(
         InfraInstance.run_id == run.id, InfraInstance.provider == info.provider,
         InfraInstance.released_at.is_(None)))).all()
@@ -128,7 +135,7 @@ async def submit(session, *, run, ticket, inp, heartbeat_id, remote_train_config
     if previous:
         from zevo.engine.run.remeasurement import restarts_workload
         from zevo.engine.run.adaptive_training import checkpoint_resume_authorized
-        from zevo.engine.run.training_continuation import authorized as continuation_authorized
+        from zevo.engine.run.stage_continuation import authorized as continuation_authorized
         from zevo.engine.run.runner import resumable_stage_interruption, execution_retry_authorized
         continuing = continuation_authorized(ticket, previous)
         restart = bool(contract.restart_instruction_id or restarts_workload(run, ticket.id, previous.id)
@@ -137,7 +144,7 @@ async def submit(session, *, run, ticket, inp, heartbeat_id, remote_train_config
                        or execution_retry_authorized(previous.meta))
         if previous.meta.get("implementation_sha256") == implementation and not restart:
             raise ValueError("unchanged failed workload requires a verified continuation or authorized restart")
-        if continuing:
+        if continuing and ticket.agent_id == "train":
             from types import SimpleNamespace
             from zevo.contracts.train import TrainingContinuation
             from zevo.engine.run.training_continuation import verify_request
