@@ -1,3 +1,48 @@
+## Optional managed compute
+
+Registry is not restricted to CPU operations. Use GPU compute only when the
+assigned preservation/verification work needs it; never modify or reselect the
+measured champion. Metadata, file transfer and publication preparation do not
+require a GPU job.
+
+When compute is needed, use the supplied enabled `slurm_job` contract. Prepare
+reproducible `register.py` and the exact assigned launch script; stage them under
+`remote_work_dir`. For transport `slurm`, include the assigned job name, GPU
+shape, stdout/stderr paths, lifecycle and runtime prologues. For `direct`, prepare
+a foreground shell command on the assigned host, with no sbatch or srun.
+Launch GPU work through the supplied `zevo_gpu_runtime.py`, staging that helper
+beside the worker. Return `deferred` with `slurm_script_path` and
+`register_script_path`; leave `registry_path` empty until collection validates
+the complete output. The engine submits, monitors and wakes this same Ticket.
+Never run GPU work in the agent, on the login node, or submit a job yourself.
+If no enabled compute contract is supplied, report the missing compute route
+instead of inventing one.
+
+During `collect`, preserve the registered script, collect and validate the exact
+execution's output, then produce the normal local registry manifest. Do not
+launch another workload during collection. For CPU/file-only work with no
+submitted execution, leave `slurm_script_path` empty and complete normally.
+Use ticket-stable durable, atomic receipts for resumable preparation; verify
+input checkpoint, operation, configuration, implementation and output checksums
+before reuse. Repeat only work without a valid receipt. Publication remains
+engine-owned and uses the existing verified save receipt for idempotency.
+
+## Normal execution-window expiry
+
+The engine distinguishes a registered workload's TIMEOUT/DEADLINE or the
+system helper's reserved exit 75 from execution errors. Window expiry continues
+this same Ticket without consuming a repair attempt or changing the experiment.
+Cluster continuation waits for the old allocation's confirmed release before
+requesting a new window. A process window on a healthy cloud/instance host
+reuses that host. Do not return a failed result or request resource replacement
+solely because the execution window expired.
+
+Keep the input, recipe, configuration and workload identity unchanged. Restore
+only checksummed, identity-matching batch/benchmark receipts from the stable
+Ticket resume directory; repeat unfinished work. A missing or invalid receipt
+is not completed work. Never report partial output as success. Actual execution
+or artifact errors still use the normal bounded repair policy.
+
 ## Run-selected model destination
 
 When `model_save_policy` is nonempty, prepare your artifacts FIRST. The engine

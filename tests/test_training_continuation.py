@@ -1,7 +1,9 @@
 """A completed finite job can bank a partial plan without failing its ticket."""
 import hashlib
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -63,7 +65,13 @@ def test_incomplete_or_changed_state_cannot_continue(saved, damage, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_verified_exit_zero_queues_same_ticket_without_repair(saved):
+@pytest.mark.parametrize('provider', ['cluster', 'cloud', 'instance'])
+async def test_verified_exit_zero_queues_same_ticket_without_repair(saved, monkeypatch, provider):
+    from zevo.engine.run import resource_recovery, remote_jobs
+    from zevo.contracts.infrastructure import InfrastructureDeviceInfo
+    from tests.test_ssh_provider_contract import _device
+    monkeypatch.setattr(remote_jobs, '_device_info_for_ticket',
+                        AsyncMock(return_value=InfrastructureDeviceInfo.model_validate(_device('cluster'))))
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -72,17 +80,24 @@ async def test_verified_exit_zero_queues_same_ticket_without_repair(saved):
         run = Run(id='run', task_name='task', metric='accuracy', status='running')
         ticket = Ticket(id='train-ticket', run_id='run', agent_id='train', status='running', repair_attempts=2)
         hb = HeartbeatRun(id='collect-hb', agent_id='train', ticket_id=ticket.id, driver='test', model='test')
-        row = InfraInstance(id='old', instance_id='123', provider='cluster', run_id='run', ticket_id=ticket.id,
-            status='released', meta={'scheduler_state': 'COMPLETED'})
+        row = InfraInstance(id='old', instance_id='123', provider=provider, run_id='run', ticket_id=ticket.id,
+            status='released', released_at=datetime.now(timezone.utc),
+            meta={'scheduler_state': 'COMPLETED', 'resource_request': True})
         session.add_all([run, ticket, hb, row]); await session.commit()
         proof = {**verify_files(**saved), 'source_resource_id': row.id, 'source_job_id': row.instance_id}
         await queue_continuation(session, ticket, hb, row, proof)
+        await session.commit()
+        if provider == 'cluster':
+            assert ticket.status == 'waiting_external'
+            assert await resource_recovery.reconcile(session) == 1
         assert ticket.status == 'queued' and ticket.repair_attempts == 2
         assert hb.finished_at and hb.activation_phase == 'continue'
         assert authorized(ticket, row)
         assert not authorized(SimpleNamespace(id='different', agent_id='train'), row)
         # Redelivery coalesces; it must not produce two new submissions.
         await queue_continuation(session, ticket, hb, row, proof)
+        await session.commit()
+        assert await resource_recovery.reconcile(session) == 0
         queued = (await session.execute(select(AgentWakeupRequest).where(AgentWakeupRequest.status == 'queued'))).scalars().all()
         assert len(queued) == 1
         assert queued[0].ticket_id == ticket.id

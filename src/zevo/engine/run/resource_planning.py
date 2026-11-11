@@ -263,7 +263,7 @@ def plan_stage_resources(
         )
         estimated = max(estimated, inference_gpus_per_replica)
 
-    single_node = stage in {"data", "inference", "evaluation"}
+    single_node = stage in {"data", "inference", "evaluation", "registry"}
     if requested_gpus:
         if requested_gpus < estimated or (maximum_gpus and requested_gpus > maximum_gpus):
             raise ValueError(f"requested {requested_gpus} GPUs outside stage requirement {estimated} and Run maximum {maximum_gpus or 'unlimited'}")

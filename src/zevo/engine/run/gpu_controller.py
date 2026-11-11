@@ -369,6 +369,20 @@ def _checkpoint_allocation_handoff(run, ticket, consumer, train):
     )
 
 
+async def checkpoint_execution(session, run, ticket):
+    """Resolve the checkpoint's exact execution, even after workload cleanup.
+
+    released_at on an execution alias does not release its allocation owner.
+    Never substitute an older checkpoint or an arbitrary Train execution.
+    """
+    from zevo.db import InfraInstance, Ticket
+    request = (ticket.payload or {}).get("mid_training_checkpoint") or {}
+    stage = (run.lifecycle or {}).get("adaptive_checkpoints", {}).get(request.get("request_id"), {})
+    row = await session.get(InfraInstance, stage["job_row_id"]) if stage.get("job_row_id") else None
+    train = await session.get(Ticket, row.ticket_id) if row else None
+    return row if row and _checkpoint_allocation_handoff(run, ticket, row, train) else None
+
+
 async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id, sha256, publication=None, continuation=None):
     """Reuse a healthy owned allocation or submit one finite controller job."""
     from sqlalchemy import select
@@ -397,6 +411,8 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             Ticket.status.notin_(["succeeded", "degraded", "failed", "cancelled", "skipped"]),
         ).order_by(InfraInstance.created_at.desc())
     )).scalars().all())
+    checkpoint = await checkpoint_execution(session, run, ticket)
+    from zevo.engine.run.lifecycle import aware
     owner = None
     for row in candidates:
         meta = dict(row.meta or {})
@@ -404,6 +420,14 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             continue
         if run.gpu_allocation_mode != "per_run" and row.ticket_id != ticket.id:
             continue
+        from zevo.engine.run.resource_recovery import KEY as resource_handoffs_key
+        if any(event.get("owner_id") == row.id and event.get("kind") == "continuation"
+               and event.get("phase") != "resumed"
+               for event in (run.lifecycle or {}).get(resource_handoffs_key, {}).values()):
+            # Retirement is already decided. Do not lend this allocation to
+            # another stage while the scheduler is confirming its release.
+            return waiting_submission(blocker=ticket, contract=contract, info=info,
+                heartbeat_id=heartbeat_id, sha256=sha256, continuation=continuation)
         state = await _retained_allocation_state(info, row.instance_id)
         if run.gpu_allocation_mode == "per_submission" and state not in _TERMINAL_ALLOCATION_STATES:
             raise ValueError("previous submission allocation is still active or terminating; retry after Slurm releases it")
@@ -420,25 +444,23 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             raise ValueError("stage does not fit the retained run allocation; resource plan must cover all stages")
         # No concurrent commands on one set of GPUs. Keep waits in the backend
         # until the current stage (including repair and collect) has settled.
-        for consumer_index, consumer in enumerate(active_consumers):
+        for consumer in active_consumers:
             if (consumer.meta or {}).get("controller_directory") != meta["controller_directory"]:
                 continue
             train = await session.get(Ticket, consumer.ticket_id)
             # Earlier completed segments remain as bookkeeping rows on the same
             # Train ticket. The verified current checkpoint supersedes them.
-            current_checkpoint = next((other for other in active_consumers
-                if other.ticket_id == consumer.ticket_id
-                and (other.meta or {}).get("controller_directory") == meta["controller_directory"]
-                and _checkpoint_allocation_handoff(run, ticket, other, train)), None)
-            if (current_checkpoint is not None
-                    and consumer_index > active_consumers.index(current_checkpoint)
+            if (checkpoint is not None and checkpoint.ticket_id == consumer.ticket_id
+                    and ((checkpoint.meta or {}).get("allocation_owner_row_id") or checkpoint.id) == row.id
+                    and checkpoint.instance_id == row.instance_id
+                    and (checkpoint.meta or {}).get("controller_directory") == meta["controller_directory"]
+                    and aware(consumer.created_at) <= aware(checkpoint.created_at)
                     and (consumer.meta or {}).get("scheduler_state") == "COMPLETED"):
                 continue
-            if not _checkpoint_allocation_handoff(run, ticket, consumer, train):
-                if run.gpu_allocation_mode == "per_run":
-                    return waiting_submission(blocker=train, contract=contract, info=info,
-                        heartbeat_id=heartbeat_id, sha256=sha256, continuation=continuation)
-                raise ValueError("retained allocation is busy with another stage")
+            if run.gpu_allocation_mode == "per_run":
+                return waiting_submission(blocker=train, contract=contract, info=info,
+                    heartbeat_id=heartbeat_id, sha256=sha256, continuation=continuation)
+            raise ValueError("retained allocation is busy with another stage")
         if continuation and continuation.get("source_job_id") == row.instance_id:
             # The worker already yielded for walltime. Do not send it back into
             # the same exhausted window. Release this idle owned controller;
@@ -449,7 +471,11 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             release = await _ssh(info, upload_text_command(meta["controller_directory"] + "/release", "walltime continuation"))
             if not release.get("ok"):
                 raise ValueError("could not release exhausted allocation for continuation")
-            break
+            # Compatibility for already-prepared submissions: release is only
+            # a request, not proof that Slurm has returned the old GPUs. Keep
+            # this submission in the engine queue until terminal confirmation.
+            return waiting_submission(blocker=ticket, contract=contract, info=info,
+                heartbeat_id=heartbeat_id, sha256=sha256, continuation=continuation)
         owner = row
         break
     directory = ((owner.meta or {})["controller_directory"] if owner is not None

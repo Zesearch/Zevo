@@ -49,6 +49,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from zevo.contracts._base import AgentResult, AgentTaskInput
+from zevo.contracts.infrastructure import SlurmStageJobContract
 
 
 def model_tag_for_run(run_id: str) -> str:
@@ -143,6 +144,8 @@ def _main(argv: list[str] | None = None) -> int:
 
 class RegisterTaskInput(AgentTaskInput):
     """Mirror of orchestrator.RegisterPayload (after ref resolution)."""
+
+    slurm_job: SlurmStageJobContract = Field(default_factory=SlurmStageJobContract)
 
     model_save_policy: dict[str, Any] = Field(default_factory=dict)
     saved_model_path: str = ""
@@ -273,7 +276,8 @@ class RegisterTaskInput(AgentTaskInput):
 class RegisterResult(AgentResult):
     """What the Registry Agent reports back."""
 
-    status: Literal["succeeded", "failed"]
+    status: Literal["succeeded", "deferred", "failed"]
+    slurm_script_path: str = ""
 
     registry_path: str = Field(..., description="Absolute path to the Ticket-local registry manifest that was committed.")
     register_script_path: str = Field(..., description="Path to the generated register.py. '' on failure.")
