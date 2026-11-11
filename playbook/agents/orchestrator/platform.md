@@ -412,7 +412,8 @@ parent after seeing the new result, and never bind artifacts from another Run.
     "base_model": "<baseline config base model>",
     "model_source": "base_model",
     "parent_selection_rationale": "Initial adaptation starts from the measured baseline model.",
-    "configuration_suggestions": {"training_method": "<optional advice>"}
+    "selected_training_method": "<selected installed method>",
+    "configuration_suggestions": {"direction": "<optional advice>"}
   },
   "inputs": {
     "training_dataset": {"artifact_role": "training_dataset", "source_ticket_id": "data-..."},

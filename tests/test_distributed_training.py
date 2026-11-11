@@ -424,3 +424,21 @@ def test_slurm_stage_multi_node_gpus_per_node() -> None:
 def test_slurm_stage_rejects_indivisible_gpu_count() -> None:
     with pytest.raises(ValidationError):
         SlurmStageJobContract(enabled=False, num_gpus=6, nodes=4)
+
+
+def test_effective_batch_uses_data_parallel_ranks_not_tensor_parallel_ranks():
+    values = _base_training_values(world_size=4, batch_size=2,
+        gradient_accumulation_steps=2, effective_batch_size=8,
+        distributed_strategy='deepspeed', distributed=dict(backend='deepspeed', zero_stage=3,
+            nodes=1, gpus_per_node=4, tensor_parallel_size=2))
+    assert TrainingConfig(**values).effective_batch_size == 8
+    with pytest.raises(ValidationError, match='data_parallel_size'):
+        TrainingConfig(**{**values, 'effective_batch_size': 16})
+
+
+def test_zero3_without_tensor_parallel_keeps_run_0d6_batch_256():
+    values = _base_training_values(world_size=4, batch_size=4,
+        gradient_accumulation_steps=16, effective_batch_size=256,
+        distributed_strategy='deepspeed', distributed=dict(backend='deepspeed', zero_stage=3,
+            nodes=1, gpus_per_node=4, tensor_parallel_size=1))
+    assert TrainingConfig(**values).effective_batch_size == 256

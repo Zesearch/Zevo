@@ -803,7 +803,7 @@ class DistributedConfig(BaseModel):
     large models / long context. ``world_size`` is always
     ``nodes * gpus_per_node`` so it composes with
     ``effective_batch_size = batch_size * gradient_accumulation_steps *
-    world_size``.
+    (world_size / tensor_parallel_size)``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1156,11 +1156,16 @@ class TrainingConfig(BaseModel):
     def validate_realized_batch_and_peft(self) -> "TrainingConfig":
         if self.adaptive_evaluation and self.early_stopping is not None:
             raise ValueError("adaptive Validation decisions cannot be combined with loss early stopping")
-        expected = self.batch_size * self.gradient_accumulation_steps * self.world_size
+        tensor_parallel = self.distributed.tensor_parallel_size if self.distributed else 1
+        if self.world_size % tensor_parallel:
+            raise ValueError("world_size must be divisible by tensor_parallel_size")
+        data_parallel = self.world_size // tensor_parallel
+        expected = self.batch_size * self.gradient_accumulation_steps * data_parallel
         if self.effective_batch_size != expected:
             raise ValueError(
                 "effective_batch_size must equal batch_size * "
-                "gradient_accumulation_steps * world_size"
+                "gradient_accumulation_steps * data_parallel_size "
+                "(world_size / tensor_parallel_size)"
             )
         if self.distributed is not None and (
             self.distributed.world_size != self.world_size
@@ -1451,6 +1456,17 @@ def current_train_config_schema() -> dict:
     return TrainRunConfig.model_json_schema()
 
 
+def inference_execution_contract(config: InferenceRunConfig) -> dict[str, Any]:
+    """Compare execution and provenance, excluding only advisory audit records.
+
+    Parsing already removes YAML comments, key order and formatting. Keep every
+    other field, including prompt examples and nested implementation arguments;
+    a generically named 'notes' key in backend arguments is not safe to ignore.
+    File checksums still identify exact artifacts and are not rewritten here.
+    """
+    return config.model_dump(mode="json", exclude={"suggestion_decisions"})
+
+
 def load_train_config(path: str | Path) -> TrainRunConfig:
     return TrainRunConfig.model_validate(load_yaml_config(path, TrainRunConfig).model_dump())
 
@@ -1491,9 +1507,9 @@ class VllmMemoryPlan(BaseModel):
             ) / self.tensor_parallel_size
             + 4.0
         )
-        if self.target_gpu_memory_gib != expected_target:
+        if self.target_gpu_memory_gib < expected_target:
             raise ValueError(
-                "target_gpu_memory_gib must equal the engine-owned model and "
+                "target_gpu_memory_gib must be at least the engine-owned model and "
                 "workload sizing formula"
             )
         return self

@@ -208,11 +208,13 @@ def test_full_train_needs_more_gpus_when_each_gpu_has_less_vram() -> None:
         info=info,
     )
     assert (selected.estimated_gpus, selected.num_gpus) == (8, 8)
-    with pytest.raises(ValueError, match="no valid train GPU tier"):
-        plan_stage_resources(
-            stage="train", base_model="org/32B", training_method="sft",
-            info=info, maximum_gpus=4,
-        )
+    bounded = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="sft",
+        info=info, maximum_gpus=4,
+    )
+    assert bounded.num_gpus == 4
+    assert bounded.estimated_gpus == 8
+    assert "concrete memory preflight" in bounded.rationale
 
 
 def test_lora_and_inference_do_not_take_extra_gpus_merely_because_they_are_free() -> None:
@@ -308,11 +310,14 @@ def test_pinned_train_world_size_is_exact_and_must_fit() -> None:
     )
     assert (selected.estimated_gpus, selected.num_gpus, selected.nodes) == (4, 6, 1)
     assert selected.source == "pinned Train world_size"
-    with pytest.raises(ValueError, match="below estimated GPU requirement"):
-        plan_stage_resources(
-            stage="train", base_model="org/32B", training_method="sft",
-            info=info, train_world_size_pin=2,
-        )
+    smaller = plan_stage_resources(
+        stage="train", base_model="org/32B", training_method="sft",
+        info=info, train_world_size_pin=2,
+    )
+    assert smaller.num_gpus == 2
+    with pytest.raises(ValueError, match="no valid train GPU tier"):
+        plan_stage_resources(stage="train", base_model="org/32B", training_method="sft",
+                             info=info, train_world_size_pin=6, maximum_gpus=4)
 
 
 def test_slurm_snapshot_parses_node_and_qos_headroom() -> None:
@@ -385,7 +390,7 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
     )), encoding="utf-8")
     (tmp_path / "train.py").write_text(
         "from zevo_train_checkpoint import commit_checkpoint_directory\n"
-        "if False:\n"
+        "if __name__ == '__main__':\n"
         "    commit_checkpoint_directory('/tmp/staging', '/tmp/final')\n",
         encoding="utf-8",
     )

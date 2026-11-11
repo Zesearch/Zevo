@@ -243,6 +243,16 @@ class TrainTaskInput(AgentTaskInput):
         ),
     )
 
+    selected_training_method: str = Field(
+        "", description="Explicit experiment method selected by the coordinator; binding unless superseded by a user pin. Empty retains the active method or delegates choice when authorized.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_method_selection(cls, value):
+        from zevo.contracts.training_selection import normalize_method_selection
+        return normalize_method_selection(value)
+
     active_training_method: str = Field(
         "", description="Engine-resolved method of the latest measured round before this Ticket; independent of the selected parent checkpoint.",
     )

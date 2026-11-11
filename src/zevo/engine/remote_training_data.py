@@ -138,7 +138,9 @@ class RemoteTrainingPackage(BaseModel):
     prepare_script_sha256: str = Field(pattern=_SHA256_PATTERN)
     data_recipe_sha256: str = Field(pattern=_SHA256_PATTERN)
     data_signature: str = Field(pattern=_SHA256_PATTERN)
-    semantic_fingerprint_version: Literal[2]
+    semantic_fingerprint_version: Literal[2, 3]
+    recipe_hash_version: Literal[1, 2] = 1
+    legacy_data_recipe_sha256: str = ""
     blocked_semantic_fingerprints: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -200,6 +202,7 @@ class RemotePreparationReceipt(BaseModel):
     data_intent_signature: str = Field(pattern=_SHA256_PATTERN)
     source: RemoteSource
     prepare_script_sha256: str = Field(pattern=_SHA256_PATTERN)
+    recipe_hash_version: Literal[1, 2] = 1
     data_recipe_sha256: str = Field(pattern=_SHA256_PATTERN)
     preparation_signature: str = Field(pattern=_SHA256_PATTERN)
     dataset_path: str = Field(min_length=1)
@@ -267,24 +270,34 @@ def remote_preparation_signature(
     })).hexdigest()
 
 
+def executable_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in recipe.items()
+            if key not in {"direction", "audit_steps", "dataset_name"}
+            and not (key == "constraints" and not value)}
+
+
+def recipe_sha256(recipe: dict[str, Any], *, version: int = 2) -> str:
+    if version not in {1, 2}:
+        raise ValueError("unsupported recipe hash version")
+    return hashlib.sha256(_canonical_json(executable_recipe(recipe) if version == 2 else recipe)).hexdigest()
+
+
 def remote_data_signature(
     *,
     spec: RemoteDatasetSpec,
     recipe: dict[str, Any],
     prepare_script_sha256: str,
     blocked_semantic_fingerprints: Iterable[str] = (),
+    semantic_fingerprint_version: int = 3,
 ) -> str:
     """Identity of immutable source + executable recipe + scoring exclusion.
 
     Remote bytes do not exist on the scheduler.  The receipt later binds this
     intent identity to the actual remote file SHA-256 and row count.
     """
-    realized_recipe = dict(recipe)
-    realized_recipe.pop("direction", None)
-    realized_recipe.pop("audit_steps", None)
-    realized_recipe.pop("dataset_name", None)
+    realized_recipe = executable_recipe(recipe)
     value = {
-        "semantic_fingerprint_version": 2,
+        "semantic_fingerprint_version": semantic_fingerprint_version,
         "remote_dataset_spec": spec.model_dump(mode="json"),
         "data_recipe": realized_recipe,
         "prepare_script_sha256": prepare_script_sha256,
@@ -308,6 +321,7 @@ def build_remote_training_package(
     blocked_semantic_fingerprints: Iterable[str],
     data_intent_signature: str,
     recipe_path: str | Path | None = None,
+    semantic_fingerprint_version: int = 3,
 ) -> RemoteTrainingPackage:
     script_hash = file_sha256(prepare_script_path)
     recipe_for_hash = recipe
@@ -319,16 +333,19 @@ def build_remote_training_package(
         if not isinstance(loaded_recipe, dict):
             raise ValueError("remote data recipe must be a JSON object")
         recipe_for_hash = loaded_recipe
-    recipe_hash = hashlib.sha256(_canonical_json(recipe_for_hash)).hexdigest()
+    recipe_hash = recipe_sha256(recipe_for_hash)
     blocked = sorted(set(blocked_semantic_fingerprints))
     signature = remote_data_signature(
         spec=spec,
         recipe=recipe,
         prepare_script_sha256=script_hash,
         blocked_semantic_fingerprints=blocked,
+        semantic_fingerprint_version=semantic_fingerprint_version,
     )
     return RemoteTrainingPackage(
-        semantic_fingerprint_version=2,
+        semantic_fingerprint_version=semantic_fingerprint_version,
+        recipe_hash_version=2,
+        legacy_data_recipe_sha256=recipe_sha256(recipe_for_hash, version=1),
         source=spec.source,
         training_method=spec.training_method,
         method_format=spec.method_format,
@@ -357,21 +374,22 @@ _ANSWER_FIELD_KEYS = {
 }
 
 
-def _semantic_value(value: Any) -> Any:
+def _semantic_value(value: Any, *, version: int = 3) -> Any:
     """Canonical, typed input content; mapping order is never evidence.
 
-    Strings retain the established whitespace/case normalization. Explicit
-    type tags prevent numeric/boolean/null values and nested boundaries from
+    Version 2 retains its frozen whitespace/case normalization; version 3
+    preserves exact text and all nested keys. Explicit type tags prevent
+    numeric/boolean/null values and nested boundaries from
     disappearing or colliding with text and delimiter-joined sequences.
     """
     if isinstance(value, dict):
         return ["object", [
-            [str(key), _semantic_value(child)]
+            [str(key), _semantic_value(child, version=version)]
             for key, child in sorted(value.items(), key=lambda item: str(item[0]))
-            if str(key).casefold() not in _SEMANTIC_METADATA_KEYS
+            if version != 2 or str(key).casefold() not in _SEMANTIC_METADATA_KEYS
         ]]
     if isinstance(value, (list, tuple)):
-        return ["array", [_semantic_value(child) for child in value]]
+        return ["array", [_semantic_value(child, version=version) for child in value]]
     if value is None:
         return ["null"]
     if isinstance(value, bool):
@@ -379,22 +397,34 @@ def _semantic_value(value: Any) -> Any:
     if isinstance(value, (int, float)):
         return ["number", value]
     if isinstance(value, str):
-        return ["text", " ".join(value.split()).casefold()]
+        return ["text", " ".join(value.split()).casefold() if version == 2 else value]
     raise ValueError(f"unsupported semantic input type: {type(value).__name__}")
 
 
-def _semantic_fingerprint(record: dict[str, Any]) -> str:
+def _semantic_fingerprint(record: dict[str, Any], *, version: int = 3) -> str:
     """Fingerprint model inputs with canonical order and typed boundaries.
 
     A single question, one user message, and one keyed instruction share the
     same input-turn representation; supervised assistant targets stay absent.
     Multi-field and structured inputs preserve their keys and list ordering.
     """
+    if version not in {2, 3}:
+        raise ValueError("unsupported semantic fingerprint version")
     messages = record.get("messages")
     if isinstance(messages, list):
         inputs = [message.get("content") for message in messages
                   if isinstance(message, dict)
                   and str(message.get("role") or "").strip().casefold() in {"user", "human"}]
+        if version == 3:
+            # Keep conditioning roles/content and prior assistant context. Only
+            # the final assistant target is excluded from the model's input.
+            turns = [dict(m) for m in messages if isinstance(m, dict)]
+            if turns and str(turns[-1].get("role", "")).casefold() in {"assistant", "gpt"}:
+                turns.pop()
+            if len(turns) == 1 and str(turns[0].get("role", "")).casefold() in {"user", "human"}:
+                inputs = [turns[0].get("content")]
+            else:
+                inputs = [{"messages": turns}]
     elif isinstance(record.get("instruction"), dict):
         instructions = record["instruction"]
         def turn_key(key: Any) -> tuple[int, Any]:
@@ -402,8 +432,10 @@ def _semantic_fingerprint(record: dict[str, Any]) -> str:
             return (0, int(text)) if text.isdecimal() else (1, text)
         inputs = [instructions[key] for key in sorted(instructions, key=turn_key)]
     else:
+        question_keys = _QUESTION_FIELD_KEYS | ({"system", "system_prompt", "tools", "functions", "history", "environment"}
+                                               if version == 3 else set())
         selected = {key: value for key, value in record.items()
-                    if key.casefold() in _QUESTION_FIELD_KEYS}
+                    if key.casefold() in question_keys}
         if not selected:
             selected = {key: value for key, value in record.items()
                         if key.casefold() not in _ANSWER_FIELD_KEYS | _SEMANTIC_METADATA_KEYS}
@@ -415,14 +447,14 @@ def _semantic_fingerprint(record: dict[str, Any]) -> str:
                   else [selected])
     if not inputs:
         return ""
-    encoded = json.dumps(["semantic-v2", [_semantic_value(item) for item in inputs]],
+    encoded = json.dumps([f"semantic-v{version}", [_semantic_value(item, version=version) for item in inputs]],
                          ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 
 def _scan_jsonl(
-    path: Path, *, blocked: set[str] | None = None,
+    path: Path, *, blocked: set[str] | None = None, semantic_fingerprint_version: int = 3,
 ) -> tuple[int, list[str], int, str]:
     """Validate a JSONL artifact without retaining a multi-GB dataset in RAM."""
     n_rows = 0
@@ -446,7 +478,7 @@ def _scan_jsonl(
                 if key not in fields:
                     fields.append(key)
             n_rows += 1
-            if blocked and _semantic_fingerprint(row) in blocked:
+            if blocked and _semantic_fingerprint(row, version=semantic_fingerprint_version) in blocked:
                 removed += 1
     if not n_rows:
         raise ValueError("remote preparation produced zero training rows")
@@ -454,7 +486,7 @@ def _scan_jsonl(
 
 
 def _filter_jsonl_atomic(
-    source: Path, destination: Path, *, blocked: set[str],
+    source: Path, destination: Path, *, blocked: set[str], semantic_fingerprint_version: int = 3,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(
@@ -472,7 +504,7 @@ def _filter_jsonl_atomic(
                         raise ValueError(
                             f"invalid JSONL at line {line_number}: {exc}"
                         ) from exc
-                    if _semantic_fingerprint(row) in blocked:
+                    if _semantic_fingerprint(row, version=semantic_fingerprint_version) in blocked:
                         continue
                     output.write(json.dumps(
                         row, ensure_ascii=False, separators=(",", ":"),
@@ -548,8 +580,9 @@ def record_remote_preparation(
         raise ValueError("remote preparation profile is missing or empty")
     n_rows, fields, _removed, dataset_hash = _scan_jsonl(dataset)
     script_hash = file_sha256(prepare_script_path)
-    recipe_hash = hashlib.sha256(_canonical_json(recipe)).hexdigest()
+    recipe_hash = recipe_sha256(recipe)
     receipt = RemotePreparationReceipt(
+        recipe_hash_version=2,
         data_intent_signature=data_intent_signature,
         source=spec.source,
         prepare_script_sha256=script_hash,
@@ -593,7 +626,7 @@ def validate_remote_preparation(
     dataset = Path(dataset_path).resolve()
     profile = Path(profile_path).resolve()
     script_hash = file_sha256(prepare_script_path)
-    recipe_hash = hashlib.sha256(_canonical_json(recipe)).hexdigest()
+    recipe_hash = recipe_sha256(recipe, version=receipt.recipe_hash_version)
     expected_signature = remote_preparation_signature(
         data_intent_signature=data_intent_signature,
         source=spec.source,
@@ -733,7 +766,7 @@ def finalize_remote_training_data(
 
     blocked = set(package.blocked_semantic_fingerprints)
     n_rows_before, fields, removed, prepared_hash = _scan_jsonl(
-        prepared, blocked=blocked,
+        prepared, blocked=blocked, semantic_fingerprint_version=package.semantic_fingerprint_version,
     )
     n_rows = n_rows_before - removed
     if not n_rows:
@@ -750,6 +783,7 @@ def finalize_remote_training_data(
     if preparation_receipt_path:
         preparation_receipt = Path(preparation_receipt_path).resolve()
         expected_preparation = RemotePreparationReceipt(
+            recipe_hash_version=package.recipe_hash_version,
             data_intent_signature=package.data_intent_signature,
             source=package.source,
             prepare_script_sha256=package.prepare_script_sha256,
@@ -771,6 +805,17 @@ def finalize_remote_training_data(
             existing_preparation = load_remote_preparation_receipt(
                 preparation_receipt
             )
+            if existing_preparation.recipe_hash_version == 1 and package.recipe_hash_version == 2:
+                # Old receipts have no executable-only hash. Accept them only
+                # against the full current recipe digest, never guessed metadata.
+                legacy_hash = package.legacy_data_recipe_sha256
+                expected_preparation = expected_preparation.model_copy(update={
+                    "recipe_hash_version": 1, "data_recipe_sha256": legacy_hash,
+                    "preparation_signature": remote_preparation_signature(
+                        data_intent_signature=package.data_intent_signature,
+                        source=package.source, prepare_script_sha256=package.prepare_script_sha256,
+                        data_recipe_sha256=legacy_hash),
+                })
             if existing_preparation != expected_preparation:
                 raise ValueError(
                     "remote preparation receipt is partial, stale, or semantically different"
@@ -783,7 +828,7 @@ def finalize_remote_training_data(
 
     materialization_mode: Literal["rewrite", "hardlink", "reflink", "copy"]
     if removed:
-        _filter_jsonl_atomic(prepared, output, blocked=blocked)
+        _filter_jsonl_atomic(prepared, output, blocked=blocked, semantic_fingerprint_version=package.semantic_fingerprint_version)
         materialization_mode = "rewrite"
         output_hash = file_sha256(output)
     else:

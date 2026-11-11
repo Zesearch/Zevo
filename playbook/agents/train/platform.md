@@ -428,7 +428,7 @@ report Section 3, choose by model size vs. available VRAM:
 
 The stage request is the single source of the launcher. `world_size = nodes ×
 gpus_per_node` and must equal `training.world_size`, so
-`effective_batch_size = batch_size × gradient_accumulation_steps × world_size`
+`effective_batch_size = batch_size × gradient_accumulation_steps × (world_size / tensor_parallel_size)`
 composes across nodes. Take `nodes` and per-node GPUs from `slurm_job`; never
 copy the reusable Infrastructure envelope or invent a topology the engine's
 stage request did not select.
@@ -490,7 +490,7 @@ Use this method-selection priority:
 
 1. A non-empty `training_method_pin` is binding; Method transitions do not apply.
 2. Execute an explicit Orchestrator selection in
-   `configuration_suggestions.training_method`; do not treat that selection as
+   `selected_training_method`; do not treat that selection as
    optional hyperparameter advice. A pipeline change requires transition evidence.
 3. Otherwise retain `active_training_method`. The selected parent's method does
    not override the active branch, and omission is not permission to change it.
@@ -515,7 +515,7 @@ Orchestrator-selected method change:
 
 Execute the method resolved above. When no new method is selected,
 retain the active method. A pipeline change must be named in
-`configuration_suggestions.training_method` with the Orchestrator's hypothesis
+`selected_training_method` with the Orchestrator's hypothesis
 and supporting evidence. These are compatibility examples, not a prescribed
 order or round-robin schedule. Do not fabricate preference pairs or
 rewards merely to force a change. PPO is not installed in this release; do not
@@ -792,8 +792,8 @@ belong in `training`; additional TRL/Transformers/distributed arguments belong i
 and acceleration-package versions belong in `training.software_versions`. An
 argument omitted from Python may still rely on a library default, so resolve and
 record that effective value before launch. `batch_size` is per device and
-`effective_batch_size` must equal batch size × gradient accumulation × world
-size. `training.logging_steps` is exactly 20. Trainer evaluation defaults to
+`effective_batch_size` must equal batch size × gradient accumulation × data-parallel
+size (`world_size / tensor_parallel_size`). `training.logging_steps` is exactly 20. Trainer evaluation defaults to
 `training.eval_strategy="no"`, `training.eval_steps=0`, and
 `training.early_stopping=null`; record the actual values if explicitly enabled.
 Record the realized checkpoint strategy, cap,
@@ -981,3 +981,8 @@ Use `zevo_gpu_runtime.timed` around import/setup, model construction, full-state
 resume restoration and first-batch warmup in generated scripts. Keep checkpoint
 validation and resume evidence unchanged. A 60-second read-only diagnostic
 reports subprocess states/wait channels; it never automatically restarts training.
+
+Coarse model-name GPU estimates are recommendations. Honor the assigned
+allocation and user pins, then preflight the concrete method, precision,
+sharding/offload and workload memory before expensive execution. A constrained
+allocation does not authorize changing a pinned training method.

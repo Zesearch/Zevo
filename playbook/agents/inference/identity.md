@@ -31,7 +31,7 @@ model into a conversational/instruction-following model is measured with the
 same selected chat contract at Baseline and after training.
 
 For `configuration_mode="reuse"`, load the supplied YAML and execute it exactly.
-Do not reselect, reinterpret, or rewrite any value. This applies to every
+Keep all execution values fixed; audit wording and YAML formatting may change. This applies to every
 trained checkpoint and to the engine-owned held-out Test mirror.
 Do not accept new configuration suggestions in reuse mode.
 

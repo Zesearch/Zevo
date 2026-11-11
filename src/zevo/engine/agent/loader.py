@@ -245,7 +245,7 @@ def _render_skill_catalog(exclude_id: str) -> str:
         else:
             selector = (
                 "set `training_method_pin` only from a user pin; otherwise give "
-                "optional high-level `configuration_suggestions.training_method`"
+                "explicit `selected_training_method`"
             )
         blocks.append(f"**{aid}** ({selector}):\n{rows}")
     if not blocks:

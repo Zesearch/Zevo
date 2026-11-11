@@ -378,7 +378,7 @@ from zevo.engine.remote_training_data import _semantic_fingerprint
 
 
 def semantic_record_fingerprints(
-    source: str, *, excluded_fields: Sequence[str] = (),
+    source: str, *, excluded_fields: Sequence[str] = (), semantic_fingerprint_version: int = 3,
 ) -> set[str]:
     """Return opaque exact semantic identities for one tabular population."""
     path = _absolute_file(source, label="scoring source")
@@ -393,7 +393,7 @@ def semantic_record_fingerprints(
                 semantic = {
                     key: value for key, value in row.items() if key not in excluded
                 }
-                fingerprint = _semantic_fingerprint(semantic)
+                fingerprint = _semantic_fingerprint(semantic, version=semantic_fingerprint_version)
                 if fingerprint:
                     fingerprints.add(fingerprint)
         return fingerprints
@@ -401,7 +401,7 @@ def semantic_record_fingerprints(
     for row in rows:
         fingerprint = _semantic_fingerprint({
             key: value for key, value in row.items() if key not in excluded
-        })
+        }, version=semantic_fingerprint_version)
         if fingerprint:
             fingerprints.add(fingerprint)
     return fingerprints
@@ -412,6 +412,7 @@ def sanitize_training_against_scoring(
     training_dataset: str,
     validation_source: str,
     blocked_fingerprints: Sequence[str] = (),
+    semantic_fingerprint_version: int = 3,
     out_dir: str,
 ) -> SanitizedTrainingArtifact:
     """Remove exact Validation/Test duplicates without exposing rows to Data."""
@@ -419,11 +420,11 @@ def sanitize_training_against_scoring(
     training_columns, training_rows = _read_records(
         training_path, label="training dataset",
     )
-    blocked = semantic_record_fingerprints(validation_source)
+    blocked = semantic_record_fingerprints(validation_source, semantic_fingerprint_version=semantic_fingerprint_version)
     blocked.update(str(value) for value in blocked_fingerprints if value)
     retained = [
         row for row in training_rows
-        if _semantic_fingerprint(row) not in blocked
+        if _semantic_fingerprint(row, version=semantic_fingerprint_version) not in blocked
     ]
     removed = len(training_rows) - len(retained)
     if removed == 0:

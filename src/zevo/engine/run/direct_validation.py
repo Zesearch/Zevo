@@ -33,10 +33,11 @@ def validate_launch(inp, body, executable_name, *, configuration_path=""):
     if problem:
         return problem
     commands = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
-    if getattr(inp, "gpu_runtime_helper_path", "") and not any(
-        name in commands for name in ("zevo_gpu_runtime.py", "zevo_parallel_inference.py", "zevo_adaptive_training.py")
-    ):
-        return "GPU workload must use the system GPU runtime or a system runner"
+    if getattr(inp, "gpu_runtime_helper_path", ""):
+        from zevo.engine.run.python_capabilities import gpu_launch_problem
+        problem = gpu_launch_problem(body, script.with_name(executable_name))
+        if problem:
+            return problem
     try:
         if executable_name == "predict.py":
             from zevo.contracts.configuration import validate_adaptive_vllm_memory_config

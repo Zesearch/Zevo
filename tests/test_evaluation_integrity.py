@@ -21,13 +21,19 @@ from zevo.db.models import Base, Run, Task, ScoreEvent, Ticket, WorkProduct
 def test_semantic_inputs_have_stable_typed_boundaries():
     a = {"question": "What?", "context": {"left": 2, "right": False}, "answer": "secret"}
     b = {"answer": "changed", "context": {"right": False, "left": 2}, "question": " What? "}
+    assert _semantic_fingerprint(a, version=2) == _semantic_fingerprint(b, version=2)
+    assert _semantic_fingerprint(a) != _semantic_fingerprint(b)
+    b["question"] = a["question"]
     assert _semantic_fingerprint(a) == _semantic_fingerprint(b)
     variants = [{"x": value} for value in [0, 1, False, None, "0", "false", [0], {"v": 0}]]
     identities = [_semantic_fingerprint(item) for item in variants]
     assert all(identities) and len(set(identities)) == len(variants)
     assert _semantic_fingerprint({"input": ["a", "b"]}) != _semantic_fingerprint({"input": "a\nb"})
     assert _semantic_fingerprint({"input": [1, 2]}) != _semantic_fingerprint({"input": [2, 1]})
-    assert _semantic_fingerprint({"instruction": {"2": "b", "1": "a"}}) == _semantic_fingerprint({"messages": [{"role": "user", "content": "a"}, {"role": "assistant", "content": "private"}, {"role": "user", "content": "b"}]})
+    instructions = {"instruction": {"2": "b", "1": "a"}}
+    messages = {"messages": [{"role": "user", "content": "a"}, {"role": "assistant", "content": "private"}, {"role": "user", "content": "b"}]}
+    assert _semantic_fingerprint(instructions, version=2) == _semantic_fingerprint(messages, version=2)
+    assert _semantic_fingerprint(instructions) != _semantic_fingerprint(messages)  # Prior assistant context conditions later turns.
 
 
 def test_numeric_and_reordered_populations_overlap(tmp_path):

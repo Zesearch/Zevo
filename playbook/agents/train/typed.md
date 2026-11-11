@@ -24,11 +24,12 @@
 | `parent_train_config_path` | Empty for a baseline branch; otherwise YAML from the same parent Train Ticket. |
 | `branch_transition` | Engine-validated experiment-transition record. `none` while continuing; a Method change carries its prior branch, Validation evidence, and next branch. |
 | `training_method_pin` | Highest-priority binding method when non-empty. |
-| `active_training_method` | Inherit when there is no user pin or explicit Orchestrator selection; parent YAML does not override it. |
+| `selected_training_method` | Coordinator decision; user pins take precedence. |
+| `active_training_method` | Inherit absent a pin or selection; parent YAML cannot override it. |
 | `activation_contract.method_selection_owner` | `worker` delegates method choice only after applying pins, explicit selection, and active-branch inheritance. |
 | `method_config_pins` | Binding method-owned values. |
 | `loss_objective_pins` | Binding method-valid objective values. |
-| `configuration_suggestions` | High-level Orchestrator method/direction, plus any user advisory customization. |
+| `configuration_suggestions` | Non-binding direction and user advisory controls. |
 | `configuration_pins` | Other strict Customized Pipeline values. |
 | `device_info_path` | Cloud/instance device contract or cluster access route. |
 | `slurm_job` | Engine-owned finite-job path/name, job-id stdout/stderr patterns, GPU count, queue deadline, phase, backend-observed JOBID/state, bookkeeping endpoints, and exact schemas. Enabled only for cluster. `submit` creates one job and returns deferred; `collect` never duplicates it. |
