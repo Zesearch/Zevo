@@ -16,7 +16,7 @@ from zevo.engine.run.repair_progress import record_execution_repair
 
 
 class RepairTicketRequest(StrictBody):
-    action: Literal["prepare", "collect", "resubmit", "replace_resource"]
+    action: Literal["prepare", "provision", "collect", "resubmit", "replace_resource"]
     reason: RecoveryText = Field(max_length=2000)
     evidence: list[RecoveryText] = Field(min_length=1, max_length=20)
     execution_attempt: int = Field(ge=0, description="Exact registered attempt; zero only for preparation before any execution")
@@ -38,7 +38,7 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
         raise HTTPException(409, "Repair requires an active Run")
     if await instruction_gate_active(session, run.id):
         raise HTTPException(409, "Run instruction must be resolved before repair")
-    if (ticket.lane != "optimization" or ticket.agent_id not in {"data", "train", "inference", "evaluation"}
+    if (ticket.lane != "optimization" or ticket.agent_id not in {"infrastructure", "data", "train", "inference", "evaluation"}
             or ticket.status != "failed" or ticket.repair_route != "orchestrator"):
         raise HTTPException(409, "Only a failed optimization workload referred to Orchestrator can be repaired")
     supervisor = await session.get(Ticket, run.supervisor_ticket_id)
@@ -60,7 +60,28 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
     row = await _latest_slurm_resource_request(session, ticket)
     meta = dict(row.meta or {}) if row else {}
     state = str(meta.get("scheduler_state") or "").split(" ")[0].upper().rstrip("+")
-    if request.action == "prepare":
+    if ticket.agent_id == "infrastructure" and request.action != "provision":
+        raise HTTPException(422, "Infrastructure recovery requires provision, preserving the existing plan")
+    if request.action == "provision":
+        failure = await session.scalar(select(TicketNotice).where(
+            TicketNotice.ticket_id == ticket.id, TicketNotice.code == "cloud.acquisition_failed",
+        ).order_by(TicketNotice.created_at.desc()).limit(1))
+        try:
+            rejected = json.loads(failure.body) if failure else {}
+        except (ValueError, TypeError):
+            rejected = {}
+        if rejected.get("confirmed_not_created") is not True:
+            raise HTTPException(409, "Provision repair requires confirmed absence; reconcile unknown creation first")
+        from zevo.db import InfraInstance
+        active = await session.scalar(select(InfraInstance.id).where(
+            InfraInstance.run_id == run.id, InfraInstance.ticket_id == ticket.id,
+            InfraInstance.released_at.is_(None),
+        ).limit(1))
+        if (ticket.agent_id != "infrastructure" or request.execution_attempt != 0
+                or row is not None or active is not None
+                or request.input_products or request.input_signature):
+            raise HTTPException(409, "Provision repair requires Infrastructure with no active allocation or execution")
+    elif request.action == "prepare":
         from zevo.engine.run.input_validation import input_signature, NOTICE_CODE
         from zevo.contracts.tickets import validate_stored_payload
         from zevo.db import WorkProduct
@@ -118,13 +139,55 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
         "The engine owns allocation replacement when authorized. Resume committed "
         "training state; do not restart completed steps or create a new iteration."
     )))
-    if request.action == "replace_resource":
-        from zevo.engine.run.resource_recovery import request_replacement
-        await request_replacement(session, ticket, row)
-        await session.commit()
-    else:
-        await queue_wakeup(session, agent_id=ticket.agent_id, ticket_id=ticket.id, source="retry",
-            reason=f"Orchestrator approved repair: {request.reason}",
-            payload={"repair_attempt": ticket.repair_attempts, "review_heartbeat_id": supervisor_heartbeat})
+    session.add(TicketNotice(ticket_id=ticket.id,
+        code="ticket.awaiting_supervisor_completion", severity="info",
+        body=json.dumps({"heartbeat_id": supervisor_heartbeat, "repair": True})))
+    await session.commit()
     return {"ticket_id": ticket.id, "status": ticket.status,
             "repair_attempts": ticket.repair_attempts, "action": request.action}
+
+
+async def release_reviewed_repairs(session, supervisor, heartbeat_id):
+    """Release only repairs belonging to this committed, validated decision."""
+    from zevo.engine.run.wakeup import queue_wakeup
+    from zevo.engine.run.resource_recovery import request_replacement
+    from zevo.db import InfraInstance
+    run = await session.get(Run, supervisor.run_id)
+    decision = await session.get(HeartbeatRun, heartbeat_id)
+    if (run is None or run.status != "running" or run.cancel_requested_at is not None
+            or decision is None or decision.finished_at is None
+            or decision.ticket_id != supervisor.id or supervisor.status not in {"succeeded", "degraded"}):
+        return
+    for ticket_id in (decision.resolved_config or {}).get("repair_target_ticket_ids", []):
+        ticket = await session.get(Ticket, ticket_id)
+        if ticket is None or ticket.run_id != run.id or ticket.status != "repairing":
+            continue
+        notices = (await session.scalars(select(TicketNotice).where(
+            TicketNotice.ticket_id == ticket_id,
+            TicketNotice.code.in_(["repair.authorized", "ticket.awaiting_supervisor_completion"]),
+        ))).all()
+        authorization = None
+        gates = []
+        for notice in notices:
+            try:
+                data = json.loads(notice.body)
+            except (ValueError, TypeError):
+                continue
+            if data.get("heartbeat_id") != heartbeat_id:
+                continue
+            if notice.code == "repair.authorized":
+                authorization = data
+            else:
+                gates.append(notice)
+        if not authorization or not gates:
+            continue
+        for gate in gates:
+            gate.code = "ticket.supervisor_handoff_released"
+        if authorization["action"] == "replace_resource":
+            row = await session.get(InfraInstance, authorization["resource_id"])
+            await request_replacement(session, ticket, row)
+            await session.commit()
+        else:
+            await queue_wakeup(session, agent_id=ticket.agent_id, ticket_id=ticket.id,
+                source="retry", reason="Validated Orchestrator repair decision completed",
+                payload={"repair_attempt": ticket.repair_attempts, "review_heartbeat_id": heartbeat_id})

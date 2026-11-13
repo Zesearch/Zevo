@@ -4745,6 +4745,11 @@ async def _apply_ticket_failure_policy(
         ticket.repair_attempts = int(ticket.repair_attempts or 0)
         ticket.repair_route = "terminal"
         return False
+    if boundary is None:
+        from zevo.engine.run.cloud_capacity import handle_failure
+        capacity_wait = await handle_failure(session, ticket, inp, heartbeat_id)
+        if capacity_wait is not None:
+            return capacity_wait
     context = FailureContext(origin, error_message[:6000], boundary)
     session.add(TicketNotice(
         ticket_id=ticket.id, code="failure.context", severity="error",
@@ -4826,8 +4831,25 @@ async def _apply_ticket_failure_policy(
 
 
 async def _queue_ticket_repair(session: AsyncSession, tk: Ticket) -> None:
+    from zevo.engine.run.supervisor_handoff import waiting
+    if await waiting(session, tk):
+        await session.commit()
+        return
     from zevo.engine.run.resource_recovery import KEY, request_replacement
     run = await session.get(Run, tk.run_id)
+    from zevo.engine.run.cloud_capacity import next_attempt
+    due = next_attempt(run, tk.id) if run else None
+    if due and due > datetime.now(timezone.utc):
+        from zevo.engine.run.wakeup import queue_wakeup
+        await queue_wakeup(session, agent_id=tk.agent_id, ticket_id=tk.id,
+            source="retry", reason=tk.summary,
+            payload={"repair_attempt": tk.repair_attempts})
+        wake = await session.scalar(select(AgentWakeupRequest).where(
+            AgentWakeupRequest.ticket_id == tk.id, AgentWakeupRequest.status == "queued"))
+        if wake is not None:
+            wake.scheduled_for = due
+            await session.commit()
+        return
     recovery = (run.lifecycle or {}).get(KEY, {}).get(tk.id, {}) if run else {}
     if recovery and recovery.get("phase") != "resumed":
         # The durable recovery reconciler owns the next action, including
@@ -5008,6 +5030,15 @@ async def run_ticket(
         tk.error_message = "Run is finalizing; new optimization work is disabled"
         await session.commit()
         return tk
+    from zevo.engine.run.cloud_capacity import next_attempt
+    capacity_due = next_attempt(run, tk.id)
+    if capacity_due and capacity_due > datetime.now(timezone.utc):
+        from zevo.engine.run.wakeup import WakeupDeferred
+        raise WakeupDeferred("cloud_capacity_backoff")
+    from zevo.engine.run.supervisor_handoff import waiting as waiting_for_supervisor
+    if await waiting_for_supervisor(session, tk):
+        from zevo.engine.run.wakeup import WakeupDeferred
+        raise WakeupDeferred("supervisor_decision_pending")
     activation_payload = dict(activation_payload or {})
     from zevo.engine.run.resource_recovery import KEY as resource_handoffs_key
     handoff = (run.lifecycle or {}).get(resource_handoffs_key, {}).get(tk.id, {})
@@ -6514,7 +6545,7 @@ async def run_ticket(
             tk.summary = summary[:400]
             repair_scheduled = await _apply_ticket_failure_policy(
                 session, tk, error_message=summary, cancelled=cancelled_by_user,
-                origin=failure_origin,
+                origin=failure_origin, inp=inp, heartbeat_id=heartbeat_id,
                 boundary="held_out_isolation" if heldout_access_hits else None,
                 can_diagnose=not is_system_runner,
             )
@@ -7805,6 +7836,9 @@ async def run_ticket(
     # Consequently an in-progress "starting …" message cannot run the next
     # stage beside the Orchestrator that authored it.
     if tk.agent_id == "orchestrator" and not cancelled_by_user:
+        from zevo.engine.run.execution_repair import release_reviewed_repairs
+        if tk.status in ("succeeded", "degraded") and isinstance(output, SupervisorAction):
+            await release_reviewed_repairs(session, tk, heartbeat_id)
         await _release_emitted_child(
             session,
             supervisor=tk,

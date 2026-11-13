@@ -449,6 +449,11 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                                     instruction_id[:8], active_stage.instance_id,
                                 )
                                 return
+                        from zevo.engine.run.supervisor_handoff import waiting as waiting_for_supervisor
+                        if target is not None and await waiting_for_supervisor(s, target):
+                            w.scheduled_for = datetime.now(timezone.utc) + _dt.timedelta(seconds=5)
+                            await s.commit()
+                            return
                         obsolete = bool(
                             target is not None
                             and target.status in TERMINAL_TICKET_STATUSES

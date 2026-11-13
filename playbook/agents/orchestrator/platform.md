@@ -738,7 +738,16 @@ The attempt must match the latest registered terminal execution. The endpoint
 preserves checkpoint files, bindings, iteration, training configuration and the
 accumulated twenty-repair limit; it cannot override pause, cancellation, budget
 or isolation boundaries. Return `wait` after the accepted repair request; the
-engine queues the child without requiring a new Ticket.
+engine releases the child only after this heartbeat finishes with a validated
+result. Messages do not bypass that barrier.
+
+For failed Infrastructure acquisition before any instance or execution exists,
+use `action="provision", execution_attempt=0` on the SAME Ticket. The engine
+requires an acquisition journal confirming that creation was rejected and no
+live allocation exists. Preserve the resource plan, backend, region and market.
+Unknown creation (for example a timeout) requires reconciliation first; do not
+retry blindly or create a replacement Ticket. Explicit temporary capacity
+shortages receive bounded engine backoff before escalating to you.
 
 Do not use the human `/rerun` route for automatic recovery: it has different
 authority and reset semantics. If repair is refused, report the precise blocker
