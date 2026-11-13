@@ -440,6 +440,11 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
             continue
         if state not in {"RUNNING", "PENDING", "CONFIGURING"}:
             raise ValueError("cannot verify the retained allocation: allocation is not reusable or terminal: " + state)
+        if getattr(info.cluster, "reservation", ""):
+            from zevo.engine.run.slurm_reservation import script_reservations
+            headers = meta.get("controller_script_snapshot") or await read_controller_headers(info, meta["controller_directory"])
+            if script_reservations(headers or "") != [info.cluster.reservation]:
+                raise ValueError("retained allocation does not match the configured Slurm reservation")
         if row.gpu_count < contract.num_gpus or int(meta.get("nodes", 1)) != contract.nodes:
             raise ValueError("stage does not fit the retained run allocation; resource plan must cover all stages")
         # No concurrent commands on one set of GPUs. Keep waits in the backend
@@ -493,6 +498,8 @@ async def submit_workload(session, *, run, ticket, contract, info, heartbeat_id,
     if owner is None:
         wrapper_path = directory + "/controller.sbatch"
         body = Path(contract.script_path).read_text()
+        from zevo.engine.run.slurm_reservation import apply_reservation
+        body = apply_reservation(body, getattr(info.cluster, "reservation", ""))
         if run.gpu_allocation_mode == "per_run":
             # The initial Data/Inference stage can need far less RAM and time
             # than Train. Allocate the validated train envelope from the start.

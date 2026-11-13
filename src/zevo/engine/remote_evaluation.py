@@ -184,7 +184,7 @@ def launch_script(inp: EvaluationTaskInput, info: InfrastructureDeviceInfo, remo
                   f'#SBATCH --mem={max(1, plan.min_ram_gb)}G',
                   f'#SBATCH --time={max(1, int(plan.time_limit_hours * 60))}',
                   f'#SBATCH --output={contract.stdout_path}', f'#SBATCH --error={contract.stderr_path}']
-        for flag in ('partition', 'account', 'qos'):
+        for flag in ('partition', 'account', 'qos', 'reservation'):
             value = getattr(route, flag)
             if value:
                 if any(c.isspace() for c in value):
