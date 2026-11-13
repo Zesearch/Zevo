@@ -30,7 +30,7 @@ def _gpu_tres_count(value: str) -> int | None:
 
 
 def parse_slurm_capacity(
-    output: str, *, qos: str = "",
+    output: str, *, qos: str = "", reservation: str = "",
 ) -> SlurmCapacitySnapshot:
     """Parse one bounded SSH response, rejecting incomplete scheduler data."""
     sections = output.split(f"\n{_QOS_MARKER}\n", 1)
@@ -43,7 +43,10 @@ def parse_slurm_capacity(
         if len(fields) != 4:
             raise ValueError("sinfo returned an unrecognized node row")
         _, total_gres, used_gres, state = fields
-        if not state.lower().startswith(("idle", "mix")):
+        # Slurm renders IDLE+RESERVED as "resv", not "idle". Count it
+        # only after the probe has restricted nodes to our reservation.
+        reserved_idle = bool(reservation) and state.lower() == "resv"
+        if not state.lower().startswith(("idle", "mix")) and not reserved_idle:
             continue
         totals = _GPU_GRES.findall(total_gres)
         used = _GPU_GRES.findall(used_gres)
@@ -91,7 +94,7 @@ async def probe_slurm_capacity(info: InfrastructureDeviceInfo) -> SlurmCapacityS
         from zevo.engine.run.slurm_reservation import reservation_nodes
         response = await _query(info,
             "set -e; scontrol show reservation " + shlex.quote(route.reservation)
-            + " -o; printf '\\n__ZEVO_CLOCK__'; date -Iseconds")
+            + " -o; printf '\\n__ZEVO_CLOCK__'; date -Iseconds", required=("scontrol",))
         nodes = reservation_nodes(response, route.reservation)
     sinfo = (
         "sinfo -N -h "
@@ -110,11 +113,15 @@ async def probe_slurm_capacity(info: InfrastructureDeviceInfo) -> SlurmCapacityS
             "-O QOS:50,TRES-Alloc:256",
         ])
     command = "\n".join(commands)
-    output = await _query(info, command)
-    return parse_slurm_capacity(output, qos=qos)
+    output = await _query(info, command, required=("sinfo", "sacctmgr", "squeue") if qos else ("sinfo",))
+    return parse_slurm_capacity(output, qos=qos, reservation=route.reservation)
 
 
-async def _query(info: InfrastructureDeviceInfo, command: str) -> str:
+async def _query(info: InfrastructureDeviceInfo, command: str, *, required: tuple[str, ...] = ()) -> str:
+    from zevo.engine.run.remote_jobs import _slurm_cli_bootstrap_command, _slurm_login_command
+    command = _slurm_login_command(
+        _slurm_cli_bootstrap_command(info.cluster.env_setup, required=required) + command
+    )
     process = await asyncio.create_subprocess_exec(
         *ssh_base_args(info.ssh), f"{info.ssh.user}@{info.ssh.host}", command,
         stdout=asyncio.subprocess.PIPE,
@@ -127,7 +134,9 @@ async def _query(info: InfrastructureDeviceInfo, command: str) -> str:
         await process.communicate()
         raise ValueError("Slurm capacity probe timed out") from exc
     if process.returncode != 0:
-        raise ValueError("Slurm capacity probe command failed: " + _stderr.decode("utf-8", errors="replace")[:500])
+        lines = _stderr.decode("utf-8", errors="replace").strip().splitlines()
+        detail = lines[-1][-300:] if lines else "no stderr diagnostic"
+        raise ValueError(f"Slurm capacity probe failed (exit {process.returncode}): {detail}")
     if len(stdout) > 1_000_000:
         raise ValueError("Slurm capacity probe output exceeded 1 MB")
     return stdout.decode("utf-8", errors="replace")
