@@ -150,7 +150,7 @@ def _slurm_cli_bootstrap_command(env_setup: str = "", *, required: tuple[str, ..
             "fi; fi; "
         )
     for command in required:
-        if command not in {"sbatch", "squeue", "sacct", "scancel", "scontrol"}:
+        if command not in {"sbatch", "squeue", "sacct", "scancel", "scontrol", "sinfo", "sacctmgr"}:
             raise ValueError("unsupported Slurm command")
         bootstrap += (
             f"command -v {command} >/dev/null 2>&1 "

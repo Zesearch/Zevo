@@ -61,7 +61,7 @@ def test_probe_scopes_nodes_and_keeps_busy_reservation(monkeypatch):
     info.cluster.qos = ''
     info.resource_plan.slurm_qos = ''
     commands = []
-    async def query(info, command):
+    async def query(info, command, **kwargs):
         commands.append(command)
         if 'scontrol' in command:
             return RECORD
@@ -77,7 +77,7 @@ def test_invalid_reservation_stops_before_partition_probe(monkeypatch):
     info = _cluster_info(constraints=_partial_node_constraints())
     info.cluster.reservation = 'reserved'
     commands = []
-    async def query(info, command):
+    async def query(info, command, **kwargs):
         commands.append(command)
         raise ValueError('Access denied')
     monkeypatch.setattr(slurm_capacity, '_query', query)

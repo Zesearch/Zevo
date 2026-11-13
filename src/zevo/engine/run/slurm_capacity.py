@@ -91,7 +91,7 @@ async def probe_slurm_capacity(info: InfrastructureDeviceInfo) -> SlurmCapacityS
         from zevo.engine.run.slurm_reservation import reservation_nodes
         response = await _query(info,
             "set -e; scontrol show reservation " + shlex.quote(route.reservation)
-            + " -o; printf '\\n__ZEVO_CLOCK__'; date -Iseconds")
+            + " -o; printf '\\n__ZEVO_CLOCK__'; date -Iseconds", required=("scontrol",))
         nodes = reservation_nodes(response, route.reservation)
     sinfo = (
         "sinfo -N -h "
@@ -110,11 +110,15 @@ async def probe_slurm_capacity(info: InfrastructureDeviceInfo) -> SlurmCapacityS
             "-O QOS:50,TRES-Alloc:256",
         ])
     command = "\n".join(commands)
-    output = await _query(info, command)
+    output = await _query(info, command, required=("sinfo", "sacctmgr", "squeue") if qos else ("sinfo",))
     return parse_slurm_capacity(output, qos=qos)
 
 
-async def _query(info: InfrastructureDeviceInfo, command: str) -> str:
+async def _query(info: InfrastructureDeviceInfo, command: str, *, required: tuple[str, ...] = ()) -> str:
+    from zevo.engine.run.remote_jobs import _slurm_cli_bootstrap_command, _slurm_login_command
+    command = _slurm_login_command(
+        _slurm_cli_bootstrap_command(info.cluster.env_setup, required=required) + command
+    )
     process = await asyncio.create_subprocess_exec(
         *ssh_base_args(info.ssh), f"{info.ssh.user}@{info.ssh.host}", command,
         stdout=asyncio.subprocess.PIPE,
@@ -127,7 +131,9 @@ async def _query(info: InfrastructureDeviceInfo, command: str) -> str:
         await process.communicate()
         raise ValueError("Slurm capacity probe timed out") from exc
     if process.returncode != 0:
-        raise ValueError("Slurm capacity probe command failed: " + _stderr.decode("utf-8", errors="replace")[:500])
+        lines = _stderr.decode("utf-8", errors="replace").strip().splitlines()
+        detail = lines[-1][-300:] if lines else "no stderr diagnostic"
+        raise ValueError(f"Slurm capacity probe failed (exit {process.returncode}): {detail}")
     if len(stdout) > 1_000_000:
         raise ValueError("Slurm capacity probe output exceeded 1 MB")
     return stdout.decode("utf-8", errors="replace")
