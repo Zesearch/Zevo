@@ -24,7 +24,7 @@ def test_capacity_probe_initializes_site_environment(tmp_path, monkeypatch, rese
         'module load shared slurm; echo site-setup-noise'
     )
     executable(tmp_path / 'scontrol', "echo 'ReservationName=reserved StartTime=2000-01-01T00:00:00 EndTime=2099-01-01T00:00:00 Nodes=gpu01'\n")
-    executable(tmp_path / 'sinfo', "echo 'gpu01|gpu:8|gpu:4|mix'\n")
+    executable(tmp_path / 'sinfo', "echo 'gpu01|gpu:8|gpu:0|resv'\n" if reservation else "echo 'gpu01|gpu:8|gpu:4|mix'\n")
     executable(tmp_path / 'sacctmgr', "echo 'research|gres/gpu=8'\n")
     executable(tmp_path / 'squeue', "echo 'research gres/gpu=2'\n")
     real_exec = asyncio.create_subprocess_exec
@@ -34,7 +34,7 @@ def test_capacity_probe_initializes_site_environment(tmp_path, monkeypatch, rese
         return await real_exec('/bin/bash', '-c', args[-1], **kwargs)
     monkeypatch.setattr(slurm_capacity.asyncio, 'create_subprocess_exec', local_ssh)
     snapshot = asyncio.run(slurm_capacity.probe_slurm_capacity(info))
-    assert snapshot.free_gpus_by_node == (4,)
+    assert snapshot.free_gpus_by_node == ((8,) if reservation else (4,))
     assert snapshot.qos_free_gpus == (6 if qos else None)
     assert all(command.startswith('bash -lc ') for command in commands)
     assert len(commands) == (2 if reservation else 1)
@@ -52,3 +52,17 @@ def test_probe_error_keeps_exit_and_actual_error_after_banner(monkeypatch):
     with pytest.raises(ValueError, match=r'exit 127.*scontrol: command not found') as error:
         asyncio.run(slurm_capacity._query(info, 'scontrol show reservation reserved', required=('scontrol',)))
     assert 'Login banner' not in str(error.value)
+
+
+def test_idle_reserved_node_is_available_only_to_reservation_probe():
+    raw = "h200x8-01|gpu:h200:8(S:0-1)|gpu:h200:0(IDX:N/A)|resv\n"
+    assert slurm_capacity.parse_slurm_capacity(raw).immediately_free_gpus == 0
+    scoped = slurm_capacity.parse_slurm_capacity(raw, reservation="rzhao-h200x8")
+    assert scoped.free_gpus_by_node == (8,)
+    assert scoped.immediately_free_gpus == 8
+
+
+@pytest.mark.parametrize('state', ['drain', 'down', 'alloc', 'resv*'])
+def test_reservation_does_not_make_unavailable_nodes_free(state):
+    raw = f"gpu01|gpu:8|gpu:0|{state}\n"
+    assert slurm_capacity.parse_slurm_capacity(raw, reservation="reserved").immediately_free_gpus == 0

@@ -30,7 +30,7 @@ def _gpu_tres_count(value: str) -> int | None:
 
 
 def parse_slurm_capacity(
-    output: str, *, qos: str = "",
+    output: str, *, qos: str = "", reservation: str = "",
 ) -> SlurmCapacitySnapshot:
     """Parse one bounded SSH response, rejecting incomplete scheduler data."""
     sections = output.split(f"\n{_QOS_MARKER}\n", 1)
@@ -43,7 +43,10 @@ def parse_slurm_capacity(
         if len(fields) != 4:
             raise ValueError("sinfo returned an unrecognized node row")
         _, total_gres, used_gres, state = fields
-        if not state.lower().startswith(("idle", "mix")):
+        # Slurm renders IDLE+RESERVED as "resv", not "idle". Count it
+        # only after the probe has restricted nodes to our reservation.
+        reserved_idle = bool(reservation) and state.lower() == "resv"
+        if not state.lower().startswith(("idle", "mix")) and not reserved_idle:
             continue
         totals = _GPU_GRES.findall(total_gres)
         used = _GPU_GRES.findall(used_gres)
@@ -111,7 +114,7 @@ async def probe_slurm_capacity(info: InfrastructureDeviceInfo) -> SlurmCapacityS
         ])
     command = "\n".join(commands)
     output = await _query(info, command, required=("sinfo", "sacctmgr", "squeue") if qos else ("sinfo",))
-    return parse_slurm_capacity(output, qos=qos)
+    return parse_slurm_capacity(output, qos=qos, reservation=route.reservation)
 
 
 async def _query(info: InfrastructureDeviceInfo, command: str, *, required: tuple[str, ...] = ()) -> str:
