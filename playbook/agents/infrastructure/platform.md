@@ -609,3 +609,17 @@ it from the same policy. An existing allocation's deadline does not change.
 Release early when work finishes; use verified saved progress and a new
 allocation when work remains at expiry. Per-stage submissions still use their
 finite stage plan.
+
+### Optional Slurm reservation
+
+Read the selected SSH connection's SKILL.md before writing cluster routing.
+If it requires a reservation, query `scontrol show reservation <name> -o`,
+verify its validity window, permitted Users/Accounts/Groups and partition/node
+scope against the current identity, and record the exact name in
+`device_info.json` under `cluster.reservation`. A busy reservation is a queue
+wait, not permission to switch to unreserved nodes. Report missing, expired or
+unauthorized reservations instead of silently omitting them. If the skill does
+not specify a reservation, leave `cluster.reservation` empty (the default).
+The Engine scopes capacity probes and all new allocation controllers to this
+field; repairs and continuations must preserve it. This is separate from the
+resource plan and does not require a new Infra ticket for each submission.

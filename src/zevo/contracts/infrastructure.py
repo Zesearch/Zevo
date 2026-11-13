@@ -759,6 +759,10 @@ class DeviceClusterRoute(BaseModel):
     partition: str = ""
     account: str = ""
     qos: str = ""
+    reservation: str = Field(
+        default="", pattern=r"^[A-Za-z0-9_.-]*$",
+        description="Optional Slurm reservation required by the selected SSH skill. Empty means ordinary partition scheduling.",
+    )
     container_image: str = ""
     env_setup: str = ""
     workdir: str = Field(min_length=1)

@@ -962,6 +962,8 @@ async def _slurm_stage_job_contract(
             try:
                 capacity = await probe_slurm_capacity(info)
             except (OSError, ValueError) as exc:
+                if info.cluster.reservation:
+                    raise ValueError(f"Cannot verify Slurm reservation {info.cluster.reservation}: {exc}") from exc
                 # A snapshot is only a sizing hint. Slurm can still safely
                 # queue the minimum job when the read-only probe is unavailable.
                 capacity_error = str(exc)

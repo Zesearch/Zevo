@@ -86,9 +86,17 @@ async def probe_slurm_capacity(info: InfrastructureDeviceInfo) -> SlurmCapacityS
     route = info.cluster
     partition = route.partition or info.resource_plan.slurm_partition
     qos = route.qos or info.resource_plan.slurm_qos
+    nodes = ""
+    if route.reservation:
+        from zevo.engine.run.slurm_reservation import reservation_nodes
+        response = await _query(info,
+            "set -e; scontrol show reservation " + shlex.quote(route.reservation)
+            + " -o; printf '\\n__ZEVO_CLOCK__'; date -Iseconds")
+        nodes = reservation_nodes(response, route.reservation)
     sinfo = (
         "sinfo -N -h "
         + (f"-p {shlex.quote(partition)} " if partition else "")
+        + (f"-n {shlex.quote(nodes)} " if nodes else "")
         + "-O 'NodeList:40|,Gres:120|,GresUsed:120|,StateCompact:30'"
     )
     commands = ["set -e", sinfo]
@@ -102,6 +110,11 @@ async def probe_slurm_capacity(info: InfrastructureDeviceInfo) -> SlurmCapacityS
             "-O QOS:50,TRES-Alloc:256",
         ])
     command = "\n".join(commands)
+    output = await _query(info, command)
+    return parse_slurm_capacity(output, qos=qos)
+
+
+async def _query(info: InfrastructureDeviceInfo, command: str) -> str:
     process = await asyncio.create_subprocess_exec(
         *ssh_base_args(info.ssh), f"{info.ssh.user}@{info.ssh.host}", command,
         stdout=asyncio.subprocess.PIPE,
@@ -114,7 +127,7 @@ async def probe_slurm_capacity(info: InfrastructureDeviceInfo) -> SlurmCapacityS
         await process.communicate()
         raise ValueError("Slurm capacity probe timed out") from exc
     if process.returncode != 0:
-        raise ValueError("Slurm capacity probe command failed")
+        raise ValueError("Slurm capacity probe command failed: " + _stderr.decode("utf-8", errors="replace")[:500])
     if len(stdout) > 1_000_000:
         raise ValueError("Slurm capacity probe output exceeded 1 MB")
-    return parse_slurm_capacity(stdout.decode("utf-8", errors="replace"), qos=qos)
+    return stdout.decode("utf-8", errors="replace")

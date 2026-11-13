@@ -99,8 +99,9 @@ def test_release_boundary(mode, state, expected):
     ('per_submission', 'train-1', False, 'RUNNING'),
     ('per_submission', 'train-1', False, 'COMPLETING'), ('per_run', 'infer-1', False, False),
 ])
+@pytest.mark.parametrize("reservation", ["", "reserved"])
 @pytest.mark.parametrize("retirement_failure", [False, True])
-async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mode, next_ticket, reuses, live, retirement_failure):
+async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mode, next_ticket, reuses, live, retirement_failure, reservation):
     from zevo.engine.run import remote_jobs
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
@@ -115,6 +116,8 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
             if live == 'missing':
                 return dict(ok=False, error='Login banner\nslurm_load_jobs error: Invalid job id specified\n')
             return dict(ok=True, stdout=(live if isinstance(live, str) and live != 'continuation' else 'RUNNING') + '\n' if live else '')
+        if 'sbatch --parsable' in command and reservation:
+            assert f'#SBATCH --reservation={reservation}' in script.with_name('allocation-controller.sbatch').read_text()
         if 'sacct -n -X' in command:
             return dict(ok=True, stdout='123|TIMEOUT\n')
         return dict(ok=True, stdout='456\n' if 'sbatch --parsable' in command else '123\n')
@@ -129,14 +132,15 @@ async def test_repair_and_cross_stage_allocation_reuse(tmp_path, monkeypatch, mo
         ticket = Ticket(id=next_ticket, run_id=run.id, agent_id='train')
         owner = InfraInstance(id='owner', run_id=run.id, ticket_id='train-1',
             instance_id='123', provider='cluster', gpu_count=8,
-            meta=dict(controller_directory='/controller', scheduler_state='FAILED', nodes=1))
+            meta=dict(controller_directory='/controller', scheduler_state='FAILED', nodes=1,
+                controller_script_snapshot=f'#SBATCH --reservation={reservation}' if reservation else ''))
         session.add_all([run, ticket, owner])
         await session.commit()
         if live == 'retiring':
             from zevo.engine.run.resource_recovery import KEY
             run.lifecycle = {KEY: {'train-1': {'owner_id': owner.id, 'kind': 'continuation', 'phase': 'stopping'}}}
         kwargs = dict(run=run, ticket=ticket, contract=contract,
-            info=SimpleNamespace(cluster=SimpleNamespace(workdir='/remote', env_setup='export SITE_SLURM=1'), resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=4)),
+            info=SimpleNamespace(cluster=SimpleNamespace(workdir='/remote', env_setup='export SITE_SLURM=1', reservation=reservation), resource_plan=SimpleNamespace(min_ram_gb=64, min_cpus=8, time_limit_hours=4)),
             heartbeat_id='h2', sha256='digest')
         publication = {"attempted": False}
         kwargs["publication"] = publication
