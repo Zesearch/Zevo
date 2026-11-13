@@ -178,3 +178,56 @@ def test_aws_is_an_accepted_backend_without_region_or_image(monkeypatch) -> None
     rc = acquire.main(["--backend", "aws", "--offer-id", "g5.xlarge", "--ssh-key-path", "/k",
                        "--run-id", "r", "--ticket-id", "t"])
     assert rc == 0 and seen["backend"] == "aws"
+
+
+@pytest.mark.asyncio
+async def test_capacity_is_structured_and_unknown_creation_cannot_rent_twice(tmp_path, monkeypatch):
+    from zevo.providers.aws_ec2.provider import CloudCapacityUnavailable
+    calls = []
+    async def rejected(*args):
+        calls.append(1)
+        raise CloudCapacityUnavailable('all allowed zones sold out')
+    monkeypatch.setattr(acquire, 'make_provider', lambda backend: object())
+    monkeypatch.setattr(acquire, 'create', rejected)
+    args = _args(tmp_path, backend='aws')
+    assert await acquire.run(args) == 4
+    state = json.loads(Path(args.state).read_text())
+    assert state['failure_kind'] == 'capacity' and state['confirmed_not_created'] is True
+    assert await acquire.run(args) == 4
+    assert len(calls) == 2
+    async def lost_response(*args):
+        calls.append(1)
+        raise TimeoutError('response lost after launch')
+    monkeypatch.setattr(acquire, 'create', lost_response)
+    assert await acquire.run(args) == 4
+    state = json.loads(Path(args.state).read_text())
+    assert state['failure_kind'] == 'unknown' and state['confirmed_not_created'] is False
+    assert await acquire.run(args) == 4
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_interrupted_creation_journal_blocks_duplicate_rental(tmp_path, monkeypatch):
+    args = _args(tmp_path)
+    Path(args.state).write_text(json.dumps({'phase': 'creating'}))
+    def forbidden(*args):
+        pytest.fail('must reconcile interrupted acquisition before creation')
+    monkeypatch.setattr(acquire, 'make_provider', forbidden)
+    assert await acquire.run(args) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [('offer_id', 'larger'), ('disk_gb', 1000), ('region', 'us-west-2'), ('dph', 99)])
+async def test_capacity_retry_cannot_change_original_request(tmp_path, monkeypatch, field, value):
+    from zevo.providers.aws_ec2.provider import CloudCapacityUnavailable
+    calls = []
+    async def rejected(*args):
+        calls.append(1)
+        raise CloudCapacityUnavailable('sold out')
+    monkeypatch.setattr(acquire, 'make_provider', lambda backend: object())
+    monkeypatch.setattr(acquire, 'create', rejected)
+    args = _args(tmp_path, backend='aws')
+    assert await acquire.run(args) == 4
+    setattr(args, field, value)
+    assert await acquire.run(args) == 4
+    assert len(calls) == 1

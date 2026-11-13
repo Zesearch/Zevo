@@ -336,9 +336,11 @@ contract.
 For provision, select `cloud_backend` once from `available_cloud_backends`
 (respecting a valid deployment preference), then keep it fixed through
 acquisition and cleanup. A single-entry list is the Run's pin: if that backend
-has no feasible offer or its launch fails for capacity, fail the ticket with
-that evidence (name the backend, type, zone, and the provider's error) instead
-of renting on any other backend. Use only the shipped client:
+has no feasible offer or its launch fails for capacity, report the failure with
+that evidence (name the backend, type, zone, and the provider's error). Keep
+`acquire_state.json` at the work directory root. The engine recognizes confirmed
+capacity rejection and schedules bounded backoff on this SAME Ticket; do not
+request `replace_resource` when no instance exists or rent on another backend. Use only the shipped client:
 
 ```python
 from zevo.providers.vastai import VastAIProvider
@@ -395,7 +397,10 @@ records that the helper uploaded `remote_env.sh` to `~/zevo/env/` and started
 profiles); Inference and Train `ensure` their profile later. A
 `remote_env.started=false` is not a provisioning failure: mention the reason
 in `notes` and continue. Never rent a
-replacement in the same Ticket, whatever the exit code.
+replacement yourself. For confirmed capacity rejection, end the activation;
+the engine owns the wait and retry. When reactivated, run the same helper with
+the same plan, offer, region and market. Never delete an unresolved acquisition
+journal: an unknown create outcome must be reconciled before another rental.
 
 ## Slurm site skills
 

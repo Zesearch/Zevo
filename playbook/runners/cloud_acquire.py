@@ -38,6 +38,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -254,15 +255,54 @@ async def run(args) -> int:
     def save() -> None:
         out.write_text(json.dumps(state, indent=1), encoding="utf-8")
 
+    request = {key: getattr(args, key) for key in (
+        "backend", "offer_id", "region", "docker_image", "disk_gb", "name", "run_id", "ticket_id", "dph",
+    )}
+    # A lost response or interrupted post-create step is not proof of absence.
+    # Never create again over an unresolved acquisition journal.
+    previous = {}
+    if out.exists():
+        previous = json.loads(out.read_text(encoding="utf-8"))
+        if previous.get("request") and previous["request"] != request:
+            _log("Acquisition retry must preserve the original request")
+            return 4
+        if previous.get("phase") != "create_failed" or not previous.get("confirmed_not_created"):
+            _log("Existing acquisition requires reconciliation before another create")
+            return 4
+    state.update(request=request, run_id=args.run_id, ticket_id=args.ticket_id,
+                 attempted_at=datetime.now(timezone.utc).isoformat())
+    save()  # Persist BEFORE the network call; a crash must fail closed.
     provider = make_provider(args.backend)
     # Pin the effective region even when --region was omitted. Later recovery
     # must not query whatever default happens to be configured at that time.
     effective_region = str(getattr(provider, "region", "") or args.region)
     state["region"] = effective_region
+    state["market"] = str(getattr(provider, "market", ""))
+    if previous and (previous.get("market") != state["market"] or previous.get("region") != effective_region):
+        # Restore the rejection journal; no launch has been attempted.
+        out.write_text(json.dumps(previous, indent=1), encoding="utf-8")
+        _log("Acquisition retry cannot change the effective region or market")
+        return 4
+    save()
     try:
         instance_id = await create(provider, args.backend, args)
     except Exception as exc:  # noqa: BLE001
-        state.update(phase="create_failed", error=repr(exc)[:400]); save()
+        from zevo.providers.aws_ec2.provider import CloudCapacityUnavailable
+        response = getattr(exc, "response", {}) or {}
+        response = response if isinstance(response, dict) else {}
+        code = str((response.get("Error") or {}).get("Code") or "")
+        capacity = isinstance(exc, CloudCapacityUnavailable)
+        # Explicit AWS refusal codes are safe to reconsider; timeouts and
+        # unknown responses may have created an instance and are never retried.
+        rejected = capacity or (args.backend == "aws" and code in {
+            "UnauthorizedOperation", "AuthFailure", "InvalidParameterValue",
+            "InvalidParameterCombination", "VcpuLimitExceeded", "InstanceLimitExceeded",
+            "MaxSpotInstanceCountExceeded", "Unsupported", "SpotMaxPriceTooLow",
+        })
+        state.update(phase="create_failed", error=repr(exc)[:400],
+                     failure_kind="capacity" if capacity else "rejected" if rejected else "unknown",
+                     confirmed_not_created=rejected, provider_error_code=code)
+        save()
         _log(json.dumps(state)); return 4
     state.update(instance_id=instance_id, phase="registering"); save()
     _log(f"CREATED {instance_id}")

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from zevo.contracts._base import AgentResult
 from zevo.db import Base, Run, Ticket, HeartbeatRun, InfraInstance, RunInstruction, AgentWakeupRequest, WorkProduct
-from zevo.engine.run.execution_repair import RepairTicketRequest, repair_ticket
+from zevo.engine.run.execution_repair import RepairTicketRequest, repair_ticket, release_reviewed_repairs
 from zevo.engine.run.repair_progress import execution_retry_authorized, verify_repair_training_config
 from zevo.api.routers.ui.heartbeats import _repair_sources
 
@@ -59,6 +59,8 @@ async def test_review_repairs_same_ticket_preserving_state_and_budget(repair_db,
     assert (await db.get(WorkProduct, 'product')).path == '/durable/checkpoint-735'
     assert execution_retry_authorized(execution.meta) is (action == 'resubmit')
     assert not execution_retry_authorized({**execution.meta, 'execution_attempt': 3})
+    assert not (await db.scalars(select(AgentWakeupRequest))).all()
+    await complete_review(db)
     wakes = (await db.scalars(select(AgentWakeupRequest))).all()
     assert len(wakes) == 1 and wakes[0].ticket_id == ticket.id
     assert wakes[0].payload['repair_attempt'] == 3
@@ -173,7 +175,10 @@ async def test_replacement_review_defers_dispatch_until_resources_are_ready(repa
     from zevo.engine.run.resource_recovery import KEY
     db,ticket,execution = repair_db
     result = await repair_ticket(db,ticket,request('replace_resource'))
-    assert result['status'] == 'waiting_external'
+    assert result['status'] == 'repairing'
+    assert not (await db.get(Run,'r')).lifecycle.get(KEY)
+    await complete_review(db)
+    assert ticket.status == 'waiting_external'
     assert ticket.repair_attempts == 3 and execution_retry_authorized(execution.meta)
     assert (await db.get(Run,'r')).lifecycle[KEY][ticket.id]['phase'] == 'stopping'
     assert not (await db.scalars(select(AgentWakeupRequest))).all()
@@ -226,3 +231,109 @@ async def test_stage_history_includes_explicit_reviews_only_within_run(repair_db
     ticket.lane = 'held_out_test'
     await db.commit()
     assert await history() == []
+
+
+async def complete_review(db):
+    hb = await db.get(HeartbeatRun, 'decision')
+    hb.finished_at = datetime.now(timezone.utc)
+    supervisor = await db.get(Ticket, 'orch')
+    supervisor.status = 'succeeded'
+    await db.commit()
+    await release_reviewed_repairs(db, supervisor, hb.id)
+
+
+@pytest.mark.asyncio
+async def test_repair_cannot_run_from_message_before_valid_review(repair_db):
+    from zevo.engine.run.runner import run_ticket, _queue_ticket_repair
+    from zevo.engine.run.wakeup import WakeupDeferred
+    from zevo.engine.run.supervisor_handoff import waiting
+    db, ticket, _ = repair_db
+    await repair_ticket(db, ticket, request())
+    await _queue_ticket_repair(db, ticket)
+    assert not (await db.scalars(select(AgentWakeupRequest))).all()
+    with pytest.raises(WakeupDeferred, match='supervisor_decision_pending'):
+        await run_ticket(db, ticket_id=ticket.id, activation_source='on_demand')
+    hb = await db.get(HeartbeatRun, 'decision')
+    hb.finished_at = datetime.now(timezone.utc)
+    supervisor = await db.get(Ticket, 'orch')
+    supervisor.status = 'failed'
+    await db.commit()
+    await release_reviewed_repairs(db, supervisor, hb.id)
+    assert await waiting(db, ticket)
+    assert not (await db.scalars(select(AgentWakeupRequest))).all()
+    await complete_review(db)
+    assert not await waiting(db, ticket)
+    await complete_review(db)
+    assert len((await db.scalars(select(AgentWakeupRequest))).all()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('blocker', ['', 'unknown', 'live', 'execution'])
+async def test_infrastructure_provision_repairs_without_execution(repair_db, blocker):
+    import json
+    from zevo.db import TicketNotice
+    db, ticket, execution = repair_db
+    ticket.agent_id = 'infrastructure'
+    if blocker != 'execution':
+        await db.delete(execution)
+    db.add(TicketNotice(ticket_id=ticket.id, code='cloud.acquisition_failed', severity='warning',
+        body=json.dumps({'confirmed_not_created': blocker != 'unknown'})))
+    if blocker == 'live':
+        db.add(InfraInstance(id='live', run_id='r', ticket_id=ticket.id, provider='cloud', instance_id='i-1'))
+    await db.commit()
+    req = RepairTicketRequest(action='provision', execution_attempt=0,
+        reason='Retry confirmed rejected provisioning under unchanged plan', evidence=['acquisition journal'])
+    if blocker:
+        with pytest.raises(HTTPException):
+            await repair_ticket(db, ticket, req)
+    else:
+        result = await repair_ticket(db, ticket, req)
+        assert result['status'] == 'repairing' and ticket.repair_attempts == 3
+        assert not (await db.scalars(select(AgentWakeupRequest))).all()
+        await complete_review(db)
+        assert len((await db.scalars(select(AgentWakeupRequest))).all()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['capacity', 'unknown', 'stale', 'exhausted', 'budget', 'live', 'short_wait'])
+async def test_cloud_capacity_wait_is_bounded_and_safe(repair_db, tmp_path, monkeypatch, case):
+    import json
+    from datetime import timedelta
+    from zevo.engine.run.cloud_capacity import handle_failure, KEY, next_attempt
+    from zevo.engine.run.runner import _queue_ticket_repair, run_ticket
+    from zevo.engine.run.wakeup import WakeupDeferred
+    db, ticket, execution = repair_db
+    await db.delete(execution)
+    ticket.agent_id = 'infrastructure'
+    hb = HeartbeatRun(id='infra-hb', ticket_id=ticket.id, agent_id='infrastructure', driver='mock', model='test')
+    db.add(hb)
+    run = await db.get(Run, 'r')
+    now = datetime.now(timezone.utc)
+    if case == 'exhausted':
+        run.lifecycle = {KEY: {ticket.id: {'attempts': 5, 'first_at': now.isoformat(), 'next_at': now.isoformat()}}}
+    if case == 'budget':
+        monkeypatch.setattr('zevo.engine.cost.budget.snapshot_for_run', AsyncMock(return_value=SimpleNamespace(over_budget=True, over_time_limit=False)))
+    if case == 'live':
+        db.add(InfraInstance(id='live', run_id='r', ticket_id=ticket.id, provider='cloud', instance_id='i-1'))
+    if case == 'short_wait':
+        run.max_queue_wait_hours = 0.001
+    await db.commit()
+    state = {'run_id': 'r', 'ticket_id': ticket.id, 'phase': 'create_failed',
+        'failure_kind': 'unknown' if case == 'unknown' else 'capacity',
+        'confirmed_not_created': case != 'unknown',
+        'attempted_at': (datetime.now(timezone.utc) - timedelta(days=1) if case == 'stale' else datetime.now(timezone.utc)).isoformat()}
+    (tmp_path / 'acquire_state.json').write_text(json.dumps(state))
+    result = await handle_failure(db, ticket, SimpleNamespace(work_dir=str(tmp_path)), hb.id)
+    assert result is (True if case == 'capacity' else None if case == 'stale' else False)
+    if case == 'capacity':
+        due = next_attempt(run, ticket.id)
+        assert due > datetime.now(timezone.utc)
+        await db.commit()
+        await _queue_ticket_repair(db, ticket)
+        wake = (await db.scalars(select(AgentWakeupRequest))).one()
+        assert wake.scheduled_for.replace(tzinfo=timezone.utc) == due
+        with pytest.raises(WakeupDeferred, match='cloud_capacity_backoff'):
+            await run_ticket(db, ticket_id=ticket.id, activation_source='on_demand')
+        assert ticket.repair_attempts == 3 and ticket.iteration == 2
+    else:
+        assert not (await db.scalars(select(AgentWakeupRequest))).all()

@@ -619,7 +619,7 @@ class AwsEc2Provider:
             logger.info("Launched EC2 %s (%s, %s) in %s/%s", instance_id, offer_id, self.market,
                         self.region, zone)
             return {"instance_id": instance_id, "success": True}
-        raise RuntimeError(
+        raise CloudCapacityUnavailable(
             f"No {self.market} capacity for {offer_id} in any offering zone of {self.region} "
             f"({'; '.join(failures)}). Try another instance type or region."
         )
@@ -765,9 +765,12 @@ class AwsEc2Provider:
 _GONE_STATES = ("shutting-down", "terminated", "not-found")
 # RunInstances errors that mean "not in this Availability Zone right now".
 # Account-level refusals (quota, MaxSpotInstanceCountExceeded) are not retried.
+class CloudCapacityUnavailable(RuntimeError):
+    """Every launch was explicitly rejected; no instance was created."""
+
+
 CAPACITY_ERROR_CODES = frozenset({
-    "InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported",
-    "SpotMaxPriceTooLow", "InsufficientHostCapacity",
+    "InsufficientInstanceCapacity", "InsufficientCapacity", "InsufficientHostCapacity",
 })
 
 
