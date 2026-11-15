@@ -9,13 +9,13 @@ import type { ExecutionEventDTO } from "../lib/api";
 // Observatory palette: loss = brass, alert/val_loss = coral, live/healthy =
 // phosphor, info = sky, extra = gold/lilac.
 const METRIC_COLORS: Record<string, string> = {
-  loss: "rgb(var(--brass-500))",
-  val_loss: "rgb(var(--coral-400))",
-  learning_rate: "rgb(var(--skyx-400))",
-  grad_norm: "rgb(var(--phosphor-400))",
-  entropy: "rgb(var(--lilac-400))",
-  mean_token_accuracy: "rgb(var(--skyx-300))",
-  num_tokens: "rgb(var(--gold-500))",
+  loss: "#E08D38",
+  val_loss: "#F26F58",
+  learning_rate: "#5FB0DD",
+  grad_norm: "#4FD1B5",
+  entropy: "#A98FD6",
+  mean_token_accuracy: "#8FCDEB",
+  num_tokens: "#E0B23C",
 };
 
 // Canonical metric names — different models/trainers emit the same thing under
@@ -60,7 +60,7 @@ const NON_NEGATIVE_METRICS = new Set([
   "entropy", "mean_token_accuracy",
 ]);
 const SUMMARY_KEYS = ["train_runtime", "total_flos", "train_samples_per_second", "train_steps_per_second"];
-const PALETTE = ["rgb(var(--brass-500))", "rgb(var(--skyx-400))", "rgb(var(--lilac-400))", "rgb(var(--phosphor-400))", "rgb(var(--coral-400))", "rgb(var(--skyx-300))", "rgb(var(--gold-500))", "rgb(var(--brass-300))"];
+const PALETTE = ["#E08D38", "#5FB0DD", "#A98FD6", "#4FD1B5", "#F26F58", "#8FCDEB", "#E0B23C", "#F2C185"];
 const CHARTS_PER_PAGE = 8;
 
 /** Compact scientific: drop the ".00" trailing zeros and the leading "+" on the
@@ -173,17 +173,17 @@ function MetricChart({ metric, color, data, total }: {
       </div>
       <ResponsiveContainer width="100%" height={120}>
         <LineChart data={data} margin={{ top: 4, right: 10, left: -10, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--night-800))" />
-          <XAxis dataKey="step" type="number" stroke="rgb(var(--night-500))" fontSize={13}
-            tick={{ fill: "rgb(var(--night-400))" }}
+          <CartesianGrid strokeDasharray="3 3" stroke="#1C2731" />
+          <XAxis dataKey="step" type="number" stroke="#66788A" fontSize={13}
+            tick={{ fill: "#8B9CAB" }}
             domain={[0, total]} ticks={axisTicks(total)} allowDataOverflow />
-          <YAxis stroke="rgb(var(--night-500))" fontSize={13} tick={{ fill: "rgb(var(--night-400))" }} width={56}
+          <YAxis stroke="#66788A" fontSize={13} tick={{ fill: "#8B9CAB" }} width={56}
             scale={logScale ? "log" : "auto"}
             domain={logScale ? ["auto", "auto"] : ["auto", "auto"]}
             allowDataOverflow={false} tickFormatter={fmtTick} />
           <Tooltip
-            contentStyle={{ background: "rgb(var(--night-900))", border: "1px solid rgb(var(--night-800))", borderRadius: 10, fontSize: 12 }}
-            labelStyle={{ color: "rgb(var(--night-400))" }}
+            contentStyle={{ background: "#10161E", border: "1px solid #1C2731", borderRadius: 10, fontSize: 12 }}
+            labelStyle={{ color: "#8B9CAB" }}
             labelFormatter={(s) => `step ${s}`}
             formatter={(v: number) => [fmtMetric(v), metric]}
           />
@@ -337,7 +337,7 @@ export function TrainingMonitor({ executionEvents, renderContainer = (content) =
           return (
           last[m] !== undefined ? (
             <span key={m} className="rounded px-2 py-0.5"
-              style={{ background: "rgb(var(--night-500) / 0.1)", color: colorFor(m, i) }}>
+              style={{ background: "rgba(102,120,138,0.1)", color: colorFor(m, i) }}>
               {m} <span className="text-slate-100">{fmtMetric(last[m] as number)}</span>
             </span>
           ) : null

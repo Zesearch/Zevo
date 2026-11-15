@@ -134,13 +134,13 @@ export function PipelineRing({
           rim. Its lamp reads off the same states as every station — one
           colour vocabulary for the whole diagram, so a failed supervisor looks
           like a failed anything else. */}
-      <circle cx={cx} cy={hubY} r={54} fill="rgb(var(--field))" stroke={COL[centerState]} strokeWidth={2.5}
+      <circle cx={cx} cy={hubY} r={54} fill="#0E141B" stroke={COL[centerState]} strokeWidth={2.5}
         style={centerState === "active" ? { filter: `drop-shadow(0 0 8px ${ACTIVE_GLOW}0.7))` } : undefined}>
         {centerState === "active" && (
           <animate attributeName="stroke-opacity" values="1;0.25;1" dur="1.8s" repeatCount="indefinite" />
         )}
       </circle>
-      <circle cx={cx} cy={hubY} r={54} fill="none" stroke="rgb(var(--overlay))" strokeOpacity={0.05} strokeWidth={1} />
+      <circle cx={cx} cy={hubY} r={54} fill="none" stroke="#ffffff" strokeOpacity={0.05} strokeWidth={1} />
       <text x={cx} y={hubY + 8} textAnchor="middle" fill={COL[centerState]} fontSize={21} fontWeight={600} fontFamily="Spline Sans Mono">
         ORCH
       </text>
@@ -148,7 +148,7 @@ export function PipelineRing({
           theirs — same font, size and colour, so the hub is read the same way.
           Set clear of the disc: at +78 the label sat 24px off a 54px circle and
           read as part of it rather than as its caption. */}
-      <text x={cx} y={hubY + 90} textAnchor="middle" fill={centerState === "idle" ? "rgb(var(--night-500))" : "rgb(var(--night-200))"} fontSize={20} fontWeight={500} fontFamily="Instrument Sans">
+      <text x={cx} y={hubY + 90} textAnchor="middle" fill={centerState === "idle" ? "#66788A" : "#D3DDE5"} fontSize={20} fontWeight={500} fontFamily="Instrument Sans">
         {centerMain}
         {centerCount ? `  ·  ${centerCount}` : ""}
       </text>
@@ -172,19 +172,19 @@ export function PipelineRing({
             {/* station disc — running is the disc itself pulsing. It used to be
                 a 6px lamp pinned to the disc's shoulder, which is a second
                 thing to notice for a state the disc could carry on its own. */}
-            <circle cx={p.x} cy={p.y} r={42} fill="rgb(var(--field))" stroke={col} strokeWidth={2.5}
+            <circle cx={p.x} cy={p.y} r={42} fill="#0E141B" stroke={col} strokeWidth={2.5}
               style={live ? { filter: `drop-shadow(0 0 8px ${ACTIVE_GLOW}0.7))` } : undefined}>
               {live && (
                 <animate attributeName="stroke-opacity" values="1;0.25;1" dur="1.8s" repeatCount="indefinite" />
               )}
             </circle>
-            <circle cx={p.x} cy={p.y} r={42} fill="none" stroke="rgb(var(--overlay))" strokeOpacity={0.05} strokeWidth={1} />
+            <circle cx={p.x} cy={p.y} r={42} fill="none" stroke="#ffffff" strokeOpacity={0.05} strokeWidth={1} />
             {/* station code */}
             <text x={p.x} y={p.y - 2} textAnchor="middle" fill={col} fontSize={21} fontWeight={600} fontFamily="Spline Sans Mono">
               {s.short}
             </text>
             {/* station index */}
-            <text x={p.x} y={p.y + 18} textAnchor="middle" fill="rgb(var(--night-400))" fontSize={13} fontFamily="Spline Sans Mono">
+            <text x={p.x} y={p.y + 18} textAnchor="middle" fill="#8B9CAB" fontSize={13} fontFamily="Spline Sans Mono">
               {String(i + 1).padStart(2, "0")}
             </text>
             {/* label */}
@@ -192,7 +192,7 @@ export function PipelineRing({
               // foreignObject rather than <text>: this one label carries the
               // note marker, and that is an HTML control with a tooltip.
               <foreignObject x={p.x + labelDx - 130} y={(below ? p.y + 60 : p.y - 84)} width={260} height={26}>
-                <div className="flex h-full items-center justify-center gap-1.5 whitespace-nowrap font-sans text-[20px] font-medium leading-none text-[rgb(var(--night-200))]">
+                <div className="flex h-full items-center justify-center gap-1.5 whitespace-nowrap font-sans text-[20px] font-medium leading-none text-[#D3DDE5]">
                   {stationNote}
                   <span>{s.label}{s.count ? `  ·  ${s.count}` : ""}</span>
                   {noteAt === i && countNote}
@@ -203,7 +203,7 @@ export function PipelineRing({
                 x={p.x + labelDx}
                 y={below ? p.y + 78 : p.y - 66}
                 textAnchor="middle"
-                fill={s.state === "idle" ? "rgb(var(--night-500))" : "rgb(var(--night-200))"}
+                fill={s.state === "idle" ? "#66788A" : "#D3DDE5"}
                 fontSize={20}
                 fontWeight={500}
                 fontFamily="Instrument Sans"
