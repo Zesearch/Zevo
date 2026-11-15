@@ -66,22 +66,22 @@
 }
 
 :root[data-theme="light"] {
-  --night-50: 12 20 28; /* #0C141C */
-  --night-100: 23 33 44; /* #17212C */
-  --night-200: 42 55 69; /* #2A3745 */
-  --night-300: 66 82 95; /* #42525F */
-  --night-400: 83 101 122; /* #53657A */
+  --night-50: 11 18 25; /* #0B1219 */
+  --night-100: 20 28 38; /* #141C26 */
+  --night-200: 39 51 63; /* #27333F */
+  --night-300: 63 78 92; /* #3F4E5C */
+  --night-400: 81 99 122; /* #51637A */
   --night-500: 91 110 130; /* #5B6E82 */
   --night-600: 127 142 157; /* #7F8E9D */
-  --night-700: 198 208 217; /* #C6D0D9 */
-  --night-800: 217 224 230; /* #D9E0E6 */
+  --night-700: 205 213 221; /* #CDD5DD */
+  --night-800: 225 230 235; /* #E1E6EB */
   --night-900: 255 255 255; /* #FFFFFF */
-  --night-950: 238 242 245; /* #EEF2F5 */
-  --brass-100: 94 49 9; /* #5E3109 */
-  --brass-200: 122 68 20; /* #7A4414 */
-  --brass-300: 158 92 31; /* #9E5C1F */
-  --brass-400: 180 105 31; /* #B4691F */
-  --brass-500: 201 117 42; /* #C9752A */
+  --night-950: 247 248 250; /* #F7F8FA */
+  --brass-100: 107 58 10; /* #6B3A0A */
+  --brass-200: 138 71 12; /* #8A470C */
+  --brass-300: 180 83 9; /* #B45309 */
+  --brass-400: 194 98 10; /* #C2620A */
+  --brass-500: 217 119 6; /* #D97706 */
   --brass-600: 224 141 56; /* #E08D38 */
   --brass-700: 242 193 133; /* #F2C185 */
   --phosphor-100: 6 63 51; /* #063F33 */
@@ -111,13 +111,13 @@
   --gold-300: 110 80 12; /* #6E500C */
   --gold-400: 135 99 18; /* #876312 */
   --gold-500: 166 123 26; /* #A67B1A */
-  --raised: 246 248 250; /* #F6F8FA */
-  --overlay: 15 23 32; /* #0F1720 */
-  --field: 248 250 251; /* #F8FAFB */
-  --field-edge: 185 198 209; /* #B9C6D1 */
+  --raised: 243 245 248; /* #F3F5F8 */
+  --overlay: 11 18 25; /* #0B1219 */
+  --field: 250 251 252; /* #FAFBFC */
+  --field-edge: 179 192 204; /* #B3C0CC */
   --btn: 255 255 255; /* #FFFFFF */
-  --btn-hover: 241 244 247; /* #F1F4F7 */
-  --btn-edge-hover: 174 187 199; /* #AEBBC7 */
+  --btn-hover: 243 245 248; /* #F3F5F8 */
+  --btn-edge-hover: 169 182 195; /* #A9B6C3 */
 }
 
 :root {
@@ -145,10 +145,10 @@
   /* Paper ground: the grid and glows are quieter, shadows are soft and cool
      instead of pooled black, and the bezel sheen is dropped (a highlight on
      white is just a smear). */
-  --grid: rgb(var(--overlay) / 0.035);
-  --glow-brass: rgb(var(--brass-600) / 0.07);
-  --glow-phosphor: rgb(var(--phosphor-500) / 0.05);
-  --shadow-bezel: 0 1px 2px rgb(23 33 44 / 0.06), 0 10px 28px -16px rgb(23 33 44 / 0.18);
+  --grid: rgb(var(--overlay) / 0.028);
+  --glow-brass: rgb(var(--brass-500) / 0.05);
+  --glow-phosphor: rgb(var(--phosphor-500) / 0.04);
+  --shadow-bezel: 0 1px 2px rgb(11 18 25 / 0.05), 0 8px 24px -16px rgb(11 18 25 / 0.14);
   --bezel-sheen: transparent;
 }
 
@@ -315,6 +315,18 @@ h1, h2, h3, .font-display {
   background: linear-gradient(180deg, rgb(var(--brass-500) / 0.28), rgb(var(--brass-500) / 0.12));
   color: rgb(var(--brass-100));
   box-shadow: 0 0 18px -6px rgb(var(--brass-500) / 0.65);
+}
+
+:root[data-theme="light"] .btn-brass {
+  border-color: rgb(var(--brass-300));
+  background: rgb(var(--brass-300));
+  color: #fff;
+}
+:root[data-theme="light"] .btn-brass:hover {
+  border-color: rgb(var(--brass-200));
+  background: rgb(var(--brass-200));
+  color: #fff;
+  box-shadow: 0 6px 16px -8px rgb(var(--brass-300) / 0.6);
 }
 
 /* Secondary launch path (Customized Pipeline). Sky reads as the alternate route
