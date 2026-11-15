@@ -163,11 +163,11 @@ export function Gauge({
     const large = total * frac > 180 ? 1 : 0;
     return `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
   };
-  const stroke = { phosphor: "rgb(var(--phosphor-400))", brass: "rgb(var(--brass-500))", coral: "rgb(var(--coral-400))" }[tone];
+  const stroke = { phosphor: "#4FD1B5", brass: "#E08D38", coral: "#F26F58" }[tone];
   return (
     <div className="flex flex-col items-center">
       <svg width={size} height={size} className="overflow-visible">
-        <path d={arc(1)} fill="none" stroke="rgb(var(--night-800))" strokeWidth={9} strokeLinecap="round" />
+        <path d={arc(1)} fill="none" stroke="#1C2731" strokeWidth={9} strokeLinecap="round" />
         {bounded && (
           <path
             d={arc(clamped)}
@@ -183,14 +183,14 @@ export function Gauge({
           y={label ? cy - 2 : cy + size * 0.06}
           textAnchor="middle"
           className="readout"
-          fill="rgb(var(--night-100))"
+          fill="#E9EEF2"
           fontSize={size * displayScale}
           fontWeight={600}
         >
           {display}
         </text>
         {label && (
-          <text x={cx} y={cy + size * 0.15} textAnchor="middle" fill="rgb(var(--night-500))" fontSize={size * 0.085} className="kicker">
+          <text x={cx} y={cy + size * 0.15} textAnchor="middle" fill="#66788A" fontSize={size * 0.085} className="kicker">
             {label}
           </text>
         )}
