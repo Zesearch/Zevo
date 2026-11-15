@@ -4,11 +4,11 @@ import { timelineTicketStatus } from "./timelineStatus";
 
 // The iteration header and loop share exactly five lamp meanings.
 export const PIPELINE_LAMPS = {
-  idle: { color: "#3B4C5B", dot: "bg-slate-600", label: "idle" },
-  waiting: { color: "#5FB0DD", dot: "bg-skyx-400", label: "waiting" },
-  active: { color: "#E08D38", dot: "bg-brass-500", label: "running" },
-  done: { color: "#4FD1B5", dot: "bg-phosphor-400", label: "done" },
-  failed: { color: "#F26F58", dot: "bg-coral-400", label: "failed" },
+  idle: { color: "rgb(var(--night-600))", dot: "bg-slate-600", label: "idle" },
+  waiting: { color: "rgb(var(--skyx-400))", dot: "bg-skyx-400", label: "waiting" },
+  active: { color: "rgb(var(--brass-500))", dot: "bg-brass-500", label: "running" },
+  done: { color: "rgb(var(--phosphor-400))", dot: "bg-phosphor-400", label: "done" },
+  failed: { color: "rgb(var(--coral-400))", dot: "bg-coral-400", label: "failed" },
 } as const;
 export type PipelineState = keyof typeof PIPELINE_LAMPS;
 

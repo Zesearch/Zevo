@@ -5,6 +5,10 @@
 //  Aesthetic: analog observatory / instrument console. Deep observatory-night
 //  canvas, sodium-brass primary, phosphor-mint live signals, coral alerts.
 //
+//  Every colour is a CSS variable (see styles.css): the dark observatory ramps
+//  live on :root and a light re-cut on :root[data-theme="light"], so one
+//  class like text-brass-300 is readable on both grounds without a rewrite.
+//
 //  Two layers of tokens:
 //   1. SEMANTIC tokens (canvas/panel/ink/brass/phosphor/…) — used by the hand
 //      built ZEVO shell + signature screens for precise, readable intent.
@@ -13,65 +17,14 @@
 //      dark-slate theme inherits the console look coherently without a rewrite.
 // ═══════════════════════════════════════════════════════════════════════════
 //
-const NIGHT = {
-  50:  "#F3F7FA",
-  100: "#E9EEF2",
-  200: "#D3DDE5",
-  300: "#B2C0CC",
-  400: "#8B9CAB",
-  500: "#66788A", // dim label text
-  600: "#3B4C5B",
-  700: "#293745", // raised hairline
-  800: "#1C2731", // hairline / border
-  900: "#10161E", // panel
-  950: "#0A0E13", // deepest / canvas
-};
-const BRASS = {
-  100: "#FBEDD6",
-  200: "#F7D9AE",
-  300: "#F2C185",
-  400: "#ECA758",
-  500: "#E08D38", // primary action / sodium lamp
-  600: "#C6762A",
-  700: "#9E5C1F",
-};
-const PHOSPHOR = {
-  100: "#D6F7EE",
-  200: "#A9EEDC",
-  300: "#7DE8CE",
-  400: "#4FD1B5", // live / running / healthy
-  500: "#2BB89C",
-  600: "#1E8F79",
-};
-const CORAL = {
-  100: "#FBD9D1",
-  200: "#F7B7A9",
-  300: "#F79A88",
-  400: "#F26F58", // alert / failed
-  500: "#E24E36",
-  600: "#B93A26",
-};
-const SKYX = {
-  100: "#D6EDF9",
-  200: "#AEDCF1",
-  300: "#8FCDEB",
-  400: "#5FB0DD", // ready / info
-  500: "#3D93C6",
-  600: "#2C6F98",
-};
-const LILAC = {
-  100: "#E7DDF7",
-  200: "#D3C2EF",
-  300: "#C3B0E8",
-  400: "#A98FD6", // degraded / auto-improve
-  500: "#8F6FC4",
-  600: "#6F52A0",
-};
-const GOLD = {
-  300: "#EED08A",
-  400: "#E6BB5B",
-  500: "#E0B23C", // chart accent
-};
+const v = (name) => `rgb(var(--${name}) / <alpha-value>)`;
+const NIGHT = { 50: v("night-50"), 100: v("night-100"), 200: v("night-200"), 300: v("night-300"), 400: v("night-400"), 500: v("night-500"), 600: v("night-600"), 700: v("night-700"), 800: v("night-800"), 900: v("night-900"), 950: v("night-950") };
+const BRASS = { 100: v("brass-100"), 200: v("brass-200"), 300: v("brass-300"), 400: v("brass-400"), 500: v("brass-500"), 600: v("brass-600"), 700: v("brass-700") };
+const PHOSPHOR = { 100: v("phosphor-100"), 200: v("phosphor-200"), 300: v("phosphor-300"), 400: v("phosphor-400"), 500: v("phosphor-500"), 600: v("phosphor-600") };
+const CORAL = { 100: v("coral-100"), 200: v("coral-200"), 300: v("coral-300"), 400: v("coral-400"), 500: v("coral-500"), 600: v("coral-600") };
+const SKYX = { 100: v("skyx-100"), 200: v("skyx-200"), 300: v("skyx-300"), 400: v("skyx-400"), 500: v("skyx-500"), 600: v("skyx-600") };
+const LILAC = { 100: v("lilac-100"), 200: v("lilac-200"), 300: v("lilac-300"), 400: v("lilac-400"), 500: v("lilac-500"), 600: v("lilac-600") };
+const GOLD = { 300: v("gold-300"), 400: v("gold-400"), 500: v("gold-500") };
 
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
@@ -81,7 +34,7 @@ export default {
         // ── Semantic (preferred in ZEVO-native code) ──
         canvas: NIGHT[950],
         panel: NIGHT[900],
-        raised: "#141C25",
+        raised: v("raised"),
         hair: NIGHT[800],
         ink: NIGHT[100],
         dim: NIGHT[500],
@@ -91,6 +44,9 @@ export default {
         skyx: SKYX,
         lilac: LILAC,
         gold: GOLD,
+        // Translucent overlays (bg-white/5 hover tints) must tint TOWARD the
+        // ink, so "white" is light on the dark theme and near-black on light.
+        white: v("overlay"),
 
         // ── Remap of stock scales so inherited pages read as the console ──
         slate: NIGHT,
@@ -150,8 +106,8 @@ export default {
       },
       boxShadow: {
         // Instrument bezel: soft top-light + grounded drop.
-        bezel: "inset 0 1px 0 0 rgba(255,255,255,0.045), 0 1px 2px rgba(0,0,0,0.5), 0 14px 34px -18px rgba(0,0,0,0.7)",
-        lamp: "0 0 0 1px rgba(255,255,255,0.04)",
+        bezel: "var(--shadow-bezel)",
+        lamp: "0 0 0 1px rgb(var(--overlay) / 0.04)",
         "glow-brass": "0 0 12px -2px rgba(224,141,56,0.55)",
         "glow-phosphor": "0 0 12px -2px rgba(79,209,181,0.6)",
         "glow-coral": "0 0 12px -2px rgba(242,111,88,0.6)",

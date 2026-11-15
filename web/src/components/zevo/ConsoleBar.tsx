@@ -10,13 +10,47 @@
 // in its own header, and ⌘K reaches it from anywhere.
 import useSWR from "swr";
 import { Link } from "react-router-dom";
-import { Command } from "lucide-react";
+import { Command, Moon, Sun } from "lucide-react";
 import type { ModelDTO, RunStatistics } from "../../lib/api";
 import { fmtCost, fmtDuration } from "../../lib/format";
 import logoUrl from "../../assets/zevo-logo.png";
 import { fireCommand } from "../../lib/commands";
+import { useTheme, type Theme } from "../../lib/theme";
 
 type CostTotal = { total_usd: number; gpu_usd: number; agent_usd: number };
+
+// Dark / Light as one segmented control: the active segment is raised and
+// inked, the other sits flat. Both are always visible, so the reader sees the
+// choice they did not make as well as the one they did.
+function ThemeSwitch() {
+  const [theme, setTheme] = useTheme();
+  const seg = (value: Theme, Icon: typeof Sun, label: string) => {
+    const on = theme === value;
+    return (
+      <button
+        type="button"
+        role="radio"
+        aria-checked={on}
+        onClick={() => setTheme(value)}
+        className={
+          "flex items-center gap-1.5 rounded-[7px] px-2.5 py-1 text-xs font-medium transition-colors " +
+          (on
+            ? "bg-raised text-ink shadow-[inset_0_0_0_1px_rgb(var(--night-700))]"
+            : "text-dim hover:text-ink")
+        }
+      >
+        <Icon size={13} aria-hidden />
+        <span className="hidden lg:inline">{label}</span>
+      </button>
+    );
+  };
+  return (
+    <div role="radiogroup" aria-label="Colour theme" className="flex items-center gap-0.5 rounded-[9px] border border-hair bg-canvas p-0.5">
+      {seg("dark", Moon, "Dark")}
+      {seg("light", Sun, "Light")}
+    </div>
+  );
+}
 
 function Vital({ label, value, live = false }: { label: string; value: string; live?: boolean }) {
   return (
@@ -70,6 +104,7 @@ export function ConsoleBar() {
       </div>
 
       <div className="ml-auto flex items-center gap-2">
+        <ThemeSwitch />
         <div className="hidden sm:block">
           <button
             onClick={() => fireCommand("open-palette")}
