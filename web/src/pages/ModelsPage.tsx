@@ -105,7 +105,7 @@ export function ModelsPage() {
             <button
               onClick={() => setDrawer({ mode: "compare", tag: compareSelection[0], otherTag: compareSelection[1] })}
               className="btn"
-              style={{ borderColor: "rgba(169,143,214,0.4)", color: "#C3B0E8" }}
+              style={{ borderColor: "rgb(var(--lilac-400) / 0.4)", color: "rgb(var(--lilac-300))" }}
             >
               <ArrowLeftRight size={13} /> compare {compareSelection.map(nameOf).join(" vs ")}
             </button>

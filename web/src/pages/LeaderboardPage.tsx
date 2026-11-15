@@ -126,8 +126,8 @@ type BoardId = (typeof BOARDS)[number]["id"];
 
 // Distinct hue per entrant, so one keeps its colour whichever task you open.
 const SERIES_COLORS = [
-  "#4FD1B5", "#E08D38", "#5FB0DD", "#A98FD6", "#E6BB5B",
-  "#F26F58", "#7DE8CE", "#8FCDEB", "#C3B0E8",
+  "rgb(var(--phosphor-400))", "rgb(var(--brass-500))", "rgb(var(--skyx-400))", "rgb(var(--lilac-400))", "rgb(var(--gold-400))",
+  "rgb(var(--coral-400))", "rgb(var(--phosphor-300))", "rgb(var(--skyx-300))", "rgb(var(--lilac-300))",
 ];
 
 export function LeaderboardPage() {

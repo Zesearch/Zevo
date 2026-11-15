@@ -175,8 +175,8 @@ export function IterationChart({
           between the title and the plot, which is the space the chart wants. */}
       <Kicker strong className="!text-sm">Score per iteration</Kicker>
       <div className="mt-1.5 flex items-center justify-center gap-5">
-        <LegendKey color="#66788A" label="validation" dashed />
-        <LegendKey color="#4FD1B5" label="test" />
+        <LegendKey color="rgb(var(--night-500))" label="validation" dashed />
+        <LegendKey color="rgb(var(--phosphor-400))" label="test" />
       </div>
       {/* Scrolls sideways once the run has more iterations than fit: the inner
           track claims PX_PER_POINT per point, so a short run still fills the
@@ -188,17 +188,17 @@ export function IterationChart({
         <ComposedChart data={chart} margin={{ top: 38, right: 12, left: -8, bottom: 4 }}>
           <defs>
             <linearGradient id="iter-acc" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#4FD1B5" stopOpacity={0.32} />
-              <stop offset="100%" stopColor="#4FD1B5" stopOpacity={0} />
+              <stop offset="0%" stopColor="rgb(var(--phosphor-400))" stopOpacity={0.32} />
+              <stop offset="100%" stopColor="rgb(var(--phosphor-400))" stopOpacity={0} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1C2731" />
+          <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--night-800))" />
           <XAxis
-            dataKey="label" stroke="#66788A" fontSize={15} tick={{ fill: "#B2C0CC" }}
+            dataKey="label" stroke="rgb(var(--night-500))" fontSize={15} tick={{ fill: "rgb(var(--night-300))" }}
             padding={{ left: 42, right: 22 }} tickMargin={22} height={50}
           />
           <YAxis
-            stroke="#66788A" fontSize={15} tick={{ fill: "#B2C0CC" }}
+            stroke="rgb(var(--night-500))" fontSize={15} tick={{ fill: "rgb(var(--night-300))" }}
             domain={[yMin, yMax]} allowDecimals={!percentage}
             ticks={yTicks}
             tickFormatter={(v) => percentage
@@ -211,10 +211,10 @@ export function IterationChart({
               than squinting at 12px. */}
           <Tooltip
             contentStyle={{
-              background: "#10161E", border: "1px solid #1C2731",
+              background: "rgb(var(--night-900))", border: "1px solid rgb(var(--night-800))",
               borderRadius: 10, fontSize: 15, padding: "8px 12px",
             }}
-            labelStyle={{ color: "#8B9CAB", fontSize: 14, marginBottom: 4 }}
+            labelStyle={{ color: "rgb(var(--night-400))", fontSize: 14, marginBottom: 4 }}
             itemStyle={{ fontSize: 15, padding: "1px 0" }}
             formatter={(v: number, n: string) => [chartValue(v), n]}
           />
@@ -232,24 +232,24 @@ export function IterationChart({
             dot={(p: any) => <g key={p.index} />} activeDot={false}
           />
           <Line
-            type="monotone" dataKey="validation" name="validation" stroke="#66788A" strokeWidth={1.25}
+            type="monotone" dataKey="validation" name="validation" stroke="rgb(var(--night-500))" strokeWidth={1.25}
             strokeDasharray="5 3" isAnimationActive={false} connectNulls
             // Same size and weight as an ordinary test dot, in grey. They are
             // two readings of equal standing, so they get the same mark; what
             // separates them is hue and the dashed stroke, not importance. At
             // r=2 it read as an afterthought next to the r=4 test dot.
-            dot={{ r: 7, fill: "#66788A", stroke: "none" }}
+            dot={{ r: 7, fill: "rgb(var(--night-500))", stroke: "none" }}
             // Hovering must not SHRINK the point. recharts' default activeDot
             // is r=4, which was fine when the resting dot was smaller than that
             // and reads as a glitch now that it is 7.
-            activeDot={{ r: 9, fill: "#66788A", stroke: "#0A0E13", strokeWidth: 2 }}
-            label={valueLabel("validation", "#8B9CAB")}
+            activeDot={{ r: 9, fill: "rgb(var(--night-500))", stroke: "rgb(var(--night-950))", strokeWidth: 2 }}
+            label={valueLabel("validation", "rgb(var(--night-400))")}
           />
           <Line
-            type="monotone" dataKey="test" name="test" stroke="#4FD1B5" strokeWidth={2}
+            type="monotone" dataKey="test" name="test" stroke="rgb(var(--phosphor-400))" strokeWidth={2}
             isAnimationActive={false} connectNulls
-            activeDot={{ r: 9, fill: "#4FD1B5", stroke: "#0A0E13", strokeWidth: 2 }}
-            label={valueLabel("test", "#A9E9DA")}
+            activeDot={{ r: 9, fill: "rgb(var(--phosphor-400))", stroke: "rgb(var(--night-950))", strokeWidth: 2 }}
+            label={valueLabel("test", "rgb(var(--phosphor-200))")}
             dot={(p: any) => {
               // An iteration whose held-out measurement has not landed yet has
               // no point on this line. `connectNulls` bridges the line across
@@ -268,9 +268,9 @@ export function IterationChart({
                   // green. It keeps a halo instead: same mark, same hue, still
                   // findable.
                   r={7}
-                  fill="#4FD1B5"
+                  fill="rgb(var(--phosphor-400))"
                   stroke="none"
-                  style={isBest ? { filter: "drop-shadow(0 0 7px rgba(79,209,181,0.95))" } : undefined}
+                  style={isBest ? { filter: "drop-shadow(0 0 7px rgb(var(--phosphor-400) / 0.95))" } : undefined}
                 />
               );
             }}
