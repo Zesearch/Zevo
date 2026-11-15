@@ -6,14 +6,150 @@
    ZEVO — instrument-console primitives.
    ═══════════════════════════════════════════════════════════════════════ */
 
+/* Colour lives in two variable sets. The dark observatory ramps are the
+   default; :root[data-theme="light"] re-cuts every ramp for a white ground.
+   Both blocks are generated from one palette table, so a shade exists in
+   both themes or in neither. Tailwind reads the same variables. */
+:root {
+  --night-50: 243 247 250; /* #F3F7FA */
+  --night-100: 233 238 242; /* #E9EEF2 */
+  --night-200: 211 221 229; /* #D3DDE5 */
+  --night-300: 178 192 204; /* #B2C0CC */
+  --night-400: 139 156 171; /* #8B9CAB */
+  --night-500: 102 120 138; /* #66788A */
+  --night-600: 59 76 91; /* #3B4C5B */
+  --night-700: 41 55 69; /* #293745 */
+  --night-800: 28 39 49; /* #1C2731 */
+  --night-900: 16 22 30; /* #10161E */
+  --night-950: 10 14 19; /* #0A0E13 */
+  --brass-100: 251 237 214; /* #FBEDD6 */
+  --brass-200: 247 217 174; /* #F7D9AE */
+  --brass-300: 242 193 133; /* #F2C185 */
+  --brass-400: 236 167 88; /* #ECA758 */
+  --brass-500: 224 141 56; /* #E08D38 */
+  --brass-600: 198 118 42; /* #C6762A */
+  --brass-700: 158 92 31; /* #9E5C1F */
+  --phosphor-100: 214 247 238; /* #D6F7EE */
+  --phosphor-200: 169 238 220; /* #A9EEDC */
+  --phosphor-300: 125 232 206; /* #7DE8CE */
+  --phosphor-400: 79 209 181; /* #4FD1B5 */
+  --phosphor-500: 43 184 156; /* #2BB89C */
+  --phosphor-600: 30 143 121; /* #1E8F79 */
+  --coral-100: 251 217 209; /* #FBD9D1 */
+  --coral-200: 247 183 169; /* #F7B7A9 */
+  --coral-300: 247 154 136; /* #F79A88 */
+  --coral-400: 242 111 88; /* #F26F58 */
+  --coral-500: 226 78 54; /* #E24E36 */
+  --coral-600: 185 58 38; /* #B93A26 */
+  --skyx-100: 214 237 249; /* #D6EDF9 */
+  --skyx-200: 174 220 241; /* #AEDCF1 */
+  --skyx-300: 143 205 235; /* #8FCDEB */
+  --skyx-400: 95 176 221; /* #5FB0DD */
+  --skyx-500: 61 147 198; /* #3D93C6 */
+  --skyx-600: 44 111 152; /* #2C6F98 */
+  --lilac-100: 231 221 247; /* #E7DDF7 */
+  --lilac-200: 211 194 239; /* #D3C2EF */
+  --lilac-300: 195 176 232; /* #C3B0E8 */
+  --lilac-400: 169 143 214; /* #A98FD6 */
+  --lilac-500: 143 111 196; /* #8F6FC4 */
+  --lilac-600: 111 82 160; /* #6F52A0 */
+  --gold-300: 238 208 138; /* #EED08A */
+  --gold-400: 230 187 91; /* #E6BB5B */
+  --gold-500: 224 178 60; /* #E0B23C */
+  --raised: 20 28 37; /* #141C25 */
+  --overlay: 255 255 255; /* #FFFFFF */
+  --field: 14 20 27; /* #0E141B */
+  --field-edge: 41 64 79; /* #29404F */
+  --btn: 19 27 36; /* #131B24 */
+  --btn-hover: 24 34 48; /* #182230 */
+  --btn-edge-hover: 52 72 90; /* #34485A */
+}
+
+:root[data-theme="light"] {
+  --night-50: 11 18 25; /* #0B1219 */
+  --night-100: 20 28 38; /* #141C26 */
+  --night-200: 39 51 63; /* #27333F */
+  --night-300: 63 78 92; /* #3F4E5C */
+  --night-400: 81 99 122; /* #51637A */
+  --night-500: 91 110 130; /* #5B6E82 */
+  --night-600: 127 142 157; /* #7F8E9D */
+  --night-700: 205 213 221; /* #CDD5DD */
+  --night-800: 225 230 235; /* #E1E6EB */
+  --night-900: 255 255 255; /* #FFFFFF */
+  --night-950: 247 248 250; /* #F7F8FA */
+  --brass-100: 107 58 10; /* #6B3A0A */
+  --brass-200: 138 71 12; /* #8A470C */
+  --brass-300: 180 83 9; /* #B45309 */
+  --brass-400: 194 98 10; /* #C2620A */
+  --brass-500: 217 119 6; /* #D97706 */
+  --brass-600: 224 141 56; /* #E08D38 */
+  --brass-700: 242 193 133; /* #F2C185 */
+  --phosphor-100: 6 63 51; /* #063F33 */
+  --phosphor-200: 11 85 70; /* #0B5546 */
+  --phosphor-300: 16 106 87; /* #106A57 */
+  --phosphor-400: 20 122 101; /* #147A65 */
+  --phosphor-500: 30 143 121; /* #1E8F79 */
+  --phosphor-600: 43 184 156; /* #2BB89C */
+  --coral-100: 110 30 17; /* #6E1E11 */
+  --coral-200: 140 41 25; /* #8C2919 */
+  --coral-300: 168 51 31; /* #A8331F */
+  --coral-400: 194 62 39; /* #C23E27 */
+  --coral-500: 214 74 51; /* #D64A33 */
+  --coral-600: 232 106 82; /* #E86A52 */
+  --skyx-100: 12 53 80; /* #0C3550 */
+  --skyx-200: 18 74 110; /* #124A6E */
+  --skyx-300: 25 92 136; /* #195C88 */
+  --skyx-400: 36 112 164; /* #2470A4 */
+  --skyx-500: 61 147 198; /* #3D93C6 */
+  --skyx-600: 95 176 221; /* #5FB0DD */
+  --lilac-100: 51 35 90; /* #33235A */
+  --lilac-200: 66 48 116; /* #423074 */
+  --lilac-300: 85 63 143; /* #553F8F */
+  --lilac-400: 111 82 160; /* #6F52A0 */
+  --lilac-500: 143 111 196; /* #8F6FC4 */
+  --lilac-600: 169 143 214; /* #A98FD6 */
+  --gold-300: 110 80 12; /* #6E500C */
+  --gold-400: 135 99 18; /* #876312 */
+  --gold-500: 166 123 26; /* #A67B1A */
+  --raised: 243 245 248; /* #F3F5F8 */
+  --overlay: 11 18 25; /* #0B1219 */
+  --field: 250 251 252; /* #FAFBFC */
+  --field-edge: 179 192 204; /* #B3C0CC */
+  --btn: 255 255 255; /* #FFFFFF */
+  --btn-hover: 243 245 248; /* #F3F5F8 */
+  --btn-edge-hover: 169 182 195; /* #A9B6C3 */
+}
+
 :root {
   color-scheme: dark;
-  --canvas: #0a0e13;
-  --panel: #10161e;
-  --hair: #1c2731;
-  --brass: #e08d38;
-  --phosphor: #4fd1b5;
-  --coral: #f26f58;
+  --canvas: rgb(var(--night-950));
+  --panel: rgb(var(--night-900));
+  --hair: rgb(var(--night-800));
+  --brass: rgb(var(--brass-500));
+  --phosphor: rgb(var(--phosphor-400));
+  --coral: rgb(var(--coral-400));
+  --sky: rgb(var(--skyx-400));
+  --ink: rgb(var(--night-100));
+  --ink-strong: rgb(var(--night-50));
+  --ink-soft: rgb(var(--night-300));
+  --dim: rgb(var(--night-500));
+  --label: rgb(var(--night-400));
+  --grid: rgb(var(--overlay) / 0.014);
+  --glow-brass: rgb(var(--brass-500) / 0.08);
+  --glow-phosphor: rgb(var(--phosphor-400) / 0.06);
+  --shadow-bezel: inset 0 1px 0 0 rgb(var(--overlay) / 0.045), 0 1px 2px rgb(0 0 0 / 0.5), 0 14px 34px -18px rgb(0 0 0 / 0.7);
+  --bezel-sheen: rgb(var(--overlay) / 0.018);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  /* Paper ground: the grid and glows are quieter, shadows are soft and cool
+     instead of pooled black, and the bezel sheen is dropped (a highlight on
+     white is just a smear). */
+  --grid: rgb(var(--overlay) / 0.028);
+  --glow-brass: rgb(var(--brass-500) / 0.05);
+  --glow-phosphor: rgb(var(--phosphor-500) / 0.04);
+  --shadow-bezel: 0 1px 2px rgb(11 18 25 / 0.05), 0 8px 24px -16px rgb(11 18 25 / 0.14);
+  --bezel-sheen: transparent;
 }
 
 html,
@@ -28,10 +164,10 @@ body {
      coordinate grid, fixed behind everything. */
   background-color: var(--canvas);
   background-image:
-    radial-gradient(900px 520px at 82% -8%, rgba(224, 141, 56, 0.08), transparent 60%),
-    radial-gradient(760px 620px at -6% 108%, rgba(79, 209, 181, 0.06), transparent 55%),
-    linear-gradient(rgba(255, 255, 255, 0.014) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px);
+    radial-gradient(900px 520px at 82% -8%, var(--glow-brass), transparent 60%),
+    radial-gradient(760px 620px at -6% 108%, var(--glow-phosphor), transparent 55%),
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
   background-size: 100% 100%, 100% 100%, 44px 44px, 44px 44px;
   background-attachment: fixed;
 }
@@ -61,30 +197,27 @@ h1, h2, h3, .font-display {
 .bezel {
   position: relative;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0) 42%),
-    #10161e;
+    linear-gradient(180deg, var(--bezel-sheen), transparent 42%),
+    var(--panel);
   border: 1px solid var(--hair);
   border-radius: 14px;
-  box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.045),
-    0 1px 2px rgba(0, 0, 0, 0.5),
-    0 14px 34px -18px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--shadow-bezel);
 }
 .bezel-flat {
-  background: #0e141b;
+  background: rgb(var(--field));
   border: 1px solid var(--hair);
   border-radius: 12px;
 }
 /* Dashed instrument intake (file dropzones). */
 .bezel-dashed {
-  background: #0e141b;
-  border: 1.5px dashed #29404f;
+  background: rgb(var(--field));
+  border: 1.5px dashed rgb(var(--field-edge));
   border-radius: 12px;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 .bezel-dashed:hover {
-  border-color: rgba(224, 141, 56, 0.55);
-  background: #10171f;
+  border-color: rgb(var(--brass-500) / 0.55);
+  background: var(--panel);
 }
 
 /* ── Tracked micro-label ("kicker") — the console's voice ── */
@@ -93,7 +226,7 @@ h1, h2, h3, .font-display {
   font-size: 0.75rem;
   letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: #66788a;
+  color: var(--dim);
 }
 
 /* One voice for labels attached directly to an input. Keep this below the
@@ -104,7 +237,7 @@ h1, h2, h3, .font-display {
   line-height: 1.05rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #8b9cab;
+  color: var(--label);
 }
 
 /* Column headings use one scale across native tables and table-like grids. */
@@ -114,7 +247,7 @@ h1, h2, h3, .font-display {
   line-height: 1.05rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #8b9cab;
+  color: var(--label);
 }
 
 /* ── Section title — the top of the dialog's heading scale ──
@@ -127,7 +260,7 @@ h1, h2, h3, .font-display {
   font-size: 1rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #e9eef2;
+  color: var(--ink);
 }
 
 /* ── Status lamp: a small glowing indicator dot ── */
@@ -137,24 +270,24 @@ h1, h2, h3, .font-display {
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04);
+  box-shadow: 0 0 0 1px rgb(var(--overlay) / 0.04);
 }
 .lamp-live {
   background: var(--phosphor);
-  box-shadow: 0 0 10px -1px rgba(79, 209, 181, 0.85), 0 0 0 1px rgba(79, 209, 181, 0.25);
+  box-shadow: 0 0 10px -1px rgb(var(--phosphor-400) / 0.85), 0 0 0 1px rgb(var(--phosphor-400) / 0.25);
   animation: lamp-pulse 1.8s ease-in-out infinite;
 }
-.lamp-brass { background: var(--brass); box-shadow: 0 0 10px -1px rgba(224, 141, 56, 0.8); }
+.lamp-brass { background: var(--brass); box-shadow: 0 0 10px -1px rgb(var(--brass-500) / 0.8); }
 /* Work in flight. Same pulse as .lamp-live, brass instead of phosphor so a
    running station never reads as a finished one. */
 .lamp-running {
   background: var(--brass);
-  box-shadow: 0 0 10px -1px rgba(224, 141, 56, 0.85), 0 0 0 1px rgba(224, 141, 56, 0.25);
+  box-shadow: 0 0 10px -1px rgb(var(--brass-500) / 0.85), 0 0 0 1px rgb(var(--brass-500) / 0.25);
   animation: lamp-pulse 1.8s ease-in-out infinite;
 }
-.lamp-waiting { background: #5fb0dd; box-shadow: 0 0 10px -1px rgba(95, 176, 221, 0.8); }
-.lamp-coral { background: var(--coral); box-shadow: 0 0 10px -1px rgba(242, 111, 88, 0.8); }
-.lamp-idle  { background: #3b4c5b; }
+.lamp-waiting { background: var(--sky); box-shadow: 0 0 10px -1px rgb(var(--skyx-400) / 0.8); }
+.lamp-coral { background: var(--coral); box-shadow: 0 0 10px -1px rgb(var(--coral-400) / 0.8); }
+.lamp-idle  { background: rgb(var(--night-600)); }
 
 /* ── Buttons ── */
 .btn {
@@ -166,36 +299,48 @@ h1, h2, h3, .font-display {
   font-size: 0.9375rem;
   font-weight: 500;
   border: 1px solid var(--hair);
-  color: #b2c0cc;
-  background: #131b24;
+  color: var(--ink-soft);
+  background: rgb(var(--btn));
   transition: all 0.15s ease;
   white-space: nowrap;
 }
-.btn:hover { border-color: #34485a; color: #e9eef2; background: #182230; }
+.btn:hover { border-color: rgb(var(--btn-edge-hover)); color: var(--ink); background: rgb(var(--btn-hover)); }
 .btn-brass {
-  border-color: rgba(224, 141, 56, 0.4);
-  background: linear-gradient(180deg, rgba(224, 141, 56, 0.18), rgba(224, 141, 56, 0.08));
-  color: #f2c185;
+  border-color: rgb(var(--brass-500) / 0.4);
+  background: linear-gradient(180deg, rgb(var(--brass-500) / 0.18), rgb(var(--brass-500) / 0.08));
+  color: rgb(var(--brass-300));
 }
 .btn-brass:hover {
-  border-color: rgba(224, 141, 56, 0.7);
-  background: linear-gradient(180deg, rgba(224, 141, 56, 0.28), rgba(224, 141, 56, 0.12));
-  color: #fbedd6;
-  box-shadow: 0 0 18px -6px rgba(224, 141, 56, 0.65);
+  border-color: rgb(var(--brass-500) / 0.7);
+  background: linear-gradient(180deg, rgb(var(--brass-500) / 0.28), rgb(var(--brass-500) / 0.12));
+  color: rgb(var(--brass-100));
+  box-shadow: 0 0 18px -6px rgb(var(--brass-500) / 0.65);
+}
+
+:root[data-theme="light"] .btn-brass {
+  border-color: rgb(var(--brass-300));
+  background: rgb(var(--brass-300));
+  color: #fff;
+}
+:root[data-theme="light"] .btn-brass:hover {
+  border-color: rgb(var(--brass-200));
+  background: rgb(var(--brass-200));
+  color: #fff;
+  box-shadow: 0 6px 16px -8px rgb(var(--brass-300) / 0.6);
 }
 
 /* Secondary launch path (Customized Pipeline). Sky reads as the alternate route
    without competing with brass, which marks the primary action. */
 .btn-sky {
-  border-color: rgba(95, 176, 221, 0.4);
-  background: linear-gradient(180deg, rgba(95, 176, 221, 0.18), rgba(95, 176, 221, 0.08));
-  color: #8fcdeb;
+  border-color: rgb(var(--skyx-400) / 0.4);
+  background: linear-gradient(180deg, rgb(var(--skyx-400) / 0.18), rgb(var(--skyx-400) / 0.08));
+  color: rgb(var(--skyx-300));
 }
 .btn-sky:hover {
-  border-color: rgba(95, 176, 221, 0.7);
-  background: linear-gradient(180deg, rgba(95, 176, 221, 0.28), rgba(95, 176, 221, 0.12));
-  color: #d6edf9;
-  box-shadow: 0 0 18px -6px rgba(95, 176, 221, 0.65);
+  border-color: rgb(var(--skyx-400) / 0.7);
+  background: linear-gradient(180deg, rgb(var(--skyx-400) / 0.28), rgb(var(--skyx-400) / 0.12));
+  color: rgb(var(--skyx-100));
+  box-shadow: 0 0 18px -6px rgb(var(--skyx-400) / 0.65);
 }
 
 /* Big instrument readout numeral. */
@@ -207,7 +352,7 @@ h1, h2, h3, .font-display {
 
 /* Focus ring — brass. */
 *:focus-visible {
-  outline: 2px solid rgba(224, 141, 56, 0.7);
+  outline: 2px solid rgb(var(--brass-500) / 0.7);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -229,12 +374,12 @@ h1, h2, h3, .font-display {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(102, 120, 138, 0.22);
+  background: rgb(var(--night-500) / 0.22);
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(102, 120, 138, 0.4); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--night-500) / 0.4); background-clip: padding-box; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -244,23 +389,25 @@ h1, h2, h3, .font-display {
   }
   .scanlines::after { display: none; }
 }
+/* Scanlines are a CRT conceit; on paper they read as dirt. */
+:root[data-theme="light"] .scanlines::after { display: none; }
 
 /* ── A list that shows it scrolls ──────────────────────────────────────── */
 .scroll-visible {
   overflow-y: auto;
   scrollbar-gutter: stable;
   scrollbar-width: thin;                    /* Firefox */
-  scrollbar-color: #3b4c5b transparent;
+  scrollbar-color: rgb(var(--night-600)) transparent;
 }
 .scroll-visible::-webkit-scrollbar { width: 8px; }
 .scroll-visible::-webkit-scrollbar-track { background: transparent; }
 .scroll-visible::-webkit-scrollbar-thumb {
-  background: #3b4c5b;
+  background: rgb(var(--night-600));
   border-radius: 4px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
-.scroll-visible::-webkit-scrollbar-thumb:hover { background-clip: content-box; background-color: #66788a; }
+.scroll-visible::-webkit-scrollbar-thumb:hover { background-clip: content-box; background-color: var(--dim); }
 
 /* ── Bars grow out of the zero line when a list is (re)drawn ───────────────
    scaleX rather than width: it composites on the GPU and does not relayout
