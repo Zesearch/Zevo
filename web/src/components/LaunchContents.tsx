@@ -17,11 +17,11 @@ export function LaunchContents({ steps, active, onSelect }: { steps: LaunchStep[
       <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 h-[76px] rounded-xl bg-gradient-to-r from-brass-500/[0.06] to-transparent transition-transform duration-500 ease-out motion-reduce:transition-none" style={{ transform: `translateY(${active * 76}px)` }} />
       <ol>{steps.map((step, index) => <li key={step.label}>
         <button ref={active === index ? current : undefined} type="button" aria-current={active === index ? "step" : undefined} aria-label={step.group === "Review" ? step.label : `${index + 1}. ${step.label}${step.complete ? " — complete" : ""}`} onClick={() => onSelect(index)}
-          className={`relative flex h-[76px] w-full items-center gap-2 rounded-xl px-2 text-left transition-colors duration-300 focus-visible:outline focus-visible:outline-brass-400 ${active === index ? "text-[#d9c5a3]" : "text-slate-500 hover:text-slate-200"}`}>
+          className={`relative flex h-[76px] w-full items-center gap-2 rounded-xl px-2 text-left transition-colors duration-300 focus-visible:outline focus-visible:outline-brass-400 ${active === index ? "text-brass-300" : "text-slate-500 hover:text-slate-200"}`}>
           <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] transition-all duration-300 motion-reduce:transition-none ${step.complete ? "text-emerald-300" : active === index ? "text-brass-200" : "text-slate-600"}`}>
             {step.group === "Review" ? null : step.complete ? <Check size={12} /> : String(index + 1).padStart(2, "0")}
           </span>
-          <span className="min-w-0 flex-1"><span className="block text-[10px] uppercase tracking-[0.16em] opacity-60">{step.group}</span><span className="mt-1 block whitespace-nowrap text-[18px]">{step.label}</span></span>
+          <span className="min-w-0 flex-1"><span className="block text-[10px] uppercase tracking-[0.16em]">{step.group}</span><span className="mt-1 block whitespace-nowrap text-[18px]">{step.label}</span></span>
           {active === index && <ChevronRight size={12} className="text-brass-300 motion-safe:animate-zevo-in" />}
         </button>
       </li>)}</ol>
