@@ -19,9 +19,9 @@ import { useTheme, type Theme } from "../../lib/theme";
 
 type CostTotal = { total_usd: number; gpu_usd: number; agent_usd: number };
 
-// Dark / Light as one segmented control: the active segment is raised and
-// inked, the other sits flat. Both are always visible, so the reader sees the
-// choice they did not make as well as the one they did.
+// Theme switch: two icon segments, moon and sun. The active one is raised
+// and inked; the other sits flat. Labels live in aria/title so the control
+// stays a 56px pill instead of a word pair.
 function ThemeSwitch() {
   const [theme, setTheme] = useTheme();
   const seg = (value: Theme, Icon: typeof Sun, label: string) => {
@@ -31,23 +31,24 @@ function ThemeSwitch() {
         type="button"
         role="radio"
         aria-checked={on}
+        aria-label={label}
+        title={label}
         onClick={() => setTheme(value)}
         className={
-          "flex items-center gap-1.5 rounded-[7px] px-2.5 py-1 text-xs font-medium transition-colors " +
+          "flex h-7 w-7 items-center justify-center rounded-[7px] transition-colors " +
           (on
             ? "bg-raised text-ink shadow-[inset_0_0_0_1px_rgb(var(--night-700))]"
             : "text-dim hover:text-ink")
         }
       >
-        <Icon size={13} aria-hidden />
-        <span className="hidden lg:inline">{label}</span>
+        <Icon size={14} aria-hidden />
       </button>
     );
   };
   return (
     <div role="radiogroup" aria-label="Colour theme" className="flex items-center gap-0.5 rounded-[9px] border border-hair bg-canvas p-0.5">
-      {seg("dark", Moon, "Dark")}
-      {seg("light", Sun, "Light")}
+      {seg("dark", Moon, "Dark theme")}
+      {seg("light", Sun, "Light theme")}
     </div>
   );
 }
@@ -90,7 +91,7 @@ export function ConsoleBar() {
           line in the bar sat 34px inside the vertical line down the page, and
           the two read as two unrelated rules rather than one frame. */}
       <Link to="/" aria-label="Zevo Dashboard" className="flex w-auto shrink-0 md:w-[calc(11rem-1.25rem)] items-baseline gap-1 rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brass-300">
-        <img src={logoUrl} alt="Z" className="h-8 w-auto shrink-0" />
+        <img src={logoUrl} alt="Z" className="zevo-logo h-8 w-auto shrink-0" />
         <span className="ml-0.5 font-display text-3xl font-semibold leading-none tracking-tight text-ink">
           evo
         </span>

@@ -72,8 +72,8 @@
   --night-300: 63 78 92; /* #3F4E5C */
   --night-400: 81 99 122; /* #51637A */
   --night-500: 91 110 130; /* #5B6E82 */
-  --night-600: 127 142 157; /* #7F8E9D */
-  --night-700: 205 213 221; /* #CDD5DD */
+  --night-600: 95 113 133; /* #5F7185 */
+  --night-700: 195 204 213; /* #C3CCD5 */
   --night-800: 225 230 235; /* #E1E6EB */
   --night-900: 255 255 255; /* #FFFFFF */
   --night-950: 247 248 250; /* #F7F8FA */
@@ -389,6 +389,10 @@ h1, h2, h3, .font-display {
   }
   .scanlines::after { display: none; }
 }
+/* The wordmark's Z is pale artwork drawn for the dark ground. On light the
+   alpha stays and the paint becomes ink, so the dots read as the same mark. */
+:root[data-theme="light"] .zevo-logo { filter: brightness(0) opacity(0.88); }
+
 /* Scanlines are a CRT conceit; on paper they read as dirt. */
 :root[data-theme="light"] .scanlines::after { display: none; }
 
