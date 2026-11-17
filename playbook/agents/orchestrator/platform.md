@@ -329,9 +329,12 @@ is terminal, a corrected recipe may create a replacement Data Ticket in the
 same iteration N, provided no Train Ticket has been created there. Keep the
 earlier Ticket as history and bind both Train data inputs to the successful
 replacement. Do not advance the iteration merely to recover Data preparation.
-An unchanged recipe should reuse/repair its existing Ticket. Once Train exists
-(including queued, failed, or cancelled Train), a new recipe requires a new
-iteration so its bound data provenance stays unchanged. Initial iteration-0
+An unchanged recipe should reuse/repair its existing Ticket. Exception: when
+every Train in N failed with `failure_recovery.scope=upstream_input` before any
+resource submission, workload execution, training step or checkpoint, and no
+activation remains live, repair Data in N and create a new Train bound to the
+replacement. Retain failed Tickets and their original bindings; do not advance
+N for this preflight repair. Otherwise Train freezes N's data. Initial iteration-0
 Data and the frozen scoring populations retain their existing restrictions.
 
 Data downloads or uploads the source once to the remote plane, performs detect,

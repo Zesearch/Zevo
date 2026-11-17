@@ -69,3 +69,65 @@ def test_answer_supervision_passes():
     helper.validate_training_response(r'Reasoning. \boxed{A}', expected_response=r'Reasoning. \boxed{A}',
                                       required_format='boxed', gold='A', input_ids=[1, 2, 3],
                                       labels=[-100, 2, 3], answer_token_span=(1, 3))
+
+
+def test_legal_answer_line_alignment_preserves_explanation_and_gold():
+    source = 'Legal Concept: duty.\nRule Application: Answer: A is not correct.\nConclusion: C follows.\nAnswer: C'
+    aligned = helper.prepare_response(source, scope='matching_records', output_format='answer_line',
+        requirement='Frozen inference prompt requires a final answer line', gold='C',
+        answer_span=(len(source)-1, len(source)), answer_template='Final Answer: {answer}')
+    assert aligned == source.removesuffix('Answer: C') + 'Final Answer: C'
+    assert helper.prepare_response(aligned, scope='matching_records', output_format='answer_line',
+        requirement='Frozen inference prompt', gold='C', answer_span=(len(aligned)-1, len(aligned)),
+        answer_template='Final Answer: {answer}') == aligned
+    helper.validate_training_response(aligned, expected_response=aligned,
+        required_format='answer_line', answer_template='Final Answer: {answer}', gold='C',
+        input_ids=[10, 20, 30], labels=[-100, 20, 30], answer_token_span=(2, 3))
+
+
+def test_answer_only_alignment_does_not_invent_reasoning():
+    assert helper.prepare_response('Answer: B', scope='task', output_format='answer_line',
+        requirement='Final answer line', gold='B', answer_span=(8, 9),
+        answer_template='Final Answer: {answer}') == 'Final Answer: B'
+
+
+@pytest.mark.parametrize('source,gold,span', [
+    ('Reasoning says C', 'C', (15, 16)),
+    ('Answer: C\nMore explanation.', 'C', (8, 9)),
+    ('Answer: B', 'C', (8, 9)),
+    ('An organism name with no option.', 'C', None),
+])
+def test_line_alignment_does_not_guess_or_drop_reasoning(source, gold, span):
+    with pytest.raises(ValueError):
+        helper.prepare_response(source, scope='task', output_format='answer_line',
+            requirement='Final answer line', gold=gold, answer_span=span,
+            answer_template='Final Answer: {answer}')
+
+
+@pytest.mark.parametrize('template', [None, 'Final Answer: C', '{answer}{answer}', '{other}',
+                                       'Final Answer:\n{answer}', 'Final Answer: {answer} '])
+def test_line_alignment_requires_explicit_safe_template(template):
+    with pytest.raises(ValueError):
+        helper.prepare_response('Answer: C', scope='task', output_format='answer_line',
+            requirement='Final answer line', gold='C', answer_span=(8, 9), answer_template=template)
+
+
+def test_preserving_old_legal_target_cannot_satisfy_final_answer_contract():
+    with pytest.raises(ValueError, match='conflicts'):
+        helper.validate_training_response('Answer: C', expected_response='Answer: C',
+            required_format='answer_line', answer_template='Final Answer: {answer}', gold='C',
+            input_ids=[1, 2], labels=[-100, 2], answer_token_span=(1, 2))
+    with pytest.raises(ValueError, match='preserve'):
+        helper.validate_training_response('Answer: C', expected_response='Answer: C',
+            answer_template='Final Answer: {answer}', gold='C', input_ids=[1], labels=[1])
+    with pytest.raises(ValueError, match='preserve'):
+        helper.prepare_response('Answer: C', answer_template='Final Answer: {answer}')
+
+
+@pytest.mark.parametrize('labels,span,error', [([-100, 2], None, 'requires'),
+    ([-100, 2], (1, 3), 'truncated'), ([-100, 2], (0, 1), 'masked')])
+def test_aligned_answer_still_requires_real_supervision(labels, span, error):
+    with pytest.raises(ValueError, match=error):
+        helper.validate_training_response('Final Answer: C', expected_response='Final Answer: C',
+            required_format='answer_line', answer_template='Final Answer: {answer}', gold='C',
+            input_ids=[1, 2], labels=labels, answer_token_span=span)
