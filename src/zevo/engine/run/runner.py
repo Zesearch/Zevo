@@ -2939,7 +2939,7 @@ def _slurm_stage_result_problem(
             return f"cluster Train configuration is invalid: {exc}"
         if contract.phase == "submit":
             train_script = str(path.with_name("train.py"))
-            if train_config.training_method == "sft" and getattr(inp, "response_helper_path", ""):
+            if getattr(inp, "response_helper_path", "") and train_config.training_method == "sft":
                 from zevo.engine.run.python_capabilities import capability_problem
                 response_problem = capability_problem(
                     train_script, {"zevo_training_response.validate_training_response"},

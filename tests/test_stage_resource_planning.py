@@ -416,6 +416,24 @@ def test_stage_contract_probes_only_before_new_submission(tmp_path, monkeypatch)
         configuration_path=str(config_path),
     ) == ""
 
+    # New SFT work orders require response checks; historical inputs above do not.
+    monkeypatch.setattr(
+        runner, "load_train_config",
+        lambda _path: SimpleNamespace(training=training, training_method="sft"),
+    )
+    guarded = SimpleNamespace(slurm_job=submit, response_helper_path="helper.py")
+    assert "validate actual constructed responses" in runner._slurm_stage_result_problem(
+        guarded, str(script), "train.py", configuration_path=str(config_path),
+    )
+    with (tmp_path / "train.py").open("a") as program:
+        program.write(
+            "from zevo_training_response import validate_training_response\n"
+            "validate_training_response('A', expected_response='A', input_ids=[1], labels=[1])\n"
+        )
+    assert runner._slurm_stage_result_problem(
+        guarded, str(script), "train.py", configuration_path=str(config_path),
+    ) == ""
+
     job_row = SimpleNamespace(
         id="request-1", gpu_count=6, instance_id="12345", status="RUNNING",
         meta={"nodes": 2, "gpus_per_node": 3},
