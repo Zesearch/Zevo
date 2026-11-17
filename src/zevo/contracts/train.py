@@ -185,6 +185,14 @@ class TrainTaskInput(AgentTaskInput):
             "Empty for cluster (cluster.env_setup applies)."
         ),
     )
+    response_helper_path: str = Field(
+        default="",
+        description=(
+            "System-owned training response helper. Copy beside train.py; use "
+            "prepare_response and validate_training_response on real supervised "
+            "responses before optimization, preserving generic SFT by default."
+        ),
+    )
     telemetry_helper_path: str = Field(
         ...,
         min_length=1,

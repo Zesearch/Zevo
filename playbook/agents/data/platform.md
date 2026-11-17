@@ -202,6 +202,14 @@ epochs, batch size, sequence length, decoding setting, or other Specialist
 hyperparameter. Fail if the source lacks the declared method's required signal;
 do not fabricate preferences, labels, references, or rewards.
 
+Preserve source answers and existing explanations independently of later model
+rendering. For question/answer sources retain documented gold labels, option
+mappings and provenance when available; do not invent absent metadata. Existing
+prompt/completion and multi-turn messages remain valid semantic SFT records.
+Train constructs final model inputs after baseline Inference freezes the protocol. If requested to repair an
+ambiguous answer, resolve it from authoritative source evidence or report it;
+never guess gold or fabricate an explanation.
+
 #### Generate training data
 
 When suitable permitted public training data cannot be found, report the

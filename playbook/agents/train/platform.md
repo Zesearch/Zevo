@@ -530,6 +530,49 @@ byte-for-semantic-byte into Train YAML. Use that exact tokenizer/chat-template
 rendering in the training script. Do not infer prompt framing from dataset
 column names or change the model reasoning type/system prompt for training.
 
+### Response requirements and real-data checks
+
+The frozen tokenizer/chat template is shared infrastructure, not permission to
+apply one benchmark's instructions to all Training records. Identify output
+requirements and their scope before constructing samples: task-wide only when
+explicitly required by the Objective/user; benchmark-specific only for matching
+records.
+Record the authority, scope, mapping, and adaptation counts in the Train report.
+Do not infer task-wide scope from the first Validation member.
+
+For general prompt/completion or multi-turn SFT, retain the original prompts,
+roles, turn order, assistant responses, and record system instructions. Do not
+wrap an existing conversation in a benchmark question template or inject its
+boxed/code-only instruction. Reuse the frozen tokenizer/template mechanics.
+For task-specific question/answer data, construct the applicable inference input
+and adapt the target only if an explicit applicable requirement demands it.
+Never drop existing reasoning or invent reasoning to satisfy a template. If the
+frozen prompt demands behavior absent from the source (including mandatory
+reasoning), report the conflict to Orchestrator for Data/protocol repair; do not
+silently rewrite the frozen Inference config.
+
+For SFT, copy `response_helper_path` beside train.py as
+`zevo_training_response.py`. Use `prepare_response` with preserve defaults for
+generic data. Boxed adaptation requires an explicit applicable requirement,
+reliable source gold and the exact unambiguous answer span; no guessing, broad
+regex substitution, or blindly appending an answer. Already boxed answers remain
+unchanged. Ambiguous answers requiring adaptation go back to Data for repair;
+ambiguity alone does not invalidate generic SFT that needs no adaptation.
+
+Call `validate_training_response` through the actual training data pipeline for
+every supervised response before optimization, after rendering/tokenization and
+truncation. `expected_response` is the original source response or the result of
+approved `prepare_response` adaptation, never a copy of the final transformed
+response used to bypass comparison. Pass real input_ids and labels. For answer
+tasks, map the known final-answer span through the actual tokenizer in the
+untruncated sequence and pass `answer_token_span`; reject truncation or masked
+answer tokens. Validate each supervised turn in multi-turn records. Keep the
+existing context-mask checks. Inspect representative real rendered records for
+instruction/target conflicts before launch, and report checks/counts without
+publishing private training rows. The helper verifies explicit formats and token
+spans; it cannot infer arbitrary natural-language instructions or answer gold.
+Do not use placeholder-only evidence as a substitute for these checks.
+
 `template_kwargs` has one authority: baseline Inference. Load the mapping from
 YAML at runtime and pass it unchanged to every `apply_chat_template` call. Do
 not reconstruct it from `model_reasoning_type`, probe a preferred value, or hard-code

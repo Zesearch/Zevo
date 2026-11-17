@@ -27,10 +27,10 @@ export function useLaunchPreflight() {
   const blocked = review?.result.status === "blocked";
   const ready = review?.result.status === "ready";
   const Icon = ready ? CheckCircle2 : AlertTriangle;
-  return { check, panel: review ? <section aria-label="Launch checks" role={blocked ? "alert" : "status"} className={`rounded-lg border p-3 text-sm ${blocked ? "border-coral-500/40 bg-coral-500/10 text-coral-300" : ready ? "border-hair bg-raised text-slate-300" : "border-brass-500/40 bg-brass-500/10 text-brass-200"}`}>
-    <h3 className="flex items-center gap-2 font-semibold"><Icon size={16} className="shrink-0" />{blocked ? "Run not started — check configuration" : ready ? "Configuration checks passed" : "Review before starting your run"}</h3>
-    <div className="max-h-32 overflow-y-auto">
-      <ul className="mt-2 space-y-2 text-xs leading-relaxed">{review.result.items.filter((item) => item.severity !== "info").map((item) => <li key={item.code}><strong>{item.severity === "blocker" ? "Required: " : "Review: "}</strong>{item.message} {item.hint}</li>)}</ul>
+  return { check, panel: review && !ready ? <section aria-label="Launch checks" role={blocked ? "alert" : "status"} className={`launch-checks rounded-xl border px-4 py-3 text-sm ${blocked ? "border-coral-500/40 bg-coral-500/10 text-coral-300" : ready ? "border-transparent bg-transparent text-slate-300" : "border-brass-500/40 bg-brass-500/10 text-brass-200"}`}>
+    <h3 className="flex items-center gap-2 font-semibold"><Icon size={18} className="shrink-0" />{blocked ? "Run not started — check configuration" : ready ? "Configuration checks passed" : "Review before starting your run"}</h3>
+    <div className="max-h-48 overflow-y-auto">
+      <ul className="empty:hidden mt-2 space-y-2 text-sm leading-relaxed">{review.result.items.filter((item) => item.severity !== "info").map((item) => <li key={item.code}><strong>{item.severity === "blocker" ? "Required: " : "Review: "}</strong>{item.message} {item.hint}</li>)}</ul>
     </div>
     {review.result.status === "risky" && <p className="mt-2 text-xs font-medium">Run not started. Click start run again to accept these notes and launch.</p>}
   </section> : null };

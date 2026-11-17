@@ -85,3 +85,20 @@
 .launch-select-menu [role="option"]:hover .launch-option-title { color: rgb(var(--brass-300)); }
 .launch-select-menu [role="option"][data-active="true"] .launch-option-description,
 .launch-select-menu [role="option"]:hover .launch-option-description { color: rgb(var(--brass-200)); }
+
+/* Full-width launch feedback above the navigation row. */
+.launch-navigation-review { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 20px; }
+.launch-review-action { display: contents; }
+.launch-navigation-review > .launch-back { grid-column: 1; grid-row: 2; justify-self: start; }
+.launch-review-action > .launch-next { grid-column: 2; grid-row: 2; min-width: 164px; min-height: 48px; justify-content: center; }
+.launch-feedback { display: flex; flex-direction: column; gap: 16px; min-width: 0; padding: 8px 0; }
+.launch-feedback:empty { display: none; }
+.launch-review-action > .launch-feedback { grid-column: 1 / -1; grid-row: 1; }
+.launch-feedback .launch-checks { margin: 0; }
+@media (max-width: 480px) {
+  .launch-navigation-review { gap: 16px 12px; }
+  .launch-review-action > .launch-next { min-width: 140px; }
+
+}
+
+.launch-review-action .launch-next:disabled { opacity: 0.65; }

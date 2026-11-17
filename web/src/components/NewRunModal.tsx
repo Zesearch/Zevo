@@ -688,6 +688,7 @@ export function NewRunModal({
       ...backendFromInputs(inputs),
     };
     if (!(await preflight.check(body))) return;
+    runSetup.begin("finalizing");
     const out = await api<{ run_id: string; status: string }>("/runs", {
       method: "POST",
       body: JSON.stringify(body),
@@ -697,6 +698,7 @@ export function NewRunModal({
   }
 
   async function submitSingle() {
+    runSetup.begin("finalizing");
     const body = {
       agent_id: agentId,
       input_format: "freeform",
@@ -716,6 +718,7 @@ export function NewRunModal({
   }
 
   async function submit() {
+    runSetup.begin("checking");
     setBusy(true);
     setError(null);
     try {
@@ -758,12 +761,12 @@ export function NewRunModal({
     }
   }
 
-  const launchFeedback = <div className="space-y-3">
-    {(mode === "auto" || mode === "full_pipeline") && preflight.panel}
+  const launchFeedback = <div className="launch-feedback">
+    {!busy && (mode === "auto" || mode === "full_pipeline") && preflight.panel}
     {error && <div role="alert" className="whitespace-pre-line text-sm text-coral-300">{error}</div>}
     {busy && runSetup.progress && <RunSetupProgressView progress={runSetup.progress} />}
   </div>;
-  const reviewAction = <div className="space-y-4">
+  const reviewAction = <div className="launch-review-action">
     {screen === "form" && launchFeedback}
     <button type="button" className="launch-next" disabled={busy || launchMissing.length > 0 || (["auto", "full_pipeline"].includes(mode) && !modelSaveReady(modelSave))} onClick={() => {
       if (mode === "full_pipeline" && !reusableSetting) setScreen("save");

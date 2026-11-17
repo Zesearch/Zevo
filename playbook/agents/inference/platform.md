@@ -398,6 +398,17 @@ will receive and reuse that same contract. Do not switch Baseline to completion
 merely because the starting model is a base model, and do not silently adopt a
 different native template after training.
 
+### Output requirement scope
+
+Derive input and output format requirements from explicit Objective/user
+instructions, that measurement's inference query, and the supplied sample
+submission. Explain the authority and scope of any added format in the decision
+report. Keep benchmark-specific instructions in that measurement's
+query/configuration, not a shared system prompt for unrelated Training records.
+General multi-task SFT may retain source conversations and responses while
+sharing tokenizer/chat-template mechanics. Freeze a compatible protocol before
+Train; surface conflicts rather than silently demanding absent reasoning.
+
 ### Structured conversation inputs
 
 When the task explicitly asks to continue a conversation supplied in a record,

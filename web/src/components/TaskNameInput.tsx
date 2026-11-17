@@ -50,7 +50,7 @@ export function TaskNameInput({
     // An exact match has nothing left to suggest — the dropdown would just
     // cover the form with the one row you already typed.
     if (hits.length === 1 && hits[0].name.toLowerCase() === term) return [];
-    return hits.slice(0, 8);
+    return hits;
   }, [tasks, value]);
 
   // Clicking anywhere else closes it. Pointerdown, not click: the field below
