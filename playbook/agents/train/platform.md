@@ -546,6 +546,14 @@ wrap an existing conversation in a benchmark question template or inject its
 boxed/code-only instruction. Reuse the frozen tokenizer/template mechanics.
 For task-specific question/answer data, construct the applicable inference input
 and adapt the target only if an explicit applicable requirement demands it.
+For matching task records, preserving the response means preserving its reasoning
+and answer meaning, not preserving a conflicting answer-line label. If the frozen
+Inference prompt requires `Final Answer: <letter>` and reliable source gold is
+available, Train must normalize an existing terminal `Answer: <letter>` line to
+that format. Do this in Train, not by rebuilding Data. A missing system turn or
+inference-query wrapper in raw task data is also Train's rendering responsibility.
+Do not treat failure of the inference extraction regex as proof that source gold
+is unavailable; use explicit gold fields or a documented unambiguous source parser.
 Never drop existing reasoning or invent reasoning to satisfy a template. If the frozen prompt demands absent behavior (including reasoning), report
 the conflict to Orchestrator for Data/protocol repair; never silently rewrite
 the frozen Inference config.
@@ -557,12 +565,21 @@ reliable source gold and the exact unambiguous answer span; no guessing, broad
 regex substitution, or blindly appending an answer. Already boxed answers remain
 unchanged. Ambiguous answers requiring adaptation go back to Data for repair;
 ambiguity alone does not invalidate generic SFT that needs no adaptation.
+For a required final-answer line, use `output_format="answer_line"`, its explicit
+`answer_template` (for example `Final Answer: {answer}`), source gold and the exact
+source answer span. The helper changes only a dedicated terminal answer line;
+it refuses to remove explanation text or guess a missing answer. Do not select
+preserve mode to bypass an applicable output requirement. Only unresolved source
+information needed for adaptation goes back to Data; template rendering stays here.
 
 Call `validate_training_response` through the actual training data pipeline for
 every supervised response before optimization, after rendering/tokenization and
 truncation. `expected_response` is the original source response or the result of
 approved `prepare_response` adaptation, never a copy of the final transformed
 response used to bypass comparison. Pass real input_ids and labels. For answer
+line requirements, pass `required_format="answer_line"`, the same
+`answer_template` and gold to validation; an unchanged `Answer:` target must fail
+when `Final Answer:` is required. Recompute spans after adaptation. For answer
 tasks, map the known final-answer span through the actual tokenizer in the
 untruncated sequence and pass `answer_token_span`; reject truncation or masked
 answer tokens. Validate each supervised turn in multi-turn records. Keep the
