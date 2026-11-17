@@ -530,7 +530,7 @@ byte-for-semantic-byte into Train YAML. Use that exact tokenizer/chat-template
 rendering in the training script. Do not infer prompt framing from dataset
 column names or change the model reasoning type/system prompt for training.
 
-### Response requirements and real-data checks
+### Responses
 
 The frozen tokenizer/chat template is shared infrastructure, not permission to
 apply one benchmark's instructions to all Training records. Identify output
