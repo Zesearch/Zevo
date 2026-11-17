@@ -1289,6 +1289,7 @@ async def _build_train_input(
             )
         ),
         gpu_runtime_helper_path=str(Path(work_dir) / "zevo_gpu_runtime.py"),
+        response_helper_path=str(Path(work_dir) / "zevo_training_response.py"),
         telemetry_helper_path=str(Path(work_dir) / "zevo_train_telemetry.py"),
         remote_env_helper_path=(
             str(Path(work_dir) / "zevo_remote_env.sh")
@@ -2938,6 +2939,14 @@ def _slurm_stage_result_problem(
             return f"cluster Train configuration is invalid: {exc}"
         if contract.phase == "submit":
             train_script = str(path.with_name("train.py"))
+            if getattr(inp, "response_helper_path", "") and train_config.training_method == "sft":
+                from zevo.engine.run.python_capabilities import capability_problem
+                response_problem = capability_problem(
+                    train_script, {"zevo_training_response.validate_training_response"},
+                    "Train must validate actual constructed responses with zevo_training_response",
+                )
+                if response_problem:
+                    return response_problem
             checkpoint_problem = _python_checkpoint_helper_problem(train_script)
             if checkpoint_problem:
                 return checkpoint_problem
@@ -5151,6 +5160,8 @@ async def run_ticket(
             raise ValueError(f"system cloud acquisition helper is missing: {acquire_source}")
         shutil.copyfile(acquire_source, Path(work_dir) / "zevo_cloud_acquire.py")
     if tk.agent_id == "train":
+        shutil.copyfile(REPO_ROOT / "playbook" / "runners" / "training_response.py",
+                        Path(work_dir) / "zevo_training_response.py")
         shutil.copyfile(REPO_ROOT / "playbook" / "runners" / "checkpoint_state.py",
                         Path(work_dir) / "zevo_checkpoint_state.py")
         shutil.copyfile(REPO_ROOT / "playbook" / "runners" / "adaptive_training.py",

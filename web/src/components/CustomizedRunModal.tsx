@@ -385,6 +385,7 @@ export function CustomizedRunForm({
   };
 
   async function start() {
+    runSetup.begin("checking");
     setBusy(true);
     setError(null);
     try {
@@ -486,12 +487,12 @@ export function CustomizedRunForm({
     }),
   ];
 
-  const feedback = <div className="space-y-3">
-    {preflight.panel}
+  const feedback = <div className="launch-feedback">
+    {!busy && preflight.panel}
     {error && <div role="alert" className="whitespace-pre-line text-sm text-coral-300">{error}</div>}
     {busy && runSetup.progress && <RunSetupProgressView progress={runSetup.progress} />}
   </div>;
-  const reviewAction = <div className="space-y-4">
+  const reviewAction = <div className="launch-review-action">
     {!saving && feedback}
     <button type="button" className="launch-next" disabled={busy || requiredMissing.length > 0 || !modelSaveReady(modelSave)} onClick={() => { if (pickedSetting) void start(); else setSaving(true); }}>{busy ? "Starting…" : "Start Run →"}</button>
   </div>;
