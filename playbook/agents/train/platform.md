@@ -1091,7 +1091,11 @@ continuation still require byte-identical configuration and the original plan.
 
 Model/parent, data identity/selection, training method, method config,
 approved resource limits and frozen inference/prompt/tokenizer protocol are not yours to
-change during repair. Unknown fields remain subject to review. If the engine rejects
+change during repair. Only these explicit task boundaries require Orchestrator
+review; new implementation fields, module-count assertions, derivation notes,
+software-version evidence and diagnostics do not require approval merely because
+they are new. Schema validation, resource fit, user pins and fresh-state checks
+still apply. If the engine rejects
 a necessary change, preserve the original YAML, stage a separate candidate and
 return fixed_configuration recovery with training_configuration_change containing
 absolute original_config_path/proposed_config_path, exact hashes, changes and
