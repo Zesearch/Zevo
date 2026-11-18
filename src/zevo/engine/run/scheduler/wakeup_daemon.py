@@ -385,6 +385,15 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                         target = (await s.execute(
                             select(Ticket).where(Ticket.id == w.ticket_id)
                         )).scalar_one_or_none()
+                        # Cron only rescues queued work. A previous activation may
+                        # have advanced this Ticket while the alarm waited for its
+                        # lock; unlike event wakeups, the alarm carries no new fact.
+                        if w.source == "cron" and target is not None and target.status != "queued":
+                            w.status = "completed"
+                            w.finished_at = datetime.now(timezone.utc)
+                            w.reason = (f"{w.reason or ''} | skipped obsolete cron: ticket {target.status}")[:2000]
+                            await s.commit()
+                            return
                         from zevo.engine.run.input_validation import obsolete_input_review
                         if await obsolete_input_review(s, w, target):
                             w.status = "completed"
@@ -526,6 +535,11 @@ async def _cron_tick(interval_seconds: int, lane: str | None = None) -> None:
                     Ticket.agent_id == a.id,
                     Ticket.status == "queued",
                     Ticket.lane == lane,
+                    ~select(AgentWakeupRequest.id).where(
+                        AgentWakeupRequest.ticket_id == Ticket.id,
+                        AgentWakeupRequest.agent_id == Ticket.agent_id,
+                        AgentWakeupRequest.status.in_(("queued", "running")),
+                    ).exists(),
                     or_(
                         Ticket.agent_id == "orchestrator",
                         Ticket.lane != "optimization",
@@ -540,14 +554,14 @@ async def _cron_tick(interval_seconds: int, lane: str | None = None) -> None:
             )).scalar_one_or_none()
             if tk is None:
                 continue
-            # A pending wakeup for this Ticket already covers the scan. Using
+            # A queued or running wakeup already covers the scan. Using
             # a concrete Ticket id is what lets two daemons claim disjoint
             # lanes and also lets queue_wakeup coalesce duplicates.
             pending = (await s.execute(
                 select(AgentWakeupRequest).where(
                     AgentWakeupRequest.agent_id == a.id,
                     AgentWakeupRequest.ticket_id == tk.id,
-                    AgentWakeupRequest.status == "queued",
+                    AgentWakeupRequest.status.in_(("queued", "running")),
                 ).limit(1)
             )).scalar_one_or_none()
             if pending is not None:

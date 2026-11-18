@@ -36,6 +36,10 @@ class DriverRunResult:
             self.output = self.output.to_result()
 
 
+class SubmissionContractError(ValueError):
+    """Schema binding failed before the driver could invoke the Agent."""
+
+
 def submission_blueprint(blueprint: AgentBlueprint, input_payload: BaseModel) -> AgentBlueprint:
     """Bind the wire contract before both prompting and parsing, on every LLM driver."""
     from zevo.contracts._base import AgentResult
@@ -44,7 +48,13 @@ def submission_blueprint(blueprint: AgentBlueprint, input_payload: BaseModel) ->
     if schema is None or not issubclass(schema, AgentResult):
         return blueprint
     operation = str(getattr(input_payload, "operation", ""))
-    wire = submission_schema(schema, operation)
+    from zevo.contracts.infrastructure import InfraTaskInput
+    if isinstance(input_payload, InfraTaskInput):
+        operation = "release" if input_payload.release else "provision"
+    try:
+        wire = submission_schema(schema, operation)
+    except Exception as exc:
+        raise SubmissionContractError(str(exc)) from exc
     return replace(blueprint, output_schema=wire, instructions=blueprint.instructions + (
         "\n\n# Final submission contract\n"
         "Use the operation-specific submission schema supplied with this activation. "

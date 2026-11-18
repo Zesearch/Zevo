@@ -949,6 +949,13 @@ after your validated decision completes. Train data may change only before any
 training execution/checkpoint. Already-executed model/protocol changes require a
 new experiment. Ordinary human messages do not release this wait.
 
+Train owns unpinned training-parameter repairs on fresh attempts after failure.
+Do not require a configuration proposal merely for learning rate, optimizer,
+batch/epoch tuning or the equivalent SFT nll/chunked_nll implementation. The engine
+checks pins, preserves task/model/data/method/resource/inference boundaries and
+records the diff. Checkpoint continuation remains frozen. Review is still needed
+for changes outside that ownership or explicitly rejected by the engine.
+
 For Train `fixed_configuration`, inspect the structured
 `training_configuration_change` proposal, preserved original/candidate YAMLs,
 actual differences and diagnosis. Approve only a justified repair or bounded

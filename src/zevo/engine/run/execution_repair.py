@@ -97,9 +97,21 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
             rejected = json.loads(failure.body) if failure else {}
         except (ValueError, TypeError):
             rejected = {}
-        if rejected.get("confirmed_not_created") is not True:
-            raise HTTPException(409, "Provision repair requires confirmed absence; reconcile unknown creation first")
+        # No database allocation is not proof that a provider never created one.
+        # Accept a missing journal only when EVERY prior activation is positively
+        # known to have failed before dispatch, and no resource was ever registered.
+        activations = (await session.scalars(select(HeartbeatRun).where(
+            HeartbeatRun.ticket_id == ticket.id))).all()
         from zevo.db import InfraInstance
+        any_resource = await session.scalar(select(InfraInstance.id).where(
+            InfraInstance.ticket_id == ticket.id).limit(1))
+        never_dispatched = bool(activations) and all(
+            h.finished_at is not None and
+            (h.resolved_config or {}).get("submission_contract_failed_before_dispatch") is True
+            for h in activations
+        ) and any_resource is None
+        if rejected.get("confirmed_not_created") is not True and not (failure is None and never_dispatched):
+            raise HTTPException(409, "Provision repair requires confirmed absence; reconcile unknown creation first")
         active = await session.scalar(select(InfraInstance.id).where(
             InfraInstance.run_id == run.id, InfraInstance.ticket_id == ticket.id,
             InfraInstance.released_at.is_(None),
@@ -158,7 +170,10 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
         if not candidate:
             raise HTTPException(409, "Train resubmit requires train_config_path for configuration review")
         try:
-            verify_repair_training_config(row, candidate)
+            from types import SimpleNamespace
+            pins = {key: (ticket.payload or {}).get(key, {}) for key in
+                    ('configuration_pins', 'method_config_pins', 'loss_objective_pins')}
+            verify_repair_training_config(row, candidate, train_input=SimpleNamespace(**pins))
         except (ValueError, OSError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -185,8 +200,10 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
         if request.action == "reconfigure" else
         "Re-read the repaired input bindings and validate them before execution. Preserve all other work-order requirements."
         if request.action == "resume_inputs" else
-        "Preserve training semantics, inputs, plan, resources and verified resumable checkpoints. "
-        "Only engine-recognized execution-only YAML changes are permitted; checkpoint continuation remains byte-identical."
+        "Preserve work-order inputs, resources and verified resumable checkpoints. "
+        "For a fresh Train attempt after failure, Train may tune its unpinned parameters within the same "
+        "model, data, method, resource and inference boundaries; record differences and restart from the original parent. "
+        "Checkpoint continuation remains byte-identical."
     )
     session.add(TicketMessage(ticket_id=ticket.id, author="system", body=(
         f"__REPAIR__\n\nOrchestrator approved {request.action} on this same Ticket "

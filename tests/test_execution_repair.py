@@ -117,7 +117,7 @@ def test_training_repair_cannot_change_or_lose_the_registered_config(tmp_path):
         'training_config_sha256': hashlib.sha256(config.read_bytes()).hexdigest()})
     verify_repair_training_config(previous, config)
     config.write_text('changed plan')
-    with pytest.raises(ValueError, match='exact registered training configuration'):
+    with pytest.raises(ValueError, match='snapshot unavailable'):
         verify_repair_training_config(previous, config)
     previous.meta.pop('training_config_sha256')
     with pytest.raises(ValueError):
@@ -677,3 +677,43 @@ async def test_approval_and_submission_share_semantic_comparison(repair_db):
     path.write_text(yaml.safe_dump(value))
     with pytest.raises(ValueError, match='learning_rate'):
         verify_repair_training_config(execution, path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["safe", "unmarked", "no_history", "active", "unknown_creation", "released_resource"])
+async def test_infra_pre_dispatch_repair_requires_positive_evidence(repair_db, case):
+    import json
+    from zevo.db import TicketNotice
+    db, ticket, execution = repair_db
+    await db.delete(execution)
+    ticket.agent_id = "infrastructure"
+    ticket.payload = {"operation": "provision", "purpose": "train"}
+    if case != "no_history":
+        db.add(HeartbeatRun(id="failed-infra", ticket_id=ticket.id,
+            agent_id="infrastructure", driver="mock", model="test",
+            finished_at=None if case == "active" else datetime.now(timezone.utc),
+            resolved_config={"submission_contract_failed_before_dispatch": True}))
+    if case == "unmarked":
+        db.add(HeartbeatRun(id="older-infra", ticket_id=ticket.id,
+            agent_id="infrastructure", driver="mock", model="test",
+            finished_at=datetime.now(timezone.utc)))
+    if case == "unknown_creation":
+        db.add(TicketNotice(ticket_id=ticket.id, code="cloud.acquisition_failed",
+            body=json.dumps({"confirmed_not_created": False})))
+    if case == "released_resource":
+        db.add(InfraInstance(id="old-resource", run_id="r", ticket_id=ticket.id,
+            provider="cloud", instance_id="i-1", released_at=datetime.now(timezone.utc)))
+    await db.commit()
+    req = RepairTicketRequest(action="provision", execution_attempt=0,
+        reason="Fixed schema binding before Agent dispatch", evidence=["engine pre-dispatch marker"])
+    if case != "safe":
+        with pytest.raises(HTTPException):
+            await repair_ticket(db, ticket, req)
+        assert ticket.status == "failed" and ticket.repair_attempts == 2
+    else:
+        await repair_ticket(db, ticket, req)
+        assert ticket.status == "repairing" and ticket.repair_attempts == 3
+        assert ticket.payload == {"operation": "provision", "purpose": "train"}
+        assert not (await db.scalars(select(AgentWakeupRequest))).all()
+        await complete_review(db)
+        assert len((await db.scalars(select(AgentWakeupRequest))).all()) == 1

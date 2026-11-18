@@ -124,7 +124,7 @@ def repair_instruction(
         "why in execution_retry_reason on a failed collect Result, with "
         "failure_recovery.scope=current_task and evidence. The engine can issue a new submit "
         "contract even when the previous process exited zero/COMPLETED. Keep the same Ticket, "
-        "resources, frozen configuration and resumable state. Needing permission to submit "
+        "resources and verified resumable state. Train may tune its unpinned parameters on a fresh failed-attempt restart, preserving model, data, method and inference identity; record changes and restart from the original parent with fresh optimizer/plan state. Checkpoint continuation preserves its frozen configuration. Needing permission to submit "
         "again is not a resource-plan change. In any execution phase, including preparation "
         "before submission, an unusable assigned resource may be replaced by returning failed "
         "with execution_retry_action=replace_resource, execution_retry_reason, and "

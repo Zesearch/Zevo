@@ -143,3 +143,35 @@ def test_resource_replacement_still_requires_reason():
         "current_task", execution_retry_action="replace_resource",
         execution_retry_reason="assigned device is broken"))).to_result()
     assert result.execution_retry_action == "replace_resource"
+
+
+@pytest.mark.parametrize("release", [False, True])
+def test_infra_binding_uses_real_runtime_input(release, tmp_path):
+    from zevo.contracts.infrastructure import InfraTaskInput
+    inp = InfraTaskInput(
+        ticket_id="infra-r-001", run_id="r", release=release,
+        purpose="" if release else "train", provider="cluster", num_gpus=1,
+        auto_release=False, instance_id="existing" if release else "",
+        work_dir=str(tmp_path), remote_dir="/scratch/zevo",
+        ssh_host="login.example.com", ssh_port=22, ssh_user="user", ssh_key_path="/k",
+        gpu_lease_request_schema={}, gpu_lease_grant_schema={},
+        infra_instance_create_schema={}, infra_instance_patch_schema={},
+        infra_instance_response_schema={}, device_info_schema={},
+        device_info_validation_command="true",
+    )
+    assert not hasattr(inp, "operation")
+    bound = submission_blueprint(load_agent("infrastructure"), inp)
+    schema = bound.output_schema
+    operation = "release" if release else "provision"
+    assert schema.model_fields["operation"].default == operation
+    assert ("device_info_path" in schema.model_fields) is not release
+    output = schema(**common(**(
+        {"released_resource": {"provider": "cluster", "instance_id": "existing"}}
+        if release else {"device_info_path": "/device"})))
+    assert DriverRunResult(output=output).output.operation == operation
+
+
+def test_invalid_binding_is_explicitly_pre_dispatch():
+    from zevo.engine.agent.drivers.base import SubmissionContractError
+    with pytest.raises(SubmissionContractError, match="unsupported Infra"):
+        submission_blueprint(load_agent("infrastructure"), SimpleNamespace())

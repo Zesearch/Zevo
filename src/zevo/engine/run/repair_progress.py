@@ -77,19 +77,23 @@ def record_execution_repair(row, *, action, reason, heartbeat_id):
 
 
 class TrainingConfigurationReviewRequired(ValueError):
-    """A normal retry attempted to change an immutable registered configuration."""
+    """A retry crossed its configuration ownership or continuation boundary."""
 
 
-def verify_repair_training_config(previous, path):
+def verify_repair_training_config(previous, path, *, train_input=None, continuation=False):
     if previous is None:
         return
     expected = (previous.meta or {}).get('training_config_sha256')
+    if continuation or getattr(train_input, 'continuation', None) is not None:
+        if not expected or hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected:
+            raise TrainingConfigurationReviewRequired('checkpoint continuation requires byte-identical training configuration')
+        return
     approval = (previous.meta or {}).get("training_configuration_approval") or {}
     if (approval.get("released") is True
             and approval.get("execution_attempt") == int((previous.meta or {}).get("execution_attempt") or 1)
             and approval.get("original_sha256") == expected):
         expected = approval["proposed_sha256"]
-    message = ('execution repair requires the exact registered training configuration or recognized execution-only changes; '
+    message = ('execution repair permits Train-owned tuning only on a fresh failed-attempt restart; preserve task boundaries and checkpoint continuation identity; '
                'submit failure_recovery.scope=fixed_configuration with training_configuration_change '
                'and leave execution_retry_reason empty')
     if approval.get("released") is True:
@@ -97,13 +101,25 @@ def verify_repair_training_config(previous, path):
             raise TrainingConfigurationReviewRequired(message)
         return
     from zevo.engine.run.training_config_retry import compare_registered
+    meta = previous.meta or {}
+    state = str(meta.get('scheduler_state') or '').split(' ')[0].upper().rstrip('+')
+    fresh_repair = (train_input is not None and not continuation
+        and getattr(train_input, 'continuation', None) is None
+        and (state in {'FAILED', 'OUT_OF_MEMORY', 'NODE_FAIL', 'BOOT_FAIL'}
+             or state == 'COMPLETED' and execution_retry_authorized(meta))
+        and not meta.get('training_continuation') and not meta.get('stage_continuation'))
     try:
-        audit = compare_registered(previous.meta or {}, path)
+        audit = compare_registered(meta, path, train_input=train_input if fresh_repair else None)
     except (ValueError, OSError) as exc:
         raise TrainingConfigurationReviewRequired(f'{message}: {exc}') from exc
-    blocked = [c['path'] for c in audit['changes'] if not c['execution_only']]
+    blocked = [c['path'] for c in audit['changes'] if not c['execution_only'] and not c.get('train_owned')]
     if blocked:
         raise TrainingConfigurationReviewRequired(f"{message}; changed fields: {', '.join(blocked)}")
+    if any(c.get('train_owned') and not c['execution_only'] for c in audit['changes']):
+        audit['authority'] = 'train'
+        audit['restart_mode'] = 'restart_parent'
+        audit['failure_state'] = state
+        audit['reason'] = (meta.get('execution_repair') or {}).get('reason', 'repair failed training attempt')
     previous.meta = {**previous.meta, 'training_config_retry_audit': audit}
 
 

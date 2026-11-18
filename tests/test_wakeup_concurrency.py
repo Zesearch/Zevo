@@ -506,3 +506,52 @@ async def test_cron_does_not_bypass_a_pending_supervisor_handoff(db):
             select(AgentWakeupRequest)
         )).scalars().all()
     assert [w.ticket_id for w in wakes] == [ordinary.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('covered_status', ['queued', 'running'])
+async def test_cron_skips_covered_ticket_but_rescues_another(db, covered_status):
+    async with db() as s:
+        s.add(Agent(id='orchestrator', name='orchestrator', title='orchestrator',
+                    identity_path='playbook/agents/orchestrator/identity.md'))
+        for key in ['covered', 'orphan']:
+            s.add(Ticket(id=key, run_id='run-'+key, agent_id='orchestrator', status='queued'))
+        s.add(AgentWakeupRequest(id='existing', agent_id='orchestrator', ticket_id='covered',
+                                status=covered_status, source='handoff'))
+        await s.commit()
+    await wd._cron_tick(300, 'optimization')
+    async with db() as s:
+        rows = (await s.scalars(select(AgentWakeupRequest))).all()
+        assert len(rows) == 2
+        assert [(w.ticket_id, w.source) for w in rows if w.id != 'existing'] == [('orphan', 'cron')]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source,status,expected', [
+    ('cron', 'succeeded', False), ('cron', 'running', False),
+    ('cron', 'awaiting_input', False), ('cron', 'queued', True),
+    ('handoff', 'succeeded', True), ('on_demand', 'succeeded', True),
+])
+async def test_obsolete_cron_skipped_without_losing_real_events(db, monkeypatch, source, status, expected):
+    async with db() as s:
+        s.add(Ticket(id='supervisor', run_id='run-1', agent_id='orchestrator', status=status))
+        s.add(Ticket(id='active-train', run_id='run-1', agent_id='train', status='running'))
+        s.add(AgentWakeupRequest(id='alarm', ticket_id='supervisor', agent_id='orchestrator',
+                                source=source, status='queued'))
+        await s.commit()
+    @asynccontextmanager
+    async def lock(*args, **kwargs):
+        yield True
+    seen = []
+    async def process(session, wakeup):
+        seen.append(wakeup.id)
+    monkeypatch.setattr(wd, 'advisory_lock', lock)
+    monkeypatch.setattr(wd, '_process_wakeup', process)
+    await wd._run_one('orchestrator', 'alarm', datetime.now(timezone.utc))
+    assert bool(seen) is expected
+    async with db() as s:
+        assert (await s.get(Ticket, 'active-train')).status == 'running'
+        w = await s.get(AgentWakeupRequest, 'alarm')
+        if not expected:
+            assert w.status == 'completed' and w.finished_at
+            assert 'skipped obsolete cron' in w.reason
