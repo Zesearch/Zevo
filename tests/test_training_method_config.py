@@ -573,3 +573,29 @@ def test_optional_trainer_early_stopping_preserves_adaptive_decision_ownership(m
     payload["training"]["adaptive_evaluation"] = True
     with pytest.raises(ValueError, match="adaptive Validation decisions cannot be combined"):
         TrainRunConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize('scope', ['assistant_messages', 'all_tokens', 'answer_tokens'])
+def test_sft_can_choose_supervision_scope_without_changing_prompt(scope):
+    loss = derive_loss_contract('sft', 'chat')
+    loss.target_scope = scope
+    payload = _train_payload(loss_contract=loss)
+    if scope == 'all_tokens':
+        payload['prompt_alignment']['prefix_labels_all_ignored'] = False
+        payload['prompt_alignment']['target_starts_with_synthetic_response'] = False
+        example = payload['training_data_example']
+        example['loss_target_placeholders'] = ['<INPUT>', '<TARGET_RESPONSE>']
+        example['context_only_placeholders'] = []
+        example['sequence_loss_targets']['training'] = ['<INPUT>', '<TARGET_RESPONSE>']
+    elif scope == 'answer_tokens':
+        payload['prompt_alignment']['target_starts_with_synthetic_response'] = False
+    cfg = TrainRunConfig.model_validate(payload)
+    assert cfg.loss_contract.target_scope == scope
+    assert cfg.prompt.prompt_framing == 'chat'
+
+
+def test_supervision_scope_does_not_allow_changing_method_objective():
+    loss = derive_loss_contract('grpo', 'chat')
+    loss.target_scope = 'all_tokens'
+    with pytest.raises(ValidationError, match='loss_contract'):
+        TrainRunConfig.model_validate(_train_payload(training_method='grpo', loss_contract=loss))

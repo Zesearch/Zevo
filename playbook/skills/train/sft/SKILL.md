@@ -25,11 +25,18 @@ Preserve its stored method id while finishing that Ticket; new work uses `sft`.
 
 Require the shape selected by `prompt_framing`:
 
-| framing family | required row | required `loss_contract.target_scope` |
+| framing family | required row | default `loss_contract.target_scope` |
 |---|---|---|
 | `chat` / `chat:<id>` | `{"messages":[...]}` | explicit labels for each assistant turn |
 | `completion` | `{"prompt":...,"completion":...}` | `completion_only_loss=True` |
 | `text` | `{"text":...}` | all tokens; set neither mask |
+
+Train may choose `all_tokens` for any framing, or `answer_tokens` for
+chat/completion with reliable source answer spans. Honor user pins. Keep
+the original rendered text and construct labels for the declared scope:
+all tokens includes prompt tokens; answer_tokens masks everything except the
+verified final-answer span. Reject missing/ambiguous spans rather than guessing.
+Record actual mask evidence and matching synthetic loss/context spans.
 
 Validate every training row needed by the run. Fail
 on mixed or incompatible records; do not convert them inside Train.
@@ -39,8 +46,10 @@ Render the preceding context with `add_generation_prompt=True` and the context
 plus target assistant with `add_generation_prompt=False`, using the unchanged
 template and exact `template_kwargs` loaded from baseline
 `inference_config.yaml`. Require the prompt ids to be an exact prefix of the
-full ids, mask that prefix with `-100`, and supervise only the remaining target.
-Earlier assistant turns remain masked context. Fail on a prefix mismatch, empty
+full ids. For the default assistant_messages scope, mask that prefix with `-100`
+and supervise only the remaining target; earlier turns remain masked context.
+For an explicitly selected alternative, apply its declared labels instead.
+Fail on a prefix mismatch, empty
 target, or target truncation. Do not patch Jinja, replace the instruct template,
 or hand-write wrapper tokens.
 

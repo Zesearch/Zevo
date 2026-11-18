@@ -74,8 +74,8 @@ the current model lineage's Baseline Inference YAML.
 - baseline YAML path and the bare 64-character lowercase SHA-256 of its exact file bytes;
 - `prompt_alignment`: measured proof from the real Train rendering/collator
   path that the Baseline synthetic prompt renders identically, is a string and
-  token prefix of a synthetic completed assistant sequence, has all context
-  labels ignored, and starts the unmasked target at the synthetic response;
+  token prefix of a synthetic completed assistant sequence; report actual
+  prefix masking and target-start booleans for the selected supervision scope;
 - `training_data_example`: one method-shaped normalized record using synthetic
   placeholders, the exact tokenizer/template-rendered sequence(s), declared
   loss-target and context-only placeholders, required per-sequence

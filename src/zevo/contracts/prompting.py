@@ -20,6 +20,7 @@ LossTargetScope = Literal[
     "assistant_messages",
     "completion",
     "all_tokens",
+    "answer_tokens",
     "method_defined",
     "not_applicable",
 ]
@@ -316,6 +317,16 @@ def derive_loss_contract(training_method: object, prompt_framing: object) -> Los
     return LossContract(objective=method, target_scope="method_defined")
 
 
+def allowed_loss_target_scopes(training_method: str, prompt_framing: str) -> set[str]:
+    expected = derive_loss_contract(training_method, prompt_framing)
+    if expected.objective == 'supervised_causal_lm':
+        scopes = {expected.target_scope, 'all_tokens'}
+        if normalize_prompt_framing(prompt_framing) != 'text':
+            scopes.add('answer_tokens')
+        return scopes
+    return {expected.target_scope}
+
+
 def require_loss_contract(
     declared: LossContract | dict | None,
     *,
@@ -337,7 +348,7 @@ def require_loss_contract(
         actual.owner != expected.owner
         or actual.framework != expected.framework
         or actual.objective != expected.objective
-        or actual.target_scope != expected.target_scope
+        or actual.target_scope not in allowed_loss_target_scopes(training_method, prompt_framing)
     ):
         raise ValueError(
             "loss_contract conflicts with training_method/prompt_framing; "
