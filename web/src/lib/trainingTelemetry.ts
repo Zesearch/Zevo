@@ -31,13 +31,23 @@ export function trainingActivity(
   return null;
 }
 
+/** Preparation counters count rows, not optimizer updates. Keep them out of
+ * both the metric series and the axis, even when they carry numeric extras. */
+export function isTrainingChartEvent(event: ExecutionEventDTO): boolean {
+  if (isMidTrainingValidationEvent(event)) return false;
+  const phase = event.phase.split(":")[0];
+  if (["data_preparation", "preparing_data", "tokenization", "tokenizing", "model_load",
+       "loading_model", "saving_model", "connecting"].includes(phase)) return false;
+  return true;
+}
+
 /** Keep checkpoint resumes on one global-step timeline. A replay or rollback
  * replaces the old suffix, so abandoned steps cannot survive a restart. */
 export function continuousTrainingEvents(events: ExecutionEventDTO[]): ExecutionEventDTO[] {
   let result: ExecutionEventDTO[] = [];
   const seenAttempts = new Set<string>();
   for (const event of [...events].sort((a, b) => a.ts.localeCompare(b.ts))) {
-    if (isMidTrainingValidationEvent(event)) continue;
+    if (!isTrainingChartEvent(event)) continue;
     const loss = event.extras?.loss ?? event.loss;
     const isTrainingReading = event.event_type === "progress" && event.current_step > 0
       && typeof loss === "number" && loss >= 0

@@ -4828,6 +4828,9 @@ async def _apply_ticket_failure_policy(
             await request_replacement(session, ticket, execution, owner=owner,
                                       reason=result.execution_retry_reason)
         return True
+    from zevo.engine.run.reviewed_recovery import wait_for_review
+    if disposition.route == "orchestrator" and await wait_for_review(session, ticket, recovery, heartbeat_id):
+        return False
     ticket.status = "failed"
     ticket.repair_route = (
         ("terminal" if ticket.lane == "held_out_test" or ticket.agent_id == "orchestrator" else "orchestrator")
@@ -5050,6 +5053,9 @@ async def run_ticket(
     if await waiting_for_supervisor(session, tk):
         from zevo.engine.run.wakeup import WakeupDeferred
         raise WakeupDeferred("supervisor_decision_pending")
+    from zevo.engine.run.reviewed_recovery import waiting_for_review
+    if waiting_for_review(tk):
+        return tk  # Only a reviewed repair can release this dependency/configuration wait.
     activation_payload = dict(activation_payload or {})
     from zevo.engine.run.resource_recovery import KEY as resource_handoffs_key
     handoff = (run.lifecycle or {}).get(resource_handoffs_key, {}).get(tk.id, {})
@@ -5317,6 +5323,14 @@ async def run_ticket(
             "unchanged_failure_limit": MAX_UNCHANGED_FAILURES,
             "payload_validation_failure_limit": 1,
         }
+        if tk.agent_id == "train":
+            prior = await _latest_slurm_resource_request(session, tk)
+            approval = dict((prior.meta or {}).get("training_configuration_approval") or {}) if prior else {}
+            if approval.get("released") and execution_retry_authorized(prior.meta or {}):
+                contract["training_configuration_approval"] = {
+                    key: value for key, value in approval.items()
+                    if key not in {"original_configuration", "proposed_configuration"}
+                }
         if tk.agent_id == "data" and getattr(inp, "operation", "") == "prepare_run_data":
             contract["data_plane"] = "remote" if getattr(inp, "device_info_path", "") else "local"
         contract["memory_environment"] = memory_environment(run, tk, inp)
@@ -7406,6 +7420,13 @@ async def run_ticket(
                     output.status = "failed"
                 if hasattr(output, "error_message"):
                     output.error_message = summary
+                from zevo.engine.run.repair_progress import TrainingConfigurationReviewRequired
+                if isinstance(exc, TrainingConfigurationReviewRequired) and isinstance(output, TrainResult):
+                    from zevo.contracts.failure import FailureRecovery
+                    output.execution_retry_reason = ""
+                    output.failure_recovery = FailureRecovery(
+                        scope="fixed_configuration", reason=str(exc), evidence=[summary],
+                        next_action="Review the configuration change. If no structured proposal exists, authorize a bounded diagnostic resubmit to prepare one; do not launch altered YAML without reconfigure approval.")
         if run.gpu_provider == "cloud":
             from zevo.engine.run.cloud_recovery import binding_lost
             if await binding_lost(session, run.id, getattr(inp, "device_info_path", "")):

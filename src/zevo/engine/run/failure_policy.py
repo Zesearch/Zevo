@@ -6,7 +6,7 @@ spends again.  This module assigns one of three routes:
 ``self``
     The Specialist owns the generated output, script, command, or artifact and
     gets up to twenty repair activations on the same Ticket. All agents stop
-    local repair earlier after five consecutive failures with unchanged
+    local repair earlier after three consecutive failures with unchanged
     evidence, including execution identity, input/output artifacts and measured
     workload progress. Specialists hand off for Orchestrator review; the
     Orchestrator itself cannot escalate to itself.
@@ -27,7 +27,7 @@ from zevo.contracts.failure import FailureRecovery
 
 RepairRoute = Literal["self", "orchestrator", "terminal"]
 MAX_REPAIR_ATTEMPTS = 20
-MAX_UNCHANGED_FAILURES = 5
+MAX_UNCHANGED_FAILURES = 3
 
 # Legacy reconciliation threshold for old queued rows without versioned
 # validation notices. New work orders stop on their FIRST validation failure;

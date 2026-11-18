@@ -62,7 +62,7 @@ async def test_review_request_hands_off_without_spending_another_repair(session,
     result = AgentResult(status="failed", ticket_id=ticket.id, error_message="State load failed.",
                          notes="", failure_recovery=recovery())
     assert not await _apply_ticket_failure_policy(session, ticket, error_message=result.error_message, result=result)
-    assert ticket.status == "failed" and ticket.repair_route == "orchestrator"
+    assert ticket.status == ("awaiting_input" if agent == "train" else "failed") and ticket.repair_route == "orchestrator"
     assert ticket.repair_attempts == 7
     assert not (await session.scalars(select(TicketMessage))).all()
 
@@ -321,18 +321,18 @@ async def test_input_artifact_change_resets_without_work_products(session, tmp_p
 @pytest.mark.asyncio
 @pytest.mark.parametrize('agent', ['data', 'train', 'inference', 'evaluation', 'infrastructure', 'registry', 'orchestrator'])
 @pytest.mark.parametrize('lane', ['optimization', 'held_out_test'])
-async def test_five_identical_failures_only_schedule_four_repairs(session, agent, lane):
+async def test_three_identical_failures_only_schedule_two_repairs(session, agent, lane):
     session.add(Run(id='r', metric='score', status='running'))
     ticket = Ticket(id='stage', run_id='r', agent_id=agent, lane=lane, status='running')
     session.add(ticket)
     await session.commit()
-    for _ in range(4):
+    for _ in range(2):
         assert await _apply_ticket_failure_policy(session, ticket, error_message='deterministic failure')
     assert not await _apply_ticket_failure_policy(session, ticket, error_message='deterministic failure')
-    assert ticket.repair_attempts == 4
+    assert ticket.repair_attempts == 2
     assert ticket.repair_route == ('terminal' if lane == 'held_out_test' or agent == 'orchestrator' else 'orchestrator')
     messages = (await session.scalars(select(TicketMessage).where(TicketMessage.ticket_id == ticket.id))).all()
-    assert len(messages) == 4
+    assert len(messages) == 2
 
 
 @pytest.mark.asyncio

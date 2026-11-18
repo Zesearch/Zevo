@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import re
+import json
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -511,7 +512,7 @@ async def _optimization_data_tickets(db: AsyncSession, run_id: str) -> list[Tick
 
 async def _train_allows_input_repair(db: AsyncSession, train: Ticket) -> bool:
     """Only an explicit upstream-input failure before execution can release Data."""
-    if train.status != "failed" or train.repair_route != "orchestrator":
+    if train.status not in {"failed", "awaiting_input"} or train.repair_route != "orchestrator":
         return False
     results = (await db.scalars(select(HeartbeatResult).where(
         HeartbeatResult.ticket_id == train.id,
@@ -1048,6 +1049,8 @@ async def create_ticket(
     body: CreateTicketBody,
     db: AsyncSession = Depends(get_db),
 ) -> CreateTicketResponse:
+    if body.repairs_ticket_id and not body.run_id:
+        raise HTTPException(422, "Upstream repair requires an existing Run")
     if body.checkpoint_request_id and (not body.run_id or body.agent_id not in {"inference", "evaluation"}):
         raise HTTPException(422, "checkpoint stages require a Run and Inference or Evaluation")
     # Validate agent exists
@@ -1121,6 +1124,11 @@ async def create_ticket(
         if r is None:
             raise HTTPException(400, f"run {run_id!r} does not exist")
         owning_run = r
+        repair_target = None
+        if body.repairs_ticket_id:
+            from zevo.engine.run.reviewed_recovery import validate_dependency
+            repair_target = await validate_dependency(db, r, body.repairs_ticket_id,
+                child_agent=body.agent_id, iteration=body.iteration)
         from zevo.engine.run.lifecycle import finalization
         if r.cancel_requested_at is not None:
             raise HTTPException(409, "Run is cancelling; no new work is accepted")
@@ -1135,7 +1143,7 @@ async def create_ticket(
                 Ticket.run_id == run_id,
                 Ticket.agent_id == "registry",
             ).order_by(Ticket.created_at.asc()).limit(1))).scalar_one_or_none()
-            if final_registry is not None:
+            if final_registry is not None and (repair_target is None or repair_target.id != final_registry.id):
                 raise HTTPException(
                     409,
                     {
@@ -1148,22 +1156,20 @@ async def create_ticket(
                         ),
                     },
                 )
-            live_specialist = (await db.execute(select(Ticket).where(
-                Ticket.run_id == run_id,
-                Ticket.lane == "optimization",
+            live_specialists = (await db.scalars(select(Ticket).where(
+                Ticket.run_id == run_id, Ticket.lane == "optimization",
                 Ticket.agent_id != "orchestrator",
                 Ticket.status.in_(("queued", "running", "repairing", "awaiting_input", "waiting_external")),
-            ).order_by(Ticket.created_at.asc()).limit(1))).scalar_one_or_none()
+            ).order_by(Ticket.created_at.asc()))).all()
+            from zevo.engine.run.reviewed_recovery import waiting_ancestors
+            blocked_chain = await waiting_ancestors(db, repair_target) if repair_target else set()
+            live_specialist = next((t for t in live_specialists if t.id not in blocked_chain), None)
             if live_specialist is not None and not body.checkpoint_request_id:
-                raise HTTPException(
-                    409,
-                    {
-                        "error": "the Run already has an active Specialist",
-                        "ticket_id": live_specialist.id,
-                        "agent_id": live_specialist.agent_id,
-                        "advice": "Wait for that Ticket to finish before emitting the next stage.",
-                    },
-                )
+                raise HTTPException(409, {
+                    "error": "the Run already has an active Specialist",
+                    "ticket_id": live_specialist.id, "agent_id": live_specialist.agent_id,
+                    "advice": "Wait for that Ticket to finish before emitting the next stage.",
+                })
         # A factual score row is not a complete iteration record. The next
         # transition is blocked until the Orchestrator supplies all four Journal
         # fields. Final Registry is not an exception: it runs only after every
@@ -1415,6 +1421,13 @@ async def create_ticket(
         repair_attempts=inherited_repairs,
     )
     db.add(tk)
+    if body.repairs_ticket_id:
+        from zevo.engine.run.reviewed_recovery import DEPENDENCY_CODE
+        db.add(TicketNotice(ticket_id=tid, code=DEPENDENCY_CODE, severity="info", body=body.repairs_ticket_id))
+        # Failed upstream children cannot create an unbounded recovery loop.
+        repair_target.repair_attempts = int(repair_target.repair_attempts or 0) + 1
+        db.add(TicketNotice(ticket_id=repair_target.id, code="repair.upstream_requested", severity="info",
+            body=json.dumps({"child_ticket_id": tid, "repair_attempt": repair_target.repair_attempts})))
     if inherited_repairs:
         db.add(TicketNotice(ticket_id=tid, code="resource.repair_inherited", severity="info",
             body=f"Preserved {inherited_repairs} repair activations from this work order's cloud recovery history."))
@@ -1745,6 +1758,9 @@ async def post_message(
     run_is_terminal = run is not None and run.status in TERMINAL_RUN_STATUSES
     woke = bool(payload.wake_agent and author and author != t.agent_id
                 and not run_is_terminal)
+    from zevo.engine.run.reviewed_recovery import waiting_for_review
+    if waiting_for_review(t):
+        woke = False  # A message cannot bypass dependency/configuration review.
     if woke:
         # G.4 — if the ticket was paused waiting for clarification,
         # the user's reply unblocks it. Flip back to `queued` BEFORE

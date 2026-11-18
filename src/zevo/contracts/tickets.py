@@ -182,6 +182,7 @@ class CreateTicketBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str = Field(min_length=1)
+    repairs_ticket_id: str = Field("", description="Explicit blocked optimization Ticket whose upstream inputs this child repairs. Requires a live supervisor review; the original Ticket remains awaiting_input until reviewed resumption.")
     checkpoint_request_id: str = Field("", pattern=r"^(?:|[0-9a-f]{32})$",
         description="For a verified mid-training checkpoint, create its Inference/Evaluation with payload={} and inputs={}; the engine binds frozen artifacts and validates them using the ordinary contracts.")
     input_format: TicketInputFormat = "typed"

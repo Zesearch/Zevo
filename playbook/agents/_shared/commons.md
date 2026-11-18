@@ -114,12 +114,12 @@ continue or report a blocker. Repeated unchanged attempts are not progress.
 The activation contract reports repair allowances and the no-progress limit;
 these are distinct from stored-payload validation failures. Do not invent an
 additional turn-count deadline or claim success merely to finish an activation.
-Across all agents, five consecutive failed activations without changed execution,
+Across all agents, three consecutive failed activations without changed execution,
 artifacts, or measured workload progress end local repair. Optimization specialists
 hand off to the Orchestrator for review; held-out Test and the Orchestrator itself
 do not escalate to the Orchestrator. Real progress restarts this streak; normal
 external waiting does not count as failure. A request that already needs upstream
-authority can be escalated immediately without consuming five failures.
+authority can be escalated immediately without consuming three failures.
 
 ## Runtime environment
 
@@ -552,3 +552,16 @@ Historical messages are evidence, not automatically active requests: current
 inputs, pins and durable Run instructions govern; do not revive superseded or
 completed requests. Resolve conflicting messages by their chronology and current
 state. The snapshot contains only this Ticket's messages.
+
+
+### Waiting for upstream repair
+
+When a correct next action requires another Specialist to repair an input, return
+`failed` with `failure_recovery.scope="upstream_input"`, concrete evidence and
+which input needs correction. Leave `execution_retry_reason` empty. The failed
+activation remains in history, but the optimization Ticket becomes
+`awaiting_input` for Orchestrator review, not a completed failed work order.
+Do not self-wake or create replacement work. The Orchestrator may create an
+explicit repair dependency and, after checking its successful products, resume
+this SAME Ticket with updated bindings. Re-read and validate those bindings.
+Held-out isolation and exhausted repair limits still stop this path.

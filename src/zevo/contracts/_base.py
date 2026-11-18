@@ -124,7 +124,7 @@ class AgentResult(StrictResult):
             if self.status != "failed":
                 raise ValueError("execution_retry_reason is only valid for failed results")
             if self.failure_recovery is not None and self.failure_recovery.scope != "current_task":
-                raise ValueError("execution retry must stay within current_task; other scopes require review")
+                raise ValueError("execution retry must stay within current_task; for upstream_input/fixed_configuration review leave execution_retry_reason empty and describe the proposal in failure_recovery")
         if self.failure_recovery is not None and self.status != "failed":
             raise ValueError("failure_recovery is only valid for failed results")
         if self.status == "failed" and not self.error_message.strip():
