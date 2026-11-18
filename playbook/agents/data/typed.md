@@ -54,8 +54,9 @@ For standalone local preparation, return absolute `training_dataset_path`,
 remote and scoring fields empty. Validate the recipe and rows using the supplied
 local commands. This route requires an explicit local activation contract.
 
-Keep `remote_data_receipt_path` and `remote_training_package_path` empty in
-every Data result. The engine fills these after finalization. The preparation
+Do not submit `remote_data_receipt_path` or `remote_training_package_path`.
+These Engine-only fields are absent from your submission schema; the engine
+adds them after finalization. The preparation
 receipt belongs at the supplied remote `remote_preparation_receipt_path`;
 verify it there, but never put it in `remote_data_receipt_path`.
 
@@ -79,7 +80,9 @@ Skill `collect` means source acquisition; `slurm_job.phase="collect"` instead
 collects an existing job's result and must not repeat acquisition or submission.
 
 Return measured `n_rows_in`, `n_rows_out`, artifact paths, and exactly one
-`DataResult`. `data_recipe.json` is the sole authority for source provenance,
+operation-specific Data submission. Only fields in this activation's output
+schema may be submitted; do not copy the full backend `DataResult` from earlier
+transcripts. `data_recipe.json` is the sole authority for source provenance,
 ordered methods, and the realized recipe; the runner verifies it and derives
 `data_signature`. For remote Data, the compact receipt binds that signature to
 the exact final bytes and measured row count without copying rows back.

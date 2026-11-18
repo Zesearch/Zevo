@@ -237,8 +237,9 @@ deterministic transformations only.
 - Record the model, generation settings, accepted/rejected counts, and method
   in the recipe, `audit_steps`, and `synthesis_*` provenance fields.
 - Keep `decontaminate_against_eval=true`. The engine performs private evaluation
-  overlap checks; leave `decontamination_checked` and
-  `decontamination_removed_rows` at their defaults for the engine to populate.
+  overlap checks. Do not submit `decontamination_checked`,
+  `decontamination_removed_rows`, or other Engine-only fields; they are absent
+  from your submission schema and added by the engine afterward.
 
 Every source requires a `remote_dataset_spec.json` matching the supplied schema.
 Use `source.kind=huggingface` for a resolved Hub dataset, including discovery;
