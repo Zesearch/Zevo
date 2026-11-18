@@ -99,3 +99,100 @@ def test_guard_cannot_be_loosened(tmp_path):
     data['training']['implementation_config']['startup_max_first_batch_nll'] = 10
     path.write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError): verify_repair_training_config(row, path)
+
+
+def fresh_repair(tmp_path):
+    row, path, value = registered(tmp_path)
+    value.update(training_method='sft', parent_model='Qwen/base',
+                 loss_contract={'objective_config': {'loss_type': 'chunked_nll'}, 'mask': 'completion'})
+    raw = yaml.safe_dump(value)
+    row.meta.update(scheduler_state='FAILED', training_config_snapshot=raw,
+                    training_config_sha256=hashlib.sha256(raw.encode()).hexdigest())
+    value['training']['implementation_config']['output_dir'] = '/run/train/attempt-2/output'
+    return row, path, value
+
+
+@pytest.mark.parametrize('parameter,new', [
+    ('learning_rate', 2e-5), ('batch_size', 2), ('gradient_accumulation_steps', 8),
+    ('num_epochs', 3), ('optimizer', 'adamw_torch'), ('precision', 'bf16'),
+])
+def test_train_can_tune_unpinned_parameters_on_fresh_failed_attempt(tmp_path, parameter, new):
+    row, path, value = fresh_repair(tmp_path)
+    value['training'][parameter] = new
+    path.write_text(yaml.safe_dump(value))
+    verify_repair_training_config(row, path, train_input=SimpleNamespace())
+    audit = row.meta['training_config_retry_audit']
+    assert audit['authority'] == 'train' and audit['restart_mode'] == 'restart_parent'
+    assert any(c['path'] == 'training.' + parameter and c['train_owned'] for c in audit['changes'])
+    assert audit['original_sha256'] != audit['proposed_sha256']
+
+
+def test_train_can_repair_nll_implementation_and_memory_accounting(tmp_path):
+    row, path, value = fresh_repair(tmp_path)
+    value['loss_contract']['objective_config']['loss_type'] = 'nll'
+    impl = value['training']['implementation_config']
+    impl['startup_max_pre_step_grad_norm'] = 10000
+    impl['gpu_memory_preflight']['components_gib']['dense_nll_logits'] = 13
+    impl['gpu_memory_preflight']['estimated_peak_per_rank_gib'] = 104
+    path.write_text(yaml.safe_dump(value))
+    verify_repair_training_config(row, path, train_input=SimpleNamespace())
+    assert row.meta['training_config_retry_audit']['authority'] == 'train'
+
+
+@pytest.mark.parametrize('case', ['pin', 'loss_pin', 'model', 'data', 'method', 'mask',
+                                 'world_size', 'data_selection', 'memory_capacity',
+                                 'old_output', 'resume', 'unknown', 'different_objective'])
+def test_train_tuning_cannot_cross_task_boundaries(tmp_path, case):
+    row, path, value = fresh_repair(tmp_path)
+    value['training']['learning_rate'] = 2e-5
+    inp = SimpleNamespace()
+    if case == 'pin': inp.configuration_pins = {'learning_rate': 1e-5}
+    if case == 'loss_pin':
+        inp.loss_objective_pins = {'loss_type': 'chunked_nll'}
+        value['loss_contract']['objective_config']['loss_type'] = 'nll'
+    if case == 'model': value['parent_model'] = 'other/model'
+    if case == 'data': value['data_signature'] = 'other'
+    if case == 'method': value['training_method'] = 'grpo'
+    if case == 'mask': value['loss_contract']['mask'] = 'all'
+    if case == 'world_size': value['training']['world_size'] = 4
+    if case == 'data_selection': value['training']['data_selection'] = {'limit': 1}
+    if case == 'memory_capacity': value['training']['implementation_config']['gpu_memory_preflight']['per_gpu_vram_gib'] = 200
+    if case == 'old_output': value['training']['implementation_config']['output_dir'] = '/run/train/attempt-1/output'
+    if case == 'resume': value['training']['implementation_config']['resume_from_checkpoint'] = '/old/checkpoint'
+    if case == 'unknown': value['training']['implementation_config']['new_model_path'] = '/other/model'
+    if case == 'different_objective': value['loss_contract']['objective_config']['loss_type'] = 'other'
+    path.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError):
+        verify_repair_training_config(row, path, train_input=inp)
+    assert 'training_config_retry_audit' not in row.meta
+
+
+@pytest.mark.parametrize('case', ['completed', 'running', 'continuation', 'input_continuation', 'stored_continuation'])
+def test_train_tuning_is_only_for_failed_fresh_attempts(tmp_path, case):
+    row, path, value = fresh_repair(tmp_path)
+    value['training']['learning_rate'] = 2e-5
+    inp = SimpleNamespace()
+    if case in {'completed', 'running'}: row.meta['scheduler_state'] = case.upper()
+    if case == 'input_continuation': inp.continuation = {'checkpoint': '/checkpoint'}
+    if case == 'stored_continuation': row.meta['training_continuation'] = {'checkpoint': '/checkpoint'}
+    path.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError):
+        verify_repair_training_config(row, path, train_input=inp, continuation=case == 'continuation')
+
+
+def test_completed_workload_needs_explicit_failed_collect_retry(tmp_path):
+    row, path, value = fresh_repair(tmp_path)
+    row.meta['scheduler_state'] = 'COMPLETED'
+    row.meta['execution_repair'] = {'action': 'resubmit', 'execution_attempt': 1,
+                                    'reason': 'Completed process produced invalid training; restart with corrected optimizer'}
+    value['training']['learning_rate'] = 2e-5
+    path.write_text(yaml.safe_dump(value))
+    verify_repair_training_config(row, path, train_input=SimpleNamespace())
+    assert row.meta['training_config_retry_audit']['reason'] == row.meta['execution_repair']['reason']
+
+
+def test_continuation_rejects_even_execution_only_yaml_changes(tmp_path):
+    row, path, value = fresh_repair(tmp_path)
+    path.write_text(yaml.safe_dump(value))  # only attempt-local output path changed
+    with pytest.raises(ValueError, match='byte-identical'):
+        verify_repair_training_config(row, path, train_input=SimpleNamespace(), continuation=True)

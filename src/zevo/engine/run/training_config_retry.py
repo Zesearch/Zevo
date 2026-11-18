@@ -1,7 +1,7 @@
-"""Fail-closed semantic comparison for execution-only Train repairs.
+"""Audit Train repairs while preserving task boundaries and continuation identity.
 
-The registered bytes remain the audit identity. Only explicitly named diagnostic
-and bookkeeping fields may differ without a training reconfiguration approval.
+Fresh failed-attempt repairs may tune Train-owned choices using engine input pins.
+Without that context only execution bookkeeping changes are accepted.
 """
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def _diff(before, after, path=()):
                "execution_only": _allowed(path, before, after)}
 
 
-def compare_registered(meta, path):
+def compare_registered(meta, path, *, train_input=None):
     path = Path(path)
     candidate = path.read_bytes()
     expected = meta.get('training_config_sha256')
@@ -149,6 +149,8 @@ def compare_registered(meta, path):
     except (ValueError, TypeError) as exc:
         raise ValueError('Training YAML must contain finite JSON-compatible values') from exc
     audit['changes'] = list(_diff(before, after))
+    if train_input is not None:
+        _classify_train_changes(audit, before, after, train_input)
     training = after.get('training')
     implementation = training.get('implementation_config') if isinstance(training, dict) else None
     memory = implementation.get('gpu_memory_preflight') if isinstance(implementation, dict) else None
@@ -160,3 +162,68 @@ def compare_registered(meta, path):
                     and 0 < estimate < capacity):
                 change['execution_only'] = False
     return audit
+
+
+# Train owns these choices within the already selected method and allocation.
+_TRAIN_PARAMETERS = {
+    'num_epochs', 'early_stopping', 'max_seq_len', 'batch_size',
+    'gradient_accumulation_steps', 'effective_batch_size', 'learning_rate',
+    'optimizer', 'lr_scheduler_type', 'warmup_ratio', 'weight_decay',
+    'max_grad_norm', 'precision', 'gradient_checkpointing', 'packing', 'seed',
+    'lora_r', 'lora_alpha', 'lora_dropout', 'lora_target_modules',
+}
+_IMPLEMENTATION_PARAMETERS = _TRAIN_PARAMETERS | {
+    'planned_optimizer_steps', 'max_steps', 'warmup_steps', 'optim',
+    'per_device_train_batch_size', 'num_train_epochs', 'bf16', 'fp16',
+    'group_by_length', 'dataloader_num_workers', 'dataloader_pin_memory',
+}
+
+
+def _subset(expected, actual):
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(k in actual and _subset(v, actual[k]) for k, v in expected.items())
+    return type(expected) is type(actual) and expected == actual
+
+
+def _classify_train_changes(audit, before, after, inp):
+    training = after.get('training', {})
+    # Resolve pins from the engine-built input, not from agent-authored YAML.
+    for key, value in (getattr(inp, 'configuration_pins', {}) or {}).items():
+        actual = training.get(key, after.get(key, _MISSING))
+        if not _subset(value, actual):
+            raise ValueError(f'Train repair violates user pin {key}')
+    for field, actual in [('method_config_pins', after.get('method_config', {})),
+                          ('loss_objective_pins', after.get('loss_contract', {}).get('objective_config', {}))]:
+        if not _subset(getattr(inp, field, {}) or {}, actual):
+            raise ValueError(f'Train repair violates {field}')
+    for change in audit['changes']:
+        parts = change['path'].split('.')
+        owned = len(parts) >= 2 and parts[0] == 'training' and parts[1] in _TRAIN_PARAMETERS
+        if parts[:2] == ['training', 'implementation_config'] and len(parts) >= 3:
+            key = parts[2]
+            owned = key in _IMPLEMENTATION_PARAMETERS or key.startswith(('startup_', 'probe_'))
+            if key.startswith(('startup_max_', 'startup_min_')):
+                value = change['after']
+                owned = type(value) in {int, float} and math.isfinite(value) and value > 0
+            if key == 'gpu_memory_preflight' and len(parts) >= 4:
+                owned = parts[3] in {'components_gib', 'estimated_peak_per_rank_gib', 'note'}
+                memory = training['implementation_config'].get(key, {})
+                estimate, capacity = memory.get('estimated_peak_per_rank_gib'), memory.get('per_gpu_vram_gib')
+                owned = owned and type(estimate) in {int, float} and type(capacity) in {int, float} and 0 < estimate < capacity
+        # Explicitly equivalent SFT implementations; masks/objective otherwise stay fixed.
+        if parts in [['loss_contract', 'objective_config', 'loss_type'],
+                     ['training', 'implementation_config', 'loss_type']]:
+            owned = (after.get('training_method') in {'sft', 'full_sft', 'lora_sft'}
+                     and change['before'] in {'nll', 'chunked_nll'} and change['after'] in {'nll', 'chunked_nll'})
+        if len(parts) == 3 and parts[0] == 'suggestion_decisions' and parts[2] in {'realized', 'rationale'}:
+            owned = True  # explanatory record only; actual values are checked above
+        change['train_owned'] = bool(owned)
+
+    if any(c.get('train_owned') and not c['execution_only'] for c in audit['changes']):
+        old_impl = before.get('training', {}).get('implementation_config', {})
+        impl = training.get('implementation_config', {})
+        old_dir, new_dir = old_impl.get('output_dir'), impl.get('output_dir')
+        if old_dir == new_dir or not _attempt_path(old_dir, new_dir):
+            raise ValueError('Train-owned tuning requires a fresh attempt-local output directory')
+        if any(impl.get(key) for key in ('resume_from_checkpoint', 'resume_checkpoint', 'resume')):
+            raise ValueError('Train-owned tuning must restart from the original parent, not a checkpoint continuation')

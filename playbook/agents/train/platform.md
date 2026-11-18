@@ -1046,43 +1046,36 @@ sharding/offload and workload memory before expensive execution. A constrained
 allocation does not authorize changing a pinned training method.
 
 
-## Reviewed configuration repair
+## Training repair and configuration ownership
 
-Diagnose before proposing configuration changes. Implementation-only logging,
-gradient-finiteness checks and read-only probes do not require changing the
-registered YAML. A hypothesis is not a verified cause; explain what a proposed
-short diagnostic execution will test.
+Diagnose failures before retrying; a hypothesis is not a verified cause. On a
+fresh attempt after a failed execution, you may adjust your own unpinned training
+parameters without Orchestrator approval: learning rate, optimizer, scheduler,
+warmup, epochs, sequence length, batch/accumulation, precision, gradient clipping,
+checkpointing, packing, seed and LoRA hyperparameters within the selected method.
+You may update their implementation settings, startup/probe diagnostics and
+memory estimates within the assigned allocation. SFT `chunked_nll` and `nll`
+are permitted alternatives for the same cross-entropy objective; keep loss masks
+and all other objective fields unchanged. User pins remain binding.
 
-Normal execution repair compares parsed YAML against the registered snapshot.
-It permits formatting/comments, attempt-local output paths, the same launch
-command with only its attempt-local baseline-inference copy path changed,
-and explicitly recognized diagnostic bookkeeping. The three positive startup
-thresholds (`startup_max_first_batch_nll`, `startup_max_first_logged_loss`,
-`startup_max_reference_loss_mismatch`) may be added or tightened, not removed
-or loosened. Diagnostic descriptions and bounded GPU memory estimates do not
-change the training recipe. Keep the actual model, data, method, loss, optimizer,
-schedule, batch geometry, resource plan and inference protocol unchanged.
-Unknown configuration fields require review; a name containing "diagnostic"
-is not permission. The engine records the full hashes and semantic diff.
-For legacy executions, retain `train_config.attemptN.yaml` with the exact
-registered bytes so the engine can verify its baseline.
+Preserve original YAML bytes as `train_config.attemptN.yaml`. Explain the diagnosis,
+changed parameters, evidence and retry purpose in your result/message. Use the
+normal same-Ticket repair flow; if collect needs another execution, return failed
+with current_task recovery and execution_retry_reason. Do not escalate merely
+because a Train-owned parameter changed. Repair counts and Run budgets still apply.
 
-If a necessary fix changes training semantics or an unrecognized field, preserve its original
-YAML and stage a separate candidate YAML. Return `failed` with
-`failure_recovery.scope="fixed_configuration"` and
-`failure_recovery.training_configuration_change` containing absolute
-`original_config_path`, `proposed_config_path`, their exact `original_sha256`
-and `proposed_sha256`, a nonempty `changes` list and
-`restart_mode="restart_parent"`. Include diagnosis and evidence in the recovery
-request. Leave `execution_retry_reason` empty. Do not submit the candidate or
-change scope to current_task merely to bypass the configuration lock.
+Changed parameters require a NEW attempt directory, starting from the original
+parent with fresh optimizer, scheduler and plan state. Never continue the old
+attempt's checkpoint or step count. Preserve old logs/configs/checkpoints for audit.
+The engine records configuration hashes and the full diff. Walltime and checkpoint
+continuation still require byte-identical configuration and the original plan.
 
-The Ticket waits for Orchestrator review. After approval, the engine supplies
-`activation_contract.training_configuration_approval`; use only that candidate's
-exact bytes. Start a NEW attempt from the original parent, with new optimizer,
-scheduler and attempt-local plan state. Never resume an old NaN/incompatible
-checkpoint or reuse its completed-step count. Old logs/checkpoints remain audit
-history. This path preserves data, model, method, inference protocol, iteration,
-resource requirements and user pins. Normal repairs permit only the recognized
-execution-only differences above. Walltime/checkpoint continuation still requires
-byte-identical configuration and the original full training plan.
+Model/parent, data identity/selection, training method, method config, loss masks,
+resource topology and frozen inference/prompt/tokenizer protocol are not yours to
+change during repair. Unknown fields remain subject to review. If the engine rejects
+a necessary change, preserve the original YAML, stage a separate candidate and
+return fixed_configuration recovery with training_configuration_change containing
+absolute original_config_path/proposed_config_path, exact hashes, changes and
+restart_mode=restart_parent. Do not bypass a rejection. After Orchestrator approval,
+use the exact approved candidate bytes. A change outside the task boundary requires
+an appropriate upstream decision/new experiment, not a disguised retry.

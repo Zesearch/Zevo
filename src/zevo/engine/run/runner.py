@@ -4489,7 +4489,9 @@ async def _submit_validated_slurm_stage_once(
     training_digest = ""
     if isinstance(inp, TrainTaskInput):
         from zevo.engine.run.repair_progress import verify_repair_training_config
-        verify_repair_training_config(previous, Path(contract.script_path).with_name("train_config.yaml"))
+        from zevo.engine.run.adaptive_training import checkpoint_resume_authorized
+        verify_repair_training_config(previous, Path(contract.script_path).with_name("train_config.yaml"),
+            train_input=inp, continuation=walltime_resume or checkpoint_resume_authorized(run, ticket, previous))
         training_digest = hashlib.sha256(Path(contract.script_path).with_name("train_config.yaml").read_bytes()).hexdigest()
         if walltime_resume and training_digest != resume_proof["config_sha256"]:
             raise ValueError("walltime continuation must preserve the frozen training configuration")
@@ -6222,6 +6224,7 @@ async def run_ticket(
     failure_origin: FailureOrigin = "agent_execution"
     output: BaseModel | None = None
     exit_code = 0
+    typed_activation = not isinstance(inp, FreeformInput)
     try:
         if isinstance(inp, FreeformInput) and tk.agent_id != "orchestrator":
             from zevo.engine.run.freeform_resolution import resolve_work_order
@@ -6280,6 +6283,10 @@ async def run_ticket(
             "owned process groups were stopped and the attempt was finalized"
         )
     except Exception as e:
+        from zevo.engine.agent.drivers.base import SubmissionContractError
+        if typed_activation and isinstance(e, SubmissionContractError):
+            hb.resolved_config = {**(hb.resolved_config or {}),
+                                  "submission_contract_failed_before_dispatch": True}
         exit_code = 1
         error_message = f"{type(e).__name__}: {e}"
     finally:

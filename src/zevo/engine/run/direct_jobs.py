@@ -98,7 +98,11 @@ async def submit(session, *, run, ticket, inp, heartbeat_id, remote_train_config
     previous = await _latest_slurm_resource_request(session, ticket)
     if ticket.agent_id == "train":
         from zevo.engine.run.repair_progress import verify_repair_training_config
-        verify_repair_training_config(previous, Path(contract.script_path).with_name("train_config.yaml"))
+        from zevo.engine.run.adaptive_training import checkpoint_resume_authorized
+        from zevo.engine.run.stage_continuation import authorized as continuation_authorized
+        verify_repair_training_config(previous, Path(contract.script_path).with_name("train_config.yaml"),
+            train_input=inp, continuation=continuation_authorized(ticket, previous)
+                or checkpoint_resume_authorized(run, ticket, previous))
     execution_id = str(uuid5(NAMESPACE_URL, f"zevo:direct:{ticket.id}:{contract.attempt}:{contract.remote_work_dir}"))
     existing = await session.get(InfraInstance, execution_id)
     if existing:
