@@ -478,6 +478,10 @@ For a failed result, put the specific current failure in `error_message` and
 use `failure_recovery` to describe recovery. `notes` is explanatory context;
 phrases such as "escalating" in prose are not a handoff protocol.
 
+In the Agent submission, execution retry fields belong inside
+`failure_recovery` with `scope="current_task"`. Review scopes have no retry
+fields. Do not copy the backend's top-level retry fields from old results.
+
 - `scope="current_task"`: name a concrete implementation correction or bounded
   diagnostic within the existing work order. Explain what the next action will
   fix or distinguish. An OOM alone does not determine ownership.

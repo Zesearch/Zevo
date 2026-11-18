@@ -218,6 +218,8 @@ class OpenRouterDriver:
         model_override: str = "",
         sandbox_mode: str = "",   # accepted for parity; in-process, no sandbox
     ) -> DriverRunResult:
+        from zevo.engine.agent.drivers.base import submission_blueprint
+        blueprint = submission_blueprint(blueprint, input_payload)
         api_key = self._api_key()
         model_id = model_override or blueprint.default_model or DEFAULT_MODEL
 

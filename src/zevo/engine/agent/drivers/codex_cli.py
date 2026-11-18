@@ -415,6 +415,8 @@ class CodexCliDriver:
         model_override: str = "",
         sandbox_mode: str = "",
     ) -> DriverRunResult:
+        from zevo.engine.agent.drivers.base import submission_blueprint
+        blueprint = submission_blueprint(blueprint, input_payload)
         # Accepted for interface parity only -- this driver has no sandbox
         # runtime. Say so instead of silently ignoring a requested mode.
         if sandbox_mode and sandbox_mode != "none":

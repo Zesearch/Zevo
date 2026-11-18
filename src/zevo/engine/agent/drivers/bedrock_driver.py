@@ -180,6 +180,8 @@ class BedrockDriver:
         model_override: str = "",
         sandbox_mode: str = "",   # accepted for interface parity; in-process driver, no sandbox
     ) -> DriverRunResult:
+        from zevo.engine.agent.drivers.base import submission_blueprint
+        blueprint = submission_blueprint(blueprint, input_payload)
         client = self._client()
         model_id = model_override or blueprint.default_model or DEFAULT_MODEL
 

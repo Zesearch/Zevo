@@ -679,6 +679,8 @@ class ClaudeCliDriver:
         model_override: str = "",
         sandbox_mode: str = "",
     ) -> DriverRunResult:
+        from zevo.engine.agent.drivers.base import submission_blueprint
+        blueprint = submission_blueprint(blueprint, input_payload)
         claude_bin = self._resolve_bin()
         # Claude Code uses its own model id format (claude-sonnet-4-6,
         # claude-opus-4-8, etc.). The agent's default_model may be a

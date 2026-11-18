@@ -40,6 +40,11 @@ schema probe can acquire or partially persist a real resource.
 Reuse the one successful Infra reference throughout a run. The orchestrator
 must not create release tickets in the normal forward DAG; lifecycle code owns
 terminal cleanup. Follow `platform.md` and emit exactly one `InfraResult`.
+Use this activation's submission schema: provision success leaves
+`failure_resource=null`; failed provision may put resource identity and cleanup
+evidence there. Release uses `released_resource`. Do not submit top-level
+`provider`, `instance_id`, `cloud_backend`, or `auto_release`; the driver converts
+the submission into the backend Result after validation.
 After usable provision, report only `device_info_path`; the reopened, validated
 artifact is the sole authority for the resource plan, device measurements,
 route, ownership, lifecycle policy, and price. Do not restate the resolved
