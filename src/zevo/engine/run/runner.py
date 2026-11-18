@@ -4632,6 +4632,8 @@ async def _submit_validated_slurm_stage_once(
             "script_sha256": local_script_sha256,
             "implementation_sha256": implementation_sha256,
             **({"training_config_sha256": training_digest,
+                "training_config_snapshot": Path(contract.script_path).with_name("train_config.yaml").read_bytes().decode("utf-8"),
+                "training_config_local_path": str(Path(contract.script_path).with_name("train_config.yaml")),
                 "training_config_remote_path": remote_train_config_path or
                     str(PurePosixPath(contract.remote_work_dir) / "train_config.yaml")}
                if training_digest else {}),
