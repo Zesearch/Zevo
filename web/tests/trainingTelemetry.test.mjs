@@ -51,3 +51,25 @@ test('checkpoint resumes retain earlier steps and replace a rolled-back suffix',
   const restart = reading(1, 'restart', '06');
   assert.deepEqual(continuousTrainingEvents([first, checkpoint, resumed, restart]), [restart]);
 });
+
+
+test('20,000 prepared rows cannot enlarge a 1,250-step training chart or become metrics', () => {
+  const preparation = { ...event('data_preparation', { elapsed_seconds: 24.6 }, '01'),
+    current_step: 20000, total_steps: 20000 };
+  const training = { ...event('training', { loss: .5 }, '02'),
+    current_step: 20, total_steps: 1250, attempt_id: 'first' };
+  const validationLoss = { ...event('training', { eval_loss: .4 }, '03'),
+    current_step: 20, total_steps: 1250, attempt_id: 'first' };
+  const points = continuousTrainingEvents([preparation, training, validationLoss]);
+  assert.deepEqual(points, [training, validationLoss]);
+  assert.equal(Math.max(...points.map(p => p.total_steps)), 1250);
+  assert.deepEqual(continuousTrainingEvents([preparation]), []);
+});
+
+test('preparation in a new attempt does not distort the old training axis', () => {
+  const training = { ...event('training', { loss: .5 }, '01'),
+    current_step: 1250, total_steps: 1250, attempt_id: 'first' };
+  const preparation = { ...event('data_preparation', { elapsed_seconds: 25 }, '02'),
+    current_step: 20000, total_steps: 20000, attempt_id: 'second' };
+  assert.deepEqual(continuousTrainingEvents([training, preparation]), [training]);
+});

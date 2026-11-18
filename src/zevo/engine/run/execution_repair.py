@@ -9,19 +9,20 @@ from pydantic import Field
 from sqlalchemy import select
 
 from zevo.contracts._base import StrictBody
-from zevo.contracts.failure import RecoveryText
+from zevo.contracts.failure import RecoveryText, TrainingConfigurationChange
 from zevo.db import HeartbeatRun, Run, Ticket, TicketMessage, TicketNotice
 from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
 from zevo.engine.run.repair_progress import record_execution_repair
 
 
 class RepairTicketRequest(StrictBody):
-    action: Literal["prepare", "provision", "collect", "resubmit", "replace_resource"]
+    action: Literal["prepare", "provision", "collect", "resubmit", "replace_resource", "resume_inputs", "reconfigure"]
+    training_configuration_change: TrainingConfigurationChange | None = None
     reason: RecoveryText = Field(max_length=2000)
     evidence: list[RecoveryText] = Field(min_length=1, max_length=20)
     execution_attempt: int = Field(ge=0, description="Exact registered attempt; zero only for preparation before any execution")
     input_signature: str = Field("", description="Exact rejected input signature for prepare")
-    input_products: dict[str, str] = Field(default_factory=dict, description="For prepare only: replace stale bindings with current products of the SAME upstream Ticket and artifact role")
+    input_products: dict[str, str] = Field(default_factory=dict, description="For prepare: same upstream Ticket; for resume_inputs: reviewed successful repair dependency. Maps input names to exact WorkProduct IDs.")
 
 
 async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
@@ -38,9 +39,9 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
         raise HTTPException(409, "Repair requires an active Run")
     if await instruction_gate_active(session, run.id):
         raise HTTPException(409, "Run instruction must be resolved before repair")
-    if (ticket.lane != "optimization" or ticket.agent_id not in {"infrastructure", "data", "train", "inference", "evaluation"}
-            or ticket.status != "failed" or ticket.repair_route != "orchestrator"):
-        raise HTTPException(409, "Only a failed optimization workload referred to Orchestrator can be repaired")
+    if (ticket.lane != "optimization" or ticket.agent_id not in {"infrastructure", "data", "train", "inference", "evaluation", "registry"}
+            or ticket.status not in {"failed", "awaiting_input"} or ticket.repair_route != "orchestrator"):
+        raise HTTPException(409, "Only a failed or waiting optimization workload referred to Orchestrator can be repaired")
     supervisor = await session.get(Ticket, run.supervisor_ticket_id)
     supervisor_heartbeat = await session.scalar(select(HeartbeatRun.id).where(
         HeartbeatRun.ticket_id == run.supervisor_ticket_id,
@@ -50,6 +51,21 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
         raise HTTPException(409, "Repair requires a live Run supervisor decision")
     if int(ticket.repair_attempts or 0) >= MAX_REPAIR_ATTEMPTS:
         raise HTTPException(409, "Ticket repair limit reached")
+    if request.action in {"resume_inputs", "reconfigure"}:
+        from zevo.engine.run.reviewed_recovery import waiting_ancestors
+        blocked_chain = await waiting_ancestors(session, ticket)
+        active_other = await session.scalar(select(Ticket.id).where(
+            Ticket.run_id == run.id, Ticket.lane == "optimization", Ticket.id.notin_(blocked_chain),
+            Ticket.agent_id != "orchestrator",
+            Ticket.status.in_(("queued", "running", "repairing", "waiting_external", "awaiting_input")),
+        ).limit(1))
+        if active_other:
+            raise HTTPException(409, "Wait for the upstream repair Specialist to finish before resuming")
+    if ticket.status == "awaiting_input" and request.action in {"resubmit", "collect"}:
+        from zevo.engine.run.reviewed_recovery import latest_request
+        review = await latest_request(session, ticket)
+        if review.get("request", {}).get("scope") != "fixed_configuration":
+            raise HTTPException(409, "Upstream-input waits must resume with explicitly reviewed input_products")
     if await session.scalar(select(HeartbeatRun.id).where(
         HeartbeatRun.ticket_id == ticket.id, HeartbeatRun.finished_at.is_(None),
     ).limit(1)):
@@ -60,9 +76,19 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
     row = await _latest_slurm_resource_request(session, ticket)
     meta = dict(row.meta or {}) if row else {}
     state = str(meta.get("scheduler_state") or "").split(" ")[0].upper().rstrip("+")
-    if ticket.agent_id == "infrastructure" and request.action != "provision":
+    if request.training_configuration_change is not None and request.action != "reconfigure":
+        raise HTTPException(422, "Configuration approval requires reconfigure")
+    if ticket.status == "awaiting_input" and request.action not in {"resume_inputs", "reconfigure", "resubmit", "collect"}:
+        raise HTTPException(409, "Waiting review requires resume_inputs or reconfigure")
+    if ticket.agent_id == "infrastructure" and request.action not in {"provision", "resume_inputs"}:
         raise HTTPException(422, "Infrastructure recovery requires provision, preserving the existing plan")
-    if request.action == "provision":
+    if request.action == "resume_inputs":
+        expected_attempt = int(meta.get("execution_attempt") or 1) if row else 0
+        if request.execution_attempt != expected_attempt or row and state not in _SLURM_TERMINAL_STATES:
+            raise HTTPException(409, "Resume inputs must name the latest terminal execution or zero before execution")
+        from zevo.engine.run.reviewed_recovery import restore_inputs
+        await restore_inputs(session, run, ticket, request, row)
+    elif request.action == "provision":
         failure = await session.scalar(select(TicketNotice).where(
             TicketNotice.ticket_id == ticket.id, TicketNotice.code == "cloud.acquisition_failed",
         ).order_by(TicketNotice.created_at.desc()).limit(1))
@@ -115,10 +141,14 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
             or int(meta.get("execution_attempt") or 1) != request.execution_attempt):
         raise HTTPException(409, "Repair must name the latest terminal execution attempt")
 
-    # Only preparation can correct a stale binding, preserving upstream lineage.
-    # Frozen plans, checkpoints and iterations remain unchanged.
+    if request.action == "reconfigure":
+        from zevo.engine.run.reviewed_recovery import approve_configuration
+        await approve_configuration(session, ticket, row, request, supervisor_heartbeat)
+
+    # Input repairs and configuration changes are explicit reviewed actions.
+    # Reviewed reconfiguration starts afresh; other repairs preserve resumable state.
     if row is not None:
-        record_execution_repair(row, action=request.action, reason=request.reason,
+        record_execution_repair(row, action="resubmit" if request.action in {"reconfigure", "resume_inputs"} else request.action, reason=request.reason,
                                 heartbeat_id=supervisor_heartbeat)
     decision = await session.get(HeartbeatRun, supervisor_heartbeat)
     targets = list((decision.resolved_config or {}).get("repair_target_ticket_ids", []))
@@ -130,14 +160,20 @@ async def repair_ticket(session, ticket: Ticket, request: RepairTicketRequest):
     session.add(TicketNotice(ticket_id=ticket.id, code="repair.authorized", severity="info",
         body=json.dumps({**request.model_dump(), "heartbeat_id": supervisor_heartbeat,
                          "resource_id": row.id if row else "", "repair_attempt": ticket.repair_attempts})))
+    guidance = (
+        "Use only the approved proposed_config_path and SHA-256. Start a fresh execution from the original parent model, "
+        "with a fresh attempt-local plan and optimizer state; never resume a prior attempt checkpoint. "
+        "Preserve data, model, method, inference protocol and resource requirements."
+        if request.action == "reconfigure" else
+        "Re-read the repaired input bindings and validate them before execution. Preserve all other work-order requirements."
+        if request.action == "resume_inputs" else
+        "Preserve frozen configuration, inputs, plan, resources and verified resumable checkpoints."
+    )
     session.add(TicketMessage(ticket_id=ticket.id, author="system", body=(
         f"__REPAIR__\n\nOrchestrator approved {request.action} on this same Ticket "
         f"(repair {ticket.repair_attempts}/{MAX_REPAIR_ATTEMPTS}). {request.reason}\n"
         f"Evidence: {json.dumps(request.evidence)}\n"
-        "Follow the engine-supplied execution contract. Preserve frozen configuration, "
-        "inputs, plan, resource requirements and verified resumable checkpoints. "
-        "The engine owns allocation replacement when authorized. Resume committed "
-        "training state; do not restart completed steps or create a new iteration."
+        f"Follow the engine-supplied execution contract. {guidance}"
     )))
     session.add(TicketNotice(ticket_id=ticket.id,
         code="ticket.awaiting_supervisor_completion", severity="info",
@@ -181,6 +217,12 @@ async def release_reviewed_repairs(session, supervisor, heartbeat_id):
                 gates.append(notice)
         if not authorization or not gates:
             continue
+        if authorization["action"] == "reconfigure":
+            row = await session.get(InfraInstance, authorization["resource_id"])
+            approval = dict((row.meta or {}).get("training_configuration_approval") or {}) if row else {}
+            if approval.get("heartbeat_id") != heartbeat_id:
+                continue
+            row.meta = {**row.meta, "training_configuration_approval": {**approval, "released": True}}
         for gate in gates:
             gate.code = "ticket.supervisor_handoff_released"
         if authorization["action"] == "replace_resource":

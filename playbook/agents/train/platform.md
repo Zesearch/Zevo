@@ -1044,3 +1044,31 @@ Coarse model-name GPU estimates are recommendations. Honor the assigned
 allocation and user pins, then preflight the concrete method, precision,
 sharding/offload and workload memory before expensive execution. A constrained
 allocation does not authorize changing a pinned training method.
+
+
+## Reviewed configuration repair
+
+Diagnose before proposing configuration changes. Implementation-only logging,
+gradient-finiteness checks and read-only probes do not require changing the
+registered YAML. A hypothesis is not a verified cause; explain what a proposed
+short diagnostic execution will test.
+
+If a necessary fix changes the registered configuration, preserve its original
+YAML and stage a separate candidate YAML. Return `failed` with
+`failure_recovery.scope="fixed_configuration"` and
+`failure_recovery.training_configuration_change` containing absolute
+`original_config_path`, `proposed_config_path`, their exact `original_sha256`
+and `proposed_sha256`, a nonempty `changes` list and
+`restart_mode="restart_parent"`. Include diagnosis and evidence in the recovery
+request. Leave `execution_retry_reason` empty. Do not submit the candidate or
+change scope to current_task merely to bypass the configuration lock.
+
+The Ticket waits for Orchestrator review. After approval, the engine supplies
+`activation_contract.training_configuration_approval`; use only that candidate's
+exact bytes. Start a NEW attempt from the original parent, with new optimizer,
+scheduler and attempt-local plan state. Never resume an old NaN/incompatible
+checkpoint or reuse its completed-step count. Old logs/checkpoints remain audit
+history. This path preserves data, model, method, inference protocol, iteration,
+resource requirements and user pins. Normal repair and walltime continuation
+still require unchanged configuration; permission for another attempt alone
+never permits configuration changes.

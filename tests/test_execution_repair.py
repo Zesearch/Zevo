@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import hashlib
@@ -337,3 +338,265 @@ async def test_cloud_capacity_wait_is_bounded_and_safe(repair_db, tmp_path, monk
         assert ticket.repair_attempts == 3 and ticket.iteration == 2
     else:
         assert not (await db.scalars(select(AgentWakeupRequest))).all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('agent', ['data', 'train', 'inference', 'evaluation', 'infrastructure', 'registry'])
+async def test_upstream_failure_waits_for_review_without_self_retry(repair_db, agent):
+    from zevo.contracts.failure import FailureRecovery
+    from zevo.engine.run.runner import _apply_ticket_failure_policy
+    from zevo.engine.run.reviewed_recovery import latest_request
+    db, ticket, execution = repair_db
+    ticket.agent_id = agent
+    result = AgentResult(status='failed', ticket_id=ticket.id, error_message='missing gold', notes='',
+        failure_recovery=FailureRecovery(scope='upstream_input', reason='upstream artifact is incomplete',
+            evidence=['dataset schema has no gold'], next_action='prepare a corrected Data version'))
+    assert not await _apply_ticket_failure_policy(db, ticket, error_message=result.error_message,
+        result=result, heartbeat_id='failed-hb')
+    await db.flush()
+    assert ticket.status == 'awaiting_input' and ticket.repair_route == 'orchestrator'
+    assert ticket.repair_attempts == 2
+    assert (await latest_request(db, ticket))['request']['scope'] == 'upstream_input'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('lane,attempts', [('held_out_test', 2), ('optimization', 20)])
+async def test_review_wait_does_not_bypass_isolation_or_repair_limit(repair_db, lane, attempts):
+    from zevo.contracts.failure import FailureRecovery
+    from zevo.engine.run.runner import _apply_ticket_failure_policy
+    db, ticket, _ = repair_db
+    ticket.lane, ticket.repair_attempts = lane, attempts
+    result = AgentResult(status='failed', ticket_id=ticket.id, error_message='upstream', notes='',
+        failure_recovery=FailureRecovery(scope='upstream_input', reason='missing input',
+            evidence=['missing file'], next_action='repair data'))
+    await _apply_ticket_failure_policy(db, ticket, error_message=result.error_message, result=result)
+    assert ticket.status == 'failed'
+    if lane == 'held_out_test': assert ticket.repair_route == 'terminal'
+
+
+async def configuration_proposal(db, ticket, execution, tmp_path, monkeypatch):
+    import json
+    from zevo.contracts.failure import TrainingConfigurationChange
+    from zevo.db import TicketNotice
+    from zevo.engine.run.reviewed_recovery import WAIT_CODE
+    from zevo.contracts import configuration
+    original = {'parent_model': 'parent', 'data_signature': 'data',
+                'training': {'learning_rate': 0.01, 'world_size': 2}}
+    candidate = {**original, 'training': {**original['training'], 'learning_rate': 0.001}}
+    paths = [tmp_path / 'original.yaml', tmp_path / 'candidate.yaml']
+    for path, value in zip(paths, [original, candidate]): path.write_text(json.dumps(value))
+    # The production schema loader is independently tested; exercise admission,
+    # byte binding, immutable identity and release against a small configuration.
+    monkeypatch.setattr(configuration, 'load_train_config',
+        lambda path: SimpleNamespace(model_dump=lambda: json.loads(Path(path).read_text())))
+    proposal = TrainingConfigurationChange(original_config_path=str(paths[0]), proposed_config_path=str(paths[1]),
+        original_sha256=hashlib.sha256(paths[0].read_bytes()).hexdigest(),
+        proposed_sha256=hashlib.sha256(paths[1].read_bytes()).hexdigest(), changes=['training.learning_rate: 0.01 -> 0.001'])
+    execution.meta = {**execution.meta, 'training_config_sha256': proposal.original_sha256}
+    ticket.status = 'awaiting_input'
+    db.add(TicketNotice(ticket_id=ticket.id, code=WAIT_CODE, severity='info', body=json.dumps({
+        'request': {'scope':'fixed_configuration', 'training_configuration_change':proposal.model_dump()}})))
+    await db.commit()
+    return proposal, paths
+
+
+@pytest.mark.asyncio
+async def test_configuration_change_only_runs_after_review_and_exact_hash(repair_db, tmp_path, monkeypatch):
+    db, ticket, execution = repair_db
+    proposal, paths = await configuration_proposal(db, ticket, execution, tmp_path, monkeypatch)
+    req = RepairTicketRequest(action='reconfigure', execution_attempt=2, reason='numerical repair',
+        evidence=['first nonfinite gradient at step 7'], training_configuration_change=proposal)
+    await repair_ticket(db, ticket, req)
+    assert ticket.repair_attempts == 3 and ticket.iteration == 2
+    with pytest.raises(ValueError): verify_repair_training_config(execution, paths[1])
+    verify_repair_training_config(execution, paths[0])
+    await complete_review(db)
+    verify_repair_training_config(execution, paths[1])
+    with pytest.raises(ValueError): verify_repair_training_config(execution, paths[0])
+    paths[1].write_text('changed after approval')
+    with pytest.raises(ValueError): verify_repair_training_config(execution, paths[1])
+    assert (await db.get(WorkProduct, 'product')).path == '/durable/checkpoint-735'
+    approval = execution.meta['training_configuration_approval']
+    assert approval['restart_mode'] == 'restart_parent'
+    assert approval['configuration_diff']['learning_rate'] == {'before':0.01, 'after':0.001}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fault', ['pin', 'changed_bytes', 'stale_hash', 'wrong_proposal', 'not_train'])
+async def test_configuration_review_rejects_invalid_changes(repair_db, tmp_path, monkeypatch, fault):
+    db, ticket, execution = repair_db
+    proposal, paths = await configuration_proposal(db, ticket, execution, tmp_path, monkeypatch)
+    if fault == 'pin': ticket.payload = {'configuration_pins': {'learning_rate': 0.01}}
+    if fault == 'changed_bytes': paths[1].write_text('unapproved')
+    if fault == 'stale_hash': execution.meta = {**execution.meta, 'training_config_sha256': 'f'*64}
+    if fault == 'wrong_proposal': proposal = proposal.model_copy(update={'changes':['different request']})
+    if fault == 'not_train': ticket.agent_id = 'inference'
+    await db.commit()
+    with pytest.raises(HTTPException):
+        await repair_ticket(db, ticket, RepairTicketRequest(action='reconfigure', execution_attempt=2,
+            reason='repair', evidence=['diagnostics'], training_configuration_change=proposal))
+    assert ticket.status == 'awaiting_input' and ticket.repair_attempts == 2
+    assert not execution.meta.get('training_configuration_approval')
+
+
+@pytest.mark.asyncio
+async def test_upstream_dependency_requires_waiting_target_and_supervisor(repair_db):
+    import json
+    from zevo.db import TicketNotice
+    from zevo.engine.run.reviewed_recovery import validate_dependency, WAIT_CODE
+    db, ticket, _ = repair_db
+    run = await db.get(Run, 'r')
+    ticket.status = 'awaiting_input'
+    db.add(TicketNotice(ticket_id=ticket.id, code=WAIT_CODE, severity='info',
+        body=json.dumps({'request':{'scope':'upstream_input'}})))
+    await db.commit()
+    assert await validate_dependency(db, run, ticket.id, child_agent='data', iteration=2) is ticket
+    with pytest.raises(HTTPException):
+        await validate_dependency(db, run, ticket.id, child_agent='data', iteration=3)
+    (await db.get(HeartbeatRun, 'decision')).finished_at = datetime.now(timezone.utc)
+    await db.commit()
+    with pytest.raises(HTTPException):
+        await validate_dependency(db, run, ticket.id, child_agent='data', iteration=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fault', ['', 'pending_source', 'unlinked', 'executed_train'])
+async def test_resume_original_train_with_reviewed_new_data(repair_db, tmp_path, fault):
+    import json
+    from zevo.db import HeartbeatResult, TicketNotice
+    from zevo.engine.run.reviewed_recovery import WAIT_CODE, DEPENDENCY_CODE
+    db, ticket, execution = repair_db
+    if fault != 'executed_train': await db.delete(execution)
+    await db.delete(await db.get(WorkProduct, 'product'))
+    ticket.status = 'awaiting_input'
+    ticket.payload = {'operation':'train', 'base_model':'org/model', 'model_source':'base_model',
+                      'parent_selection_rationale':'first training', 'data_signature':'a'*64}
+    infra = Ticket(id='infra', run_id='r', agent_id='infrastructure', status='succeeded', payload={'purpose':'train'})
+    baseline = Ticket(id='baseline', run_id='r', agent_id='inference', status='succeeded',
+        payload={'model_source':'base_model','base_model':'org/model'})
+    data = Ticket(id='data-fixed', run_id='r', agent_id='data', iteration=2,
+        status='running' if fault == 'pending_source' else 'succeeded',
+        inputs={'device_info':{'source_ticket_id':'infra'}})
+    old = Ticket(id='data-old', run_id='r', agent_id='data', status='succeeded')
+    db.add_all([infra, baseline, data, old])
+    for tid, role, pid in [('infra','device_info','device'),('baseline','inference_config','baseline-config'),
+                           ('data-fixed','training_dataset','new-data'),('data-old','training_dataset','old-data')]:
+        path = tmp_path / pid; path.write_text('{}')
+        db.add(WorkProduct(id=pid,ticket_id=tid,role=role,path=str(path),meta={'data_signature':'b'*64}))
+    ticket.inputs = {'training_dataset':{'source_ticket_id':'data-old','artifact_role':'training_dataset','work_product_id':'old-data'},
+                     'device_info':{'source_ticket_id':'infra','artifact_role':'device_info','work_product_id':'device'},
+                     'inference_config':{'source_ticket_id':'baseline','artifact_role':'inference_config','work_product_id':'baseline-config'}}
+    db.add(HeartbeatResult(ticket_id=ticket.id,agent_id='train',status='failed',
+        output={'status':'failed','failure_recovery':{'scope':'upstream_input'}}))
+    db.add(TicketNotice(ticket_id=ticket.id,code=WAIT_CODE,severity='info',body=json.dumps({'request':{'scope':'upstream_input'}})))
+    if fault != 'unlinked': db.add(TicketNotice(ticket_id=data.id,code=DEPENDENCY_CODE,severity='info',body=ticket.id))
+    await db.commit()
+    req = RepairTicketRequest(action='resume_inputs',execution_attempt=2 if fault == 'executed_train' else 0,
+        reason='Verified gold repaired',evidence=['all rows have reliable gold'],input_products={'training_dataset':'new-data'})
+    if fault:
+        with pytest.raises(HTTPException): await repair_ticket(db,ticket,req)
+        assert ticket.status == 'awaiting_input' and ticket.inputs['training_dataset']['work_product_id']=='old-data'
+        return
+    await repair_ticket(db,ticket,req)
+    assert ticket.status == 'repairing' and ticket.repair_attempts==3 and ticket.iteration==2
+    assert ticket.inputs['training_dataset']['work_product_id']=='new-data'
+    assert ticket.payload['data_signature']=='b'*64
+    assert not (await db.scalars(select(AgentWakeupRequest))).all()
+    await complete_review(db)
+    assert len((await db.scalars(select(AgentWakeupRequest))).all())==1
+    assert (await db.get(WorkProduct,'old-data')) is not None
+
+
+@pytest.mark.asyncio
+async def test_create_linked_data_while_original_train_waits(repair_db):
+    import json
+    from zevo.api.routers.shared.tickets import create_ticket
+    from zevo.contracts.tickets import CreateTicketBody
+    from zevo.db import Agent, HeartbeatResult, TicketNotice
+    from zevo.engine.run.reviewed_recovery import WAIT_CODE, DEPENDENCY_CODE
+    db, ticket, execution = repair_db
+    await db.delete(execution)
+    await db.delete(await db.get(WorkProduct, 'product'))
+    ticket.status = 'awaiting_input'
+    from zevo.contracts.tickets import DataPayload
+    from zevo.api.routers.shared.tickets import _resolve_data_source_selection
+    db.add(Ticket(id='initial-data',run_id='r',agent_id='data',iteration=0,status='succeeded',
+        payload=_resolve_data_source_selection(DataPayload(operation='prepare_run_data',dataset='org/data',training_method='sft').model_dump())))
+    db.add(Agent(id='data',name='data',title='data',default_driver='stub',default_model='stub',
+        output_schema='',tools=[],identity_path=''))
+    db.add(Ticket(id='infra',run_id='r',agent_id='infrastructure',status='succeeded',payload={'purpose':'train'}))
+    db.add(WorkProduct(id='device',ticket_id='infra',role='device_info',path='/remote/device.json'))
+    db.add(HeartbeatResult(ticket_id=ticket.id,agent_id='train',status='failed',
+        output={'status':'failed','failure_recovery':{'scope':'upstream_input'}}))
+    db.add(TicketNotice(ticket_id=ticket.id,code=WAIT_CODE,severity='info',body=json.dumps({'request':{'scope':'upstream_input'}})))
+    await db.commit()
+    body = CreateTicketBody(agent_id='data',run_id='r',iteration=2,
+        inputs={'device_info':{'artifact_role':'device_info','source_ticket_id':'infra'}},
+        payload={'operation':'prepare_run_data','dataset':'org/data','training_method':'sft',
+                 'recipe_intent':{'direction':'add verified gold'}})
+    with pytest.raises(HTTPException): await create_ticket(body,db=db)
+    created = await create_ticket(body.model_copy(update={'repairs_ticket_id':ticket.id}),db=db)
+    assert ticket.status=='awaiting_input' and ticket.repair_attempts==3
+    assert (await db.scalar(select(TicketNotice).where(TicketNotice.ticket_id==created.id,
+        TicketNotice.code==DEPENDENCY_CODE))).body==ticket.id
+    assert not (await db.scalars(select(AgentWakeupRequest))).all()
+
+
+@pytest.mark.asyncio
+async def test_waiting_repair_cannot_be_started_by_old_wakeup(repair_db):
+    from zevo.engine.run.runner import run_ticket
+    db, ticket, _ = repair_db
+    ticket.status = 'awaiting_input'
+    await db.commit()
+    assert await run_ticket(db, ticket_id=ticket.id, activation_source='retry') is ticket
+    assert ticket.status == 'awaiting_input'
+    assert not (await db.scalars(select(HeartbeatRun).where(HeartbeatRun.ticket_id==ticket.id))).all()
+
+
+@pytest.mark.asyncio
+async def test_repair_chain_allows_waiting_ancestors_but_not_unrelated_work(repair_db):
+    from zevo.db import TicketNotice
+    from zevo.engine.run.reviewed_recovery import waiting_ancestors, DEPENDENCY_CODE
+    db, ticket, _ = repair_db
+    parent = Ticket(id='waiting-parent', run_id='r', agent_id='registry', status='awaiting_input', repair_route='orchestrator')
+    unrelated = Ticket(id='unrelated', run_id='r', agent_id='data', status='awaiting_input', repair_route='orchestrator')
+    db.add_all([parent, unrelated, TicketNotice(ticket_id=ticket.id,code=DEPENDENCY_CODE,severity='info',body=parent.id)])
+    await db.commit()
+    assert await waiting_ancestors(db,ticket) == {ticket.id,parent.id}
+    parent.status='cancelled'
+    await db.commit()
+    assert await waiting_ancestors(db,ticket) == {ticket.id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field', ['parent_model','world_size'])
+async def test_config_review_cannot_change_experiment_or_resource_identity(repair_db,tmp_path,monkeypatch,field):
+    import json
+    from zevo.db import TicketNotice
+    from zevo.engine.run.reviewed_recovery import WAIT_CODE
+    db,ticket,execution=repair_db
+    proposal,paths=await configuration_proposal(db,ticket,execution,tmp_path,monkeypatch)
+    config=json.loads(paths[1].read_text())
+    if field=='parent_model': config[field]='different-model'
+    else: config['training'][field]=8
+    paths[1].write_text(json.dumps(config))
+    proposal=proposal.model_copy(update={'proposed_sha256':hashlib.sha256(paths[1].read_bytes()).hexdigest()})
+    notice=await db.scalar(select(TicketNotice).where(TicketNotice.ticket_id==ticket.id,TicketNotice.code==WAIT_CODE))
+    notice.body=json.dumps({'request':{'scope':'fixed_configuration','training_configuration_change':proposal.model_dump()}})
+    await db.commit()
+    with pytest.raises(HTTPException):
+        await repair_ticket(db,ticket,RepairTicketRequest(action='reconfigure',execution_attempt=2,
+            reason='repair',evidence=['diagnostics'],training_configuration_change=proposal))
+    assert not execution.meta.get('training_configuration_approval')
+
+
+def test_external_failure_without_retry_request_still_freezes_training_config(tmp_path):
+    config = tmp_path / 'train_config.yaml'
+    config.write_text('registered')
+    previous = SimpleNamespace(meta={'scheduler_state':'FAILED', 'execution_attempt':2,
+        'training_config_sha256':hashlib.sha256(config.read_bytes()).hexdigest()})
+    assert not execution_retry_authorized(previous.meta)
+    verify_repair_training_config(previous,config)
+    config.write_text('unapproved repair')
+    with pytest.raises(ValueError,match='fixed_configuration'):
+        verify_repair_training_config(previous,config)

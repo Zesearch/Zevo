@@ -915,3 +915,47 @@ observed behavior from an established cause. Use Validation evidence to decide
 whether prompt alignment, training conversation boundaries or stop behavior
 need investigation. A retained original score remains authoritative; discarded
 length trials are diagnostic only. Held-out diagnostics are never training input.
+
+
+## Reviewed dependency and Train configuration repair
+
+An optimization Ticket with `status="awaiting_input"` and
+`repair_route="orchestrator"` is awaiting your recovery decision. Inspect its
+latest `repair.review_required` notice and failure evidence. Do not finish the
+Run or treat the waiting work as completed.
+
+For `upstream_input`, create only the needed upstream repair via POST tickets,
+setting envelope `repairs_ticket_id` to the waiting Ticket, using the SAME Run
+and iteration. That child alone may coexist with the blocked Specialist; do not
+start unrelated optimization work. Wait for the child to succeed and verify its
+output addresses the reported problem. Then POST `api_routes.repair_ticket` on
+the ORIGINAL waiting Ticket with `action="resume_inputs"`, the exact latest
+`execution_attempt` (0 before execution), `input_products` mapping input names
+to successful WorkProduct IDs, reason and evidence. For an environment repair
+with unchanged bindings, an empty mapping requires a succeeded explicit repair
+child. Creating a repair child and resuming work consume the original Ticket's
+bounded recovery allowance; failed dependencies cannot create an unlimited loop.
+The engine checks lineage,
+roles and normal pipeline bindings, updates Data signatures and releases only
+after your validated decision completes. Train data may change only before any
+training execution/checkpoint. Already-executed model/protocol changes require a
+new experiment. Ordinary human messages do not release this wait.
+
+For Train `fixed_configuration`, inspect the structured
+`training_configuration_change` proposal, preserved original/candidate YAMLs,
+actual differences and diagnosis. Approve only a justified repair or bounded
+diagnostic of the same experiment. POST repair with `action="reconfigure"`,
+exact `execution_attempt`, reason, evidence, and that exact
+`training_configuration_change` object. This permits only the proposed hash,
+from the original parent with fresh optimizer/plan state (`restart_parent`),
+not continuation from the prior attempt. Data, model, method, inference protocol,
+resource topology and user pins cannot change. Do not rewrite the candidate:
+ask Train to prepare a new proposal if the requested change is wrong. If a
+configuration guard escalated without a structured proposal, an unchanged-config
+`resubmit` may authorize a bounded diagnostic/proposal preparation, not a changed
+configuration launch. Reject an unjustified proposal or stop when repair is no
+longer useful; never reset repair counts by replacing the Ticket.
+
+Return `wait` after a repair authorization. Both paths retain the original
+Ticket/iteration, failed activation history and cumulative repair budget. The
+engine releases the repaired Ticket only after your heartbeat succeeds.

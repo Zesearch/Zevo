@@ -23,6 +23,8 @@ TERMINAL = {"COMPLETED", "TIMEOUT", "PREEMPTED", "NODE_FAIL", "FAILED", "OUT_OF_
 def authorized(ticket, row):
     if row is None or getattr(ticket, "agent_id", "") != "train":
         return False
+    if (row.meta or {}).get("training_configuration_approval", {}).get("released"):
+        return False  # An approved restart cannot restore the obsolete optimizer/plan.
     proof = (row.meta or {}).get("training_continuation") or {}
     return bool(proof.get("source_resource_id") == row.id
                 and proof.get("ticket_id") == ticket.id

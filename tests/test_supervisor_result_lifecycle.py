@@ -91,7 +91,7 @@ async def test_supervisor_failure_cannot_bypass_repair_stop_by_waking_itself(dat
         db.add(Ticket(id=supervisor_id, run_id="run", agent_id="orchestrator", status="running",
                       repair_attempts=20 if stop == "total_limit" else 0))
         await db.commit()
-    count = 5 if stop == "unchanged" else 1
+    count = 3 if stop == "unchanged" else 1
     for index in range(count):
         async with database() as db:
             ticket = await db.get(Ticket, supervisor_id)
@@ -108,7 +108,7 @@ async def test_supervisor_failure_cannot_bypass_repair_stop_by_waking_itself(dat
         ticket = await db.get(Ticket, supervisor_id)
         assert ticket.status == "failed"
         assert ticket.repair_route == "terminal"
-        assert ticket.repair_attempts == (4 if stop == "unchanged" else 20)
+        assert ticket.repair_attempts == (2 if stop == "unchanged" else 20)
         wakes = (await db.scalars(select(AgentWakeupRequest))).all()
         assert len(wakes) == count - 1
         assert all(w.source == "retry" and w.status == "completed" for w in wakes)
