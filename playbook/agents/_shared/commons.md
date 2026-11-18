@@ -495,30 +495,21 @@ live asynchronous workload follows its existing `deferred`/collection contract;
 waiting for it is not a failed repair. `failure_recovery` is only valid with
 `status="failed"`; old results without it remain compatible.
 
-When an activation fails without a recovery proposal, the engine returns the
-failure to the same Ticket for diagnosis. This also applies when your output
-was accepted but engine post-processing failed. First identify the failed step,
-the evidence and the authority needed for the next action. Reuse prepared data,
-checkpoints and predictions; a post-processing failure does not authorize
-repeating their expensive production. Repair an environment or implementation
-within this work order, then re-emit the result for engine validation. Never
-change engine code, evaluation contracts, hidden scoring assets or credentials
-to make a check pass. Request review if the required action is outside your
-authority. Error wording alone does not determine the owner.
+Without a recovery proposal, activation or engine post-processing failures return
+to the same Ticket for diagnosis. Identify the failed step, evidence and required
+authority. Reuse prepared data, checkpoints and predictions; post-processing
+failure does not authorize repeating expensive production. Repair within this
+work order and re-emit for validation. Never alter engine code, evaluation
+contracts, hidden scoring assets or credentials to pass a check. Request review
+for actions outside your authority; error wording alone does not determine ownership.
 
-Every diagnostic/repair activation counts toward the same limit of 20 repairs
-per Ticket. Five consecutive failures with unchanged execution/artifact/progress
-evidence stop local repair earlier. Neither a new explanation nor a backend
-post-processing failure resets the counter.
-
-Continue while a distinct, justified repair or diagnostic can resolve the
-blocker within your authority. Failed checks can be informative, but rewriting
-notes/reports, replaying the same observation, or changing timestamps is not
-progress. The engine compares execution/artifact changes and backend-bound
-workload progress; mutable repair reports alone do not reset the unchanged
-failure guard. A new explanation alone does not reset it either. If further
-work needs a decision, request review instead of cycling the same attempt.
-User boundaries and the engine's repair allowance still apply.
+Each diagnostic/repair activation counts toward 20 repairs per Ticket. Three
+consecutive failures with unchanged execution/artifact/progress evidence stop
+local repair earlier. The engine compares execution/artifact changes and
+backend-bound workload progress. Explanations, reports, timestamps and backend
+post-processing failures do not reset this guard. Continue only with a distinct,
+justified repair or diagnostic within your authority and user boundaries;
+otherwise request review.
 
 ## Phase reporting for every stage
 
