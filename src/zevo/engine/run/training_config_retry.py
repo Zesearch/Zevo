@@ -32,6 +32,10 @@ def _mapping(loader, node):
 
 _UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
 _IMPL = ('training', 'implementation_config')
+_OUTPUT_PATHS = {
+    'output_dir', 'trainer_output_dir', 'remote_attempt_dir',
+    'training_plan_path', 'final_checkpoint_dir', 'intermediate_checkpoint_dir',
+}
 _DIAGNOSTICS = {
     'startup_max_first_batch_nll', 'startup_max_first_logged_loss',
     'startup_max_reference_loss_mismatch',
@@ -65,8 +69,11 @@ def _launch(before, after):
 
 
 def _allowed(path, before, after):
-    if path == _IMPL + ('output_dir',):
-        return _attempt_path(before, after)
+    if path[:-1] == _IMPL and path[-1] in _OUTPUT_PATHS:
+        # Train owns output layout and runtime-state isolation. Directory names
+        # cannot prove whether the generated trainer starts with fresh state.
+        return ((before is _MISSING or isinstance(before, str))
+                and (after is _MISSING or isinstance(after, str)))
     if path == _IMPL + ('launch_command',):
         return _launch(before, after)
     if path[:-1] == _IMPL and path[-1] in _DIAGNOSTICS:
@@ -171,11 +178,13 @@ _TRAIN_PARAMETERS = {
     'optimizer', 'lr_scheduler_type', 'warmup_ratio', 'weight_decay',
     'max_grad_norm', 'precision', 'gradient_checkpointing', 'packing', 'seed',
     'lora_r', 'lora_alpha', 'lora_dropout', 'lora_target_modules',
+    'world_size', 'distributed',
 }
 _IMPLEMENTATION_PARAMETERS = _TRAIN_PARAMETERS | {
     'planned_optimizer_steps', 'max_steps', 'warmup_steps', 'optim',
     'per_device_train_batch_size', 'num_train_epochs', 'bf16', 'fp16',
     'group_by_length', 'dataloader_num_workers', 'dataloader_pin_memory',
+    'assistant_only_loss', 'completion_only_loss',
 }
 
 
@@ -210,7 +219,18 @@ def _classify_train_changes(audit, before, after, inp):
                 memory = training['implementation_config'].get(key, {})
                 estimate, capacity = memory.get('estimated_peak_per_rank_gib'), memory.get('per_gpu_vram_gib')
                 owned = owned and type(estimate) in {int, float} and type(capacity) in {int, float} and 0 < estimate < capacity
-        # Explicitly equivalent SFT implementations; masks/objective otherwise stay fixed.
+        # Supervision scope is Train-owned; method objectives remain fixed.
+        if parts == ['loss_contract', 'target_scope']:
+            owned = after.get('training_method') in {'sft', 'full_sft', 'lora_sft'}
+        if len(parts) >= 2 and parts[0] == 'training_data_example' and parts[1] in {
+            'loss_target_summary', 'loss_target_placeholders', 'context_only_placeholders',
+            'sequence_loss_targets',
+        }:
+            owned = True  # Keep the declared example consistent with its loss scope.
+        if parts in [['prompt_alignment', 'prefix_labels_all_ignored'],
+                     ['prompt_alignment', 'target_starts_with_synthetic_response']]:
+            owned = True  # Rendering identity stays frozen; mask evidence can change.
+        # Explicitly equivalent SFT implementations; other objectives stay fixed.
         if parts in [['loss_contract', 'objective_config', 'loss_type'],
                      ['training', 'implementation_config', 'loss_type']]:
             owned = (after.get('training_method') in {'sft', 'full_sft', 'lora_sft'}
@@ -220,10 +240,6 @@ def _classify_train_changes(audit, before, after, inp):
         change['train_owned'] = bool(owned)
 
     if any(c.get('train_owned') and not c['execution_only'] for c in audit['changes']):
-        old_impl = before.get('training', {}).get('implementation_config', {})
         impl = training.get('implementation_config', {})
-        old_dir, new_dir = old_impl.get('output_dir'), impl.get('output_dir')
-        if old_dir == new_dir or not _attempt_path(old_dir, new_dir):
-            raise ValueError('Train-owned tuning requires a fresh attempt-local output directory')
         if any(impl.get(key) for key in ('resume_from_checkpoint', 'resume_checkpoint', 'resume')):
             raise ValueError('Train-owned tuning must restart from the original parent, not a checkpoint continuation')

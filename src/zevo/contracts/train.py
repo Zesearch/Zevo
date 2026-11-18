@@ -162,7 +162,8 @@ class TrainTaskInput(AgentTaskInput):
             "and hash encoding. Select one method/framing entry and copy "
             "canonical literals; treat recommended_training_starts as guidance to "
             "start from and deviate from with rationale, never as caps; never "
-            "invent objective/owner/framework/target_scope or transfer keys."
+            "invent objective/owner/framework or transfer keys. Select target_scope "
+            "from allowed_target_scopes_by_prompt_framing and verify the realized labels."
         ),
     )
     config_validation_command: str = Field(

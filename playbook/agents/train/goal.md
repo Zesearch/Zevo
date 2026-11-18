@@ -22,8 +22,9 @@ branch points; this is never a requirement to save every epoch or step.
    values and full-parameter versus PEFT execution from evidence, resources, and
    expected benefit; explain the tradeoff. GKD teacher and Online DPO reward model
    references must be Hugging Face `owner/model` ids.
-5. Derive the semantic loss contract from method and prompt framing, then fill
-   only method-valid objective values.
+5. Derive the semantic loss objective from method and prompt framing, select an
+   allowed supervision scope with verified labels, then fill only method-valid
+   objective values. Honor user pins.
 6. Copy the complete Baseline prompt/template identity and `template_kwargs`,
    verify the exact rendered/token prefix and loss-mask boundary, add a synthetic
    `training_data_example` showing the method-shaped record, exact rendered

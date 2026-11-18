@@ -27,6 +27,7 @@ from zevo.contracts.prompting import (
     LossContract,
     PromptContract,
     derive_loss_contract,
+    allowed_loss_target_scopes,
     validate_inference_config,
     validate_loss_objective_config,
 )
@@ -220,9 +221,15 @@ def train_method_contracts() -> dict[str, Any]:
                     framing: derive_loss_contract(method, framing).model_dump(mode="json")
                     for framing in ("chat", "completion", "text")
                 },
+                "allowed_target_scopes_by_prompt_framing": {
+                    framing: sorted(allowed_loss_target_scopes(method, framing))
+                    for framing in ("chat", "completion", "text")
+                },
                 "instruction": (
                     "Select the entry matching inference_config.yaml prompt.prompt_framing; "
-                    "copy owner/framework/objective/target_scope literally, then fill only "
+                    "copy owner/framework/objective literally; target_scope is a default. "
+                    "SFT may choose all_tokens or, for chat/completion with reliable answer spans, "
+                    "answer_tokens. Implement and verify the corresponding labels, then fill "
                     "the documented loss_objective_config keys."
                 ),
             },
@@ -483,8 +490,8 @@ class PromptAlignmentEvidence(BaseModel):
     target_token_count: int = Field(ge=1)
     string_prefix_match: Literal[True]
     token_prefix_match: Literal[True]
-    prefix_labels_all_ignored: Literal[True]
-    target_starts_with_synthetic_response: Literal[True]
+    prefix_labels_all_ignored: bool
+    target_starts_with_synthetic_response: bool
 
 
 class InferenceRunConfig(BaseModel):
@@ -1336,7 +1343,8 @@ class TrainRunConfig(BaseModel):
         )
         if (
             self.loss_contract.objective != expected_loss.objective
-            or self.loss_contract.target_scope != expected_loss.target_scope
+            or self.loss_contract.target_scope not in allowed_loss_target_scopes(
+                self.training_method, self.prompt.prompt_framing)
         ):
             raise ValueError(
                 f"loss_contract does not match training_method={self.training_method!r}"
@@ -1345,6 +1353,15 @@ class TrainRunConfig(BaseModel):
             self.training_method, self.loss_contract.objective_config,
             require_complete=True,
         )
+        scope = self.loss_contract.target_scope
+        alignment = self.prompt_alignment
+        if scope == 'all_tokens':
+            if alignment.prefix_labels_all_ignored:
+                raise ValueError('all_tokens supervision must include prompt tokens')
+        elif not alignment.prefix_labels_all_ignored:
+            raise ValueError('response supervision must mask prompt tokens')
+        if scope in {'assistant_messages', 'completion'} and not alignment.target_starts_with_synthetic_response:
+            raise ValueError('response supervision must start at the synthetic response')
         if self.iteration == 1 and self.parent_kind != "baseline":
             raise ValueError("iteration 1 requires parent_kind='baseline'")
         if self.iteration == 1 and self.training.data_selection.mode != "all":

@@ -53,7 +53,6 @@ def test_diagnostic_retry_and_full_diff_audit(tmp_path):
 @pytest.mark.parametrize('field,value', [
     ('planned_optimizer_steps', 1876), ('loss_type', 'nll'), ('unknown_notes', 'anything'),
     ('startup_max_first_batch_nll', -1), ('startup_max_first_logged_loss', float('inf')),
-    ('output_dir', '/other/run/attempt-2/output'), ('output_dir', '/run/train/attempt-2/../output'),
     ('launch_command', 'python other.py'), ('startup_validation', {'checks': ['x'], 'enabled': False}),
     ('gpu_memory_preflight', {'per_gpu_vram_gib': 140, 'estimated_peak_per_rank_gib': 145}),
 ])
@@ -115,6 +114,7 @@ def fresh_repair(tmp_path):
 @pytest.mark.parametrize('parameter,new', [
     ('learning_rate', 2e-5), ('batch_size', 2), ('gradient_accumulation_steps', 8),
     ('num_epochs', 3), ('optimizer', 'adamw_torch'), ('precision', 'bf16'),
+    ('world_size', 2), ('distributed', {'backend': 'ddp', 'nodes': 1, 'gpus_per_node': 2}),
 ])
 def test_train_can_tune_unpinned_parameters_on_fresh_failed_attempt(tmp_path, parameter, new):
     row, path, value = fresh_repair(tmp_path)
@@ -140,8 +140,8 @@ def test_train_can_repair_nll_implementation_and_memory_accounting(tmp_path):
 
 
 @pytest.mark.parametrize('case', ['pin', 'loss_pin', 'model', 'data', 'method', 'mask',
-                                 'world_size', 'data_selection', 'memory_capacity',
-                                 'old_output', 'resume', 'unknown', 'different_objective'])
+                                 'data_selection', 'memory_capacity',
+                                 'resume', 'unknown', 'different_objective'])
 def test_train_tuning_cannot_cross_task_boundaries(tmp_path, case):
     row, path, value = fresh_repair(tmp_path)
     value['training']['learning_rate'] = 2e-5
@@ -154,10 +154,8 @@ def test_train_tuning_cannot_cross_task_boundaries(tmp_path, case):
     if case == 'data': value['data_signature'] = 'other'
     if case == 'method': value['training_method'] = 'grpo'
     if case == 'mask': value['loss_contract']['mask'] = 'all'
-    if case == 'world_size': value['training']['world_size'] = 4
     if case == 'data_selection': value['training']['data_selection'] = {'limit': 1}
     if case == 'memory_capacity': value['training']['implementation_config']['gpu_memory_preflight']['per_gpu_vram_gib'] = 200
-    if case == 'old_output': value['training']['implementation_config']['output_dir'] = '/run/train/attempt-1/output'
     if case == 'resume': value['training']['implementation_config']['resume_from_checkpoint'] = '/old/checkpoint'
     if case == 'unknown': value['training']['implementation_config']['new_model_path'] = '/other/model'
     if case == 'different_objective': value['loss_contract']['objective_config']['loss_type'] = 'other'
@@ -196,3 +194,53 @@ def test_continuation_rejects_even_execution_only_yaml_changes(tmp_path):
     path.write_text(yaml.safe_dump(value))  # only attempt-local output path changed
     with pytest.raises(ValueError, match='byte-identical'):
         verify_repair_training_config(row, path, train_input=SimpleNamespace(), continuation=True)
+
+
+@pytest.mark.parametrize('layout', ['unchanged', 'config_hash', 'trainer_output_dir'])
+def test_train_repair_does_not_require_an_engine_prescribed_output_layout(tmp_path, layout):
+    row, path, value = fresh_repair(tmp_path)
+    baseline = yaml.safe_load(row.meta['training_config_snapshot'])
+    impl = value['training']['implementation_config']
+    if layout == 'unchanged':
+        impl['output_dir'] = baseline['training']['implementation_config']['output_dir']
+    elif layout == 'config_hash':
+        impl['output_dir'] = '/run/train/runtime/new-config/trainer'
+    else:
+        for cfg in (baseline, value):
+            cfg['training']['implementation_config'].pop('output_dir')
+            cfg['training']['implementation_config']['trainer_output_dir'] = '/run/train/runtime/<config_sha12>/trainer'
+        raw = yaml.safe_dump(baseline)
+        row.meta.update(training_config_snapshot=raw,
+                        training_config_sha256=hashlib.sha256(raw.encode()).hexdigest())
+    value['training']['lora_target_modules'] = ['q_proj', 'k_proj', 'v_proj']
+    path.write_text(yaml.safe_dump(value))
+    verify_repair_training_config(row, path, train_input=SimpleNamespace())
+    assert row.meta['training_config_retry_audit']['restart_mode'] == 'restart_parent'
+
+
+def test_output_layout_change_does_not_bypass_user_pin(tmp_path):
+    row, path, value = fresh_repair(tmp_path)
+    path.write_text(yaml.safe_dump(value))
+    pin = {'implementation_config': {'output_dir': '/run/train/attempt-1/output'}}
+    with pytest.raises(ValueError, match='user pin'):
+        verify_repair_training_config(row, path, train_input=SimpleNamespace(configuration_pins=pin))
+
+
+@pytest.mark.parametrize('scope', ['all_tokens', 'answer_tokens'])
+def test_supervision_scope_is_train_owned(tmp_path, scope):
+    row, path, value = fresh_repair(tmp_path)
+    value['loss_contract']['target_scope'] = scope
+    value['training']['implementation_config']['assistant_only_loss'] = False
+    path.write_text(yaml.safe_dump(value))
+    verify_repair_training_config(row, path, train_input=SimpleNamespace())
+    assert row.meta['training_config_retry_audit']['authority'] == 'train'
+
+
+@pytest.mark.parametrize('pin', [{'world_size': 1}, {'loss_contract': {'target_scope': 'assistant_messages'}}])
+def test_parallelism_and_scope_still_honor_user_pins(tmp_path, pin):
+    row, path, value = fresh_repair(tmp_path)
+    value['training']['world_size'] = 2
+    value['loss_contract']['target_scope'] = 'all_tokens'
+    path.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError, match='user pin'):
+        verify_repair_training_config(row, path, train_input=SimpleNamespace(configuration_pins=pin))

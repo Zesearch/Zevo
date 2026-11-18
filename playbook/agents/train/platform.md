@@ -322,6 +322,13 @@ choice. Select and validate the mode before launch; do not silently change an
 executing experiment because of memory pressure. Report infeasibility if no
 faithful plan fits. Follow the same shared PEFT contract for every method.
 
+For a fresh retry, Train owns output layout and must ensure that trainer,
+optimizer, scheduler and plan state are fresh before optimization. Engine
+configuration review does not require an `output_dir` field or `attempt-N`
+directory naming. A configuration-scoped runtime directory is valid when the
+training implementation resolves it and verifies state isolation. Checkpoint
+continuations still preserve the frozen configuration and resumable state.
+
 A resumed historical Ticket may still pin `full_sft` or `lora_sft`. Invoke the
 unified `sft` Skill, preserve the historical method id in that Ticket's YAML,
 and interpret it as `use_peft=false` or `use_peft=true` respectively. Never
@@ -607,11 +614,13 @@ placeholder text, without model generation or optimizer steps:
 2. Render those messages plus a synthetic assistant target with
    `add_generation_prompt=False` and the same mapping; require the first token
    ids to be an exact prefix of the complete token ids.
-3. Build labels through the real collator and require every prefix label,
-   to be `-100`; require at least one unmasked target token. For a non-thinking
-   model, start the target at the synthetic response. For a thinking model,
-   include representative reasoning content followed by the response. Both
-   must follow the frozen rendering/loss contract.
+3. Build labels through the real collator and verify the selected supervision
+   scope: response scopes mask every prefix label; all_tokens supervises the
+   prefix too; answer_tokens supervises only a reliable final-answer span.
+   Require at least one unmasked target token and report the actual mask booleans.
+   For a thinking model, retain representative reasoning content followed by
+   the response in the rendered sequence, even if the chosen scope masks it.
+   All scopes must preserve the frozen rendering contract.
 
 This check verifies the frozen contract; it must never select or rewrite it. A
 mismatch means repair the rendering/collator implementation or report a real
@@ -655,6 +664,12 @@ only the method-valid `objective_config` keys. For SFT, chat normally targets
 assistant messages, completion targets the completion span, and text targets
 all tokens. The selected Skill/TRL implementation must make that mask real;
 chat-template generation markers alone do not choose the loss.
+These are defaults, not user pins. SFT may select `all_tokens` with prompt
+tokens supervised, or `answer_tokens` for chat/completion when reliable source
+answer spans identify the exact final-answer tokens. Never guess an answer span.
+Keep reasoning in the rendered input even when it is masked from loss. Record
+the chosen scope, actual labels, example loss/context spans and measured
+prompt_alignment mask booleans honestly; prompt/tokenizer rendering stays frozen.
 
 `sft` and every other PEFT-capable method realize an explicit boolean
 `method_config.use_peft`; do not leave adapter/full behavior implicit. Methods
@@ -1052,11 +1067,14 @@ Diagnose failures before retrying; a hypothesis is not a verified cause. On a
 fresh attempt after a failed execution, you may adjust your own unpinned training
 parameters without Orchestrator approval: learning rate, optimizer, scheduler,
 warmup, epochs, sequence length, batch/accumulation, precision, gradient clipping,
-checkpointing, packing, seed and LoRA hyperparameters within the selected method.
+checkpointing, packing, seed, LoRA hyperparameters, SFT supervision scope, and
+GPU world size/distributed strategy within the selected method and approved resources.
 You may update their implementation settings, startup/probe diagnostics and
 memory estimates within the assigned allocation. SFT `chunked_nll` and `nll`
-are permitted alternatives for the same cross-entropy objective; keep loss masks
-and all other objective fields unchanged. User pins remain binding.
+are permitted alternatives for the same cross-entropy objective. Supervision masks
+may change with the declared scope; all other objective fields stay unchanged.
+Recompute effective batch and launcher settings when parallelism changes and
+preflight the new resource fit. User pins remain binding.
 
 Preserve original YAML bytes as `train_config.attemptN.yaml`. Explain the diagnosis,
 changed parameters, evidence and retry purpose in your result/message. Use the
@@ -1064,14 +1082,15 @@ normal same-Ticket repair flow; if collect needs another execution, return faile
 with current_task recovery and execution_retry_reason. Do not escalate merely
 because a Train-owned parameter changed. Repair counts and Run budgets still apply.
 
-Changed parameters require a NEW attempt directory, starting from the original
-parent with fresh optimizer, scheduler and plan state. Never continue the old
+Changed parameters require isolated fresh runtime state, starting from the original
+parent with fresh optimizer, scheduler and plan state. Directory naming is yours.
+Never continue the old
 attempt's checkpoint or step count. Preserve old logs/configs/checkpoints for audit.
 The engine records configuration hashes and the full diff. Walltime and checkpoint
 continuation still require byte-identical configuration and the original plan.
 
-Model/parent, data identity/selection, training method, method config, loss masks,
-resource topology and frozen inference/prompt/tokenizer protocol are not yours to
+Model/parent, data identity/selection, training method, method config,
+approved resource limits and frozen inference/prompt/tokenizer protocol are not yours to
 change during repair. Unknown fields remain subject to review. If the engine rejects
 a necessary change, preserve the original YAML, stage a separate candidate and
 return fixed_configuration recovery with training_configuration_change containing
