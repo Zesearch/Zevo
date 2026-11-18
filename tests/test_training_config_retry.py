@@ -244,3 +244,52 @@ def test_parallelism_and_scope_still_honor_user_pins(tmp_path, pin):
     path.write_text(yaml.safe_dump(value))
     with pytest.raises(ValueError, match='user pin'):
         verify_repair_training_config(row, path, train_input=SimpleNamespace(configuration_pins=pin))
+
+
+@pytest.mark.parametrize('operation', ['add', 'modify', 'remove'])
+def test_new_implementation_evidence_does_not_need_orchestrator(tmp_path, operation):
+    row, path, value = fresh_repair(tmp_path)
+    evidence = {'lora_adapter_modules_expected': 224,
+                'lora_adapter_tensors_expected': 448,
+                'lora_target_modules_derivation': '32 layers x 7 projections',
+                'custom_preflight_evidence': {'module_check': {'verified': True}}}
+    impl = value['training']['implementation_config']
+    if operation != 'add':
+        baseline = yaml.safe_load(row.meta['training_config_snapshot'])
+        baseline['training']['implementation_config'].update(evidence)
+        raw = yaml.safe_dump(baseline)
+        row.meta.update(training_config_snapshot=raw,
+                        training_config_sha256=hashlib.sha256(raw.encode()).hexdigest())
+    if operation != 'remove':
+        impl.update(evidence)
+        if operation == 'modify':
+            impl['lora_target_modules_derivation'] += '; verified on meta device'
+            impl['custom_preflight_evidence']['module_check']['verified'] = False
+    path.write_text(yaml.safe_dump(value))
+    verify_repair_training_config(row, path, train_input=SimpleNamespace())
+    audit = row.meta['training_config_retry_audit']
+    assert audit['authority'] == 'train'
+    assert all(not c['requires_orchestrator_review'] for c in audit['changes'])
+
+
+@pytest.mark.parametrize('field', ['prompt', 'tokenizer_source', 'inference_config_sha256',
+                                  'method_config', 'parent_model'])
+def test_explicit_review_boundaries_cannot_be_added_or_removed(tmp_path, field):
+    row, path, value = fresh_repair(tmp_path)
+    if field in value:
+        del value[field]
+    else:
+        value[field] = {'changed': True}
+    path.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError, match='changed fields'):
+        verify_repair_training_config(row, path, train_input=SimpleNamespace())
+
+
+def test_new_implementation_field_still_honors_explicit_pin(tmp_path):
+    row, path, value = fresh_repair(tmp_path)
+    value['training']['implementation_config']['lora_adapter_modules_expected'] = 224
+    path.write_text(yaml.safe_dump(value))
+    inp = SimpleNamespace(configuration_pins={
+        'implementation_config': {'lora_adapter_modules_expected': 112}})
+    with pytest.raises(ValueError, match='user pin'):
+        verify_repair_training_config(row, path, train_input=inp)

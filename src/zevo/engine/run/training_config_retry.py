@@ -171,21 +171,41 @@ def compare_registered(meta, path, *, train_input=None):
     return audit
 
 
-# Train owns these choices within the already selected method and allocation.
-_TRAIN_PARAMETERS = {
-    'num_epochs', 'early_stopping', 'max_seq_len', 'batch_size',
-    'gradient_accumulation_steps', 'effective_batch_size', 'learning_rate',
-    'optimizer', 'lr_scheduler_type', 'warmup_ratio', 'weight_decay',
-    'max_grad_norm', 'precision', 'gradient_checkpointing', 'packing', 'seed',
-    'lora_r', 'lora_alpha', 'lora_dropout', 'lora_target_modules',
-    'world_size', 'distributed',
+# Only declared task boundaries require Orchestrator review. New implementation
+# fields are Train-owned by default; this is deliberately not an allowlist.
+_REVIEW_PATHS = {
+    (key,) for key in (
+        'schema_version', 'iteration', 'model', 'base_model', 'parent_model',
+        'parent_kind', 'data_signature', 'training_method', 'method_config',
+        'prompt', 'tokenizer_source', 'chat_template_source', 'chat_template_hash',
+        'template_kwargs', 'special_token_ids', 'generation_backend',
+        'inference_config_path', 'inference_config_sha256',
+    )
+} | {
+    ('training', 'data_selection'),
+    ('loss_contract', 'objective'), ('loss_contract', 'objective_config'),
+    ('loss_contract', 'mask'),
+    ('prompt_alignment', 'rendered_prompt'),
+    ('prompt_alignment', 'string_prefix_match'),
+    ('prompt_alignment', 'token_prefix_match'),
+    ('training_data_example', 'source'),
+    ('training_data_example', 'source_record'),
+    ('training_data_example', 'rendered_sequences'),
+    _IMPL + ('gpu_memory_preflight', 'per_gpu_vram_gib'),
+    _IMPL + ('loss_type',),
+    # Explicit identity aliases in free-form implementation settings.
+    *(_IMPL + (key,) for key in (
+        'model', 'base_model', 'parent_model', 'model_name_or_path',
+        'new_model_path', 'data_signature', 'data_selection', 'training_method',
+        'method_config', 'tokenizer_source', 'inference_config_sha256',
+    )),
 }
-_IMPLEMENTATION_PARAMETERS = _TRAIN_PARAMETERS | {
-    'planned_optimizer_steps', 'max_steps', 'warmup_steps', 'optim',
-    'per_device_train_batch_size', 'num_train_epochs', 'bf16', 'fp16',
-    'group_by_length', 'dataloader_num_workers', 'dataloader_pin_memory',
-    'assistant_only_loss', 'completion_only_loss',
-}
+
+
+def _requires_review(parts):
+    # Replacing/removing a containing mapping must not hide protected children.
+    return any(parts[:len(boundary)] == boundary
+               or boundary[:len(parts)] == parts for boundary in _REVIEW_PATHS)
 
 
 def _subset(expected, actual):
@@ -206,38 +226,22 @@ def _classify_train_changes(audit, before, after, inp):
         if not _subset(getattr(inp, field, {}) or {}, actual):
             raise ValueError(f'Train repair violates {field}')
     for change in audit['changes']:
-        parts = change['path'].split('.')
-        owned = len(parts) >= 2 and parts[0] == 'training' and parts[1] in _TRAIN_PARAMETERS
-        if parts[:2] == ['training', 'implementation_config'] and len(parts) >= 3:
-            key = parts[2]
-            owned = key in _IMPLEMENTATION_PARAMETERS or key.startswith(('startup_', 'probe_'))
-            if key.startswith(('startup_max_', 'startup_min_')):
-                value = change['after']
-                owned = type(value) in {int, float} and math.isfinite(value) and value > 0
-            if key == 'gpu_memory_preflight' and len(parts) >= 4:
-                owned = parts[3] in {'components_gib', 'estimated_peak_per_rank_gib', 'note'}
-                memory = training['implementation_config'].get(key, {})
-                estimate, capacity = memory.get('estimated_peak_per_rank_gib'), memory.get('per_gpu_vram_gib')
-                owned = owned and type(estimate) in {int, float} and type(capacity) in {int, float} and 0 < estimate < capacity
+        parts = tuple(change['path'].split('.'))
+        owned = not _requires_review(parts)
         # Supervision scope is Train-owned; method objectives remain fixed.
-        if parts == ['loss_contract', 'target_scope']:
+        if parts == ('loss_contract', 'target_scope'):
             owned = after.get('training_method') in {'sft', 'full_sft', 'lora_sft'}
-        if len(parts) >= 2 and parts[0] == 'training_data_example' and parts[1] in {
-            'loss_target_summary', 'loss_target_placeholders', 'context_only_placeholders',
-            'sequence_loss_targets',
-        }:
-            owned = True  # Keep the declared example consistent with its loss scope.
-        if parts in [['prompt_alignment', 'prefix_labels_all_ignored'],
-                     ['prompt_alignment', 'target_starts_with_synthetic_response']]:
-            owned = True  # Rendering identity stays frozen; mask evidence can change.
         # Explicitly equivalent SFT implementations; other objectives stay fixed.
-        if parts in [['loss_contract', 'objective_config', 'loss_type'],
-                     ['training', 'implementation_config', 'loss_type']]:
+        if parts in [('loss_contract', 'objective_config', 'loss_type'),
+                     ('training', 'implementation_config', 'loss_type')]:
             owned = (after.get('training_method') in {'sft', 'full_sft', 'lora_sft'}
                      and change['before'] in {'nll', 'chunked_nll'} and change['after'] in {'nll', 'chunked_nll'})
         if len(parts) == 3 and parts[0] == 'suggestion_decisions' and parts[2] in {'realized', 'rationale'}:
             owned = True  # explanatory record only; actual values are checked above
         change['train_owned'] = bool(owned)
+        change['requires_orchestrator_review'] = not owned
+        if not owned:
+            change['execution_only'] = False
 
     if any(c.get('train_owned') and not c['execution_only'] for c in audit['changes']):
         impl = training.get('implementation_config', {})
