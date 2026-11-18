@@ -210,6 +210,8 @@ async def submit(session, *, run, ticket, inp, heartbeat_id, remote_train_config
     if contract.stage == "train":
         config = Path(contract.script_path).with_name("train_config.yaml")
         row.meta = {**row.meta, "training_config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+                    "training_config_snapshot": config.read_bytes().decode("utf-8"),
+                    "training_config_local_path": str(config),
                     "training_config_remote_path": remote_train_config_path}
         if previous and previous.meta.get("training_continuation"):
             row.meta = {**row.meta, "resumed_from": previous.meta["training_continuation"]}

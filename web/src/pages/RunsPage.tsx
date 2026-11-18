@@ -158,7 +158,7 @@ const COLUMNS: { label: string; sort?: string }[] = [
 
 // Retain list controls while the detail route unmounts this page.
 const lastRunListView = {
-  group: "", sort: "started", order: "desc" as "asc" | "desc",
+  query: "", group: "", sort: "started", order: "desc" as "asc" | "desc",
   selectedTasks: [] as string[], selectedStatuses: [] as string[],
   pageSizePref: PAGE_SIZES[0],
 };
@@ -177,10 +177,18 @@ export function RunsPage() {
   //
   // The query lives in the URL so /runs?q=med is a link — that is how a task
   // row on Tasks points at its own runs — and so back/forward retrace searches.
-  const [params, setParams] = useSearchParams();
+  // The detail page and sidebar link to bare /runs. Restore the last search
+  // there, while an explicit URL query (including q=) takes precedence.
+  const [params, setParams] = useSearchParams({ q: lastRunListView.query });
   const query = params.get("q") ?? "";
   const setQuery = (v: string) =>
-    setParams(v ? { q: v } : {}, { replace: true });
+    setParams(previous => {
+      const next = new URLSearchParams(previous);
+      // An explicit empty query distinguishes clearing search from returning
+      // through a bare /runs link, including during Back/Forward navigation.
+      next.set("q", v);
+      return next;
+    }, { replace: true });
   const [sort, setSort] = useState<string>(lastRunListView.sort);
   // Direction is state: a column header has to be able to flip it.
   const [order, setOrder] = useState<"asc" | "desc">(lastRunListView.order);
@@ -192,8 +200,8 @@ export function RunsPage() {
   const [selectedTasks, setSelectedTasks] = useState<string[]>(lastRunListView.selectedTasks);
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>(lastRunListView.selectedStatuses);
   useEffect(() => {
-    Object.assign(lastRunListView, { group, sort, order, selectedTasks, selectedStatuses, pageSizePref });
-  }, [group, sort, order, selectedTasks, selectedStatuses, pageSizePref]);
+    Object.assign(lastRunListView, { query, group, sort, order, selectedTasks, selectedStatuses, pageSizePref });
+  }, [query, group, sort, order, selectedTasks, selectedStatuses, pageSizePref]);
   const filters = new URLSearchParams();
   if (grouped) selectedTasks.forEach(task => filters.append("task", task));
   if (groupedByStatus) selectedStatuses.forEach(status => filters.append("status", status));

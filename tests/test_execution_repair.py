@@ -19,7 +19,7 @@ from zevo.api.routers.ui.heartbeats import _repair_sources
 
 
 @pytest_asyncio.fixture
-async def repair_db(monkeypatch):
+async def repair_db(monkeypatch, tmp_path):
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -33,6 +33,11 @@ async def repair_db(monkeypatch):
     execution = InfraInstance(id='job', run_id='r', ticket_id='train', provider='cluster',
         instance_id='123', status='released', meta={'resource_request': True,
             'execution_attempt': 2, 'scheduler_state': 'COMPLETED', 'scheduler_exit_code': '0:0'})
+    config = tmp_path / 'train_config.yaml'
+    config.write_text('training:\n  learning_rate: 0.00001\n')
+    execution.meta = {**execution.meta, 'training_config_local_path': str(config),
+        'training_config_snapshot': config.read_text(),
+        'training_config_sha256': hashlib.sha256(config.read_bytes()).hexdigest()}
     product = WorkProduct(id='product', ticket_id='train', role='checkpoint', path='/durable/checkpoint-735')
     session.add_all([run, supervisor, ticket, hb, execution, product])
     await session.commit()
@@ -239,6 +244,11 @@ async def complete_review(db):
     hb.finished_at = datetime.now(timezone.utc)
     supervisor = await db.get(Ticket, 'orch')
     supervisor.status = 'succeeded'
+    from zevo.db import HeartbeatResult
+    if not await db.scalar(select(HeartbeatResult.id).where(HeartbeatResult.heartbeat_id == hb.id)):
+        db.add(HeartbeatResult(ticket_id=supervisor.id, heartbeat_id=hb.id,
+            agent_id='orchestrator', status='succeeded',
+            output={'ticket_id': supervisor.id, 'action': 'wait'}))
     await db.commit()
     await release_reviewed_repairs(db, supervisor, hb.id)
 
@@ -600,3 +610,70 @@ def test_external_failure_without_retry_request_still_freezes_training_config(tm
     config.write_text('unapproved repair')
     with pytest.raises(ValueError,match='fixed_configuration'):
         verify_repair_training_config(previous,config)
+
+
+@pytest.mark.asyncio
+async def test_release_observes_separate_approval_transaction(repair_db):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    db, ticket, _ = repair_db
+    cached = await db.get(HeartbeatRun, 'decision')
+    assert not (cached.resolved_config or {}).get('repair_target_ticket_ids')
+    async with AsyncSession(bind=db.bind, expire_on_commit=False) as api:
+        await repair_ticket(api, await api.get(Ticket, ticket.id), request())
+    # Runner retains the heartbeat it loaded before the API committed approval.
+    assert not (cached.resolved_config or {}).get('repair_target_ticket_ids')
+    await complete_review(db)
+    wakes = (await db.scalars(select(AgentWakeupRequest))).all()
+    assert len(wakes) == 1 and wakes[0].ticket_id == ticket.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('blocker', ['', 'unfinished', 'no_result', 'failed_result', 'cancel', 'stale_attempt', 'pause', 'budget'])
+async def test_reconcile_reviewed_gate_without_heartbeat_target_list(repair_db, blocker, monkeypatch):
+    from zevo.db import HeartbeatResult
+    from zevo.engine.run.execution_repair import reconcile_reviewed_repairs
+    from zevo.engine.run.supervisor_handoff import waiting
+    db, ticket, _ = repair_db
+    await repair_ticket(db, ticket, request())
+    hb = await db.get(HeartbeatRun, 'decision')
+    hb.resolved_config = {}  # overwritten/cached config must not lose durable authorization
+    if blocker != 'unfinished': hb.finished_at = datetime.now(timezone.utc)
+    (await db.get(Ticket, 'orch')).status = 'succeeded'
+    if blocker != 'no_result':
+        db.add(HeartbeatResult(ticket_id='orch', heartbeat_id='decision', agent_id='orchestrator',
+            status='failed' if blocker == 'failed_result' else 'succeeded',
+            output={'ticket_id': 'orch', 'action': 'wait'}))
+    if blocker == 'cancel': (await db.get(Run, 'r')).cancel_requested_at = datetime.now(timezone.utc)
+    if blocker == 'stale_attempt': ticket.repair_attempts += 1
+    if blocker == 'pause': db.add(RunInstruction(run_id='r', body='pause', status='needs_input'))
+    if blocker == 'budget':
+        from zevo.engine.cost import budget
+        monkeypatch.setattr(budget, 'snapshot_for_run', AsyncMock(return_value=SimpleNamespace(over_budget=True, over_time_limit=False)))
+    await db.commit()
+    await reconcile_reviewed_repairs(db)
+    await reconcile_reviewed_repairs(db)
+    wakes = (await db.scalars(select(AgentWakeupRequest))).all()
+    assert len(wakes) == (0 if blocker else 1)
+    assert await waiting(db, ticket) is bool(blocker)
+
+
+@pytest.mark.asyncio
+async def test_approval_and_submission_share_semantic_comparison(repair_db):
+    import yaml
+    db, ticket, execution = repair_db
+    path = Path(execution.meta['training_config_local_path'])
+    value = yaml.safe_load(path.read_text())
+    value['training']['learning_rate'] = 2e-5
+    path.write_text(yaml.safe_dump(value))
+    with pytest.raises(HTTPException, match='learning_rate'):
+        await repair_ticket(db, ticket, request())
+    assert ticket.status == 'failed' and ticket.repair_attempts == 2
+    value['training']['learning_rate'] = 1e-5
+    path.write_text('# execution-only formatting update\n' + yaml.safe_dump(value))
+    await repair_ticket(db, ticket, request())
+    assert execution.meta['training_config_retry_audit']['changes'] == []
+    # Subsequent unapproved critical edits are still rejected at submission.
+    value['training']['learning_rate'] = 3e-5
+    path.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError, match='learning_rate'):
+        verify_repair_training_config(execution, path)

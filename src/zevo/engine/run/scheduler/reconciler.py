@@ -2109,6 +2109,9 @@ async def reconcile_runs_and_tickets(
             report["slurm_allocations_checked"] = await _reconcile_slurm_allocation_owners(s)
         async with Session() as s:
             report["tickets_failed"] = await _sweep_stuck_tickets(s, stale_ticket_seconds)
+        async with Session() as s:
+            from zevo.engine.run.execution_repair import reconcile_reviewed_repairs
+            await reconcile_reviewed_repairs(s)
         # Recover repairing tickets whose retry wakeup was lost, so their run
         # doesn't wedge forever with pending-but-dead work.
         async with Session() as s:

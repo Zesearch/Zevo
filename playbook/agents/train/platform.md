@@ -1053,7 +1053,21 @@ gradient-finiteness checks and read-only probes do not require changing the
 registered YAML. A hypothesis is not a verified cause; explain what a proposed
 short diagnostic execution will test.
 
-If a necessary fix changes the registered configuration, preserve its original
+Normal execution repair compares parsed YAML against the registered snapshot.
+It permits formatting/comments, attempt-local output paths, the same launch
+command with only its attempt-local baseline-inference copy path changed,
+and explicitly recognized diagnostic bookkeeping. The three positive startup
+thresholds (`startup_max_first_batch_nll`, `startup_max_first_logged_loss`,
+`startup_max_reference_loss_mismatch`) may be added or tightened, not removed
+or loosened. Diagnostic descriptions and bounded GPU memory estimates do not
+change the training recipe. Keep the actual model, data, method, loss, optimizer,
+schedule, batch geometry, resource plan and inference protocol unchanged.
+Unknown configuration fields require review; a name containing "diagnostic"
+is not permission. The engine records the full hashes and semantic diff.
+For legacy executions, retain `train_config.attemptN.yaml` with the exact
+registered bytes so the engine can verify its baseline.
+
+If a necessary fix changes training semantics or an unrecognized field, preserve its original
 YAML and stage a separate candidate YAML. Return `failed` with
 `failure_recovery.scope="fixed_configuration"` and
 `failure_recovery.training_configuration_change` containing absolute
@@ -1069,6 +1083,6 @@ exact bytes. Start a NEW attempt from the original parent, with new optimizer,
 scheduler and attempt-local plan state. Never resume an old NaN/incompatible
 checkpoint or reuse its completed-step count. Old logs/checkpoints remain audit
 history. This path preserves data, model, method, inference protocol, iteration,
-resource requirements and user pins. Normal repair and walltime continuation
-still require unchanged configuration; permission for another attempt alone
-never permits configuration changes.
+resource requirements and user pins. Normal repairs permit only the recognized
+execution-only differences above. Walltime/checkpoint continuation still requires
+byte-identical configuration and the original full training plan.

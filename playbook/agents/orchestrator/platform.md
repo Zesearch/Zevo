@@ -736,6 +736,14 @@ For a failed workload with `repair_route="orchestrator"`, first review whether
 the existing work order can finish. Use `POST api_routes.repair_ticket` with
 `{"action":"resubmit","execution_attempt":N,"reason":"specific correction and why execution is needed","evidence":["verified log or artifact reference"]}`
 to authorize another execution of that SAME Ticket on unchanged resources.
+For Train resubmit or resource replacement, supply `train_config_path` pointing
+to the actual candidate YAML. The approval endpoint and submission use the same
+semantic comparison: recognized diagnostic/bookkeeping differences are allowed;
+training changes and unknown fields require `reconfigure`. A prose diagnosis is
+not authorization to change loss, data, model, optimizer, schedule or protocol.
+If comparison is rejected, inspect the reported fields and request an exact
+configuration proposal instead of repeating resubmit. Full hashes/diffs remain
+in the audit; checkpoint continuation retains its byte-identical requirement.
 Use `action="collect"` when collection or artifact revalidation alone suffices.
 The attempt must match the latest registered terminal execution. The endpoint
 preserves checkpoint files, bindings, iteration, training configuration and the

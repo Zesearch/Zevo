@@ -89,8 +89,22 @@ def verify_repair_training_config(previous, path):
             and approval.get("execution_attempt") == int((previous.meta or {}).get("execution_attempt") or 1)
             and approval.get("original_sha256") == expected):
         expected = approval["proposed_sha256"]
-    if not expected or hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected:
-        raise TrainingConfigurationReviewRequired('execution repair requires the exact registered training configuration; submit failure_recovery.scope=fixed_configuration with training_configuration_change and leave execution_retry_reason empty')
+    message = ('execution repair requires the exact registered training configuration or recognized execution-only changes; '
+               'submit failure_recovery.scope=fixed_configuration with training_configuration_change '
+               'and leave execution_retry_reason empty')
+    if approval.get("released") is True:
+        if not expected or hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected:
+            raise TrainingConfigurationReviewRequired(message)
+        return
+    from zevo.engine.run.training_config_retry import compare_registered
+    try:
+        audit = compare_registered(previous.meta or {}, path)
+    except (ValueError, OSError) as exc:
+        raise TrainingConfigurationReviewRequired(f'{message}: {exc}') from exc
+    blocked = [c['path'] for c in audit['changes'] if not c['execution_only']]
+    if blocked:
+        raise TrainingConfigurationReviewRequired(f"{message}; changed fields: {', '.join(blocked)}")
+    previous.meta = {**previous.meta, 'training_config_retry_audit': audit}
 
 
 async def _measured_progress(session, ticket):
