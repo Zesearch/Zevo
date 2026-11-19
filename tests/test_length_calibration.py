@@ -101,7 +101,7 @@ def test_multiturn_counts_questions_not_requests(tmp_path):
         check(c, q, d)
 
 
-def test_suite_gate_blocks_all_generation_until_every_member_passes(tmp_path):
+def test_suite_gate_blocks_all_generation_until_every_member_passes(tmp_path, monkeypatch):
     a = inputs(tmp_path / "a", truncated=0)
     b = inputs(tmp_path / "b", truncated=4)
     check(*a)
@@ -110,14 +110,15 @@ def test_suite_gate_blocks_all_generation_until_every_member_passes(tmp_path):
         {"config": str(c), "questions": str(q)} for c, q, _ in [a, b]
     ]}))
     marker = tmp_path / "started"
-    command = [sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).touch()", str(marker)]
+    monkeypatch.setenv("ZEVO_INFERENCE_PROGRESS_SCOPE", "calibration")
+    command = [sys.executable, "-c", "from pathlib import Path; import sys, os; Path(sys.argv[1]).write_text(os.environ['ZEVO_INFERENCE_PROGRESS_SCOPE'])", str(marker)]
     with pytest.raises(FileNotFoundError):
         run_measured(suite, command)
     assert not marker.exists()
     b = inputs(tmp_path / "b", truncated=3)
     check(*b)
     assert run_measured(suite, command) == 0
-    assert marker.exists()
+    assert marker.read_text() == "measured"
 
 
 def waiver_inputs(tmp_path):

@@ -113,7 +113,7 @@ def _suite(tmp_path: Path, row_counts: list[int]) -> Path:
     return suite
 
 
-def _run(tmp_path: Path, row_counts: list[int], turns: int = 1) -> tuple[str, list[dict]]:
+def _run(tmp_path: Path, row_counts: list[int], turns: int = 1, scope: str = "measured") -> tuple[str, list[dict]]:
     predict = tmp_path / "predict.py"
     predict.write_text(FAKE_PREDICT, encoding="utf-8")
     suite = _suite(tmp_path, row_counts)
@@ -123,13 +123,23 @@ def _run(tmp_path: Path, row_counts: list[int], turns: int = 1) -> tuple[str, li
         [sys.executable, str(HELPER), "--predict", str(predict),
          "--model", "unused", "--suite", str(suite),
          "--summary", str(summary), "--ticket-id", "test-ticket",
-         "--allocated-gpus", "2", "--gpus-per-worker", "1"],
+         "--allocated-gpus", "2", "--gpus-per-worker", "1", "--progress-scope", scope],
         env=env, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "MASK=0" in result.stdout and "MASK=1" in result.stdout
     assert len(json.loads(summary.read_text())["members"]) == len(row_counts)
     return result.stdout, json.loads(suite.read_text())["members"]
+
+
+def test_sample_suite_marks_progress_as_calibration(tmp_path):
+    output, members = _run(tmp_path, [64, 30], scope="calibration")
+    markers = [json.loads(line.split(":", 2)[2]) for line in output.splitlines()
+               if line.startswith("__PROGRESS__:")]
+    assert markers and all(m.get("progress_scope") == "calibration" for m in markers)
+    assert sum(m.get("benchmark_complete", False) for m in markers) == 2
+    assert "__PHASE__:test-ticket:length_calibration@" in output
+    assert all(Path(m["output"]).exists() for m in members)
 
 
 def test_large_single_benchmark_is_sharded_and_merged_in_original_order(tmp_path: Path) -> None:

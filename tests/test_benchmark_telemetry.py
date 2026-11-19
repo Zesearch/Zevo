@@ -84,3 +84,13 @@ def test_preflight_is_retained_without_becoming_a_benchmark() -> None:
         assert marker["step"] == 1
         assert resolve_benchmark_id(marker, ["Math"], "validation") is None
         assert canonical_benchmark_marker(marker, holdout, "optimization") == marker
+
+
+def test_calibration_is_not_formal_workload_progress():
+    from zevo.engine.run.benchmark_telemetry import is_workload_progress
+    marker = {"progress_scope": "calibration", "benchmark_complete": True,
+              "benchmark_id": "test:0", "execution_id": "job", "execution_purpose": "workload"}
+    canonical = canonical_benchmark_marker(marker, {"test_sets": [{"name": "MATH"}]}, "held_out_test")
+    assert canonical["phase"] == "length_calibration"
+    assert canonical["progress_scope"] == "calibration"
+    assert not is_workload_progress(canonical, agent_id="inference")

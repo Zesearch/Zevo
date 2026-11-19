@@ -24,6 +24,22 @@ export function latestExecution(events: ExecutionEventDTO[]): ExecutionEventDTO[
   return identity ? ordered.filter((event) => event.extras?.execution_id === identity) : ordered;
 }
 
+/** A standalone calibration suite and measured suite can share one Slurm job.
+ * Each helper invocation starts at setup; old completion markers cannot carry
+ * across that boundary. Explicit sample telemetry never supplies progress. */
+export function measuredInferenceEvents(events: ExecutionEventDTO[]): ExecutionEventDTO[] {
+  const ordered = [...events].sort(compareEvents);
+  const starts = new Map<string, number>();
+  ordered.forEach((event, index) => {
+    if (event.event_type === "phase" && event.phase === "setup")
+      starts.set(String(event.extras?.execution_id || ""), index);
+  });
+  return ordered.filter((event, index) => index >= (starts.get(String(event.extras?.execution_id || "")) ?? 0)
+    && !["calibration", "preflight", "test", "mock", "diagnostic"].includes(String(event.extras?.progress_scope))
+    && !["calibration", "preflight", "test", "mock", "diagnostic"].includes(String(event.extras?.execution_purpose))
+    && !/calibrat/.test(event.phase || ""));
+}
+
 /** Match the selected activation to a concrete workload, even before it emits logs. */
 export function activationWorkload(instances: InfraInstanceDTO[], ticketId: string,
   heartbeat?: HeartbeatDTO, activations: HeartbeatDTO[] = []): InfraInstanceDTO | undefined {
@@ -85,8 +101,8 @@ export function activationExecution(events: ExecutionEventDTO[], heartbeat?: Hea
 export function benchmarkExecutionStarted(events: ExecutionEventDTO[], stage: "inference" | "evaluation"): boolean {
   return events.some(event => {
     const extras = event.extras || {};
-    if (["preflight", "test", "mock", "diagnostic"].includes(String(extras.progress_scope))
-      || ["preflight", "test", "mock", "diagnostic"].includes(String(extras.execution_purpose))
+    if (["preflight", "test", "mock", "diagnostic", "calibration"].includes(String(extras.progress_scope))
+      || ["preflight", "test", "mock", "diagnostic", "calibration"].includes(String(extras.execution_purpose))
       || extras.benchmark_id === "probe") return false;
     const phases = [event.phase || "", String(extras.phase || "")];
     if (stage === "evaluation") {
@@ -101,6 +117,7 @@ export function benchmarkExecutionStarted(events: ExecutionEventDTO[], stage: "i
 }
 
 export function benchmarkCounts(events: ExecutionEventDTO[], members?: string[], stage: "inference" | "evaluation" = "inference") {
+  if (stage === "inference") events = measuredInferenceEvents(events);
   if (stage === "evaluation" && !benchmarkExecutionStarted(events, stage)) return null;
   const done = new Set<string>();
   let total = members?.length || 0;
@@ -145,7 +162,8 @@ export function latestBenchmarkEvent(events: ExecutionEventDTO[]): ExecutionEven
 /** Preparation is displayed without inventing a percentage before generation. */
 export function inferencePreparation(events: ExecutionEventDTO[]) {
   const ordered = [...events].sort(compareEvents);
-  if (ordered.some(e => e.extras?.benchmark_complete === true || /^generat/.test(e.phase || ""))) return null;
+  const measured = measuredInferenceEvents(events);
+  if (measured.some(e => e.extras?.benchmark_complete === true || /^generat/.test(e.phase || ""))) return null;
   const event = ordered.at(-1);
   if (!event) return null;
   const phase = event.phase || "";

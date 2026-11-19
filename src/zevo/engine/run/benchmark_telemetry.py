@@ -50,7 +50,7 @@ def is_preflight_progress(marker: Mapping[str, Any]) -> bool:
     """Separate implementation checks from measurements of the scoring suite."""
     scope = str(marker.get("progress_scope") or "").strip()
     if scope:
-        return scope in {"preflight", "test", "mock", "diagnostic"}
+        return scope in {"preflight", "test", "mock", "diagnostic", "calibration"}
     # Compatibility for already-submitted jobs that used a synthetic probe ID.
     return str(marker.get("benchmark_id") or "").strip() == "probe"
 
@@ -103,6 +103,9 @@ def canonical_benchmark_marker(
     names = benchmark_names(holdout, suite)
     identity = resolve_benchmark_id(marker, names, suite)
     result = dict(marker)
+    if marker.get("progress_scope") == "calibration":
+        result["phase"] = "length_calibration"
+        return result
     if is_preflight_progress(marker):
         result["progress_scope"] = "preflight"
         phase = str(marker.get("phase") or "")

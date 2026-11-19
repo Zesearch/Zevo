@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { transformWithEsbuild } from 'vite';
 const shared = readFileSync(new URL('../src/lib/executionProgress.ts', import.meta.url), 'utf8');
-const source = readFileSync(new URL('../src/lib/measurementProgress.ts', import.meta.url), 'utf8').replace('import { benchmarkCounts, benchmarkExecutionStarted } from "./executionProgress";', '');
+const source = readFileSync(new URL('../src/lib/measurementProgress.ts', import.meta.url), 'utf8').replace('import { benchmarkCounts, benchmarkExecutionStarted, measuredInferenceEvents } from "./executionProgress";', '');
 const { code } = await transformWithEsbuild(`${shared}\n${source}`, 'progress.ts', { loader: 'ts' });
 const { measurementProgress } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 test('new revision waits for active members in the current workload', () => {
@@ -117,4 +117,28 @@ test('zero completed rows can display real generation, but probes and unrelated 
     ticket.execution_events = [{...progress, extras: {...progress.extras, ...extras}}];
     assert.equal(measurementProgress(ticket), null);
   }
+});
+
+test('calibration completion never shows a measured progress bar', () => {
+  const calibration = assigned.map((_, i) => {
+    const event = complete(i);
+    return {...event, extras: {...event.extras, progress_scope: 'calibration'}};
+  });
+  const ticket = {measurement_members: assigned, execution_events: calibration};
+  assert.equal(measurementProgress(ticket), null);
+  ticket.execution_events.push({ts: '2026-10-26T10:03:00Z', event_type: 'phase',
+    phase: 'generating', extras: {execution_purpose: 'workload'}});
+  assert.deepEqual(measurementProgress(ticket), {completed: 0, total: 12});
+});
+
+test('legacy calibration completions are cleared when formal generation starts in the same job', () => {
+  const ticket = {measurement_members: assigned, execution_events: assigned.map((_, i) => complete(i))};
+  ticket.execution_events.push({ts: '2026-10-26T10:03:00Z', event_type: 'phase', phase: 'setup',
+    extras: {execution_purpose: 'workload'}});
+  assert.equal(measurementProgress(ticket), null);
+  ticket.execution_events.push({ts: '2026-10-26T10:04:00Z', event_type: 'phase', phase: 'generating',
+    extras: {execution_purpose: 'workload'}});
+  assert.deepEqual(measurementProgress(ticket), {completed: 0, total: 12});
+  ticket.execution_events.push({...complete(0), ts: '2026-10-26T10:05:00Z'});
+  assert.deepEqual(measurementProgress(ticket), {completed: 1, total: 12});
 });
