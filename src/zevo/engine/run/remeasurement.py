@@ -50,6 +50,41 @@ def is_replay(run: Run, ticket: Ticket) -> bool:
     return any(ticket.id in replay_ids(b) for b in batches(run))
 
 
+def inference_waits_for_revision(run: Run, ticket: Ticket) -> bool:
+    """Do not resolve a new inference contract from a partially replayed cohort."""
+    return ticket.agent_id == "inference" and any(
+        b["status"] in {"running", "paused"}
+        and b["lane"] == ticket.lane
+        and b["base_model"] == (ticket.payload or {}).get("base_model")
+        and ticket.id not in replay_ids(b)
+        for b in batches(run)
+    )
+
+
+async def _release_waiting_inference(session: AsyncSession, run: Run, lane: str) -> None:
+    from zevo.db.models import AgentWakeupRequest
+    from zevo.engine.run.wakeup import queue_wakeup
+
+    rows = (await session.execute(
+        select(AgentWakeupRequest, Ticket).join(Ticket, Ticket.id == AgentWakeupRequest.ticket_id)
+        .where(Ticket.run_id == run.id, Ticket.lane == lane,
+               Ticket.agent_id == "inference", AgentWakeupRequest.status == "deferred")
+    )).all()
+    for wake, ticket in rows:
+        if (wake.payload or {}).get("deferred_reason") != "inference_measurement_revision_pending":
+            continue
+        if inference_waits_for_revision(run, ticket):
+            continue
+        wake.status = "completed"
+        if ticket.status not in TERMINAL:
+            await queue_wakeup(
+                session, agent_id=ticket.agent_id, ticket_id=ticket.id,
+                source=wake.source, trigger_detail=wake.trigger_detail, reason=wake.reason,
+                payload={k: v for k, v in (wake.payload or {}).items() if k != "deferred_reason"},
+            )
+    await session.commit()
+
+
 def is_unpublished_replay(run: Run, ticket: Ticket) -> bool:
     latest = next((b for b in reversed(batches(run)) if ticket.id in replay_ids(b)), None)
     return latest is not None and latest["status"] != "published"
@@ -639,6 +674,10 @@ async def advance(session: AsyncSession, run_id: str, *, lane: str | None = None
     run = await _locked_run(session, run_id)
     if run is None or run.status not in {"planning", "running"} or run.cancel_requested_at is not None:
         return
+    # Also run after handoff: a concurrent wake may become deferred just after
+    # publication. Periodic recovery must release it without another publish.
+    await _release_waiting_inference(session, run, lane)
+    run = await _locked_run(session, run.id)
     batch = deepcopy(pending(run, lane))
     if batch and batch["status"] == "paused":
         return  # Maintenance pauses advancement, not the cohort's loop barrier.

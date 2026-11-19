@@ -163,6 +163,61 @@ async def finish_inference(session, ticket, tmp_path, limited=0):
     await session.commit()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lane", ["optimization", "held_out_test"])
+@pytest.mark.parametrize("status", ["running", "paused"])
+async def test_new_inference_waits_then_recovers_after_revision(scenario, lane, status):
+    from zevo.db.models import AgentWakeupRequest
+    from zevo.engine.run.runner import run_ticket, _baseline_suite_config_path
+    from zevo.engine.run.wakeup import WakeupDeferred
+
+    session, run, originals, root = scenario
+    baseline = originals[0]
+    baseline.lane = lane
+    model = baseline.payload["base_model"]
+    ticket = Ticket(id="new-inference", run_id=run.id, agent_id="inference", lane=lane,
+                    status="queued", payload={"base_model": model, "model_source": "checkpoint"})
+    batch = {"id": "revision", "status": status, "lane": lane, "base_model": model,
+             "configs": {"math": "/published.yaml"},
+             "cohort": [{"inference_id": baseline.id}]}
+    rm._store(run, batch)
+    session.add(ticket)
+    await session.commit()
+    assert await _baseline_suite_config_path(
+        session, run=run, base_model=model, member_name="math", lane=lane) == ""
+    with pytest.raises(WakeupDeferred, match="inference_measurement_revision_pending"):
+        await run_ticket(session, ticket_id=ticket.id, wakeup_id="wake")
+    assert ticket.status == "queued"
+    assert not ticket.error_message
+    assert not rm.inference_waits_for_revision(run, baseline)
+    for other_lane, other_model in [(lane, "another-model"),
+                                   ("held_out_test" if lane == "optimization" else "optimization", model)]:
+        other = Ticket(id="other", agent_id="inference", lane=other_lane,
+                       payload={"base_model": other_model})
+        assert not rm.inference_waits_for_revision(run, other)
+    wake = AgentWakeupRequest(agent_id="inference", ticket_id=ticket.id, source="assignment",
+                             status="deferred", reason="start inference", trigger_detail="assigned",
+                             payload={"deferred_reason": "inference_measurement_revision_pending",
+                                      "input_validation_review": "preserved"})
+    session.add(wake)
+    await session.commit()
+    await rm._release_waiting_inference(session, run, lane)
+    assert wake.status == "deferred"
+    batch["status"] = "published"
+    rm._store(run, batch)
+    await session.commit()
+    assert rm.configuration_override(run, ticket, "math") == "/published.yaml"
+    # Periodic recovery works even if the publication handoff has already ended.
+    await rm.advance(session, run.id, lane=lane)
+    await rm.advance(session, run.id, lane=lane)
+    queued = list((await session.scalars(select(AgentWakeupRequest).where(
+        AgentWakeupRequest.status == "queued"))).all())
+    assert len(queued) == 1
+    assert queued[0].ticket_id == ticket.id
+    assert queued[0].payload == {"input_validation_review": "preserved"}
+    assert wake.status == "completed"
+
+
 async def finish_evaluation(session, ticket, tmp_path, scores=(.7, .9)):
     ticket.status = "succeeded"
     for name, score in zip(("math", "qa"), scores):

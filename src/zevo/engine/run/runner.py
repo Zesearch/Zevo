@@ -5037,7 +5037,10 @@ async def run_ticket(
     from zevo.engine.run.lifecycle import finalization, finalization_allows
     if run.cancel_requested_at is not None:
         return tk
-    from zevo.engine.run.remeasurement import pending
+    from zevo.engine.run.remeasurement import pending, inference_waits_for_revision
+    if inference_waits_for_revision(run, tk):
+        from zevo.engine.run.wakeup import WakeupDeferred
+        raise WakeupDeferred("inference_measurement_revision_pending")
     if pending(run, "optimization") and tk.agent_id in {"orchestrator", "train"}:
         if wakeup_id and tk.agent_id == "orchestrator":
             from zevo.engine.run.wakeup import WakeupDeferred
