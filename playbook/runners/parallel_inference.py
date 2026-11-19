@@ -200,11 +200,15 @@ def _worker_environment(base: dict[str, str], root: Path, devices: list[str]) ->
 
 
 def _emit(ticket: str, payload: dict) -> None:
+    if os.environ.get("ZEVO_INFERENCE_PROGRESS_SCOPE") == "calibration":
+        payload = {**payload, "progress_scope": "calibration"}
     payload["t"] = int(time.time())
     print(f"__PROGRESS__:{ticket}:{json.dumps(payload, separators=(',', ':'))}", flush=True)
 
 
 def _phase(ticket: str, name: str) -> None:
+    if os.environ.get("ZEVO_INFERENCE_PROGRESS_SCOPE") == "calibration":
+        name = "length_calibration"
     print(f"__PHASE__:{ticket}:{name}@{int(time.time())}", flush=True)
 
 
@@ -801,10 +805,14 @@ def main() -> int:
                         help="Replica limit from the CPU/RAM and GPU resource plan")
     parser.add_argument("--resident", action="store_true", help="Reuse loaded engines across calibration and generation")
     parser.add_argument("--calibrate", action="store_true", help="Gate generation on in-process length calibration")
+    parser.add_argument("--progress-scope", choices=("calibration", "measured"),
+                        help="Use calibration for a standalone sample-only suite")
     parser.add_argument("--batch-cli", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--resident-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--generation-gate", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.progress_scope:
+        os.environ["ZEVO_INFERENCE_PROGRESS_SCOPE"] = args.progress_scope
     try:
         if args.resident_worker:
             return _resident_worker(args.predict, args.model, args.suite, args.summary,

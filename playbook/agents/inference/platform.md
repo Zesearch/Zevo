@@ -579,6 +579,12 @@ is CSV and is a separate input to prediction. For each member:
 2. Validate a provisional YAML with `config_validation_command`, then generate
    only this sample with the real model, prompt, stop controls and serving backend.
    Write separate GenerationDiagnostics with sample-local row/request indices.
+   For a standalone sample suite, pass `--progress-scope calibration` to
+   `zevo_parallel_inference.py` (or set `ZEVO_INFERENCE_PROGRESS_SCOPE=calibration`
+   for that sample command only). Custom telemetry must mark sample progress
+   with `progress_scope: calibration`; never report it as measured completion.
+   The resident `--calibrate` path already suppresses sample progress. Run the
+   full suite without the calibration scope.
 3. Run `python zevo_length_calibration.py check --config <member-config.yaml>
    --questions <exact-assigned-scoring-set.csv-or-jsonl> --diagnostics <calibration-diagnostics.json>
    --predictions <calibration-predictions.csv>`.

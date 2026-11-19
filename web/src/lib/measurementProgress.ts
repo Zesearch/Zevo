@@ -1,9 +1,9 @@
 import type { TicketDetail, ExecutionEventDTO } from "./api";
-import { benchmarkCounts, benchmarkExecutionStarted } from "./executionProgress";
+import { benchmarkCounts, benchmarkExecutionStarted, measuredInferenceEvents } from "./executionProgress";
 
 export function measurementProgress(ticket: TicketDetail, events: ExecutionEventDTO[] = ticket.execution_events,
   useCurrentAttempt = true) {
-  const workloadEvents = events.filter((event) => event.extras?.execution_purpose === "workload"
+  const workloadEvents = measuredInferenceEvents(events).filter((event) => event.extras?.execution_purpose === "workload"
     && !["preflight", "test", "mock", "diagnostic"].includes(String(event.extras.progress_scope))
     && event.extras.benchmark_id !== "probe");
   const started = Math.min(...workloadEvents.map(event => Date.parse(event.ts)));

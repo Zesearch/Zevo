@@ -5,6 +5,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -303,7 +304,9 @@ def run_measured(suite: str | Path, command: list[str]) -> int:
             validate(config_path, questions)
     if not command:
         raise ValueError("measured inference command is empty")
-    return subprocess.run(command, check=False).returncode
+    return subprocess.run(command, check=False, env={
+        **os.environ, "ZEVO_INFERENCE_PROGRESS_SCOPE": "measured",
+    }).returncode
 
 
 def main(argv: list[str] | None = None) -> int:
