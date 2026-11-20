@@ -511,19 +511,12 @@ async def _optimization_data_tickets(db: AsyncSession, run_id: str) -> list[Tick
 
 
 async def _train_allows_input_repair(db: AsyncSession, train: Ticket) -> bool:
-    """Only an explicit upstream-input failure before execution can release Data."""
-    if train.status not in {"failed", "awaiting_input"} or train.repair_route != "orchestrator":
+    """Allow stopped, demonstrably untrained tickets to revise their inputs."""
+    if train.status not in {"failed", "cancelled", "awaiting_input"}:
         return False
     results = (await db.scalars(select(HeartbeatResult).where(
         HeartbeatResult.ticket_id == train.id,
     ).order_by(HeartbeatResult.created_at.desc()))).all()
-    if not results:
-        return False
-    latest = results[0]
-    output = latest.output or {}
-    if (latest.status != "failed" or output.get("status") != "failed"
-            or (output.get("failure_recovery") or {}).get("scope") != "upstream_input"):
-        return False
     # A later preflight failure cannot erase an earlier submission/checkpoint.
     if any((row.output or {}).get("checkpoint_path")
            or (row.output or {}).get("continuation") for row in results):
@@ -533,9 +526,6 @@ async def _train_allows_input_repair(db: AsyncSession, train: Ticket) -> bool:
                                       HeartbeatRun.finished_at.is_(None)),
         select(AgentWakeupRequest.id).where(AgentWakeupRequest.ticket_id == train.id,
                                             AgentWakeupRequest.status.in_(("queued", "running", "deferred"))),
-        select(InfraInstance.id).where(InfraInstance.ticket_id == train.id),
-        select(WorkloadExecution.id).where(WorkloadExecution.ticket_id == train.id,
-                                           WorkloadExecution.purpose != "diagnostic"),
         select(ExecutionEvent.id).where(ExecutionEvent.ticket_id == train.id,
                                         ExecutionEvent.current_step > 0),
         select(WorkProduct.id).where(WorkProduct.ticket_id == train.id,
@@ -544,6 +534,20 @@ async def _train_allows_input_repair(db: AsyncSession, train: Ticket) -> bool:
     for query in evidence:
         if (await db.scalar(query.limit(1))) is not None:
             return False
+    resources = (await db.scalars(select(InfraInstance).where(
+        InfraInstance.ticket_id == train.id,
+    ))).all()
+    workload = await db.scalar(select(WorkloadExecution.id).where(
+        WorkloadExecution.ticket_id == train.id,
+        WorkloadExecution.purpose != "diagnostic",
+    ).limit(1))
+    if resources:
+        from zevo.engine.run.train_input_revision import submission_never_started
+        for resource in resources:
+            if not await submission_never_started(db, train, resource):
+                return False
+    elif workload is not None:
+        return False
     return True
 
 
@@ -575,8 +579,9 @@ async def _guard_data_revision_before_train(
             "ticket_id": train.id,
             "advice": (
                 "Same-iteration Data repair is allowed only when every Train attempt "
-                "failed with upstream_input recovery before any submission, workload "
-                "execution or checkpoint, and no activation remains live. Otherwise "
+                "is stopped with no live activation or retry, no training step or "
+                "checkpoint, and any remote submission is confirmed never started. "
+                "Cancellation alone is insufficient. Otherwise "
                 "keep its data unchanged and move a new recipe to the next iteration."
             ),
         })

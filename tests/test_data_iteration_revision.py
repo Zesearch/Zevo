@@ -56,7 +56,7 @@ async def test_active_data_cannot_be_replaced_concurrently(db, status):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["queued", "running", "succeeded", "failed", "cancelled"])
+@pytest.mark.parametrize("status", ["queued", "running", "succeeded", "repairing", "waiting_external"])
 async def test_train_freezes_iteration_data_even_if_not_running(db, status):
     db.add(ticket("bound-train", "train", 4, status))
     await db.commit()
@@ -131,14 +131,26 @@ async def test_input_failure_cannot_hide_execution_or_another_train(db, evidence
 
 
 @pytest.mark.asyncio
-async def test_latest_failure_must_explicitly_request_upstream_input_repair(db):
+@pytest.mark.parametrize("status", ["failed", "cancelled", "awaiting_input"])
+async def test_stopped_unsubmitted_train_allows_user_data_revision(db, status):
+    # 1f6bc82b: user requests full train split after Train was created, before submit.
+    t = ticket("stopped", "train", 4, status)
+    t.inputs = {"training_dataset": {"source_ticket_id": "partial-data"}}
+    db.add(t)
+    await db.commit()
+    await _guard_data_revision_before_train(db, "r", 4, await _optimization_data_tickets(db, "r"))
+    assert t.inputs["training_dataset"]["source_ticket_id"] == "partial-data"
+    assert t.status == status
+
+
+@pytest.mark.asyncio
+async def test_failure_scope_does_not_freeze_unstarted_train(db):
     from zevo.db import HeartbeatResult
     await failed_input_train(db)
     db.add(HeartbeatResult(ticket_id="blocked", status="failed",
         output={"status": "failed", "failure_recovery": {"scope": "local_execution"}}))
     await db.commit()
-    with pytest.raises(HTTPException):
-        await _guard_data_revision_before_train(db, "r", 4, await _optimization_data_tickets(db, "r"))
+    await _guard_data_revision_before_train(db, "r", 4, await _optimization_data_tickets(db, "r"))
 
 
 @pytest.mark.asyncio
@@ -149,3 +161,22 @@ async def test_preflight_exception_still_blocks_concurrent_data(db):
     with pytest.raises(HTTPException) as exc:
         await _guard_data_revision_before_train(db, "r", 4, await _optimization_data_tickets(db, "r"))
     assert exc.value.detail["ticket_id"] == "repair-in-progress"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed", [True, False])
+async def test_submitted_train_requires_positive_never_started_evidence(db, monkeypatch, confirmed):
+    from datetime import datetime, timezone
+    from zevo.db import InfraInstance
+    from zevo.engine.run import train_input_revision
+    db.add(ticket("stopped", "train", 4, "cancelled"))
+    db.add(InfraInstance(ticket_id="stopped", run_id="r", provider="cluster",
+                         instance_id="123", status="released", released_at=datetime.now(timezone.utc)))
+    await db.commit()
+    async def proof(*args): return confirmed
+    monkeypatch.setattr(train_input_revision, "submission_never_started", proof)
+    if confirmed:
+        await _guard_data_revision_before_train(db, "r", 4, await _optimization_data_tickets(db, "r"))
+    else:
+        with pytest.raises(HTTPException):
+            await _guard_data_revision_before_train(db, "r", 4, await _optimization_data_tickets(db, "r"))

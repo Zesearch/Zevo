@@ -329,13 +329,21 @@ is terminal, a corrected recipe may create a replacement Data Ticket in the
 same iteration N, provided no Train Ticket has been created there. Keep the
 earlier Ticket as history and bind both Train data inputs to the successful
 replacement. Do not advance the iteration merely to recover Data preparation.
-An unchanged recipe should reuse/repair its existing Ticket. Exception: when
-every Train in N failed with `failure_recovery.scope=upstream_input` before any
-resource submission, workload execution, training step or checkpoint, and no
-activation remains live, repair Data in N and create a new Train bound to the
-replacement. Retain failed Tickets and their original bindings; do not advance
-N for this preflight repair. Otherwise Train freezes N's data. Initial iteration-0
-Data and the frozen scoring populations retain their existing restrictions.
+An unchanged recipe should reuse/repair its existing Ticket. A created Train
+Ticket does not by itself freeze N: if every Train in N is failed, cancelled,
+or awaiting input, has no live activation or queued retry, and has demonstrably
+never started training, revise Data in N. This includes a user-requested data
+change before training; an `upstream_input` failure is not required. Stop old
+execution first. A remote submission must be confirmed cancelled before its
+workload started; missing loss/progress or a cancellation request is not proof.
+Started or uncertain execution and any checkpoint still freeze N's data.
+Retain old Tickets and their original bindings; create the replacement Train
+in N with both data inputs bound to the revised Data. Record the cancellation
+replacement link when a user instruction caused the cancellation. For an
+existing explicit upstream-input review, the reviewed resume-inputs flow may
+instead resume the original waiting Train. Do not advance N merely because an
+untrained Train Ticket was created. Initial iteration-0 Data and the frozen
+scoring populations retain their existing restrictions.
 
 Data downloads or uploads the source once to the remote plane, performs detect,
 analysis, transformation and preparation there, and returns only a remote
