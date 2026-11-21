@@ -11,7 +11,7 @@
          Spline Sans Mono (telemetry / numbers). Deliberately distinct from the
          other four Zevo skins. -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Spline+Sans+Mono:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Spline+Sans+Mono:wght@400;500;600;700&family=Archivo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <title>Zevo</title>
@@ -23,6 +23,18 @@
           var saved = localStorage.getItem("zevo-theme");
           var light = saved ? saved === "light" : matchMedia("(prefers-color-scheme: light)").matches;
           if (light) document.documentElement.setAttribute("data-theme", "light");
+          // Light-theme candidates under review: ?light=paper&type=site picks
+          // and remembers; the chooser in the console bar does the same.
+          var q = new URLSearchParams(location.search);
+          var pick = function (param, key) {
+            var v = q.get(param);
+            if (v) localStorage.setItem(key, v);
+            return localStorage.getItem(key);
+          };
+          var variant = pick("light", "zevo-light-variant");
+          if (variant) document.documentElement.setAttribute("data-light", variant);
+          var type = pick("type", "zevo-type");
+          if (type) document.documentElement.setAttribute("data-type", type);
         } catch (e) {}
       })();
     </script>

@@ -8,6 +8,7 @@
 //
 // The Launch run button is not here — every page that can start a run offers it
 // in its own header, and ⌘K reaches it from anywhere.
+import { useState } from "react";
 import useSWR from "swr";
 import { Link } from "react-router-dom";
 import { Command, Moon, Sun } from "lucide-react";
@@ -15,7 +16,15 @@ import type { ModelDTO, RunStatistics } from "../../lib/api";
 import { fmtCost, fmtDuration } from "../../lib/format";
 import logoUrl from "../../assets/zevo-logo.png";
 import { fireCommand } from "../../lib/commands";
-import { useTheme, type Theme } from "../../lib/theme";
+import {
+  LIGHT_VARIANTS,
+  applyLightVariant,
+  applyTypeSet,
+  readLightVariant,
+  readTypeSet,
+  useTheme,
+  type Theme,
+} from "../../lib/theme";
 
 type CostTotal = { total_usd: number; gpu_usd: number; agent_usd: number };
 
@@ -46,9 +55,55 @@ function ThemeSwitch() {
     );
   };
   return (
-    <div role="radiogroup" aria-label="Colour theme" className="flex items-center gap-0.5 rounded-[9px] border border-hair bg-canvas p-0.5">
-      {seg("dark", Moon, "Dark theme")}
-      {seg("light", Sun, "Light theme")}
+    <>
+      <div role="radiogroup" aria-label="Colour theme" className="flex items-center gap-0.5 rounded-[9px] border border-hair bg-canvas p-0.5">
+        {seg("dark", Moon, "Dark theme")}
+        {seg("light", Sun, "Light theme")}
+      </div>
+      {import.meta.env.DEV && theme === "light" && <VariantPicker />}
+    </>
+  );
+}
+
+// Chooser for the light-theme candidates. Dev builds only: Vite drops it from
+// production. Goes away with the losing candidates once one is picked.
+function VariantPicker() {
+  const [variant, setVariant] = useState(readLightVariant);
+  const [type, setType] = useState(readTypeSet);
+  const pill = "flex items-center gap-0.5 rounded-[9px] border border-hair bg-canvas p-0.5 font-mono text-2xs uppercase tracking-[0.12em]";
+  const seg = (on: boolean) =>
+    "rounded-[7px] px-2 py-1 transition-colors " +
+    (on ? "bg-raised text-ink shadow-[inset_0_0_0_1px_rgb(var(--night-700))]" : "text-dim hover:text-ink");
+  return (
+    <div role="radiogroup" aria-label="Light theme candidate" className={pill}>
+      {LIGHT_VARIANTS.map((v) => (
+        <button
+          key={v}
+          type="button"
+          role="radio"
+          aria-checked={variant === v}
+          className={seg(variant === v)}
+          onClick={() => {
+            applyLightVariant(v);
+            setVariant(v);
+          }}
+        >
+          {v}
+        </button>
+      ))}
+      <span className="mx-1 h-4 w-px bg-hair" aria-hidden />
+      <button
+        type="button"
+        title="Swap between the console's typefaces and the website's"
+        className={seg(type === "site")}
+        onClick={() => {
+          const next = type === "site" ? "console" : "site";
+          applyTypeSet(next);
+          setType(next);
+        }}
+      >
+        {type === "site" ? "site type" : "console type"}
+      </button>
     </div>
   );
 }
@@ -79,7 +134,7 @@ export function ConsoleBar() {
   const mac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
   return (
-    <header className="sticky top-0 z-40 flex h-16 min-w-0 items-center border-b border-hair bg-panel/85 px-3 sm:px-5 backdrop-blur-md">
+    <header className="console-bar sticky top-0 z-40 flex h-16 min-w-0 items-center border-b border-hair bg-panel/85 px-3 sm:px-5 backdrop-blur-md">
       {/* Wordmark: the transparent Z artwork carries the letter, "evo" is text.
           items-baseline, not items-end: box-bottom alignment left "evo" riding
           ~6px high, because the text box reserves descender space that letters
