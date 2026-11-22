@@ -1102,3 +1102,21 @@ absolute original_config_path/proposed_config_path, exact hashes, changes and
 restart_mode=restart_parent. Do not bypass a rejection. After Orchestrator approval,
 use the exact approved candidate bytes. A change outside the task boundary requires
 an appropriate upstream decision/new experiment, not a disguised retry.
+
+
+### Explicit resume intent for configuration repair
+
+In `training.implementation_config`, declare `resume_mode: none` for a fresh
+attempt, with `resume_path` absent or null. For a checkpoint continuation use
+`resume_mode: checkpoint` and an absolute `resume_path`. Do not put descriptions
+or automatic discovery expressions in resume fields; put explanations in notes.
+Resolve checkpoint discovery before submitting a new configuration. Do not
+rewrite a frozen configuration merely to migrate its legacy resume fields.
+
+A Train-owned retuning retry starts from the original parent with fresh optimizer,
+scheduler, and trainer state. Disable implicit checkpoint discovery in the trainer,
+even when reusing an output directory. Explicit checkpoint continuation preserves
+the registered configuration bytes. A malformed resume declaration is a configuration
+to correct, not evidence that Train-owned tuning needs Orchestrator approval.
+Autonomous and reviewed configuration repairs use the same ownership boundaries
+and user pins; approval does not permit changing model, data, or inference protocol.
