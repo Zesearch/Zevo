@@ -8,6 +8,7 @@
 //
 // The Launch run button is not here — every page that can start a run offers it
 // in its own header, and ⌘K reaches it from anywhere.
+import { useState, type ChangeEvent } from "react";
 import useSWR from "swr";
 import { Link } from "react-router-dom";
 import { Command, Moon, Sun } from "lucide-react";
@@ -15,7 +16,18 @@ import type { ModelDTO, RunStatistics } from "../../lib/api";
 import { fmtCost, fmtDuration } from "../../lib/format";
 import logoUrl from "../../assets/zevo-logo.png";
 import { fireCommand } from "../../lib/commands";
-import { useTheme, type Theme } from "../../lib/theme";
+import {
+  LIGHT_VARIANTS,
+  TYPE_SETS,
+  applyLightVariant,
+  applyTypeSet,
+  readLightVariant,
+  readTypeSet,
+  useTheme,
+  type LightVariant,
+  type Theme,
+  type TypeSet,
+} from "../../lib/theme";
 
 type CostTotal = { total_usd: number; gpu_usd: number; agent_usd: number };
 
@@ -46,10 +58,54 @@ function ThemeSwitch() {
     );
   };
   return (
-    <div role="radiogroup" aria-label="Colour theme" className="flex items-center gap-0.5 rounded-[9px] border border-hair bg-canvas p-0.5">
-      {seg("dark", Moon, "Dark theme")}
-      {seg("light", Sun, "Light theme")}
-    </div>
+    <>
+      <div role="radiogroup" aria-label="Colour theme" className="flex items-center gap-0.5 rounded-[9px] border border-hair bg-canvas p-0.5">
+        {seg("dark", Moon, "Dark theme")}
+        {seg("light", Sun, "Light theme")}
+      </div>
+      {theme === "light" && <StylePicker />}
+    </>
+  );
+}
+
+// Light-theme styles, one dropdown: four palettes, each with the console's
+// own typefaces or the website's. The choice is remembered per browser.
+const PALETTES: Record<LightVariant, string> = {
+  cool: "Cool",
+  paper: "Paper",
+  plate: "Plate",
+  shade: "Shade",
+};
+function StylePicker() {
+  const [variant, setVariant] = useState(readLightVariant);
+  const [type, setType] = useState(readTypeSet);
+  const value = `${variant}:${type}`;
+  const onChange = (e: ChangeEvent<HTMLSelectElement>) => {
+    const [v, t] = e.target.value.split(":") as [LightVariant, TypeSet];
+    applyLightVariant(v);
+    applyTypeSet(t);
+    setVariant(v);
+    setType(t);
+  };
+  return (
+    <select
+      aria-label="Light theme style"
+      title="Light theme style"
+      value={value}
+      onChange={onChange}
+      className="h-8 cursor-pointer rounded-[9px] border border-hair bg-canvas px-2 font-mono text-2xs uppercase tracking-[0.12em] text-ink-soft hover:text-ink focus:outline-none"
+    >
+      {TYPE_SETS.map((t) => (
+        <optgroup key={t} label={t === "site" ? "Website type" : "Console type"}>
+          {LIGHT_VARIANTS.map((v) => (
+            <option key={`${v}:${t}`} value={`${v}:${t}`}>
+              {PALETTES[v]}
+              {t === "site" ? " · site" : ""}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
   );
 }
 
@@ -79,7 +135,7 @@ export function ConsoleBar() {
   const mac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
   return (
-    <header className="sticky top-0 z-40 flex h-16 min-w-0 items-center border-b border-hair bg-panel/85 px-3 sm:px-5 backdrop-blur-md">
+    <header className="console-bar sticky top-0 z-40 flex h-16 min-w-0 items-center border-b border-hair bg-panel/85 px-3 sm:px-5 backdrop-blur-md">
       {/* Wordmark: the transparent Z artwork carries the letter, "evo" is text.
           items-baseline, not items-end: box-bottom alignment left "evo" riding
           ~6px high, because the text box reserves descender space that letters

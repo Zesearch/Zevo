@@ -54,3 +54,34 @@ export function useTheme(): [Theme, (t: Theme) => void] {
   };
   return [theme, setTheme];
 }
+
+// Light-theme styles: a palette and a type set, one attribute each. The
+// stylesheet carries the blocks; this module flips the attributes.
+export const LIGHT_VARIANTS = ["cool", "paper", "plate", "shade"] as const;
+export type LightVariant = (typeof LIGHT_VARIANTS)[number];
+export const TYPE_SETS = ["console", "site"] as const;
+export type TypeSet = (typeof TYPE_SETS)[number];
+
+function attrState<T extends string>(attr: string, key: string, allowed: readonly T[]) {
+  const read = (): T => {
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved && (allowed as readonly string[]).includes(saved)) return saved as T;
+    } catch {
+      /* fall through to the default */
+    }
+    return allowed[0];
+  };
+  const apply = (value: T) => {
+    document.documentElement.setAttribute(attr, value);
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      /* page-only */
+    }
+  };
+  return [read, apply] as const;
+}
+
+export const [readLightVariant, applyLightVariant] = attrState<LightVariant>("data-light", "zevo-light-variant", LIGHT_VARIANTS);
+export const [readTypeSet, applyTypeSet] = attrState<TypeSet>("data-type", "zevo-type", TYPE_SETS);

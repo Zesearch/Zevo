@@ -86,9 +86,9 @@ export default {
         },
       },
       fontFamily: {
-        display: ['"Bricolage Grotesque"', "ui-sans-serif", "system-ui", "sans-serif"],
-        sans: ['"Instrument Sans"', "ui-sans-serif", "system-ui", "sans-serif"],
-        mono: ['"Spline Sans Mono"', "ui-monospace", "Menlo", "monospace"],
+        display: ["var(--font-display)"],
+        sans: ["var(--font-sans)"],
+        mono: ["var(--font-mono)"],
       },
       fontSize: {
         "2xs": ["0.8125rem", "1.05rem"], // 13px micro-labels

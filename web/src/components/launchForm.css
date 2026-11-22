@@ -2,12 +2,12 @@
    Colours come from the theme variables in styles.css so the flow reads
    on both grounds. */
 .launch-experience .field-label {
-  font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px; font-weight: 500; letter-spacing: 0.015em;
   text-transform: none; color: rgb(var(--night-300));
 }
 .launch-experience :is(input, textarea, select, button[aria-haspopup="listbox"]):not([type="checkbox"], [type="radio"], [type="file"], [type="hidden"]) {
-  font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif !important;
+  font-family: var(--font-sans) !important;
   font-size: 16px !important; font-weight: 400 !important; line-height: 1.5 !important;
   border-radius: 6px; padding: 11px 14px;
   background: rgb(var(--field)) !important; box-shadow: none !important;
@@ -26,9 +26,9 @@
 .launch-experience section[aria-label="Basic info"] > section { padding-top: 4px; }
 .launch-experience .text-xs { font-size: 14px; line-height: 1.5; }
 .launch-experience .text-2xs { font-size: 12px; line-height: 1.5; }
-.launch-experience .font-mono { font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; }
+.launch-experience .font-mono { font-family: var(--font-sans); }
 .launch-experience table[aria-label="Run configuration"] { font-size: 16px; line-height: 1.6; }
-.launch-select-menu [role="option"] { font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 16px; line-height: 1.5; }
+.launch-select-menu [role="option"] { font-family: var(--font-sans); font-size: 16px; line-height: 1.5; }
 .field-clear {
   position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
   display: flex; align-items: center; justify-content: center;
@@ -39,7 +39,7 @@
 .field-clear-multiline { top: 12px; transform: none; }
 .launch-next, .launch-back {
   display: inline-flex; align-items: center; justify-content: center; gap: 10px;
-  font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif; font-size: 15px;
+  font-family: var(--font-sans); font-size: 15px;
   transition: color 160ms ease, border-color 160ms ease;
 }
 .launch-next { padding: 11px 20px; border: 1px solid rgb(var(--night-600)); border-radius: 6px; background: rgb(var(--btn)); color: rgb(var(--night-100)); font-weight: 500; }
@@ -60,7 +60,7 @@
   padding: 4px !important; max-height: 256px !important;
   border: 1px solid rgb(var(--night-700)); border-radius: 6px; background: var(--panel);
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.24);
-  font-family: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
 }
 .launch-select-menu [role="option"], .launch-experience .launch-file-menu button {
   padding: 10px 12px; border-radius: 4px;
