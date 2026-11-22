@@ -162,3 +162,50 @@ def test_user_stop_of_retry_does_not_erase_original_execution_failure():
 def test_generic_cancel_text_does_not_prove_user_intent():
     ticket = _ticket("data-abnormal", agent="data", status="cancelled", error="cancelled by user")
     assert unresolved_ticket_issues([ticket], run=_run())[0]["code"] == "ticket_cancelled"
+
+
+def _abandoned_run():
+    run = _run(lifecycle={'abandoned_experiment_tickets': {'old': {
+        'orchestrator_ticket_id': 'orch', 'reason': 'reward has no learning signal',
+        'recorded_at': NOW.isoformat(),
+    }}})
+    run.supervisor_ticket_id = 'orch'
+    return run
+
+
+def test_abandoned_candidate_does_not_taint_successful_registration():
+    old = _ticket('old', agent='train', status='cancelled', iteration=11)
+    registry = _ticket('registry', agent='registry', status='succeeded', iteration=15)
+    run = _abandoned_run()
+    assert unresolved_ticket_issues([old, registry], run=run) == []
+    assert old.status == 'cancelled'
+    failed = _ticket('failure', agent='evaluation', status='failed', iteration=16)
+    assert [i['ticket_id'] for i in unresolved_ticket_issues([old, registry, failed], run=run)] == ['failure']
+
+
+@pytest.mark.parametrize('case', ['no_registry', 'registry_failed', 'no_tag', 'same_iteration',
+    'dependency', 'transitive_dependency', 'held_out', 'baseline', 'failed_ticket',
+    'wrong_supervisor', 'missing_reason', 'prior_failure'])
+def test_abandonment_cannot_hide_required_or_unresolved_work(case):
+    run = _abandoned_run()
+    old = _ticket('old', agent='train', status='cancelled', iteration=11)
+    registry = _ticket('registry', agent='registry', status='succeeded', iteration=15)
+    tickets = [old, registry]
+    if case == 'no_registry': tickets.remove(registry)
+    if case == 'registry_failed': registry.status = 'failed'
+    if case == 'no_tag': run.registry_version_tag = ''
+    if case == 'same_iteration': registry.iteration = 11
+    if case == 'dependency': registry.inputs = {'model': {'source_ticket_id': old.id}}
+    if case == 'transitive_dependency':
+        parent = _ticket('parent', agent='train', status='succeeded', iteration=15)
+        parent.inputs = {'parent_model': {'source_ticket_id': old.id}}
+        registry.inputs = {'model': {'source_ticket_id': parent.id}}
+        tickets.append(parent)
+    if case == 'held_out': old.lane = 'held_out_test'
+    if case == 'baseline': old.iteration = 0
+    if case == 'failed_ticket': old.status = 'failed'
+    if case == 'wrong_supervisor': run.supervisor_ticket_id = 'other'
+    if case == 'missing_reason': run.lifecycle['abandoned_experiment_tickets']['old']['reason'] = ''
+    if case == 'prior_failure': tickets.append(_ticket('prior', agent='train', status='failed', iteration=11, created_offset=-1))
+    expected = 'prior' if case == 'prior_failure' else 'old'
+    assert expected in {i['ticket_id'] for i in unresolved_ticket_issues(tickets, run=run)}

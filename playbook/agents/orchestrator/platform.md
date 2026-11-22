@@ -834,8 +834,8 @@ champion, cancel each live stage through `api_routes.cancel_ticket` with
 Do not supply a replacement ticket for this intentional stop. This records the
 user's decision without treating the cancelled stage as an unresolved failure.
 Do not use this flag for execution errors, infrastructure failures, or your own
-decision to abandon an experiment. Those remain degraded unless successfully
-resolved. Once registration and all ordinary completion requirements are met,
+decision to abandon an experiment. Use the experiment-abandonment contract below
+for that decision; unresolved failures remain degraded. Once registration and all ordinary completion requirements are met,
 finish as success. Preserve unrelated failures and the cancellation audit.
 
 ### Mid-training Validation orchestration
@@ -986,3 +986,23 @@ longer useful; never reset repair counts by replacing the Ticket.
 Return `wait` after a repair authorization. Both paths retain the original
 Ticket/iteration, failed activation history and cumulative repair budget. The
 engine releases the repaired Ticket only after your heartbeat succeeds.
+
+
+### Deliberately abandon a candidate experiment
+
+When measured evidence makes an optimization candidate unproductive, record the
+plan decision when cancelling its unfinished Ticket. POST `api_routes.cancel_ticket`
+with `{"experiment_abandoned": true, "orchestrator_ticket_id": "<your active Ticket ID>",
+"reason": "<evidence and why this candidate is being abandoned>"}`. Do not claim a
+user instruction or fabricate a replacement. The backend retains the cancelled
+Ticket, logs and audit; this is not successful execution. The same request may
+annotate an already-cancelled Ticket while this Run's Orchestrator is active.
+It cannot relabel a failed or completed Ticket.
+
+Only non-baseline optimization Data/Train/Inference/Evaluation candidates qualify.
+Never use this for held-out work, infrastructure, Registry, or a dependency of the
+selected model. A cancelled experiment ceases to be a final Run issue only after
+another model is registered successfully and the cancelled work is outside that
+registration's dependency chain. All other completion requirements and unrelated
+failures still apply. Ordinary cancellation without this explicit record remains
+an unresolved issue; do not infer intent from old cancellation messages.
