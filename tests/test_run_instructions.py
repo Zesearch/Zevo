@@ -585,3 +585,78 @@ async def test_intentional_stop_can_finish_success_but_an_exception_stays_degrad
         result = await patch_run("run-1", PatchRunRequest(status="degraded"), db)
         assert result.status == "degraded"
         assert "test-001" in result.halted_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('already_cancelled', [False, True])
+async def test_orchestrator_can_record_experiment_abandonment(client_and_session, monkeypatch, already_cancelled):
+    from zevo.api.routers.shared.tickets import CancelTicketBody, cancel_ticket
+    from zevo.engine.run import remote_jobs
+    _, Session = client_and_session
+    calls = []
+    async def stop(db, ticket):
+        calls.append(ticket.id)
+        return {'ok': True}
+    monkeypatch.setattr(remote_jobs, 'cancel_ticket_remote_job', stop)
+    async with Session() as db:
+        supervisor = await db.get(Ticket, 'orchestrate-001')
+        supervisor.status = 'running'
+        ticket = await db.get(Ticket, 'train-001')
+        ticket.iteration = 11
+        ticket.summary = 'No learning signal; original evidence retained'
+        if already_cancelled: ticket.status = 'cancelled'
+        await db.commit()
+        body = CancelTicketBody(experiment_abandoned=True, orchestrator_ticket_id=supervisor.id,
+                                reason='reward variance too low')
+        await cancel_ticket(ticket.id, db=db, body=body)
+        run = await db.get(Run, ticket.run_id)
+        audit = run.lifecycle['abandoned_experiment_tickets'][ticket.id]
+        assert audit['reason'] == 'reward variance too low' and audit['recorded_at']
+        assert ticket.status == 'cancelled' and ticket.summary.startswith('No learning signal')
+        await cancel_ticket(ticket.id, db=db, body=body)
+        assert run.lifecycle['abandoned_experiment_tickets'][ticket.id] == audit
+        assert calls == [ticket.id, ticket.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['inactive_supervisor', 'wrong_supervisor', 'held_out', 'baseline', 'failed', 'required'])
+async def test_abandonment_api_preserves_boundaries(client_and_session, monkeypatch, case):
+    from fastapi import HTTPException
+    from zevo.api.routers.shared.tickets import CancelTicketBody, cancel_ticket
+    from zevo.engine.run import remote_jobs
+    _, Session = client_and_session
+    async def unexpected(*args, **kwargs):
+        raise AssertionError('invalid cancellation must not reach remote cleanup')
+    monkeypatch.setattr(remote_jobs, 'cancel_ticket_remote_job', unexpected)
+    async with Session() as db:
+        supervisor = await db.get(Ticket, 'orchestrate-001')
+        supervisor.status = 'running'
+        ticket = await db.get(Ticket, 'train-001')
+        ticket.iteration = 11
+        if case == 'inactive_supervisor': supervisor.status = 'succeeded'
+        if case == 'held_out': ticket.lane = 'held_out_test'
+        if case == 'baseline': ticket.iteration = 0
+        if case == 'failed': ticket.status = 'failed'
+        if case == 'required':
+            db.add(Ticket(id='registry', run_id=ticket.run_id, agent_id='registry', status='queued',
+                          iteration=15, inputs={'model': {'source_ticket_id': ticket.id}}))
+        await db.commit()
+        with pytest.raises(HTTPException):
+            await cancel_ticket(ticket.id, db=db, body=CancelTicketBody(experiment_abandoned=True,
+                orchestrator_ticket_id='wrong' if case == 'wrong_supervisor' else supervisor.id, reason='abandon'))
+        assert not (await db.get(Run, ticket.run_id)).lifecycle.get('abandoned_experiment_tickets')
+
+
+@pytest.mark.parametrize('payload', [
+    {'experiment_abandoned': True, 'reason': 'stop'},
+    {'experiment_abandoned': True, 'orchestrator_ticket_id': 'orch', 'reason': ' '},
+    {'experiment_abandoned': True, 'orchestrator_ticket_id': 'orch', 'reason': 'stop', 'user_requested_stop': True},
+    {'experiment_abandoned': True, 'orchestrator_ticket_id': 'orch', 'reason': 'stop', 'instruction_id': 'instruction'},
+    {'experiment_abandoned': True, 'orchestrator_ticket_id': 'orch', 'reason': 'stop', 'replacement_ticket_id': 'replacement'},
+    {'orchestrator_ticket_id': 'orch'},
+])
+def test_abandonment_requires_unambiguous_intent(payload):
+    from pydantic import ValidationError
+    from zevo.api.routers.shared.tickets import CancelTicketBody
+    with pytest.raises(ValidationError):
+        CancelTicketBody.model_validate(payload)

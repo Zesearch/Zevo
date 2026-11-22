@@ -2043,6 +2043,8 @@ async def post_progress(
 
 
 class CancelTicketBody(StrictBody):
+    experiment_abandoned: bool = False
+    orchestrator_ticket_id: str = ""
     user_requested_stop: bool = False
     instruction_id: str = ""
     replacement_ticket_id: str = ""
@@ -2050,6 +2052,13 @@ class CancelTicketBody(StrictBody):
 
     @model_validator(mode="after")
     def complete_replacement(self) -> "CancelTicketBody":
+        if self.experiment_abandoned:
+            if (not self.orchestrator_ticket_id.strip() or not self.reason.strip()
+                    or self.user_requested_stop or self.instruction_id or self.replacement_ticket_id):
+                raise ValueError("Experiment abandonment requires orchestrator_ticket_id and reason, without user-stop or replacement fields")
+            return self
+        if self.orchestrator_ticket_id:
+            raise ValueError("orchestrator_ticket_id requires experiment_abandoned")
         if self.user_requested_stop:
             if not self.instruction_id.strip() or not self.reason.strip() or self.replacement_ticket_id:
                 raise ValueError("User-requested stop requires instruction_id and reason, without a replacement")
@@ -2070,6 +2079,29 @@ async def cancel_ticket(
     t = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
     if t is None:
         raise HTTPException(404, f"ticket {ticket_id} not found")
+    if body is not None and body.experiment_abandoned:
+        from zevo.engine.run.outcome import can_abandon_experiment, registration_dependencies
+        if not can_abandon_experiment(t):
+            raise HTTPException(422, "Only optimization candidate experiments can be abandoned; not baseline, held-out, infrastructure or Registry")
+        if t.status in TERMINAL_TICKET_STATUSES and t.status != "cancelled":
+            raise HTTPException(409, "Cannot relabel a completed or failed ticket as abandoned")
+        run = (await db.execute(select(Run).where(Run.id == t.run_id).with_for_update())).scalar_one()
+        supervisor = await db.get(Ticket, body.orchestrator_ticket_id)
+        if (supervisor is None or supervisor.id != run.supervisor_ticket_id
+                or supervisor.run_id != t.run_id or supervisor.agent_id != "orchestrator"
+                or supervisor.lane != "optimization" or supervisor.status != "running"
+                or run.status not in {"running", "planning"}):
+            raise HTTPException(409, "Experiment abandonment requires this Run's active Orchestrator")
+        tickets = (await db.scalars(select(Ticket).where(Ticket.run_id == t.run_id))).all()
+        if t.id in registration_dependencies(tickets):
+            raise HTTPException(409, "Cannot abandon a required Registry dependency")
+        lifecycle = dict(run.lifecycle or {})
+        records = dict(lifecycle.get("abandoned_experiment_tickets") or {})
+        records.setdefault(t.id, {"orchestrator_ticket_id": supervisor.id,
+            "reason": body.reason.strip(), "recorded_at": datetime.now(timezone.utc).isoformat()})
+        lifecycle["abandoned_experiment_tickets"] = records
+        run.lifecycle = lifecycle
+        await db.commit()
     if body is not None and body.user_requested_stop:
         if t.status in TERMINAL_TICKET_STATUSES:
             raise HTTPException(409, "User-requested stop must be recorded before the stage ends")
@@ -2129,7 +2161,8 @@ async def cancel_ticket(
     # it sees it. We can't kill the process from the backend container
     # directly (separate process), so the DB flag is the signal.
     t.status = "cancelled"
-    t.error_message = "cancelled by user"
+    t.error_message = ("experiment abandoned by orchestrator"
+                       if body is not None and body.experiment_abandoned else "cancelled by user")
     await db.commit()
     from zevo.engine.run.remote_jobs import cancel_ticket_remote_job
     remote_job = await cancel_ticket_remote_job(db, t)

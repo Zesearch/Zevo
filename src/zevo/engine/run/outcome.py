@@ -76,6 +76,31 @@ def _limit_reaped(ticket: Any) -> bool:
     return bool(re.search(r"(?i)\brun limit reached\b", text))
 
 
+def registration_dependencies(tickets: Iterable[Any]) -> set[str]:
+    """Protect Registry inputs transitively, including cross-iteration parents."""
+    tickets = list(tickets)
+    by_id = {str(t.id): t for t in tickets}
+    roots = [t for t in tickets if t.agent_id == "registry"
+             and t.status not in {"cancelled", "failed", "skipped"}]
+    required = {str(t.id) for t in tickets if any(
+        t.iteration == root.iteration for root in roots)}
+    pending = list(required)
+    while pending:
+        ticket = by_id.get(pending.pop())
+        for binding in (getattr(ticket, "inputs", None) or {}).values():
+            source = binding.get("source_ticket_id") if isinstance(binding, dict) else None
+            if source and source not in required:
+                required.add(source)
+                pending.append(source)
+    return required
+
+
+def can_abandon_experiment(ticket: Any) -> bool:
+    return (getattr(ticket, "lane", "optimization") == "optimization"
+            and ticket.agent_id in {"data", "train", "inference", "evaluation"}
+            and ticket.iteration > 0)
+
+
 def unresolved_ticket_issues(tickets: Iterable[Any], *, run: Any = None) -> list[dict[str, Any]]:
     """Describe current unresolved worker failures, excluding old attempts.
 
@@ -89,6 +114,18 @@ def unresolved_ticket_issues(tickets: Iterable[Any], *, run: Any = None) -> list
     lifecycle = getattr(run, "lifecycle", None) or {}
     resolutions = lifecycle.get("cancelled_ticket_replacements", {})
     user_cancellations = lifecycle.get("user_requested_stage_cancellations", {})
+    abandoned = lifecycle.get("abandoned_experiment_tickets", {})
+    required = registration_dependencies(tickets)
+    registered = bool(getattr(run, "registry_version_tag", "")) and any(
+        t.agent_id == "registry" and t.status == "succeeded" for t in tickets)
+
+    def intentionally_abandoned(ticket):
+        record = abandoned.get(str(ticket.id), {})
+        return (registered and ticket.status == "cancelled"
+                and can_abandon_experiment(ticket) and ticket.id not in required
+                and record.get("orchestrator_ticket_id") == getattr(run, "supervisor_ticket_id", None)
+                and all(record.get(k) for k in ("orchestrator_ticket_id", "reason", "recorded_at")))
+
     slots: dict[tuple[str, str, int, str, str], list[Any]] = defaultdict(list)
     for ticket in tickets:
         if str(getattr(ticket, "agent_id", "") or "") == "orchestrator":
@@ -100,7 +137,7 @@ def unresolved_ticket_issues(tickets: Iterable[Any], *, run: Any = None) -> list
         # A deliberate stop of a retry does not resolve an earlier real failure.
         rows = [
             row for row in rows
-            if not (
+            if not intentionally_abandoned(row) and not (
                 str(getattr(row, "status", "")) == "cancelled"
                 and all(user_cancellations.get(str(row.id), {}).get(key)
                         for key in ("instruction_id", "reason", "recorded_at"))
