@@ -55,8 +55,8 @@ export function useTheme(): [Theme, (t: Theme) => void] {
   return [theme, setTheme];
 }
 
-// Light-theme candidates under local review. One attribute each; the
-// stylesheet carries the blocks. Remove with the losing candidates.
+// Light-theme styles: a palette and a type set, one attribute each. The
+// stylesheet carries the blocks; this module flips the attributes.
 export const LIGHT_VARIANTS = ["cool", "paper", "plate", "shade"] as const;
 export type LightVariant = (typeof LIGHT_VARIANTS)[number];
 export const TYPE_SETS = ["console", "site"] as const;

@@ -8,7 +8,7 @@
 //
 // The Launch run button is not here — every page that can start a run offers it
 // in its own header, and ⌘K reaches it from anywhere.
-import { useState } from "react";
+import { useState, type ChangeEvent } from "react";
 import useSWR from "swr";
 import { Link } from "react-router-dom";
 import { Command, Moon, Sun } from "lucide-react";
@@ -18,12 +18,15 @@ import logoUrl from "../../assets/zevo-logo.png";
 import { fireCommand } from "../../lib/commands";
 import {
   LIGHT_VARIANTS,
+  TYPE_SETS,
   applyLightVariant,
   applyTypeSet,
   readLightVariant,
   readTypeSet,
   useTheme,
+  type LightVariant,
   type Theme,
+  type TypeSet,
 } from "../../lib/theme";
 
 type CostTotal = { total_usd: number; gpu_usd: number; agent_usd: number };
@@ -60,51 +63,49 @@ function ThemeSwitch() {
         {seg("dark", Moon, "Dark theme")}
         {seg("light", Sun, "Light theme")}
       </div>
-      {import.meta.env.DEV && theme === "light" && <VariantPicker />}
+      {theme === "light" && <StylePicker />}
     </>
   );
 }
 
-// Chooser for the light-theme candidates. Dev builds only: Vite drops it from
-// production. Goes away with the losing candidates once one is picked.
-function VariantPicker() {
+// Light-theme styles, one dropdown: four palettes, each with the console's
+// own typefaces or the website's. The choice is remembered per browser.
+const PALETTES: Record<LightVariant, string> = {
+  cool: "Cool",
+  paper: "Paper",
+  plate: "Plate",
+  shade: "Shade",
+};
+function StylePicker() {
   const [variant, setVariant] = useState(readLightVariant);
   const [type, setType] = useState(readTypeSet);
-  const pill = "flex items-center gap-0.5 rounded-[9px] border border-hair bg-canvas p-0.5 font-mono text-2xs uppercase tracking-[0.12em]";
-  const seg = (on: boolean) =>
-    "rounded-[7px] px-2 py-1 transition-colors " +
-    (on ? "bg-raised text-ink shadow-[inset_0_0_0_1px_rgb(var(--night-700))]" : "text-dim hover:text-ink");
+  const value = `${variant}:${type}`;
+  const onChange = (e: ChangeEvent<HTMLSelectElement>) => {
+    const [v, t] = e.target.value.split(":") as [LightVariant, TypeSet];
+    applyLightVariant(v);
+    applyTypeSet(t);
+    setVariant(v);
+    setType(t);
+  };
   return (
-    <div role="radiogroup" aria-label="Light theme candidate" className={pill}>
-      {LIGHT_VARIANTS.map((v) => (
-        <button
-          key={v}
-          type="button"
-          role="radio"
-          aria-checked={variant === v}
-          className={seg(variant === v)}
-          onClick={() => {
-            applyLightVariant(v);
-            setVariant(v);
-          }}
-        >
-          {v}
-        </button>
+    <select
+      aria-label="Light theme style"
+      title="Light theme style"
+      value={value}
+      onChange={onChange}
+      className="h-8 cursor-pointer rounded-[9px] border border-hair bg-canvas px-2 font-mono text-2xs uppercase tracking-[0.12em] text-ink-soft hover:text-ink focus:outline-none"
+    >
+      {TYPE_SETS.map((t) => (
+        <optgroup key={t} label={t === "site" ? "Website type" : "Console type"}>
+          {LIGHT_VARIANTS.map((v) => (
+            <option key={`${v}:${t}`} value={`${v}:${t}`}>
+              {PALETTES[v]}
+              {t === "site" ? " · site" : ""}
+            </option>
+          ))}
+        </optgroup>
       ))}
-      <span className="mx-1 h-4 w-px bg-hair" aria-hidden />
-      <button
-        type="button"
-        title="Swap between the console's typefaces and the website's"
-        className={seg(type === "site")}
-        onClick={() => {
-          const next = type === "site" ? "console" : "site";
-          applyTypeSet(next);
-          setType(next);
-        }}
-      >
-        {type === "site" ? "site type" : "console type"}
-      </button>
-    </div>
+    </select>
   );
 }
 

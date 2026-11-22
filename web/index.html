@@ -23,8 +23,8 @@
           var saved = localStorage.getItem("zevo-theme");
           var light = saved ? saved === "light" : matchMedia("(prefers-color-scheme: light)").matches;
           if (light) document.documentElement.setAttribute("data-theme", "light");
-          // Light-theme candidates under review: ?light=paper&type=site picks
-          // and remembers; the chooser in the console bar does the same.
+          // Light-theme style: ?light=paper&type=site picks and remembers; the
+          // dropdown in the console bar does the same.
           var q = new URLSearchParams(location.search);
           var pick = function (param, key) {
             var v = q.get(param);

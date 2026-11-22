@@ -439,13 +439,12 @@ h1, h2, h3, .font-display {
   .animate-validation-drawer { animation: none; }
 }
 
-/* ── Light-theme candidates (local review only) ──────────────────────────
-   Each block re-cuts the ramps for one candidate; `data-light` on <html>
-   picks it. The website's palette is the source: paper #F7F6F2, shade
-   #EFEDE6, plate #FFFFFF, ink #0E0E0C, one vermilion signal #E4572E. Failure
-   moves from coral to cranberry so it never reads as the accent. Once a
-   candidate is chosen its block replaces the default light block above and
-   the others go. */
+/* ── Light-theme styles ───────────────────────────────────────────────────
+   Each block re-cuts the ramps for one palette; `data-light` on <html>
+   picks it (no attribute = the cool cut above). The website's palette is
+   the source: paper #F7F6F2, shade #EFEDE6, plate #FFFFFF, ink #0E0E0C,
+   one vermilion signal #E4572E. Failure moves from coral to cranberry so it
+   never reads as the accent. */
 :root[data-theme="light"][data-light="paper"] {
   --night-50: 14 14 12; /* #0E0E0C */
   --night-100: 26 26 22; /* #1A1A16 */
@@ -621,7 +620,7 @@ h1, h2, h3, .font-display {
   --shadow-bezel: 0 1px 0 rgb(14 14 12 / 0.05);
 }
 
-/* Shade candidate: the console bar is the website's inverted counter-beat
+/* Shade: the console bar is the website's inverted counter-beat
    (noir ground, chalk type). The ramps are re-declared on the bar so every
    utility inside it resolves against noir; the semantic names must be
    re-declared too, since :root computed them against its own ramps. */
@@ -694,7 +693,7 @@ h1, h2, h3, .font-display {
 }
 :root[data-theme="light"][data-light="shade"] .console-bar .zevo-logo { filter: none; }
 
-/* Type candidates: the console's own faces, or the website's (Archivo for
+/* Type sets: the console's own faces, or the website's (Archivo for
    display and UI, JetBrains Mono for the apparatus). */
 :root[data-type="site"] {
   --font-display: Archivo, ui-sans-serif, system-ui, sans-serif;
