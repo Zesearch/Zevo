@@ -293,3 +293,84 @@ def test_new_implementation_field_still_honors_explicit_pin(tmp_path):
         'implementation_config': {'lora_adapter_modules_expected': 112}})
     with pytest.raises(ValueError, match='user pin'):
         verify_repair_training_config(row, path, train_input=inp)
+
+
+@pytest.mark.parametrize('implementation,expected', [
+    ({'resume_mode': 'none'}, 'none'),
+    ({'resume_mode': 'checkpoint', 'resume_path': '/run/checkpoint-10'}, 'checkpoint'),
+    ({'resume_from_checkpoint': False}, 'none'),
+    ({'resume_from_checkpoint': '/run/checkpoint-10'}, 'checkpoint'),
+])
+def test_explicit_resume_intent(implementation, expected):
+    from zevo.contracts.training_resume import resume_mode
+    assert resume_mode(implementation) == expected
+
+
+@pytest.mark.parametrize('implementation', [
+    {'resume_mode': 'auto'},
+    {'resume_mode': 'none', 'resume_path': '/old/checkpoint'},
+    {'resume_mode': 'checkpoint'},
+    {'resume_mode': 'checkpoint', 'resume_path': 'relative/checkpoint'},
+    {'resume_mode': 'none', 'resume': True},
+    {'resume_from_checkpoint': 'auto-detected newest checkpoint-* under output_dir, else none'},
+])
+def test_ambiguous_resume_is_not_guessed(implementation):
+    from zevo.contracts.training_resume import resume_mode
+    with pytest.raises(ValueError):
+        resume_mode(implementation)
+
+
+def test_legacy_prose_can_be_corrected_for_fresh_retuning(tmp_path):
+    row, path, value = fresh_repair(tmp_path)
+    original = yaml.safe_load(row.meta['training_config_snapshot'])
+    original['training']['implementation_config']['resume_from_checkpoint'] = 'auto-detected newest checkpoint, else none'
+    raw = yaml.safe_dump(original)
+    row.meta.update(training_config_snapshot=raw, training_config_sha256=hashlib.sha256(raw.encode()).hexdigest())
+    value['training']['learning_rate'] = 2e-5
+    value['training']['implementation_config']['resume_mode'] = 'none'
+    path.write_text(yaml.safe_dump(value))
+    verify_repair_training_config(row, path, train_input=SimpleNamespace())
+    assert row.meta['training_config_retry_audit']['restart_mode'] == 'restart_parent'
+
+
+@pytest.mark.parametrize('case', ['loss_kernel', 'parallelism', 'pin', 'model', 'resume'])
+def test_reviewed_repair_uses_same_ownership_rules(tmp_path, monkeypatch, case):
+    import asyncio
+    from fastapi import HTTPException
+    from zevo.engine.run import reviewed_recovery
+    from zevo.contracts import configuration
+    row, path, value = fresh_repair(tmp_path)
+    original = tmp_path / 'original.yaml'
+    original.write_text(row.meta['training_config_snapshot'])
+    payload = {}
+    if case == 'loss_kernel':
+        value['loss_contract']['objective_config']['loss_type'] = 'nll'
+    if case == 'parallelism':
+        value['training'].update(world_size=2, distributed={'backend': 'ddp'})
+    if case == 'pin':
+        payload = {'configuration_pins': {'learning_rate': 1e-5}}
+        value['training']['learning_rate'] = 2e-5
+    if case == 'model': value['model'] = 'other'
+    if case == 'resume':
+        value['training']['learning_rate'] = 2e-5
+        value['training']['implementation_config'].update(resume_mode='checkpoint', resume_path='/old/checkpoint')
+    path.write_text(yaml.safe_dump(value))
+    fields = dict(original_config_path=str(original), proposed_config_path=str(path),
+                  original_sha256=row.meta['training_config_sha256'],
+                  proposed_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    proposal = SimpleNamespace(**fields, model_dump=lambda: fields)
+    async def latest(*args):
+        return {'request': {'training_configuration_change': fields}}
+    monkeypatch.setattr(reviewed_recovery, 'latest_request', latest)
+    # Test approval policy independently from the full TrainConfig schema.
+    monkeypatch.setattr(configuration, 'load_train_config', lambda p:
+                        SimpleNamespace(model_dump=lambda: yaml.safe_load(Path(p).read_text())))
+    from pathlib import Path
+    action = reviewed_recovery.approve_configuration(None,
+        SimpleNamespace(agent_id='train', payload=payload), row,
+        SimpleNamespace(training_configuration_change=proposal, execution_attempt=1), 'heartbeat')
+    if case in {'pin', 'model', 'resume'}:
+        with pytest.raises(HTTPException): asyncio.run(action)
+    else:
+        asyncio.run(action)
+        assert row.meta['training_configuration_approval']['configuration_diff']

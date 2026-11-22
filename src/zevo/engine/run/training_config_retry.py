@@ -245,5 +245,6 @@ def _classify_train_changes(audit, before, after, inp):
 
     if any(c.get('train_owned') and not c['execution_only'] for c in audit['changes']):
         impl = training.get('implementation_config', {})
-        if any(impl.get(key) for key in ('resume_from_checkpoint', 'resume_checkpoint', 'resume')):
+        from zevo.contracts.training_resume import resume_mode
+        if resume_mode(impl) != 'none':
             raise ValueError('Train-owned tuning must restart from the original parent, not a checkpoint continuation')

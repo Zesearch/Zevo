@@ -428,7 +428,8 @@ async def test_configuration_change_only_runs_after_review_and_exact_hash(repair
     assert (await db.get(WorkProduct, 'product')).path == '/durable/checkpoint-735'
     approval = execution.meta['training_configuration_approval']
     assert approval['restart_mode'] == 'restart_parent'
-    assert approval['configuration_diff']['learning_rate'] == {'before':0.01, 'after':0.001}
+    assert approval['configuration_diff']['training.learning_rate']['before'] == 0.01
+    assert approval['configuration_diff']['training.learning_rate']['after'] == 0.001
 
 
 @pytest.mark.asyncio
@@ -580,7 +581,7 @@ async def test_repair_chain_allows_waiting_ancestors_but_not_unrelated_work(repa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('field', ['parent_model','world_size'])
-async def test_config_review_cannot_change_experiment_or_resource_identity(repair_db,tmp_path,monkeypatch,field):
+async def test_config_review_cannot_change_experiment_or_pinned_parallelism(repair_db,tmp_path,monkeypatch,field):
     import json
     from zevo.db import TicketNotice
     from zevo.engine.run.reviewed_recovery import WAIT_CODE
@@ -588,7 +589,9 @@ async def test_config_review_cannot_change_experiment_or_resource_identity(repai
     proposal,paths=await configuration_proposal(db,ticket,execution,tmp_path,monkeypatch)
     config=json.loads(paths[1].read_text())
     if field=='parent_model': config[field]='different-model'
-    else: config['training'][field]=8
+    else:
+        ticket.payload = {**(ticket.payload or {}), 'configuration_pins': {'world_size': 1}}
+        config['training'][field]=8
     paths[1].write_text(json.dumps(config))
     proposal=proposal.model_copy(update={'proposed_sha256':hashlib.sha256(paths[1].read_bytes()).hexdigest()})
     notice=await db.scalar(select(TicketNotice).where(TicketNotice.ticket_id==ticket.id,TicketNotice.code==WAIT_CODE))

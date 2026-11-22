@@ -1161,6 +1161,10 @@ class TrainingConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_realized_batch_and_peft(self) -> "TrainingConfig":
+        # Historical frozen configs remain loadable; explicit new intent is strict.
+        if "resume_mode" in self.implementation_config or "resume_path" in self.implementation_config:
+            from zevo.contracts.training_resume import resume_mode
+            resume_mode(self.implementation_config)
         if self.adaptive_evaluation and self.early_stopping is not None:
             raise ValueError("adaptive Validation decisions cannot be combined with loss early stopping")
         tensor_parallel = self.distributed.tensor_parallel_size if self.distributed else 1

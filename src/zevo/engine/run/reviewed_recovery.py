@@ -152,17 +152,24 @@ async def approve_configuration(session, ticket, row, request, heartbeat_id):
     except (OSError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from exc
     before, after = configs
-    # Permit numerical/execution tuning, not a different model, data or protocol.
-    if {k:v for k,v in before.items() if k != "training"} != {k:v for k,v in after.items() if k != "training"}:
-        raise HTTPException(409, "Configuration repair must preserve model, data, method and inference protocol")
-    for key in ("data_selection", "world_size", "distributed", "lora_r", "lora_alpha", "lora_dropout", "lora_target_modules"):
-        if before["training"].get(key) != after["training"].get(key):
-            raise HTTPException(409, f"Configuration repair cannot change training.{key}")
-    for key, value in (ticket.payload or {}).get("configuration_pins", {}).items():
-        if key in after["training"] and after["training"].get(key) != value:
-            raise HTTPException(409, f"Configuration repair violates user pin {key}")
-    changes = {k: {"before":before["training"].get(k), "after":v}
-               for k,v in after["training"].items() if before["training"].get(k) != v}
+    # Apply the same ownership and pin rules as autonomous fresh-attempt repair.
+    from types import SimpleNamespace
+    from zevo.engine.run.training_config_retry import compare_registered
+    payload = ticket.payload or {}
+    try:
+        audit = compare_registered({
+            "training_config_sha256": proposal.original_sha256,
+            "training_config_snapshot": Path(proposal.original_config_path).read_text(),
+        }, proposal.proposed_config_path, train_input=SimpleNamespace(**{
+            key: payload.get(key, {}) for key in
+            ("configuration_pins", "method_config_pins", "loss_objective_pins")
+        }))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    blocked = [c["path"] for c in audit["changes"] if not c.get("train_owned")]
+    if blocked:
+        raise HTTPException(409, "Configuration repair changes protected task boundaries: " + ", ".join(blocked))
+    changes = {c["path"]: c for c in audit["changes"]}
     if not changes or proposal.original_sha256 == proposal.proposed_sha256:
         raise HTTPException(422, "Configuration repair must contain an actual change")
     row.meta = {**(row.meta or {}), "training_configuration_approval": {
