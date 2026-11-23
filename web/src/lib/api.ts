@@ -361,7 +361,6 @@ export type CancelOutcome = {
 
 export type RunSummary = {
   lifecycle?: {
-    token_budget_remeasurements?: Array<{ lane: string; status: string }>;
     model_save_policy?: import("../components/ModelSaveFields").ModelSavePolicy;
     model_storage?: { storage: "hf" | "remote"; path: string; revision: string };
     finalization?: {

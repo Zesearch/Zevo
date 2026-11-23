@@ -1044,7 +1044,8 @@ def test_benchmark_progress_uses_identity_not_display_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
+@pytest.mark.parametrize("consolidated", [False, True])
+async def test_heldout_suite_uses_one_inference_with_member_queries(consolidated) -> None:
     from zevo.engine.run.runner import (
         _build_evaluation_suite_members,
         _build_holdout_suite_members,
@@ -1132,10 +1133,29 @@ async def test_heldout_suite_uses_one_inference_with_member_queries() -> None:
             for name in ("math", "qa")
         ]
         db.add_all(predictions)
+        if consolidated:
+            # Baseline consolidation removed an envelope; iteration 2 still
+            # owns 004. Counting the three surviving evaluations collides.
+            db.add_all([
+                Ticket(id=tid, run_id=run.id, agent_id="evaluation",
+                       lane="held_out_test", iteration=iteration,
+                       status="succeeded", payload={}, inputs={})
+                for tid, iteration in [
+                    ("holdout-eval-suite-ru-001", 0),
+                    ("holdout-infer-suite-ru-002-eval", 1),
+                    ("holdout-eval-suite-ru-004", 2),
+                ]
+            ])
         await db.commit()
         evaluations = await _spawn_holdout_suite_evals(
             db, run, ticket, enqueue=False,
         )
+        assert evaluations[0].id == (
+            "holdout-eval-suite-ru-005" if consolidated else "holdout-eval-suite-ru-001"
+        )
+        await db.refresh(evaluations[0])  # Normalize SQLite's timestamp round trip.
+        repeated = await _spawn_holdout_suite_evals(db, run, ticket, enqueue=False)
+        assert repeated[0].id == evaluations[0].id
         assert [item.payload["test_set_name"] for item in evaluations] == ["math"]
         scoring_members = await _build_evaluation_suite_members(
             evaluations[0], dict(evaluations[0].payload or {}),

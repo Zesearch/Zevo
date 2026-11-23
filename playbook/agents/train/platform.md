@@ -664,6 +664,11 @@ only the method-valid `objective_config` keys. For SFT, chat normally targets
 assistant messages, completion targets the completion span, and text targets
 all tokens. The selected Skill/TRL implementation must make that mask real;
 chat-template generation markers alone do not choose the loss.
+After an execution attempt, changing unpinned `loss_contract.objective_config`
+parameters such as GRPO `beta` requires a structured configuration-change
+proposal and Orchestrator approval, followed by a fresh restart from the original
+parent. It is not a checkpoint continuation or an autonomous repair. Equivalent
+SFT `nll`/`chunked_nll` implementation changes remain Train-owned.
 These are defaults, not user pins. SFT may select `all_tokens` with prompt
 tokens supervised, or `answer_tokens` for chat/completion when reliable source
 answer spans identify the exact final-answer tokens. Never guess an answer span.
