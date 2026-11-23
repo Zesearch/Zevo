@@ -93,7 +93,7 @@ function StylePicker() {
       title="Light theme style"
       value={value}
       onChange={onChange}
-      className="h-8 cursor-pointer rounded-[9px] border border-hair bg-canvas px-2 font-mono text-2xs uppercase tracking-[0.12em] text-ink-soft hover:text-ink focus:outline-none"
+      className="h-8 cursor-pointer rounded-[9px] border border-hair bg-canvas px-2 font-mono text-2xs uppercase tracking-[0.12em] text-ink focus:outline-none"
     >
       {TYPE_SETS.map((t) => (
         <optgroup key={t} label={t === "site" ? "Website type" : "Console type"}>
