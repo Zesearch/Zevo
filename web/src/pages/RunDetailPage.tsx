@@ -1,3 +1,4 @@
+import { MeasurementStatus } from "../components/MeasurementStatus";
 import { operationCaption, stageAttemptLabel, withRepairLabel } from "../lib/stageLabels";
 import { withOrchestratorRepairLabel } from "../lib/orchestratorLabel";
 import { ExecutionPhase } from "../components/ExecutionPhase";
@@ -1524,6 +1525,7 @@ export function RunDetailPage() {
 
           {run.history?.length > 0 && (
             <div className="mt-6 flex flex-[3] flex-col border-t border-hair py-5">
+              <MeasurementStatus run={run} />
               <IterationChart history={run.history} metricDirection={run.validation_metric_direction} metric={run.validation_metric} />
             </div>
           )}

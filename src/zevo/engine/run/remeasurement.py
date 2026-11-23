@@ -762,7 +762,8 @@ async def advance(session: AsyncSession, run_id: str, *, lane: str | None = None
                     bindings[member] = candidates[0].id
                 item["evaluation_predictions"] = bindings
                 primary = next(p for p in products if p.id == bindings[name])
-                kwargs = dict(enqueue=False, predictions_product=primary, ticket_id=item["evaluation_id"])
+                kwargs = dict(enqueue=False, predictions_product=primary, ticket_id=item["evaluation_id"],
+                              reuse_source_ticket=bool(batch.get("reuse_tickets")))
                 if batch["lane"] == "held_out_test":
                     evaluation = await _spawn_holdout_eval(session, run, inference, test_set_name=name, **kwargs)
                 else:
@@ -772,6 +773,23 @@ async def advance(session: AsyncSession, run_id: str, *, lane: str | None = None
                 item["evaluation_id"] = evaluation.id
                 if batch.get("reuse_tickets"):
                     await _begin_attempt(session, run, batch, item, evaluation, "evaluation")
+                    # A partial replay can change the primary member. Preserve the
+                    # old payload in the attempt, then bind this attempt's scorer.
+                    from zevo.contracts.tickets import validate_stored_payload
+                    member = next(m for m in _suite(run, batch["lane"]) if m["name"] == name)
+                    evaluation.payload = validate_stored_payload(
+                        agent_id="evaluation", input_format="typed", payload={
+                            "test_set_name": name if batch["lane"] == "held_out_test" else "validation:" + name,
+                            "scoring_set": member["test_set" if batch["lane"] == "held_out_test" else "validation_set"],
+                            "metric": member["metric"],
+                            "evaluation_config": ({"prediction_column": member["prediction_column"]}
+                                                  if member.get("prediction_column") else {}),
+                            "evaluation_script": member.get("evaluation_script") or "",
+                            "evaluator_sha256": member.get("evaluator_sha256") or "",
+                            "answer_fields": list(member.get("answer_fields") or []),
+                            "sample_submission": member["sample_submission"],
+                            "code_execution_adapter": member.get("code_execution_adapter") or "",
+                        })
                     evaluation.inputs = {**(evaluation.inputs or {}), "predictions": {
                         "source_ticket_id": inference.id, "artifact_role": "predictions",
                         "work_product_id": primary.id, "path": primary.path,

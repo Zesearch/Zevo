@@ -8171,6 +8171,7 @@ async def _spawn_validation_eval(
     predictions_product: WorkProduct | None = None,
     enqueue: bool = True,
     ticket_id: str = "",
+    reuse_source_ticket: bool = False,
 ) -> Ticket | None:
     """Score one engine-created Validation-suite inference."""
     from zevo.contracts.tickets import validate_stored_payload
@@ -8191,8 +8192,8 @@ async def _spawn_validation_eval(
         )
     )).scalars().all()
     existing = next((
-        candidate for candidate in duplicate
-        if (candidate.payload or {}).get("test_set_name") == marker
+        candidate for candidate in sorted(duplicate, key=lambda row: (row.created_at, row.id))
+        if (reuse_source_ticket or (candidate.payload or {}).get("test_set_name") == marker)
         and str(((candidate.inputs or {}).get("predictions") or {}).get(
             "source_ticket_id"
         ) or "") == source.id
@@ -8449,6 +8450,7 @@ async def _spawn_holdout_eval(
     predictions_product: WorkProduct | None = None,
     enqueue: bool = True,
     ticket_id: str = "",
+    reuse_source_ticket: bool = False,
 ) -> Ticket | None:
     """Score held-out predictions with the Task's custom or built-in metric."""
     from zevo.engine.run.wakeup import queue_wakeup
@@ -8470,10 +8472,10 @@ async def _spawn_holdout_eval(
         )
     )).scalars().all()
     existing = next((
-        ticket for ticket in existing_rows
+        ticket for ticket in sorted(existing_rows, key=lambda row: (row.created_at, row.id))
         if int(ticket.iteration or 0) == iteration
-        and str((ticket.payload or {}).get("test_set_name") or "")
-            == test_set_name
+        and (reuse_source_ticket or str((ticket.payload or {}).get("test_set_name") or "")
+            == test_set_name)
         and str(((ticket.inputs or {}).get("predictions") or {}).get(
             "source_ticket_id"
         ) or "") == source.id

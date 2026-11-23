@@ -83,6 +83,11 @@ def upsert_history_fact(
     elif isinstance(old_test, (int, float)) and not isinstance(old_test, bool):
         entry["test_score"] = float(old_test)
 
+    # Refreshing Validation must not discard previously published Test members.
+    for field in ("test_scores", "test_metrics", "test_metric_directions"):
+        if isinstance(existing.get(field), dict):
+            entry[field] = dict(existing[field])
+
     if index >= 0:
         rows[index] = entry
     else:

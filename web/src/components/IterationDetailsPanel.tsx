@@ -1,3 +1,4 @@
+import { MeasurementStatus } from "./MeasurementStatus";
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { ChevronRight, X } from "lucide-react";
@@ -202,6 +203,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
 
   return (
     <div className="space-y-5">
+      <MeasurementStatus run={run} />
       {groups.map((group) => {
         const isCollapsed = collapsed.has(group.key);
         const data = group.activeData.find((item) => item.role === "training_dataset");
@@ -292,7 +294,7 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
           journal?.test_metrics,
           journal?.test_metric_directions,
           testAggregate == null ? null : {
-            name: testArtifacts[0]?.name || "Final Test",
+            name: "Test average",
             score: testAggregate,
             metric: run.metric,
             direction: run.metric_direction,

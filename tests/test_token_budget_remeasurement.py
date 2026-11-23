@@ -1349,3 +1349,32 @@ def test_active_attempt_resolves_ticket_in_its_own_lane():
                        'cohort': [{'inference_id': lane, 'inference_attempt': {'marker': lane}}]})
     assert rm.active_attempt(run, 'optimization') == {'marker': 'optimization'}
     assert rm.active_attempt(run, 'held_out_test') == {'marker': 'held_out_test'}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lane", ["optimization", "held_out_test"])
+async def test_remeasurement_reuses_evaluation_when_primary_member_changes(scenario, lane):
+    session, run, originals, root = scenario
+    for ticket in originals:
+        ticket.lane = lane
+    if lane == "held_out_test":
+        run.holdout = {**run.holdout, "test_sets": run.holdout["validation_sets"]}
+    source = originals[-1]
+    old = Ticket(id="original-evaluation", run_id=run.id, agent_id="evaluation",
+                 lane=lane, iteration=source.iteration, status="succeeded",
+                 payload={"test_set_name": "qa" if lane == "held_out_test" else ""},
+                 inputs={"predictions": {"source_ticket_id": source.id}})
+    session.add(old)
+    await session.commit()
+    assert await rm.intercept_completion(session, source)
+    await finish_inference(session, source, root)
+    await rm.advance(session, run.id)
+    item = rm.pending(run, lane)["cohort"][0]
+    assert item["evaluation_id"] == old.id
+    assert item["evaluation_attempt"]["previous_status"] == "succeeded"
+    assert item["evaluation_attempt"]["previous_payload"]["test_set_name"] == ("qa" if lane == "held_out_test" else "")
+    assert old.payload["test_set_name"] == ("math" if lane == "held_out_test" else "validation:math")
+    assert old.inputs["predictions"]["work_product_id"] == item["evaluation_predictions"]["math"]
+    assert len((await session.scalars(select(Ticket).where(Ticket.agent_id == "evaluation"))).all()) == 1
+    await rm.advance(session, run.id)
+    assert item["evaluation_id"] == old.id
