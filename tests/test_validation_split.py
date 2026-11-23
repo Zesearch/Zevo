@@ -2829,3 +2829,16 @@ async def test_run_cannot_finish_between_private_remeasurement_tickets(session_f
         assert error.value.status_code == 409
         assert "measurement revisions" in error.value.detail
         assert run.status == "running"
+
+
+def test_validation_refresh_preserves_test_suite_without_mutating_history():
+    from zevo.engine.observe.run_metrics import upsert_history_fact
+    prior = [{"iteration": 0, "source": "baseline", "score": .2,
+              "test_score": .3, "test_scores": {"a": .2, "b": .4},
+              "test_metrics": {"a": "accuracy", "b": "accuracy"},
+              "test_metric_directions": {"a": "max", "b": "max"}}]
+    refreshed = upsert_history_fact(prior, iteration=0, source="baseline", score=.5)
+    for key in ("test_score", "test_scores", "test_metrics", "test_metric_directions"):
+        assert refreshed[0][key] == prior[0][key]
+    refreshed[0]["test_scores"]["a"] = .9
+    assert prior[0]["test_scores"]["a"] == .2
