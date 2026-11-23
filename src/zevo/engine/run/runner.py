@@ -8165,6 +8165,16 @@ async def _spawn_validation_suite_evals(
     return created
 
 
+async def _next_evaluation_ticket_id(session: AsyncSession, prefix: str) -> str:
+    """Allocate past existing numeric IDs, including gaps left by consolidation."""
+    ids = (await session.scalars(
+        select(Ticket.id).where(Ticket.id.startswith(prefix))
+    )).all()
+    numbers = [int(value[len(prefix):]) for value in ids
+               if value[len(prefix):].isdigit()]
+    return f"{prefix}{max(numbers, default=0) + 1:03d}"
+
+
 async def _spawn_validation_eval(
     session: AsyncSession, run: Run, source: Ticket, *,
     member_name: str = "",
@@ -8219,7 +8229,6 @@ async def _spawn_validation_eval(
             ),
         },
     )
-    count = len(duplicate) + 1
     prediction_binding = (
         {
             "source_ticket_id": source.id,
@@ -8236,7 +8245,8 @@ async def _spawn_validation_eval(
         }
     )
     ticket = Ticket(
-        id=ticket_id or f"validation-eval-{run.id[:8]}-{count:03d}",
+        id=ticket_id or await _next_evaluation_ticket_id(
+            session, f"validation-eval-{run.id[:8]}-"),
         run_id=run.id,
         agent_id="evaluation",
         status="queued",
@@ -8483,7 +8493,8 @@ async def _spawn_holdout_eval(
     if existing is not None:
         return existing
 
-    tid = ticket_id or f"holdout-eval-{run.id[:8]}-{len(existing_rows) + 1:03d}"
+    tid = ticket_id or await _next_evaluation_ticket_id(
+        session, f"holdout-eval-{run.id[:8]}-")
     payload = validate_stored_payload(
         agent_id="evaluation",
         input_format="typed",

@@ -152,7 +152,8 @@ async def approve_configuration(session, ticket, row, request, heartbeat_id):
     except (OSError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from exc
     before, after = configs
-    # Apply the same ownership and pin rules as autonomous fresh-attempt repair.
+    # Apply user pins first. Review may approve objective hyperparameters that
+    # Train cannot change autonomously, but not model/data/method identity.
     from types import SimpleNamespace
     from zevo.engine.run.training_config_retry import compare_registered
     payload = ticket.payload or {}
@@ -166,9 +167,17 @@ async def approve_configuration(session, ticket, row, request, heartbeat_id):
         }))
     except (OSError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
-    blocked = [c["path"] for c in audit["changes"] if not c.get("train_owned")]
+    blocked = [c["path"] for c in audit["changes"]
+               if not c.get("train_owned")
+               and not c["path"].startswith("loss_contract.objective_config.")]
     if blocked:
         raise HTTPException(409, "Configuration repair changes protected task boundaries: " + ", ".join(blocked))
+    from zevo.contracts.training_resume import resume_mode
+    try:
+        if resume_mode(after.get("training", {}).get("implementation_config", {})) != "none":
+            raise ValueError("Reviewed configuration changes must restart from the original parent, not a checkpoint continuation")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     changes = {c["path"]: c for c in audit["changes"]}
     if not changes or proposal.original_sha256 == proposal.proposed_sha256:
         raise HTTPException(422, "Configuration repair must contain an actual change")

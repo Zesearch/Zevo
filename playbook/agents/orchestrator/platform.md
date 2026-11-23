@@ -976,7 +976,11 @@ exact `execution_attempt`, reason, evidence, and that exact
 `training_configuration_change` object. This permits only the proposed hash,
 from the original parent with fresh optimizer/plan state (`restart_parent`),
 not continuation from the prior attempt. Data, model, method, inference protocol,
-resource topology and user pins cannot change. Do not rewrite the candidate:
+resource topology and user pins cannot change. Within the same training method,
+unpinned `loss_contract.objective_config` parameters (for example GRPO `beta`)
+may change with this explicit approval; review the effect on the objective, not
+only the execution-memory benefit. These parameters are not autonomous Train
+repair choices. Do not rewrite the candidate:
 ask Train to prepare a new proposal if the requested change is wrong. If a
 configuration guard escalated without a structured proposal, an unchanged-config
 `resubmit` may authorize a bounded diagnostic/proposal preparation, not a changed

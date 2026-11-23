@@ -333,16 +333,31 @@ def test_legacy_prose_can_be_corrected_for_fresh_retuning(tmp_path):
     assert row.meta['training_config_retry_audit']['restart_mode'] == 'restart_parent'
 
 
-@pytest.mark.parametrize('case', ['loss_kernel', 'parallelism', 'pin', 'model', 'resume'])
-def test_reviewed_repair_uses_same_ownership_rules(tmp_path, monkeypatch, case):
+@pytest.mark.parametrize('case', ['loss_kernel', 'parallelism', 'pin', 'model', 'resume',
+                                 'beta', 'beta_pin', 'beta_resume', 'data', 'method', 'inference'])
+def test_reviewed_repair_distinguishes_approval_from_ownership(tmp_path, monkeypatch, case):
     import asyncio
     from fastapi import HTTPException
     from zevo.engine.run import reviewed_recovery
     from zevo.contracts import configuration
     row, path, value = fresh_repair(tmp_path)
+    if case.startswith('beta'):
+        value['training_method'] = 'grpo'
+        value['loss_contract']['objective_config'] = {'beta': 0.02}
+        raw = yaml.safe_dump(value)
+        row.meta.update(training_config_snapshot=raw,
+                        training_config_sha256=hashlib.sha256(raw.encode()).hexdigest())
     original = tmp_path / 'original.yaml'
     original.write_text(row.meta['training_config_snapshot'])
     payload = {}
+    if case.startswith('beta'):
+        value['loss_contract']['objective_config']['beta'] = 0.0
+        if case == 'beta_pin': payload = {'loss_objective_pins': {'beta': 0.02}}
+        if case == 'beta_resume':
+            value['training']['implementation_config'].update(resume_mode='checkpoint', resume_path='/old/checkpoint')
+    if case == 'data': value['data_signature'] = 'other'
+    if case == 'method': value['training_method'] = 'grpo'
+    if case == 'inference': value['inference_config_sha256'] = 'other'
     if case == 'loss_kernel':
         value['loss_contract']['objective_config']['loss_type'] = 'nll'
     if case == 'parallelism':
@@ -369,8 +384,16 @@ def test_reviewed_repair_uses_same_ownership_rules(tmp_path, monkeypatch, case):
     action = reviewed_recovery.approve_configuration(None,
         SimpleNamespace(agent_id='train', payload=payload), row,
         SimpleNamespace(training_configuration_change=proposal, execution_attempt=1), 'heartbeat')
-    if case in {'pin', 'model', 'resume'}:
+    if case in {'pin', 'model', 'resume', 'beta_pin', 'beta_resume', 'data', 'method', 'inference'}:
         with pytest.raises(HTTPException): asyncio.run(action)
     else:
         asyncio.run(action)
         assert row.meta['training_configuration_approval']['configuration_diff']
+        if case == 'beta':
+            change = row.meta['training_configuration_approval']['configuration_diff']['loss_contract.objective_config.beta']
+            assert change['requires_orchestrator_review'] and not change['train_owned']
+            # Approval is not effective until the reviewing heartbeat finishes.
+            with pytest.raises(ValueError):
+                verify_repair_training_config(row, path, train_input=SimpleNamespace())
+            row.meta['training_configuration_approval']['released'] = True
+            verify_repair_training_config(row, path, train_input=SimpleNamespace())

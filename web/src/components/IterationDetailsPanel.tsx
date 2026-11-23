@@ -1,4 +1,3 @@
-import { MeasurementStatus } from "./MeasurementStatus";
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { ChevronRight, X } from "lucide-react";
@@ -122,7 +121,6 @@ function benchmarkPerformance(
   scores: Record<string, number> | undefined,
   metrics: Record<string, string> | undefined,
   directions: Record<string, "min" | "max"> | undefined,
-  fallback: BenchmarkPerformance | null,
 ): BenchmarkPerformance[] {
   const rows = Object.entries(scores || {}).flatMap(([name, score]) => {
     const numeric = numericScore(score);
@@ -134,7 +132,7 @@ function benchmarkPerformance(
       direction: directions?.[name] === "min" ? "min" as const : "max" as const,
     }];
   });
-  return rows.length ? rows : fallback ? [fallback] : [];
+  return rows;
 }
 
 export function IterationDetailsPanel({ run }: { run: RunDetail }) {
@@ -203,7 +201,6 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
 
   return (
     <div className="space-y-5">
-      <MeasurementStatus run={run} />
       {groups.map((group) => {
         const isCollapsed = collapsed.has(group.key);
         const data = group.activeData.find((item) => item.role === "training_dataset");
@@ -282,25 +279,14 @@ export function IterationDetailsPanel({ run }: { run: RunDetail }) {
           journal?.validation_scores,
           journal?.validation_metrics,
           journal?.validation_metric_directions,
-          validationAggregate == null ? null : {
-            name: validationArtifacts[0]?.name || "Validation",
-            score: validationAggregate,
-            metric: run.validation_metric,
-            direction: run.validation_metric_direction,
-          },
         );
         const testPerformance = benchmarkPerformance(
           journal?.test_scores,
           journal?.test_metrics,
           journal?.test_metric_directions,
-          testAggregate == null ? null : {
-            name: "Test average",
-            score: testAggregate,
-            metric: run.metric,
-            direction: run.metric_direction,
-          },
         );
-        const hasEvaluation = validationPerformance.length > 0 || testPerformance.length > 0;
+        const hasEvaluation = validationAggregate != null || testAggregate != null
+          || validationPerformance.length > 0 || testPerformance.length > 0;
 
         return (
           <section key={group.key} className="overflow-hidden rounded-bezel border border-hair bg-panel/60">
@@ -539,7 +525,7 @@ function PerformanceSuite({
         <div>
           <Kicker strong className={accent}>{title}</Kicker>
           <p className="mt-1 font-mono text-2xs text-slate-500">
-            {rows.length} benchmark{rows.length === 1 ? "" : "s"} evaluated
+            {rows.length ? `${rows.length} benchmark${rows.length === 1 ? "" : "s"} evaluated` : "—"}
           </p>
         </div>
         {aggregate != null && (
