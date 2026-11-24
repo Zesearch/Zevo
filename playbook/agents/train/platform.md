@@ -561,6 +561,20 @@ that format. Do this in Train, not by rebuilding Data. A missing system turn or
 inference-query wrapper in raw task data is also Train's rendering responsibility.
 Do not treat failure of the inference extraction regex as proof that source gold
 is unavailable; use explicit gold fields or a documented unambiguous source parser.
+For multiple-choice Training records, validate reliable source gold against that
+record's actual option labels, not a baseline benchmark's `answer_regex` or
+`answer_column`. An A-J question with gold G is valid even when the bound baseline
+member extracts only A-D. Do not discard, re-letter or rewrite such gold merely
+to satisfy that member's extraction range; do not ask Data to rebuild valid rows.
+Use `validate_choice_gold(gold, option_labels=...)` from the response helper, and
+pass those same labels to `validate_training_response`. Obtain labels from the
+source's structured options or a documented unambiguous parser, never from gold
+alone or an assumed contiguous range. Missing/ambiguous options in task-specific
+choice data require Data clarification; generic SFT does not require options.
+Keep task-applicable output syntax and tokenizer/template alignment checks, plus
+gold/span agreement and post-truncation supervision checks. Leave all frozen
+Validation/Test extraction configurations unchanged. Training labels and each
+benchmark's evaluation extraction range have different scopes.
 Never drop existing reasoning or invent reasoning to satisfy a template. If the frozen prompt demands absent behavior (including reasoning), report
 the conflict to Orchestrator for Data/protocol repair; never silently rewrite
 the frozen Inference config.

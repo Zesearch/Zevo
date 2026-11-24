@@ -182,7 +182,10 @@ def test_shard_merge_keeps_multiple_real_requests_per_row(tmp_path: Path) -> Non
 
 def test_completed_benchmark_survives_another_worker_failure(tmp_path: Path) -> None:
     predict = tmp_path / "predict.py"
-    predict.write_text(FAKE_PREDICT, encoding="utf-8")
+    # Failure follows a benchmark, not a fixed GPU: replicas now steal work.
+    predict.write_text(FAKE_PREDICT.replace(
+        'if os.environ.get("FAKE_FAIL_MASK") == os.environ["CUDA_VISIBLE_DEVICES"]:',
+        'if members[0]["name"] == "benchmark 1":'), encoding="utf-8")
     suite = _suite(tmp_path, [1300, 1400])
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="0,1", TMPDIR="/tmp", FAKE_FAIL_MASK="1",
                FAKE_FAIL_AFTER_ARTIFACT=str(tmp_path / "benchmark-0/predictions.csv"))
@@ -276,9 +279,12 @@ def test_interrupted_batches_resume_without_duplicate_predictions(tmp_path):
     assert first.returncode != 0
     member = json.loads(suite.read_text())['members'][0]
     assert not Path(member['output']).exists()
+    # Retry may have a different replica count; committed batch identity is stable.
+    command[command.index('--allocated-gpus') + 1] = '2'
+    env['CUDA_VISIBLE_DEVICES'] = '0,1'
     second = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     assert second.returncode == 0, second.stdout + second.stderr
-    assert trace.read_text().splitlines() == ['0', '128', '128', '256']
+    assert sorted(trace.read_text().splitlines(), key=int) == ['0', '128', '128', '256']
     with open(member['output']) as handle:
         assert [row['id'] for row in csv.DictReader(handle)] == list(map(str, range(300)))
     records = json.loads(Path(member['diagnostics']).read_text())['records']
@@ -288,4 +294,4 @@ def test_interrupted_batches_resume_without_duplicate_predictions(tmp_path):
     Path(member['config']).write_text(Path(member['config']).read_text() + 'seed: 42\n')
     third = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     assert third.returncode == 0, third.stdout + third.stderr
-    assert trace.read_text().splitlines()[-3:] == ['0', '128', '256']
+    assert sorted(trace.read_text().splitlines()[-3:], key=int) == ['0', '128', '256']

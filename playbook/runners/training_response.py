@@ -8,6 +8,20 @@ from __future__ import annotations
 import re
 
 
+def validate_choice_gold(gold: str, *, option_labels: list[str]) -> None:
+    """Validate source gold against this record's explicit options, not an eval regex.
+
+    The caller obtains labels from structured source options or a documented,
+    unambiguous source parser. Do not infer them from the gold or a benchmark.
+    """
+    if (not option_labels or len(set(option_labels)) != len(option_labels)
+            or any(not isinstance(x, str) or not re.fullmatch(r"[A-Z]", x)
+                   for x in option_labels)):
+        raise ValueError("choice validation requires unique explicit A-Z option labels")
+    if gold not in option_labels:
+        raise ValueError("source gold is not among this training record's options")
+
+
 def _answer_line(template: str | None, gold: str | None) -> str:
     if (not template or template.count("{answer}") != 1
             or "{" in template.replace("{answer}", "")
@@ -66,6 +80,7 @@ def validate_training_response(
     required_format: str = "preserve", gold: str | None = None,
     answer_token_span: tuple[int, int] | None = None,
     answer_template: str | None = None,
+    option_labels: list[str] | None = None,
 ) -> None:
     """Check actual constructed response and post-truncation labels before training.
 
@@ -73,6 +88,8 @@ def validate_training_response(
     the actual tokenizer. For answer tasks it must cover the final gold answer.
     Call for each supervised turn/branch. This does not replace prefix-mask checks.
     """
+    if option_labels is not None:
+        validate_choice_gold(gold, option_labels=option_labels)
     if response != expected_response:
         raise ValueError("training response changed source content outside approved adaptation")
     if required_format not in {"preserve", "boxed", "answer_line"}:

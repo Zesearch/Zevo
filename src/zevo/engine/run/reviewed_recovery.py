@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from datetime import timezone
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -13,6 +15,11 @@ from zevo.engine.run.failure_policy import MAX_REPAIR_ATTEMPTS
 
 WAIT_CODE = "repair.review_required"
 DEPENDENCY_CODE = "repair.upstream_dependency"
+
+
+def _utc(value):
+    # SQLite returns naive UTC; PostgreSQL preserves the timezone.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 def waiting_for_review(ticket):
@@ -96,6 +103,7 @@ async def restore_inputs(session, run, ticket, request, row):
     if ticket.agent_id == "train" and not await _train_allows_input_repair(session, ticket):
         raise HTTPException(409, "Train inputs cannot change after execution or a checkpoint")
     bindings = dict(ticket.inputs or {})
+    config_changes = None
     for name, product_id in request.input_products.items():
         old = bindings.get(name)
         product = await session.get(WorkProduct, product_id)
@@ -112,7 +120,18 @@ async def restore_inputs(session, run, ticket, request, row):
             if not linked:
                 raise HTTPException(409, "New upstream Ticket must explicitly repair this waiting Ticket")
         # Frozen model/measurement identity is not a data repair permission.
-        if name in {"inference_config", "parent_checkpoint", "parent_train_config", "train_config"}:
+        if name == "inference_config":
+            previous = await session.get(WorkProduct, old.get("work_product_id"))
+            if (ticket.agent_id != "train" or previous is None
+                    or previous.ticket_id != source.id or source.agent_id != "inference"
+                    or (source.payload or {}).get("model_source") != "base_model"
+                    or (source.payload or {}).get("base_model") != (ticket.payload or {}).get("base_model")
+                    or _utc(previous.created_at) > _utc(ticket.created_at)
+                    or _utc(product.created_at) > _utc(ticket.created_at)):
+                raise HTTPException(409, "Train may only rebind existing members of its own frozen baseline before submission")
+            config_changes = compatible_training_member(previous.path, product.path,
+                pins=[run.decision_pins or {}, (ticket.payload or {}).get("configuration_pins", {})])
+        elif name in {"parent_checkpoint", "parent_train_config", "train_config"}:
             raise HTTPException(409, "Frozen model and measurement bindings require a new experiment")
         bindings[name] = {**old, "source_ticket_id": source.id,
                           "work_product_id": product.id, "path": product.path}
@@ -129,8 +148,49 @@ async def restore_inputs(session, run, ticket, request, row):
     session.add(TicketNotice(ticket_id=ticket.id, code="repair.inputs_rebound", severity="info",
         body=json.dumps({"previous_inputs": ticket.inputs, "inputs": bindings,
             "previous_data_signature": (ticket.payload or {}).get("data_signature"),
-            "data_signature": payload.get("data_signature")})))
+            "data_signature": payload.get("data_signature"),
+            "inference_member_change": config_changes})))
     ticket.inputs, ticket.payload = bindings, payload
+
+
+def compatible_training_member(old_path, new_path, *, pins):
+    """A narrow baseline-member selection, never permission to edit evaluation."""
+    from zevo.contracts.configuration import load_inference_config
+    try:
+        before, after = [load_inference_config(p).model_dump() for p in (old_path, new_path)]
+        changes = {}
+        def compare(a, b, path=""):
+            if isinstance(a, dict) and isinstance(b, dict):
+                for key in a.keys() | b.keys():
+                    compare(a.get(key), b.get(key), f"{path}.{key}" if path else key)
+            elif a != b:
+                changes[path] = {"before": a, "after": b}
+        compare(before, after)
+        allowed = {"measurement.inference_config.answer_regex", "measurement.max_new_tokens"}
+        if set(changes) - allowed:
+            raise ValueError("baseline member changes protected model, prompt or decoding fields")
+        regex = changes.get("measurement.inference_config.answer_regex")
+        if regex:
+            a, b = regex['before'], regex['after']
+            pattern = r"\[A-([A-Z])\]"
+            old_ranges, new_ranges = re.findall(pattern, a), re.findall(pattern, b)
+            if (not old_ranges or len(old_ranges) != len(new_ranges)
+                    or re.sub(pattern, "CHOICE_RANGE", a) != re.sub(pattern, "CHOICE_RANGE", b)
+                    or any(x > y for x, y in zip(old_ranges, new_ranges))):
+                raise ValueError("only widening existing A-Z choice capture ranges is permitted")
+        def check_pins(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if any(path.rsplit('.', 1)[-1] == key for path in changes):
+                        raise ValueError(f"cannot change pinned {key}")
+                    check_pins(item)
+        for pin in pins:
+            check_pins(pin)
+        return {"changes": changes,
+                "previous_sha256": hashlib.sha256(Path(old_path).read_bytes()).hexdigest(),
+                "sha256": hashlib.sha256(Path(new_path).read_bytes()).hexdigest()}
+    except (OSError, ValueError, TypeError) as exc:
+        raise HTTPException(409, f"Incompatible frozen baseline member: {exc}") from exc
 
 
 async def approve_configuration(session, ticket, row, request, heartbeat_id):

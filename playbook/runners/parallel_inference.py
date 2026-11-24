@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import os
 import queue
 import subprocess
@@ -133,12 +132,10 @@ def _member_identity(member, model, predict):
 
 
 def _partitions(
-    members: list[dict], worker_count: int, root: Path,
+    members: list[dict], root: Path,
 ) -> tuple[list[Part], list[int], set[int]]:
     loaded = [_csv_rows(member["questions"]) for member in members]
     counts = [len(rows) for _, rows in loaded]
-    total = sum(counts)
-    target = max(1, math.ceil(total / max(1, worker_count)))
     parts: list[Part] = []
     complete: set[int] = set()
     for index, member in enumerate(members):
@@ -149,12 +146,9 @@ def _partitions(
             print(f"[parallel] reuse complete benchmark {member['name']}", flush=True)
             complete.add(index)
             continue
-        nshards = min(worker_count, max(1, math.ceil(len(rows) / target)))
-        for shard in range(nshards):
-            start = len(rows) * shard // nshards
-            end = len(rows) * (shard + 1) // nshards
-            if start == end:
-                continue
+        # Fixed boundaries survive a retry with a different replica count.
+        for shard, start in enumerate(range(0, len(rows), 128)):
+            end = min(start + 128, len(rows))
             part = Part(index, start, end, member)
             part_dir = root / f"m{index:03d}-s{shard:02d}"
             part.questions = str(part_dir / "questions.csv")
@@ -163,16 +157,6 @@ def _partitions(
             _write_csv(Path(part.questions), fields, rows[start:end])
             parts.append(part)
     return parts, counts, complete
-
-
-def _allocate(parts: list[Part], worker_count: int) -> list[list[Part]]:
-    assigned: list[list[Part]] = [[] for _ in range(worker_count)]
-    loads = [0] * worker_count
-    for part in sorted(parts, key=lambda item: (-item.size, item.member_index, item.start)):
-        worker = min(range(worker_count), key=lambda item: (loads[item], item))
-        assigned[worker].append(part)
-        loads[worker] += part.size
-    return assigned
 
 
 def _worker_environment(base: dict[str, str], root: Path, devices: list[str]) -> dict[str, str]:
@@ -286,7 +270,8 @@ def _predict_resumable(adapter, engine, member, config, *, model, predict, ticke
     root = os.environ.get("ZEVO_STAGE_RESUME_ROOT") or str(Path(member.get("_resume_root", member["output"])).parent / ".zevo-resume")
     identity = {"stage": "inference", "model": model, "config": config,
                 "implementation": stage_resume.digest(Path(predict).read_text()),
-                "benchmark": member["benchmark_id"], "questions": stage_resume.digest(rows),
+                "benchmark": member["benchmark_id"], "row_offset": int(member.get("_row_offset", 0)),
+                "questions": stage_resume.digest(rows),
                 "schema": Path(member["sample_submission"]).read_text()}
     collected, diagnostics, n_unparseable = [], [], 0
     with tempfile.TemporaryDirectory(prefix="prediction-batch-") as scratch:
@@ -360,7 +345,9 @@ def _resident_worker(predict: str, model: str, manifest: str, summary: str,
                      ticket: str, gate: str, calibrate: bool, resident: bool = True) -> int:
     """Load once, calibrate assigned whole benchmarks, then generate shards."""
     import importlib.util
-    members = json.loads(Path(manifest).read_text())["members"]
+    manifest_data = json.loads(Path(manifest).read_text())
+    members = manifest_data["members"]
+    claims = Path(manifest_data["claims"])
     stage_resume.AllocationWindow().check(ticket, estimated_seconds=120)
     adapter, engine = None, None
     if resident:
@@ -382,9 +369,11 @@ def _resident_worker(predict: str, model: str, manifest: str, summary: str,
     helper = _calibration_helper() if calibrate else None
     try:
         if calibrate:
+            calibrated = set()
             for member in members:
-                if not member.get("_calibration_owner"):
+                if not member.get("_calibration_owner") or member["benchmark_id"] in calibrated:
                     continue
+                calibrated.add(member["benchmark_id"])
                 questions = member["_full_questions"]
                 if _load_config(member["config"]).get("measurement", {}).get("inference_config", {}).get("scoring_mode") == "option_loglikelihood":
                     continue
@@ -432,12 +421,20 @@ def _resident_worker(predict: str, model: str, manifest: str, summary: str,
             time.sleep(0.1)
         summaries = []
         for index, member in enumerate(members, 1):
+            # Atomic local-filesystem claims: one owner per batch. A failed worker
+            # fails this allocation; durable batch receipts are replayed on retry.
+            try:
+                (claims / str(index)).mkdir()
+            except FileExistsError:
+                continue
+            print("__ZEVO_PART_CLAIMED__:" + str(index), flush=True)
             def progress(step, total):
                 _emit(ticket, {"step": step, "total": total,
                                "benchmark_index": index, "benchmark_total": len(members)})
             result = _predict_resumable(adapter, engine, member, _load_config(member["config"]),
                                         model=model, predict=predict, ticket=ticket, progress=progress)
-            summaries.append(result)
+            summaries.append({**result, "part_index": index})
+            print("__ZEVO_PART_DONE__:" + json.dumps({"part_index": index, **result}), flush=True)
         _atomic_json(Path(summary), {"members": summaries})
         return 0
     finally:
@@ -524,29 +521,23 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
         runtime_env = gpu_runtime.prepare_environment(model=model, config_path=shared_config)
         for member in members:
             member["_identity"] = _member_identity(member, model, predict)
-        parts, counts, complete = _partitions(members, workers, root)
+        parts, counts, complete = _partitions(members, root)
         already_done_rows = sum(counts[index] for index in complete)
         if not parts:
             print("[parallel] all benchmark artifacts are already complete", flush=True)
-        assigned = _allocate(parts, workers)
-        active = [(index, batch) for index, batch in enumerate(assigned) if batch]
-        owners = {
-            index: {
-                worker for worker, batch in active
-                if any(part.member_index == index for part in batch)
-            }
-            for index in range(len(members))
-        }
+        # Each resident replica can consume any member: engine identity was
+        # checked above; each task still carries its own frozen measurement YAML.
+        active = [(index, parts) for index in range(workers)] if parts else []
         member_positions = {
-            index: [
-                (worker, local_index, part)
-                for worker, batch in active
-                for local_index, part in enumerate(batch)
-                if part.member_index == index
-            ]
+            index: [(part_index, part) for part_index, part in enumerate(parts)
+                    if part.member_index == index]
             for index in range(len(members))
         }
-        progress: dict[tuple[int, int], int] = {}
+        claims = root / "claims"
+        claims.mkdir()
+        claimed_by: dict[int, int] = {}
+        finished_parts: set[int] = set()
+        progress: dict[int, int] = {}
         committed: set[int] = set()
         request_counts: dict[int, int] = {}
         message_queue: queue.Queue[tuple[int, str | None]] = queue.Queue()
@@ -596,8 +587,8 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                 if index in committed or not positions:
                     continue
                 if not all(
-                    progress.get((worker, local_index), 0) >= part.size
-                    for worker, local_index, part in positions
+                    local_index in finished_parts
+                    for local_index, part in positions
                 ):
                     continue
                 if all(
@@ -606,7 +597,7 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                         "diagnostics": part.diagnostics,
                         "sample_submission": part.member["sample_submission"],
                     }, part.size)
-                    for _, _, part in positions
+                    for _, part in positions
                 ):
                     commit_member(index)
 
@@ -629,12 +620,12 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                      "output": part.output, "diagnostics": part.diagnostics,
                      "_full_questions": part.member["questions"],
                      "_resume_root": summary, "_row_offset": part.start,
-                     "_calibration_owner": index == min(owners[part.member_index])}
+                     "_calibration_owner": index == part.member_index % workers}
                     for part in batch
                 ]
                 manifest = root / f"worker-{index}.json"
                 worker_summary = root / f"worker-{index}-summary.json"
-                _write_json(manifest, {"members": worker_members})
+                _write_json(manifest, {"members": worker_members, "claims": str(claims)})
                 command = [sys.executable, str(Path(__file__).resolve()),
                            "--resident-worker", "--predict", str(Path(predict).resolve()),
                            "--model", model, "--suite", str(manifest),
@@ -659,7 +650,6 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                     target=read_stdout, args=(index, proc.stdout), daemon=True,
                 ).start()
             readers_done: set[int] = set()
-            successful_workers: set[int] = set()
             generation_started = False
             while len(readers_done) < len(active):
                 try:
@@ -677,21 +667,13 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                         raise RuntimeError(
                             f"inference replica {worker} exited with code {exit_code}"
                         )
-                    batch = assigned[worker]
                     with open(root / f"worker-{worker}-summary.json", encoding="utf-8") as handle:
                         worker_summaries = json.load(handle)["members"]
-                    if len(worker_summaries) != len(batch):
-                        raise ValueError(
-                            f"worker {worker} returned incomplete suite summary"
-                        )
-                    for part, item in zip(batch, worker_summaries):
-                        part.unparseable = int(item.get("n_unparseable") or 0)
-                    successful_workers.add(worker)
+                    expected = {part for part, owner in claimed_by.items() if owner == worker}
+                    reported = [int(item["part_index"]) - 1 for item in worker_summaries]
+                    if len(reported) != len(set(reported)) or set(reported) != expected or not expected <= finished_parts:
+                        raise ValueError(f"worker {worker} returned incomplete batch summary")
                     commit_ready_members()
-                    for member_index in range(len(members)):
-                        if (member_index not in committed
-                                and owners[member_index] <= successful_workers):
-                            commit_member(member_index)
                     continue
                 if not generation_started:
                     milestones = (("non-default args:", "resolve_model"),
@@ -715,6 +697,27 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                                     helper.validate(member["config"], member["questions"])
                         gate.touch()
                     continue
+                if line.startswith("__ZEVO_PART_CLAIMED__:"):
+                    part_index = int(line.split(":", 1)[1]) - 1
+                    if not 0 <= part_index < len(parts) or part_index in claimed_by:
+                        raise ValueError("invalid or duplicate batch claim")
+                    claimed_by[part_index] = worker
+                    progress[part_index] = 0
+                    continue
+                if line.startswith("__ZEVO_PART_DONE__:"):
+                    result = json.loads(line.split(":", 1)[1])
+                    part_index = int(result["part_index"]) - 1
+                    if claimed_by.get(part_index) != worker or part_index in finished_parts:
+                        raise ValueError("invalid or duplicate batch completion")
+                    part = parts[part_index]
+                    if int(result["n_rows"]) != part.size or not _complete({
+                            **part.member, "output": part.output, "diagnostics": part.diagnostics}, part.size):
+                        raise ValueError("completed batch artifacts are incomplete")
+                    part.unparseable = int(result.get("n_unparseable", 0))
+                    finished_parts.add(part_index)
+                    progress[part_index] = part.size
+                    commit_ready_members()
+                    continue
                 if not line.startswith("__PROGRESS__:"):
                     if line.startswith("__PHASE__:"):
                         print(line, flush=True)
@@ -724,7 +727,9 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                 try:
                     data = json.loads(line.split(":", 2)[2])
                     local_index = int(data["benchmark_index"]) - 1
-                    part = assigned[worker][local_index]
+                    part = parts[local_index]
+                    if claimed_by.get(local_index) != worker:
+                        raise ValueError("progress from a non-owning replica")
                     step = int(data["step"])
                     if step < 0 or step > part.size:
                         raise ValueError("worker progress exceeds its shard")
@@ -733,23 +738,23 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                 if not generation_started:
                     _phase(ticket, "generate")
                     generation_started = True
-                progress[(worker, local_index)] = max(
-                    progress.get((worker, local_index), 0), step,
+                progress[local_index] = max(
+                    progress.get(local_index, 0), step,
                 )
                 member_index = part.member_index
                 member_step = sum(
-                    value for (worker_id, batch_index), value in progress.items()
-                    if assigned[worker_id][batch_index].member_index == member_index
+                    value for batch_index, value in progress.items()
+                    if parts[batch_index].member_index == member_index
                 )
                 active_names = sorted({
-                    assigned[worker_id][batch_index].member["name"]
-                    for (worker_id, batch_index), value in progress.items()
-                    if value < assigned[worker_id][batch_index].size
+                    parts[batch_index].member["name"]
+                    for batch_index, value in progress.items()
+                    if value < parts[batch_index].size
                 })
                 active_ids = sorted({
-                    assigned[worker_id][batch_index].member["benchmark_id"]
-                    for (worker_id, batch_index), value in progress.items()
-                    if value < assigned[worker_id][batch_index].size
+                    parts[batch_index].member["benchmark_id"]
+                    for batch_index, value in progress.items()
+                    if value < parts[batch_index].size
                 })
                 _emit(ticket, {
                     # A benchmark is complete only after its merged artifacts
@@ -768,7 +773,7 @@ def run(*, predict: str, model: str, suite: str, summary: str, ticket: str,
                     "suite_rows_total": sum(counts),
                 })
                 commit_ready_members()
-            if len(committed) != len(members):
+            if len(finished_parts) != len(parts) or len(committed) != len(members):
                 raise ValueError("inference workers finished without committing every benchmark")
             _phase(ticket, "write_outputs")
             summaries = [{
