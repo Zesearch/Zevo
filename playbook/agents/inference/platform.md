@@ -253,8 +253,12 @@ and time tokenizer loading and engine construction separately. Existing library
 logs additionally expose architecture resolution, weight loading, compilation
 and warmup phases. A 60-second runtime diagnostic lists process names, states
 and kernel wait channels without reading command arguments, secrets or answers.
-The helper splits large prepared CSV benchmarks when useful,
-merges results in original row order, and marks each Benchmark complete as
+The helper splits prepared CSV benchmarks into fixed batches of at most 128 rows.
+Resident model replicas dynamically claim batches from one shared queue, across
+benchmark boundaries; a TP group is one replica, not independent GPU workers.
+Each batch retains its member-specific frozen config. Models stay loaded while
+replicas claim new work, and all calibration gates pass before generation starts.
+The helper merges results in original row order, and marks each Benchmark complete as
 soon as its shard artifacts are validated, even while a replica continues with
 other Benchmarks. The helper emits `benchmark_complete=true` after validating the merged outputs.
 For direct inference, emit that field after the corresponding output validation.

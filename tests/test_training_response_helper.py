@@ -131,3 +131,22 @@ def test_aligned_answer_still_requires_real_supervision(labels, span, error):
         helper.validate_training_response('Final Answer: C', expected_response='Final Answer: C',
             required_format='answer_line', answer_template='Final Answer: {answer}', gold='C',
             input_ids=[1, 2], labels=labels, answer_token_span=span)
+
+
+def test_choice_gold_uses_record_options_not_benchmark_range():
+    source = 'Reasoning.\nAnswer: G'
+    options = list('ABCDEFGHIJ')
+    result = helper.prepare_response(source, scope='task', output_format='answer_line',
+        requirement='Final answer line', gold='G', answer_span=(len(source)-1,len(source)),
+        answer_template='Final Answer: {answer}')
+    helper.validate_training_response(result, expected_response=result, gold='G',
+        option_labels=options, required_format='answer_line', answer_template='Final Answer: {answer}',
+        input_ids=[1,2], labels=[-100,2], answer_token_span=(1,2))
+    with pytest.raises(ValueError, match='not among'):
+        helper.validate_training_response(result,expected_response=result,gold='G',
+            option_labels=list('ABCD'),input_ids=[1,2],labels=[-100,2])
+
+
+@pytest.mark.parametrize('options,gold',[([], 'G'),(['A','A'],'A'),(['a','b'],'a'),(['A','C'],'B')])
+def test_choice_gold_requires_explicit_valid_options(options,gold):
+    with pytest.raises(ValueError): helper.validate_choice_gold(gold,option_labels=options)

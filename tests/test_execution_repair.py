@@ -720,3 +720,79 @@ async def test_infra_pre_dispatch_repair_requires_positive_evidence(repair_db, c
         assert not (await db.scalars(select(AgentWakeupRequest))).all()
         await complete_review(db)
         assert len((await db.scalars(select(AgentWakeupRequest))).all()) == 1
+
+
+def member_configs(tmp_path):
+    import yaml
+    from tests.test_sequential_yaml_workflow import _write_inference_config
+    old=_write_inference_config(tmp_path)
+    body=yaml.safe_load(old.read_text())
+    body['measurement']['inference_config']['answer_regex']=r'Final Answer: ([A-D])'
+    old.write_text(yaml.safe_dump(body))
+    new=tmp_path/'member.yaml'
+    body['measurement']['inference_config']['answer_regex']=r'Final Answer: ([A-J])'
+    new.write_text(yaml.safe_dump(body))
+    return old,new
+
+
+@pytest.mark.parametrize('fault',['','decoding','template','narrow','syntax','pin','missing'])
+def test_frozen_member_compatibility(tmp_path,fault):
+    import yaml
+    from zevo.engine.run.reviewed_recovery import compatible_training_member
+    old,new=member_configs(tmp_path)
+    body=yaml.safe_load(new.read_text())
+    if fault=='decoding': body['measurement']['max_new_tokens']=2048; body['stop_token_ids']=[3]
+    if fault=='template': body['chat_template_hash']='b'*64
+    if fault=='narrow': body['measurement']['inference_config']['answer_regex']=r'Final Answer: ([A-C])'
+    if fault=='syntax': body['measurement']['inference_config']['answer_regex']=r'Answer: ([A-J])'
+    new.write_text(yaml.safe_dump(body))
+    if fault=='missing': new.unlink()
+    pins=[{'inference_config':{'answer_regex':r'Final Answer: ([A-D])'}}] if fault=='pin' else []
+    if fault:
+        with pytest.raises(HTTPException): compatible_training_member(old,new,pins=pins)
+    else:
+        result=compatible_training_member(old,new,pins=pins)
+        assert list(result['changes'])==['measurement.inference_config.answer_regex']
+        assert result['sha256']!=result['previous_sha256']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fault',['','executed','other_baseline','new_product','heldout'])
+async def test_reviewed_train_member_rebinding(repair_db,tmp_path,monkeypatch,fault):
+    import json
+    from datetime import timedelta
+    from zevo.db import TicketNotice
+    from zevo.engine.run.reviewed_recovery import restore_inputs, WAIT_CODE
+    from zevo.api.routers.shared import tickets as api
+    db,ticket,execution=repair_db
+    if fault!='executed': await db.delete(execution)
+    await db.delete(await db.get(WorkProduct,'product'))
+    ticket.status='awaiting_input'
+    ticket.payload={'operation':'train','base_model':'Qwen/Qwen3-0.6B-Base',
+        'model_source':'base_model','parent_selection_rationale':'initial'}
+    old,new=member_configs(tmp_path)
+    earlier=ticket.created_at-timedelta(seconds=10)
+    db.add(Ticket(id='baseline',run_id='r',agent_id='inference',status='succeeded',
+        lane='held_out_test' if fault=='heldout' else 'optimization',
+        payload={'model_source':'base_model','base_model':'Qwen/Qwen3-0.6B-Base'}))
+    db.add(Ticket(id='other',run_id='r',agent_id='inference',status='succeeded'))
+    db.add_all([WorkProduct(id='old-config',ticket_id='baseline',role='inference_config',path=str(old),created_at=earlier),
+        WorkProduct(id='new-config',ticket_id='other' if fault=='other_baseline' else 'baseline',role='inference_config',path=str(new),
+        created_at=ticket.created_at+timedelta(seconds=10) if fault=='new_product' else earlier)])
+    ticket.inputs={'inference_config':{'source_ticket_id':'baseline','artifact_role':'inference_config','work_product_id':'old-config','path':str(old)}}
+    db.add(TicketNotice(ticket_id=ticket.id,code=WAIT_CODE,body=json.dumps({'request':{'scope':'upstream_input'}})))
+    await db.commit()
+    async def validate(*args,**kwargs): return kwargs['payload'],kwargs['inputs']
+    monkeypatch.setattr(api,'validate_pipeline_bindings',validate)
+    req=RepairTicketRequest(action='resume_inputs',execution_attempt=0,reason='Select compatible member',
+        evidence=['same frozen baseline'],input_products={'inference_config':'new-config'})
+    if fault:
+        with pytest.raises(HTTPException): await restore_inputs(db,await db.get(Run,'r'),ticket,req,None)
+        assert ticket.inputs['inference_config']['work_product_id']=='old-config'
+    else:
+        await restore_inputs(db,await db.get(Run,'r'),ticket,req,None)
+        assert ticket.inputs['inference_config']['work_product_id']=='new-config'
+        await db.flush()
+        notice=await db.scalar(select(TicketNotice).where(TicketNotice.code=='repair.inputs_rebound'))
+        assert json.loads(notice.body)['inference_member_change']['changes']
+        assert (await db.get(WorkProduct,'old-config')).path==str(old)

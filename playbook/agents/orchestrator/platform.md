@@ -960,6 +960,13 @@ roles and normal pipeline bindings, updates Data signatures and releases only
 after your validated decision completes. Train data may change only before any
 training execution/checkpoint. Already-executed model/protocol changes require a
 new experiment. Ordinary human messages do not release this wait.
+Before any Train submission/checkpoint, `resume_inputs` may also select another
+already-published `inference_config` WorkProduct from the SAME successful baseline
+Inference ticket. Engine permits only widened A-Z answer capture ranges and a
+member-specific max_new_tokens difference, with all other fields and user pins
+unchanged; it records both hashes and differences. This does not modify any
+Validation/Test config. Prefer record-local option validation in Train over
+rebinding solely to accommodate training gold letters outside a member's range.
 
 Train owns unpinned training-parameter repairs on fresh attempts after failure.
 Do not require a configuration proposal merely for learning rate, optimizer,

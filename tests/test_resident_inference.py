@@ -41,7 +41,7 @@ def close_engine(engine):
 '''
 
 
-def run_resident(tmp_path, counts, *, fail_member='', incompatible=False, calibrate=True, candidates=(16, 32), budget=4):
+def run_resident(tmp_path, counts, *, adapter_source=ADAPTER, gpus_per_worker=1, member_budgets=None, fail_member='', incompatible=False, calibrate=True, candidates=(16, 32), budget=4):
     runtime = tmp_path / 'runtime'
     runtime.mkdir()
     runner = runtime / 'zevo_parallel_inference.py'
@@ -51,13 +51,15 @@ def run_resident(tmp_path, counts, *, fail_member='', incompatible=False, calibr
     shutil.copyfile(HELPER.parents[2] / 'src/zevo/contracts/length_calibration.py',
                     runtime / 'zevo_length_calibration.py')
     adapter = tmp_path / 'predict.py'
-    adapter.write_text(ADAPTER)
+    adapter.write_text(adapter_source)
     suite = _suite(tmp_path, counts)
     members = json.loads(suite.read_text())['members']
-    for member in members:
+    for member_index, member in enumerate(members):
         cfg = {'base_model': 'test', 'measurement': {'max_new_tokens': 16},
-               'implementation_config': {'llm_kwargs': {'tensor_parallel_size': 1},
+               'implementation_config': {'llm_kwargs': {'tensor_parallel_size': gpus_per_worker},
                                          'length_calibration_policy': {'max_configurations': budget}}}
+        if member_budgets is not None:
+            cfg['measurement']['max_new_tokens'] = member_budgets[member_index]
         Path(member['config']).write_text(json.dumps(cfg))
         member['calibration_configs'] = []
         for n in candidates:
@@ -70,10 +72,10 @@ def run_resident(tmp_path, counts, *, fail_member='', incompatible=False, calibr
         _write_csv(Path(member['sample_submission']), ['id','prediction','complete_prediction'], [])
     suite.write_text(json.dumps({'members': members}))
     audit = tmp_path / 'audit.jsonl'
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES='0,1', TMPDIR='/tmp', AUDIT=str(audit), FAIL_MEMBER=fail_member)
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=','.join(map(str, range(2*gpus_per_worker))), TMPDIR='/tmp', AUDIT=str(audit), FAIL_MEMBER=fail_member)
     command = [sys.executable, str(runner), '--resident', '--predict', str(adapter), '--model', 'test',
                '--suite', str(suite), '--summary', str(tmp_path / 'summary.json'), '--ticket-id', 'test',
-               '--allocated-gpus', '2', '--gpus-per-worker', '1']
+               '--allocated-gpus', str(2*gpus_per_worker), '--gpus-per-worker', str(gpus_per_worker)]
     if calibrate:
         command.append('--calibrate')
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
@@ -130,3 +132,32 @@ def test_declared_budget_rejects_before_loading(tmp_path):
     assert result.returncode != 0
     assert 'declared resource budget' in result.stderr
     assert not events
+
+
+def test_dynamic_batches_reuse_engines_and_share_tail_benchmark(tmp_path):
+    # One replica is deliberately slow; the other must consume more batches,
+    # across benchmark boundaries, without rebuilding its model.
+    adapter = ADAPTER.replace("import csv, json, os", "import csv, json, os, time")
+    adapter = adapter.replace("    fields = ['id',", """    if not calibration:
+        record('batch', name=member['name'], ids=[r['id'] for r in rows],
+               offset=member['_row_offset'], mask=os.environ['CUDA_VISIBLE_DEVICES'],
+               budget=config['measurement']['max_new_tokens'])
+        time.sleep(0.3 if os.environ['CUDA_VISIBLE_DEVICES']=='0,1' else 0.03)
+    fields = ['id',""")
+    result, events, members = run_resident(tmp_path, [256, 3072],
+        adapter_source=adapter, gpus_per_worker=2, calibrate=False, member_budgets=[16,64])
+    assert result.returncode == 0, result.stdout + result.stderr
+    batches = [e for e in events if e['kind']=='batch']
+    assert len([e for e in events if e['kind']=='load']) == 2
+    assert {e['mask'] for e in batches} == {'0,1', '2,3'}
+    assert sum(e['mask']=='2,3' for e in batches) > sum(e['mask']=='0,1' for e in batches)
+    assert len({e['pid'] for e in batches if e['name']=='benchmark 1'}) == 2
+    for name, count in [('benchmark 0',256), ('benchmark 1',3072)]:
+        selected = [e for e in batches if e['name']==name]
+        ids = [int(i) for e in selected for i in e['ids']]
+        assert sorted(ids) == list(range(count))  # exact coverage, no duplicates
+        assert all(len(e['ids'])<=128 and int(e['ids'][0])==e['offset'] for e in selected)
+        assert all(e['budget']==(16 if name=='benchmark 0' else 64) for e in selected)
+    for member in members:
+        rows = list(__import__('csv').DictReader(open(member['output'])))
+        assert [int(r['id']) for r in rows] == list(range(len(rows)))
