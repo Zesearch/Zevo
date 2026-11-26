@@ -80,6 +80,14 @@ current execution must be replaced: Zevo stops that activation and its affected
 workload, retains the Ticket and healthy run allocation, and starts a new
 activation on the same Ticket. This does not consume an automatic repair attempt.
 
+For CPU, memory, partition, reservation, walltime or other Slurm allocation
+requirement changes, include `replace_allocation=true` in that same
+`restart_activation` message. The Specialist renders the approved resource
+requirements in its new launcher; the engine first releases the old allocation.
+Do not rely on prose alone or assume an unchanged GPU count means resources are
+unchanged. Pending jobs and per-submission jobs are cancelled directly; only a
+running per-run allocation with unchanged resource requirements is retained.
+
 For a Slurm GPU-count change, include `requested_gpus` (a positive integer) in
 that same `restart_activation` message request. This updates the backend resource
 request before the replacement script is generated; prose alone cannot resize a

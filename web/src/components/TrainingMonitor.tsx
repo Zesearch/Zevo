@@ -1,4 +1,4 @@
-import { continuousTrainingEvents, isMidTrainingValidationEvent } from "../lib/trainingTelemetry";
+import { continuousTrainingEvents, isMidTrainingValidationEvent, trainingLoss } from "../lib/trainingTelemetry";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
@@ -53,10 +53,9 @@ const NON_METRIC_KEYS = new Set([
 // metrics). That row's aggregate num_tokens / loss don't belong on the per-step
 // chart, so we skip it entirely.
 // Metrics that cannot legitimately be negative, so a negative reading is the
-// -1 sentinel rather than a measurement. `grad_norm` and the losses belong here
-// too; entropy and mean_token_accuracy are also bounded below by zero.
+// -1 sentinel rather than a measurement. Signed loss objectives are excluded; entropy and mean_token_accuracy are also bounded below by zero.
 const NON_NEGATIVE_METRICS = new Set([
-  "learning_rate", "loss", "val_loss", "grad_norm", "num_tokens",
+  "learning_rate", "grad_norm", "num_tokens",
   "entropy", "mean_token_accuracy",
 ]);
 const SUMMARY_KEYS = ["train_runtime", "total_flos", "train_samples_per_second", "train_steps_per_second"];
@@ -188,7 +187,7 @@ function MetricChart({ metric, color, data, total }: {
             formatter={(v: number) => [fmtMetric(v), metric]}
           />
           <Line type="monotone" dataKey={metric} stroke={color} strokeWidth={2}
-            dot={false} connectNulls isAnimationActive={false} />
+            dot={pts.length === 1 ? { r: 3, fill: color, stroke: color } : false} connectNulls isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
     </div>
@@ -245,15 +244,8 @@ export function TrainingMonitor({ executionEvents, renderContainer = (content) =
     // loss on the TRAINING curve — about fifteen times a run, once per eval —
     // and since the eval line lands on the same step as the training line it
     // had just followed, the real point was overwritten rather than joined.
-    const exLoss = num(ex.loss);
-    const exEval = num(ex.eval_loss) ?? num(ex.validation_loss);
-    // Fall back to the column only for rows that carry no explicit loss of
-    // either kind — an older marker, or a script that only set the column.
-    const lossVal = exLoss ?? (exEval === undefined ? num(p.loss) : undefined);
-    // Drop the loss=-1 sentinel rows the non-training phases emit (connecting,
-    // loading_model, saving_model, …). They share current_step=0, so without
-    // this guard they'd plot a phantom empty step-0 before the real step 1.
-    const haveLoss = lossVal !== undefined && lossVal >= 0;
+    const lossVal = trainingLoss(p);
+    const haveLoss = lossVal !== undefined;
     const row: Record<string, number | undefined> = { step: p.current_step };
     if (haveLoss) row.loss = lossVal;
     for (const [rawK, v] of Object.entries(ex)) {
@@ -262,7 +254,7 @@ export function TrainingMonitor({ executionEvents, renderContainer = (content) =
       const n = num(v);
       if (n === undefined) continue;
       // -1 is this system's "no reading", and some trainers report it as a
-      // VALUE. A learning rate, a loss or a token count is never negative, so
+      // VALUE. A learning rate or a token count is never negative, so
       // a negative one is the sentinel wearing a number's clothes: an eval log
       // line carries no learning rate, and `lr: -1` on it drew the curve
       // diving off the bottom once per epoch. Drop the key, keep the row —

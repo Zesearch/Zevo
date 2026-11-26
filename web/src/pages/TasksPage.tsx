@@ -7,7 +7,8 @@ import { TaskSettingHistory } from "../components/TaskSettings";
 import { ScoringSuiteManifest } from "../components/RunInputs";
 import { FileSetView } from "../components/FileSetView";
 import { Modal } from "../components/Modal";
-import { Bezel, Detail, Kicker, PageHead } from "../components/zevo/primitives";
+import { CreationModal } from "../components/CreationModal";
+import { Bezel, Kicker, PageHead } from "../components/zevo/primitives";
 import { PAGE_SIZES, Pager } from "../components/zevo/Pager";
 import { fmtDate, fmtMetric } from "../lib/format";
 import { useRowsPerPage } from "../lib/useRowsPerPage";
@@ -101,7 +102,7 @@ function TestFiles({ t }: { t: TaskSummary }) {
   }
   const noun = suite.length === 1 ? "benchmark" : "benchmarks";
   return (
-    <div className="min-w-0 rounded-md border border-hair bg-canvas p-2.5">
+    <div className="min-w-0 py-1">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <span className="font-mono text-xs text-slate-100">{suite.length} {noun}</span>
         <span className="font-mono text-2xs text-slate-500">
@@ -367,36 +368,27 @@ export function TasksPage() {
       {/* A task opened: what it is, and the settings it has been attacked
           with. Each setting groups related decisions into responsive cards, so
           the dialog remains readable without horizontal scrolling. */}
-      <Modal
+      <CreationModal
+        wide
         open={!!detail}
-        title={detail ?? ""}
-        width="max-w-7xl"
+        title="Task Settings"
+        heading={detail ?? "Settings"}
+        description={addingSetting
+          ? "Choose what to pin and what Zevo can explore."
+          : "Review saved configurations, adjust their constraints, or start a run."}
         onClose={() => { setAddingSetting(false); setDetail(null); }}
       >
         {opened && (
-          <div className="space-y-5">
-            {/* The objective is on the card you opened this from, and no
-                "default setting" block either: a run is started FROM a setting,
-                so the settings are the only thing this dialog is for. A task
-                nobody has run yet gets an empty table it can be filled into,
-                rather than a dead end. */}
-            <div>
-              <Detail label="Saved settings" section hideLabel={addingSetting}>
-                <div className="mt-1">
-                  <TaskSettingHistory
-                    task={opened.name}
-                    onRun={(s) => runSetting(opened, s)}
-                    onOpenDataset={(name, file, split) =>
-                      setPeekDataset({ name, file: file ?? "", split: split ?? "" })}
-                    busy={!!busy}
-                    onAddingChange={setAddingSetting}
-                  />
-                </div>
-              </Detail>
-            </div>
-          </div>
+          <TaskSettingHistory
+            task={opened.name}
+            onRun={(s) => runSetting(opened, s)}
+            onOpenDataset={(name, file, split) =>
+              setPeekDataset({ name, file: file ?? "", split: split ?? "" })}
+            busy={!!busy}
+            onAddingChange={setAddingSetting}
+          />
         )}
-      </Modal>
+      </CreationModal>
 
       {/* A dataset, read where it was named. Rendered AFTER the task dialog
           it opens from: both are z-50, so DOM order is what decides which one

@@ -221,7 +221,21 @@ async def cancel_ticket_remote_job(
                 "reason": "no live stage-owned Slurm job",
             }
         meta = dict(cluster_row.meta or {})
-        if preserve_allocation and meta.get("controller_directory"):
+        # A controller cannot consume a cancel marker while its allocation is
+        # pending. Finite per-submission allocations should be cancelled directly
+        # too; only an already-running, reusable per-run allocation is retained.
+        keep_controller = (
+            preserve_allocation and not resize_allocation
+            and meta.get("gpu_allocation_mode") == "per_run"
+            and str(meta.get("allocation_state") or "").upper() == "RUNNING"
+            and meta.get("controller_directory")
+        )
+        if preserve_allocation and not keep_controller:
+            # Resolve aliases and refuse to kill an allocation used by another
+            # stage, just as for an explicit resource resize.
+            cluster_row = await allocation_for_resize(db, ticket) or cluster_row
+            meta = dict(cluster_row.meta or {})
+        if keep_controller:
             from zevo.engine.run.gpu_controller import upload_text_command
             request_id = str(meta["controller_request_id"])
             directory = str(meta["controller_directory"])

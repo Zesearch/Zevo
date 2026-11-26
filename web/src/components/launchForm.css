@@ -102,3 +102,19 @@
 }
 
 .launch-review-action .launch-next:disabled { opacity: 0.65; }
+
+.launch-next.launch-next-compact { padding: 5px 10px; font-size: 13px; line-height: 1.4; border-radius: 5px; gap: 6px; }
+
+.launch-add-set {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; min-height: 64px; padding: 20px 16px;
+  border: 1px dashed rgb(var(--night-700)); border-radius: 6px;
+  background: transparent; font-family: var(--font-sans); font-size: 14px;
+  line-height: 1.5; color: rgb(var(--night-400));
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.launch-add-set:hover:not(:disabled) { border-color: rgb(var(--brass-500) / 0.4); color: rgb(var(--brass-300)); }
+.launch-add-set:focus-visible { outline: 1px solid rgb(var(--brass-400)); outline-offset: 3px; }
+.launch-add-set:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.suite-entry-title { font-family: var(--font-sans); font-size: 16px; line-height: 1.5; font-weight: 600; color: rgb(var(--brass-300)); }

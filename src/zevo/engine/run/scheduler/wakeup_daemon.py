@@ -423,10 +423,11 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                                 and wake_payload.get("instruction_action") == "restart_activation"
                                 and target.status not in TERMINAL_TICKET_STATUSES):
                             from zevo.engine.run.remote_jobs import cancel_ticket_remote_job, allocation_for_resize
+                            replace_allocation = bool(wake_payload.get("requested_gpus") or wake_payload.get("replace_allocation"))
                             cleanup = await cancel_ticket_remote_job(
                                 s, target,
-                                preserve_allocation=not bool(wake_payload.get("requested_gpus")),
-                                **({"resize_allocation": True} if wake_payload.get("requested_gpus") else {}),
+                                preserve_allocation=not replace_allocation,
+                                **({"resize_allocation": True} if replace_allocation else {}),
                             )
                             if cleanup.get("attempted") and not cleanup.get("ok"):
                                 w.scheduled_for = datetime.now(timezone.utc) + _dt.timedelta(seconds=5)
@@ -440,10 +441,10 @@ async def _run_one(agent_id: str, wakeup_id: str, queued_at: datetime) -> None:
                                     InfraInstance.released_at.is_(None),
                                 ).order_by(InfraInstance.created_at.desc()).limit(1)
                             )).scalar_one_or_none()
-                            if wake_payload.get("requested_gpus"):
+                            if replace_allocation:
                                 active_stage = await allocation_for_resize(s, target) or active_stage
                             if active_stage is not None and (
-                                wake_payload.get("requested_gpus")
+                                replace_allocation
                                 or not (active_stage.meta or {}).get("monitor_terminal")
                             ):
                                 # scancel acceptance is not release. Keep the

@@ -76,7 +76,7 @@ export function fmtScoringRows(
   if (total > 0 && cap > 0 && cap < total) {
     return `${n(cap)} of ${n(total)} rows`;
   }
-  if (total > 0) return `${n(total)} rows · all`;
+  if (total > 0) return `${n(total)} rows`;
   if (cap > 0) return `up to ${n(cap)} rows`;
   return "row count checked at fetch";
 }

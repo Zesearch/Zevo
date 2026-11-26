@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { transformWithEsbuild } from 'vite';
 const source = readFileSync(new URL('../src/lib/trainingTelemetry.ts', import.meta.url), 'utf8');
 const { code } = await transformWithEsbuild(source, 'trainingTelemetry.ts', { loader: 'ts' });
-const { continuousTrainingEvents, isMidTrainingValidationEvent, trainingActivity } = await import(
+const { continuousTrainingEvents, isMidTrainingValidationEvent, trainingActivity, trainingLoss } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`,
 );
 
@@ -72,4 +72,52 @@ test('preparation in a new attempt does not distort the old training axis', () =
   const preparation = { ...event('data_preparation', { elapsed_seconds: 25 }, '02'),
     current_step: 20000, total_steps: 20000, attempt_id: 'second' };
   assert.deepEqual(continuousTrainingEvents([training, preparation]), [training]);
+});
+
+
+test('RFT generation and selection cannot enlarge the optimizer-step axis', () => {
+  const generation = { ...event('generation', { acceptance_rate: .46 }, '01'),
+    current_step: 24000, total_steps: 24000 };
+  const selection = { ...event('selection', { phase_detail: 'rendering' }, '02'),
+    current_step: 18002, total_steps: 18002 };
+  const training = { ...event('training', { loss: .0833 }, '03'),
+    current_step: 280, total_steps: 282, attempt_id: 'supervised' };
+  const saving = { ...event('saving', {}, '04'), total_steps: 24000 };
+  const points = continuousTrainingEvents([generation, selection, training, saving]);
+  assert.deepEqual(points, [training]);
+  assert.equal(Math.max(...points.map(p => p.total_steps)), 282);
+  assert.deepEqual(continuousTrainingEvents([generation, selection]), []);
+});
+
+test('training phases retain reward and KL metrics, while unknown phases cannot set the axis', () => {
+  for (const phase of ['train', 'training', 'adaptive_training', 'training:optimizer']) {
+    const training = event(phase, { reward: .7, kl: .02 });
+    const unknown = { ...event('new_data_stage', { reward: 1 }, '2026-10-26T09:01:00Z'),
+      total_steps: 1000000 };
+    assert.deepEqual(continuousTrainingEvents([training, unknown]), [training]);
+  }
+});
+
+
+test('signed RL loss survives while the legacy missing-value sentinel does not', () => {
+  for (const loss of [-.007754, -.001236, 0, .000944, -1]) {
+    assert.equal(trainingLoss(event('train', { loss })), loss);
+  }
+  assert.equal(trainingLoss(event('train')), undefined);
+  assert.equal(trainingLoss({ ...event('train'), loss: -.005 }), -.005);
+  assert.equal(trainingLoss(event('train', { eval_loss: -.2 })), undefined);
+  assert.equal(trainingLoss(event('train', { loss: NaN })), undefined);
+});
+
+test('negative-loss checkpoint resumes replace the abandoned suffix', () => {
+  const reading = (step, attempt, ts) => ({ ...event('train', { loss: -.004 }, ts),
+    current_step: step, attempt_id: attempt });
+  const first = reading(20, 'first', '01');
+  const checkpoint = reading(40, 'first', '02');
+  const abandoned = reading(80, 'first', '03');
+  const resumed = reading(60, 'resume', '04');
+  assert.deepEqual(continuousTrainingEvents([first, checkpoint, abandoned, resumed]),
+    [first, checkpoint, resumed]);
+  const restart = reading(1, 'restart', '05');
+  assert.deepEqual(continuousTrainingEvents([first, checkpoint, resumed, restart]), [restart]);
 });
