@@ -1605,6 +1605,7 @@ class MessageBody(StrictBody):
     # lets it quiesce the old attempt before applying the new direction.
     run_instruction_id: str = ""
     instruction_action: Literal["continue", "restart_activation"] = "continue"
+    replace_allocation: bool = Field(default=False, strict=True, description="Release the old Slurm allocation before restart when CPU, memory, partition, reservation or other resource requirements change.")
     requested_gpus: int | None = Field(default=None, ge=1, strict=True)
     gpu_stages: list[Literal["data", "inference", "train"]] = Field(default_factory=list)
 
@@ -1642,6 +1643,10 @@ async def post_message(
     body = payload.body
     author = (payload.author or "").strip()
     instruction: RunInstruction | None = None
+    if payload.replace_allocation and (
+        not payload.run_instruction_id or payload.instruction_action != "restart_activation"
+    ):
+        raise HTTPException(422, "replace_allocation requires a routed restart instruction")
     if payload.gpu_stages and payload.requested_gpus is None:
         raise HTTPException(422, "gpu_stages requires requested_gpus")
     if payload.requested_gpus is not None and (
@@ -1668,6 +1673,8 @@ async def post_message(
         if payload.instruction_action == "restart_activation":
             if not payload.wake_agent:
                 raise HTTPException(422, "restart_activation requires wake_agent")
+            if payload.replace_allocation and (owner_run is None or owner_run.gpu_provider != "cluster"):
+                raise HTTPException(422, "replace_allocation is supported only for Slurm")
             if payload.requested_gpus is not None:
                 if t.agent_id not in {"data", "inference", "train"}:
                     raise HTTPException(422, "requested_gpus requires a compute stage")
@@ -1781,6 +1788,7 @@ async def post_message(
             reason=f"message by {payload.author}",
             payload=(
                 {"run_instruction_id": instruction.id, "instruction_action": payload.instruction_action,
+                 **({"replace_allocation": True} if payload.replace_allocation else {}),
                  **({"requested_gpus": payload.requested_gpus} if payload.requested_gpus is not None else {}),
                  **({"gpu_stages": payload.gpu_stages} if payload.gpu_stages else {})}
                 if instruction is not None else None

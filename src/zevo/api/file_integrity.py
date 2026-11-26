@@ -9,7 +9,7 @@ import tempfile
 from typing import Any, BinaryIO
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, or_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from zevo.db import Run, Ticket, WorkProduct
@@ -75,7 +75,7 @@ def _catalogue_reference(value: str, name: str) -> tuple[Path, bool] | None:
             relative = raw.relative_to(root)
         except ValueError:
             continue
-        if not relative.parts or relative.parts[0] != name:
+        if relative.parts[:len(Path(name).parts)] != Path(name).parts:
             return None
         # Use the configured public spelling as the logical key. The private
         # snapshot helper resolves it to the protected mirror when required.
@@ -84,13 +84,18 @@ def _catalogue_reference(value: str, name: str) -> tuple[Path, bool] | None:
 
 
 def _rewrite_catalogue_references(
-    value: Any, *, run_id: str, name: str,
+    value: Any, *, run_id: str, name: str, member: str | None = None,
 ) -> tuple[Any, bool]:
     if isinstance(value, str):
         reference = _catalogue_reference(value, name)
         if reference is None:
             return value, False
         logical, private = reference
+        if member is not None:
+            target = Path(files_root()) / name / member
+            # A directory reference also depends on the member being removed.
+            if logical != target and logical not in target.parents:
+                return value, False
         copied = snapshot_local_input(run_id, str(logical), private=private)
         return (copied, copied != str(logical))
     if isinstance(value, dict):
@@ -98,7 +103,7 @@ def _rewrite_catalogue_references(
         out = {}
         for key, child in value.items():
             out[key], child_changed = _rewrite_catalogue_references(
-                child, run_id=run_id, name=name,
+                child, run_id=run_id, name=name, member=member,
             )
             changed = changed or child_changed
         return out, changed
@@ -107,7 +112,7 @@ def _rewrite_catalogue_references(
         out = []
         for child in value:
             rewritten, child_changed = _rewrite_catalogue_references(
-                child, run_id=run_id, name=name,
+                child, run_id=run_id, name=name, member=member,
             )
             out.append(rewritten)
             changed = changed or child_changed
@@ -140,7 +145,9 @@ def _contains_remote_reference(value: Any, identifiers: set[str]) -> bool:
     return False
 
 
-async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
+async def preserve_legacy_run_inputs(
+    db: AsyncSession, name: str, *, member: str | None = None,
+) -> None:
     """Move pre-snapshot Run references off one live File before mutation.
 
     Files were immutable before Run snapshots were introduced, so the current
@@ -149,10 +156,28 @@ async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
     edits to the same File skip those Runs once its name is recorded in
     ``preserved_file_sets``; other referenced Files are preserved independently.
     """
-    # Serialize the one-time conversion with concurrent File edits. The first
-    # request commits the snapshot before touching live bytes; later requests
-    # then observe ``preserved_file_sets`` and leave that snapshot untouched.
-    runs = (await db.execute(select(Run).with_for_update())).scalars().all()
+    # SQL is a conservative prefilter; exact path matching still happens below.
+    # Include Ticket-only and WorkProduct-only references, not just Run pins.
+    # contains(autoescape=True) treats underscores and percent signs literally.
+    remote_ids = _remote_ids(name) if member is None else set()
+    needles = {name, *remote_ids}
+    def mentions(*columns):
+        return or_(*(cast(column, String).contains(needle, autoescape=True)
+                     for column in columns for needle in needles))
+
+    candidate_ids = union(
+        select(Run.id).where(mentions(Run.holdout, Run.decision_pins,
+                                     Run.customizations, Run.model_lineages)),
+        select(Ticket.run_id).where(mentions(Ticket.payload, Ticket.inputs, Ticket.customization)),
+        select(Ticket.run_id).join(WorkProduct, WorkProduct.ticket_id == Ticket.id)
+        .where(mentions(WorkProduct.path, WorkProduct.meta)),
+    )
+    runs = (await db.execute(
+        select(Run).where(
+            Run.id.in_(candidate_ids),
+            func.coalesce(Run.input_snapshot["local_inputs_copied"].as_boolean(), False).is_(False),
+        ).order_by(Run.id).with_for_update().execution_options(populate_existing=True)
+    )).scalars().all()
     legacy = [
         run for run in runs
         if not (run.input_snapshot or {}).get("local_inputs_copied")
@@ -177,8 +202,7 @@ async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
         if ticket is not None:
             products_by_run.setdefault(ticket.run_id, []).append(product)
 
-    file_snapshot = file_set_snapshot(name)
-    remote_ids = _remote_ids(name)
+    file_snapshot = None
     touched = False
     for run in legacy:
         changed = False
@@ -202,7 +226,7 @@ async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
 
         for field in ("holdout", "decision_pins", "customizations", "model_lineages"):
             rewritten, field_changed = _rewrite_catalogue_references(
-                getattr(run, field), run_id=run.id, name=name,
+                getattr(run, field), run_id=run.id, name=name, member=member,
             )
             if field_changed:
                 setattr(run, field, rewritten)
@@ -210,17 +234,17 @@ async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
         for ticket in tickets_by_run.get(run.id, []):
             for field in ("payload", "inputs", "customization"):
                 rewritten, field_changed = _rewrite_catalogue_references(
-                    getattr(ticket, field), run_id=run.id, name=name,
+                    getattr(ticket, field), run_id=run.id, name=name, member=member,
                 )
                 if field_changed:
                     setattr(ticket, field, rewritten)
                     changed = True
         for product in products_by_run.get(run.id, []):
             rewritten_path, path_changed = _rewrite_catalogue_references(
-                product.path, run_id=run.id, name=name,
+                product.path, run_id=run.id, name=name, member=member,
             )
             rewritten_meta, meta_changed = _rewrite_catalogue_references(
-                product.meta, run_id=run.id, name=name,
+                product.meta, run_id=run.id, name=name, member=member,
             )
             if path_changed:
                 product.path = rewritten_path
@@ -235,14 +259,18 @@ async def preserve_legacy_run_inputs(db: AsyncSession, name: str) -> None:
         snapshot = dict(run.input_snapshot or {})
         snapshot["version"] = 1
         snapshot.setdefault("local_inputs_copied", False)
-        snapshot["preserved_file_sets"] = sorted({
-            *list(snapshot.get("preserved_file_sets") or []), name,
-        })
+        if member is None:
+            snapshot["preserved_file_sets"] = sorted({
+                *list(snapshot.get("preserved_file_sets") or []), name,
+            })
+        # A member mutation must not mark its siblings as already protected.
         snapshot.setdefault("task", None)
         known_files = {
             str(item.get("name") or ""): dict(item)
             for item in (snapshot.get("files") or []) if isinstance(item, dict)
         }
+        if file_snapshot is None:
+            file_snapshot = file_set_snapshot(name)
         if file_snapshot:
             known_files[name] = file_snapshot
         snapshot["files"] = [known_files[key] for key in sorted(known_files) if key]

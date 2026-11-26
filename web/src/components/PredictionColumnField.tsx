@@ -32,13 +32,12 @@ export function PredictionColumnField({ sample, dataset, answerFields, value, on
       <input
         id={id} list={`${id}-columns`} value={value}
         onChange={(event) => onChange(event.target.value)}
-        placeholder="Auto when there is one output column"
+        placeholder="Column to score against answer fields; auto if there is only one output column"
         className="h-10 w-full rounded-md border border-hair bg-canvas px-2.5 font-mono text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none"
       />
       <datalist id={`${id}-columns`}>
         {columns.map((column) => <option key={column} value={column} />)}
       </datalist>
-      <p className="mt-1 text-xs text-slate-500">Choose the sample-submission column to score against Answer fields.</p>
     </div>
   );
 }

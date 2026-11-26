@@ -18,6 +18,7 @@ function read(): Theme {
 
 export function applyTheme(theme: Theme) {
   const root = document.documentElement;
+  root.setAttribute("data-light", "paper");
   if (theme === "light") root.setAttribute("data-theme", "light");
   else root.removeAttribute("data-theme");
   try {
@@ -57,7 +58,8 @@ export function useTheme(): [Theme, (t: Theme) => void] {
 
 // Light-theme styles: a palette and a type set, one attribute each. The
 // stylesheet carries the blocks; this module flips the attributes.
-export const LIGHT_VARIANTS = ["cool", "paper", "plate", "shade"] as const;
+// Retired variants: "cool", "plate", "shade".
+export const LIGHT_VARIANTS = ["paper"] as const;
 export type LightVariant = (typeof LIGHT_VARIANTS)[number];
 export const TYPE_SETS = ["console", "site"] as const;
 export type TypeSet = (typeof TYPE_SETS)[number];

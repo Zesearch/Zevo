@@ -40,8 +40,8 @@ const prompts: Record<string, [string, string]> = {
   "Agent": ["Who should take this on?", "Choose the agent for this task."],
   "Attachments": ["Anything else to include?", "Attach supporting files, or continue to review."],
 };
-export function LaunchStepHeading({ label }: { label: string }) {
-  const [title, description] = prompts[label] || [label, ""];
+export function LaunchStepHeading({ label, copy }: { label: string; copy?: readonly [string, string] }) {
+  const [title, description] = copy || prompts[label] || [label, ""];
   return <header className="mb-8 motion-safe:animate-zevo-in">
     <h3 className="font-display text-2xl font-semibold tracking-tight text-ink lg:text-3xl">{title}</h3>
     <p className="mt-3 text-sm leading-relaxed text-slate-400">{description}</p>

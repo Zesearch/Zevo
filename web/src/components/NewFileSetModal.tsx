@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Trash2, Upload } from "lucide-react";
-import { Modal } from "./Modal";
-import { Kicker } from "./zevo/primitives";
+import { CreationModal } from "./CreationModal";
+import { RunSummaryTable } from "./RunInputs";
+import { SettingNavigation } from "./SettingNavigation";
 import { ROOT_LABEL, groupByFolder } from "../lib/format";
 import { api } from "../lib/api";
 import type { FileSetDTO } from "../lib/api";
@@ -20,7 +21,7 @@ import type { FileSetDTO } from "../lib/api";
 
 const field =
   "w-full rounded-md border border-hair bg-canvas p-2.5 text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none";
-const head = "section-title mb-2 block !text-brass-300";
+const head = "field-label mb-2 block";
 
 type Remote = NonNullable<FileSetDTO["source"]>["remote"][number];
 
@@ -29,7 +30,7 @@ type Remote = NonNullable<FileSetDTO["source"]>["remote"][number];
  *  card outside marks only the fetched ones. */
 function SourceTag({ hf }: { hf: boolean }) {
   return (
-    <span className={`shrink-0 rounded border px-1.5 py-px font-mono text-[0.58rem] uppercase tracking-[0.1em] ${
+    <span className={`creation-source-tag shrink-0 rounded border px-1.5 py-px uppercase tracking-[0.06em] ${
       hf ? "border-hair text-slate-400" : "border-phosphor-500/40 bg-phosphor-500/10 text-phosphor-300"
     }`}>
       {hf ? "hf" : "local"}
@@ -46,6 +47,8 @@ export function NewFileSetModal({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  const [attempted, setAttempted] = useState(false);
+  const [step, setStep] = useState("basics");
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [files, setFiles] = useState<string[]>([]);
@@ -75,12 +78,14 @@ export function NewFileSetModal({
 
   useEffect(() => {
     if (!open) return;
+    setStep("basics");
+    setAttempted(false);
     setError(null);
     setBusy("");
     setProgress("");
     setDragDepth(0);
     setFolder("");
-    setAdding(false);
+    setAdding(!existing);
     setCreatedName("");
     if (!existing) {
       setName("");
@@ -271,14 +276,31 @@ export function NewFileSetModal({
     }
   }
 
+  const go = (next: string) => {
+    if (next === "checklist") {
+      setAttempted(true);
+      if (!name.trim()) { setStep("basics"); return; }
+      if (!files.length && !remote.length) { setStep("files"); return; }
+      if (busy) return;
+    }
+    setStep(next);
+  };
+
   return (
-    <Modal
+    <CreationModal wide
       open={open}
-      title={managing ? `Manage ${existing}` : "New file"}
+      title={managing ? "Manage Files" : "Add Files"}
+      heading={managing ? existing! : "Bring your files together"}
+      description="Upload files or connect a Hugging Face dataset, then save them as a reusable file set."
       onClose={() => void cancelNewFile()}
-      width="max-w-2xl"
     >
-      <div className="max-h-[70vh] space-y-4 overflow-y-auto pr-1">
+      <SettingNavigation label="File setup" active={step} onSelect={go} items={[
+        { id: "basics", label: "Basic information", group: "Required", complete: !!name.trim() },
+        { id: "files", label: "Files", group: "Required", complete: files.length + remote.length > 0 && !busy },
+        { id: "checklist", label: "Checklist" },
+      ]}>
+      <div className="space-y-8">
+        <section hidden={step !== "basics"} className="space-y-8">
         <div>
           <label className={head}>File set name</label>
           <input
@@ -287,7 +309,7 @@ export function NewFileSetModal({
             disabled={managing || !!createdName}
             spellCheck={false}
             placeholder="Name this file set, e.g. medqa-usmle"
-            className={`${field} font-mono disabled:opacity-60`}
+            className={`${field} font-mono disabled:opacity-60 ${attempted && !name.trim() ? "launch-field-missing" : ""}`}
           />
         </div>
 
@@ -302,18 +324,19 @@ export function NewFileSetModal({
           />
         </div>
 
-        <div>
-          <label className={head}>Files</label>
-          <div className="space-y-1.5 rounded-md border border-hair bg-canvas/50 p-3">
+        </section>
+        <section hidden={step !== "files"} className="space-y-4">
+          {attempted && !files.length && !remote.length && <p role="alert" className="text-sm text-coral-300">Add at least one file or dataset before continuing.</p>}
+          <div className="creation-section space-y-3">
             {groupByFolder(files).map((g) => (
               <div key={g.folder} className="space-y-1.5">
                 {g.label && (
-                  <div className="font-mono text-2xs text-brass-300">{g.label}</div>
+                  <div className="creation-folder-label">{g.label}</div>
                 )}
                 {g.files.map((f) => (
                   <div key={f.path} className={`flex items-center justify-between gap-3 ${g.indent ? "pl-3" : ""}`}>
                     <span className="flex min-w-0 items-center gap-2">
-                      <span className="min-w-0 truncate font-mono text-2xs text-slate-300">{f.leaf}</span>
+                      <span className="creation-file-name min-w-0 truncate">{f.leaf}</span>
                       <SourceTag hf={false} />
                     </span>
                     <button
@@ -335,7 +358,7 @@ export function NewFileSetModal({
                     href={r.url}
                     target="_blank"
                     rel="noreferrer"
-                    className="min-w-0 truncate font-mono text-2xs text-slate-300 hover:text-brass-300"
+                    className="creation-file-name min-w-0 truncate hover:text-brass-300"
                   >
                     {r.id}
                   </a>
@@ -357,7 +380,7 @@ export function NewFileSetModal({
                 </button>
               </div>
             ))}
-            <div className="space-y-2 pt-1">
+            <div className="creation-sources pt-2">
               {/* Two routes in, and nothing else to answer. What a file IS gets
                   decided where it is USED (a task names its test set, a setting
                   names its validation set), so asking again here was asking the
@@ -366,7 +389,7 @@ export function NewFileSetModal({
                 <button
                   onClick={() => setAdding((v) => !v)}
                   disabled={!!busy}
-                  className="btn !text-[13px] disabled:opacity-50"
+                  className="launch-next"
                 >
                   <Upload size={12} />{" "}
                   {busy === "upload"
@@ -383,7 +406,7 @@ export function NewFileSetModal({
                   <button
                     key={label}
                     onClick={() => setFolder(value)}
-                    className={`rounded border px-1.5 py-0.5 font-mono text-2xs transition ${
+                    className={`creation-folder rounded-md border transition ${
                       folder === value
                         ? "border-brass-500/50 bg-brass-500/15 text-brass-300"
                         : "border-hair text-slate-500 hover:text-slate-300"
@@ -409,16 +432,16 @@ export function NewFileSetModal({
                     setDragDepth(0);
                     void upload(e.dataTransfer.files);
                   }}
-                  className="space-y-2 rounded-md border border-hair bg-raised/40 p-3"
+                  className="space-y-4"
                 >
                   <div
-                    className={`flex flex-col items-center justify-center gap-1 rounded-md border border-dashed py-6 font-mono text-2xs transition ${
+                    className={`creation-dropzone flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-6 text-sm transition ${
                       dragDepth > 0
                         ? "border-brass-500/60 bg-brass-500/10 text-brass-300"
                         : "border-hair/70 text-slate-500"
                     }`}
                   >
-                    <Upload size={16} />
+                    <Upload size={24} />
                     {/* Named only when there is a name: "into others" reads as
                         a place, and it is not one — it is the absence of one. */}
                     {dragDepth > 0 ? "Release to upload" : "Drag files here"}
@@ -438,7 +461,7 @@ export function NewFileSetModal({
                     <button
                       onClick={() => picker.current?.click()}
                       disabled={!!busy}
-                      className="btn !text-[13px] disabled:opacity-50"
+                      className="launch-next"
                     >
                       Select from your computer
                     </button>
@@ -459,7 +482,7 @@ export function NewFileSetModal({
                 <button
                   onClick={() => void addRemote()}
                   disabled={!!busy || !hubId.trim()}
-                  className="btn !text-[13px] disabled:opacity-40"
+                  className="launch-next"
                 >
                   {busy === "remote" ? "adding…" : "add"}
                 </button>
@@ -469,7 +492,7 @@ export function NewFileSetModal({
                   and no config, so on that route the two boxes were furniture
                   you had to read past to find out they did not apply. */}
               {hubId.trim() && (
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="creation-source-options">
                   <input
                     value={hubSplit}
                     onChange={(e) => setHubSplit(e.target.value)}
@@ -477,7 +500,7 @@ export function NewFileSetModal({
                     placeholder="Dataset split to import; blank uses train"
                     spellCheck={false}
                     list="hf-splits"
-                    className={`${field} !w-32 font-mono !p-1.5 !text-2xs`}
+                    className={field}
                   />
                   <datalist id="hf-splits">
                     <option value="train" />
@@ -490,14 +513,22 @@ export function NewFileSetModal({
                     onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void addRemote(); } }}
                     placeholder="Dataset subset/config; blank uses the only one"
                     spellCheck={false}
-                    className={`${field} !w-32 font-mono !p-1.5 !text-2xs`}
+                    className={field}
                   />
                 </div>
               )}
             </div>
           </div>
-        </div>
+        </section>
 
+        <section hidden={step !== "checklist"}>
+          <RunSummaryTable optionalValues={[]} requiredValues={[
+            { name: "File set name", value: name },
+            { name: "Description", value: note || "Not specified" },
+            { name: "Uploaded files", value: files.length ? files.join("\n") : "None" },
+            { name: "Hugging Face datasets", value: remote.length ? remote.map(item => `${item.id} · ${item.config ? item.config + " · " : ""}${item.split || "train"}`).join("\n") : "None" },
+          ]} />
+        </section>
         {error && (
           <div className="whitespace-pre-line rounded-md border border-coral-500/30 bg-coral-500/10 p-2.5 text-2xs text-coral-300">
             {error}
@@ -505,24 +536,20 @@ export function NewFileSetModal({
         )}
       </div>
 
-      <div className="mt-4 flex items-center justify-between gap-2 border-t border-hair pt-4">
-        <Kicker className="!text-slate-600">
-          {files.length + remote.length} file{files.length + remote.length === 1 ? "" : "s"}
-        </Kicker>
-        <div className="flex gap-2">
-          <button onClick={() => void cancelNewFile()} disabled={!!busy} className="btn disabled:opacity-40">
-            {busy === "cancel" ? "cancelling…" : managing ? "close" : "cancel"}
-          </button>
-          <button
+      <div className="creation-actions">
+        {step !== "basics" ? <button onClick={() => setStep(step === "checklist" ? "files" : "basics")} disabled={!!busy} className="launch-back">← Back</button> : <span />}
+        <div className="flex items-center gap-6">
+          {step !== "checklist" ? <button type="button" className="launch-next" disabled={!!busy} onClick={() => go(step === "basics" ? "files" : "checklist")}>Continue →</button> : <button
             onClick={() => void saveNote()}
             disabled={!!busy || !name.trim() || (files.length === 0 && remote.length === 0)}
             title={files.length === 0 && remote.length === 0 ? "Add at least one file first" : ""}
-            className="btn btn-brass uppercase tracking-[0.14em] disabled:opacity-30"
+            className="launch-next"
           >
-            {busy === "note" ? "saving…" : "save"}
-          </button>
+            {busy === "note" ? "Saving…" : "Save files"}
+          </button>}
         </div>
       </div>
-    </Modal>
+      </SettingNavigation>
+    </CreationModal>
   );
 }

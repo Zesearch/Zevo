@@ -31,14 +31,23 @@ export function trainingActivity(
   return null;
 }
 
-/** Preparation counters count rows, not optimizer updates. Keep them out of
- * both the metric series and the axis, even when they carry numeric extras. */
+/** Only training phases report optimizer steps. Generation, selection and
+ * validation count other units and cannot contribute metrics or axis bounds. */
 export function isTrainingChartEvent(event: ExecutionEventDTO): boolean {
   if (isMidTrainingValidationEvent(event)) return false;
   const phase = event.phase.split(":")[0];
-  if (["data_preparation", "preparing_data", "tokenization", "tokenizing", "model_load",
-       "loading_model", "saving_model", "connecting"].includes(phase)) return false;
-  return true;
+  return ["train", "training", "adaptive_training"].includes(phase)
+    && (event.event_type === "progress" || event.event_type === "attempt");
+}
+
+/** Explicit loss metrics are signed (RL objectives can be negative). Only
+ * the legacy column uses -1 to represent an absent reading. */
+export function trainingLoss(event: ExecutionEventDTO): number | undefined {
+  const extras = event.extras || {};
+  const explicit = extras.loss;
+  if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
+  if (extras.eval_loss != null || extras.validation_loss != null) return undefined;
+  return Number.isFinite(event.loss) && event.loss !== -1 ? event.loss : undefined;
 }
 
 /** Keep checkpoint resumes on one global-step timeline. A replay or rollback
@@ -48,9 +57,9 @@ export function continuousTrainingEvents(events: ExecutionEventDTO[]): Execution
   const seenAttempts = new Set<string>();
   for (const event of [...events].sort((a, b) => a.ts.localeCompare(b.ts))) {
     if (!isTrainingChartEvent(event)) continue;
-    const loss = event.extras?.loss ?? event.loss;
+    const loss = trainingLoss(event);
     const isTrainingReading = event.event_type === "progress" && event.current_step > 0
-      && typeof loss === "number" && loss >= 0
+      && loss !== undefined
       && event.extras?.eval_loss == null && event.extras?.validation_loss == null;
     if (isTrainingReading && event.attempt_id && !seenAttempts.has(event.attempt_id)) {
       seenAttempts.add(event.attempt_id);

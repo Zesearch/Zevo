@@ -1,3 +1,4 @@
+import { resolveLaunchTask } from "../lib/taskSelection";
 import { SaveRunPrompt } from "./SaveRunPrompt";
 import { ClearableInput, ClearableTextarea, ClearFieldsContext } from "./ClearableField";
 import "./launchForm.css";
@@ -176,6 +177,7 @@ export function NewRunModal({
   initialMode = "auto",
   initialAgent,
   initialTaskName,
+  initialTaskId,
   initialSettingId,
   initialInputs,
 }: {
@@ -184,6 +186,7 @@ export function NewRunModal({
   initialMode?: Mode;
   initialAgent?: string;
   initialTaskName?: string;
+  initialTaskId?: string;
   initialSettingId?: string;
   initialInputs?: Record<string, string>;
 }) {
@@ -209,6 +212,7 @@ export function NewRunModal({
   // Every run is named. A name that matches a predefined task runs that task
   // as-is; any other name is a custom task and needs an objective.
   const [taskName, setTaskName] = useState("");
+  const [taskId, setTaskId] = useState(initialTaskId || "");
   // What to call THIS execution. The task name says what is being run; many
   // runs share one, so this is what tells them apart in the list afterwards.
   const [runName, setRunName] = useState("");
@@ -245,11 +249,13 @@ export function NewRunModal({
   const [customizedResetKey, setCustomizedResetKey] = useState(0);
   const [customizedSeed, setCustomizedSeed] = useState<{
     taskName: string;
+    taskId?: string;
     settingId: string;
     runName: string;
     inputs?: Partial<RunInputValues>;
   }>({
     taskName: initialTaskName || "",
+    taskId: initialTaskId,
     settingId: initialSettingId || "",
     runName: "",
     inputs: initialInputs as Partial<RunInputValues> | undefined,
@@ -326,10 +332,10 @@ export function NewRunModal({
     [agents],
   );
 
-  const predefined = useMemo(
-    () => tasks.find((c) => c.name === trimmedTask),
-    [tasks, trimmedTask],
-  );
+  const matchingTasks = tasks.filter(task => task.name === trimmedTask);
+  const predefined = resolveLaunchTask(tasks, trimmedTask, taskId);
+  const ambiguousTask = !predefined && matchingTasks.length > 1;
+
 
   const explicitComputeValue = computeTargetValue(inputs);
   const effectiveComputeTarget = (
@@ -338,6 +344,7 @@ export function NewRunModal({
   );
   const validationContract = validationContractFromInputs(inputs);
   const fullMissing = [
+    ambiguousTask && "Choose a specific task from the list",
     !runName.trim() && "Run name",
     !trimmedTask && "Task name",
     !(predefined?.task_objective || nl).trim() && "Objective",
@@ -419,6 +426,7 @@ export function NewRunModal({
     : singleMissing;
 
   function changeFullTaskName(next: string) {
+    setTaskId("");
     setSourceSkipped(false);
     // Test assets belong to the task. When the user leaves a catalogued task,
     // do not let its held-out files become the invisible starting point of a
@@ -445,7 +453,7 @@ export function NewRunModal({
 
   // The settings already on this task, for the name-clash check.
   const { data: savedSettings = [] } = useSWR<TaskSettingDTO[]>(
-    predefined ? `/api/tasks/${encodeURIComponent(trimmedTask)}/settings` : null,
+    predefined ? `/api/tasks/${encodeURIComponent(predefined.id || predefined.name)}/settings` : null,
   );
 
   // Which setting this configuration already IS, answered by the SERVER so the
@@ -488,7 +496,7 @@ export function NewRunModal({
   }).toString();
   const { data: matched } = useSWR<{ match: TaskSettingDTO | null }>(
     predefined
-      ? `/api/tasks/${encodeURIComponent(trimmedTask)}/settings/match?${matchQuery}`
+      ? `/api/tasks/${encodeURIComponent(predefined.id || predefined.name)}/settings/match?${matchQuery}`
       : null,
   );
   const alreadySaved = matched?.match ?? null;
@@ -507,11 +515,11 @@ export function NewRunModal({
   // form that nobody made. Left empty, Zevo decides each of them, which is now
   // literally true: the request is sent as the form stands (see submit), so a
   // blank Training data box reaches the run as blank.
-  // Keyed on the task NAME, not the object: tasks are re-fetched on window
+  // Keyed on the task identity, not the object: tasks are re-fetched on window
   // focus, and a fresh array means fresh object identities — depending on the
   // object made every refocus re-run this reset and silently wipe whatever
   // the user had edited.
-  const predefinedName = predefined?.name ?? "";
+  const predefinedName = predefined?.id || predefined?.name || "";
   useEffect(() => {
     // Not in Auto: a predefined name there is a mistake the checklist reports,
     // and prefilling the task's scoring fields — or clearing the objective the
@@ -611,6 +619,7 @@ export function NewRunModal({
       // The task still supplies what a task IS — its objective and complete
       // Test suite. The scalar values are only the suite's primary projection.
       body = {
+        ...(predefined?.id && !sourceSkipped ? { task_id: predefined.id } : {}),
         task_name: sourceSkipped && saveSetting ? newTaskName.trim() : trimmedTask,
         run_name: runName.trim(),
         user_request: {
@@ -841,6 +850,7 @@ export function NewRunModal({
             onClick={() => {
               setCustomizedSeed({
                 taskName,
+                taskId,
                 settingId: pickedSetting,
                 runName,
                 inputs,
@@ -895,14 +905,15 @@ export function NewRunModal({
           <div className="space-y-6">
                 <Field label="Task name">
                   <TaskNameInput value={sourceSkipped ? "" : taskName} onChange={changeFullTaskName}
+                    selectedTaskId={taskId} onPick={(_, id) => setTaskId(id || "")}
                     placeholder="Choose a Task"
                     className={fieldCls} />
                 </Field>
-            {!predefined && !sourceSkipped && taskName.trim() && <Field label="Saved settings"><p className="text-sm text-slate-500">No saved settings for this Task.</p></Field>}
+            {!predefined && !sourceSkipped && taskName.trim() && <Field label="Saved settings"><p className="text-sm text-slate-500">{ambiguousTask ? "Multiple tasks have this name. Choose a specific task from the list." : "No saved settings for this Task."}</p></Field>}
             {predefined && <>
               <Field label="Saved settings">
                 <TaskSettingHistory compact onClear={() => { setPickedSetting(""); setInputs({ ...EMPTY_RUN_INPUTS }); setTouched(true); setSaveSetting(false); }}
-                  task={trimmedTask}
+                  task={trimmedTask} taskId={predefined.id}
                   onPick={applySetting}
                   selectedId={sourceSetting}
                   modified={Boolean(sourceSetting && reusableSetting?.id !== sourceSetting)}
@@ -1011,6 +1022,7 @@ export function NewRunModal({
             key={customizedResetKey}
             onDone={onClose}
             initialTaskName={customizedSeed.taskName || initialTaskName}
+            initialTaskId={customizedSeed.taskId || initialTaskId}
             initialSettingId={customizedSeed.settingId || initialSettingId}
             initialRunName={customizedSeed.runName}
             initialInputs={customizedSeed.inputs}
@@ -1034,6 +1046,7 @@ export function NewRunModal({
             taskSelector={(
                 <Field label="Task name">
                   <TaskNameInput value={sourceSkipped ? "" : taskName} onChange={changeFullTaskName}
+                    selectedTaskId={taskId} onPick={(_, id) => setTaskId(id || "")}
                     placeholder="Choose a Task"
                     className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(trimmedTask))}`} />
                 </Field>
@@ -1064,7 +1077,7 @@ export function NewRunModal({
             optionalPrefix={predefined ? (
               <Field label="Saved settings">
                 <TaskSettingHistory compact
-                  task={trimmedTask}
+                  task={trimmedTask} taskId={predefined.id}
                   onPick={applySetting}
                   selectedId={sourceSetting}
                   modified={Boolean(sourceSetting && reusableSetting?.id !== sourceSetting)}

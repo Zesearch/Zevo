@@ -280,3 +280,89 @@ def test_comparison_version_timestamps(known_time):
     task.task_objective = "Original"
     assert task_definition_snapshot(task)["sha256"] == saved["sha256"]
     assert detect_input_changes(run, task) == []
+
+
+@pytest.mark.asyncio
+async def test_member_preservation_keeps_sibling_eligible_for_later_deletion(tmp_path, monkeypatch):
+    files = tmp_path / "files"
+    bundle = files / "bundle"
+    bundle.mkdir(parents=True)
+    first, second = bundle / "a.csv", bundle / "b.csv"
+    first.write_text("first original")
+    second.write_text("second original")
+    monkeypatch.setenv("ZEVO_FILES_DIR", str(files))
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "private"))
+    monkeypatch.setenv("ZEVO_WORK_DIR", str(tmp_path / "runs"))
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+        run = Run(id="member-run", task_name="task", metric="accuracy",
+                  decision_pins={"dataset": str(first), "other": str(second)})
+        db.add(run)
+        await db.commit()
+        await preserve_legacy_run_inputs(db, "bundle", member="a.csv")
+        saved_first = Path(run.decision_pins["dataset"])
+        assert saved_first != first
+        assert run.decision_pins["other"] == str(second)
+        assert "bundle" not in run.input_snapshot.get("preserved_file_sets", [])
+        first.unlink()
+        assert saved_first.read_text() == "first original"
+        await preserve_legacy_run_inputs(db, "bundle")
+        saved_second = Path(run.decision_pins["other"])
+        second.unlink()
+        assert saved_second.read_text() == "second original"
+        assert saved_first.read_text() == "first original"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_file_skips_python_history_scan(tmp_path, monkeypatch):
+    from zevo.api import file_integrity
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+        db.add(Run(id="unrelated", task_name="task", metric="accuracy",
+                   decision_pins={"text": ["unrelated history"] * 1000}))
+        await db.commit()
+        def unexpected(*args, **kwargs):
+            raise AssertionError("unrelated history must not be traversed or fingerprinted")
+        monkeypatch.setattr(file_integrity, "_rewrite_catalogue_references", unexpected)
+        monkeypatch.setattr(file_integrity, "file_set_snapshot", unexpected)
+        await preserve_legacy_run_inputs(db, "new_bundle", member="sample.csv")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["ticket", "product", "directory"])
+async def test_candidate_search_includes_ticket_only_reference(tmp_path, monkeypatch, location):
+    from zevo.db import WorkProduct
+    files = tmp_path / "files"
+    folder = files / "_t" / "alice" / "bundle"
+    folder.mkdir(parents=True)
+    source = folder / "train.csv"
+    source.write_text("original")
+    monkeypatch.setenv("ZEVO_FILES_DIR", str(files))
+    monkeypatch.setenv("ZEVO_HOLDOUT_ROOT", str(tmp_path / "private"))
+    monkeypatch.setenv("ZEVO_WORK_DIR", str(tmp_path / "runs"))
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+        run = Run(id="ticket-only", task_name="task", metric="accuracy")
+        reference = folder if location == "directory" else source
+        ticket = Ticket(id="data-ticket", run_id=run.id, agent_id="data",
+                        inputs={"dataset": str(reference)} if location != "product" else {})
+        product = WorkProduct(ticket_id=ticket.id, role="data", path=str(source))
+        db.add_all([run, ticket])
+        if location == "product":
+            db.add(product)
+        await db.commit()
+        await preserve_legacy_run_inputs(db, "_t/alice/bundle", member="train.csv")
+        source.unlink()
+        copied = Path(product.path if location == "product" else ticket.inputs["dataset"])
+        if location == "directory":
+            copied = copied / "train.csv"
+        assert copied.read_text() == "original"
+    await engine.dispose()

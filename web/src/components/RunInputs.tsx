@@ -1,3 +1,5 @@
+import { BUILTIN_METRICS } from "../lib/scoringMetrics";
+export { BUILTIN_METRICS } from "../lib/scoringMetrics";
 import { LaunchNavigation } from "./LaunchNavigation";
 import { FieldHint } from "./FieldHint";
 import { ClearableInput, ClearableTextarea } from "./ClearableField";
@@ -93,6 +95,7 @@ export function ScoringSuiteManifest({
   showHeader = true,
   summaryLayout = "stacked",
   startIndex = 0,
+  flat = true,
 }: {
   items: TaskTestSet[];
   title?: string;
@@ -101,6 +104,7 @@ export function ScoringSuiteManifest({
   showHeader?: boolean;
   summaryLayout?: "stacked" | "inline";
   startIndex?: number;
+  flat?: boolean;
 }) {
   const short = useFileDisplayPath();
   return (
@@ -111,13 +115,13 @@ export function ScoringSuiteManifest({
         </span>
         {note && <span className="font-mono text-2xs text-slate-500">{note}</span>}
       </div>}
-      <div className="max-h-80 space-y-1.5 overflow-y-auto pr-1">
+      <div className={flat ? "divide-y divide-hair" : "max-h-80 space-y-1.5 overflow-y-auto pr-1"}>
         {items.map((item, index) => (
           <details
             key={`${item.name}-${index}`}
-            className="group overflow-hidden rounded-md border border-hair bg-canvas/45"
+            className={flat ? "group overflow-hidden py-2" : "group overflow-hidden rounded-md border border-hair bg-canvas/45"}
           >
-            <summary className="grid cursor-pointer list-none grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-2 px-3 py-2.5 transition hover:bg-white/[0.025] sm:grid-cols-[1.5rem_minmax(8rem,1fr)_auto]">
+            <summary className="grid cursor-pointer list-none grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-2 px-3 py-2.5 transition hover:bg-white/[0.025] sm:grid-cols-[1.5rem_minmax(0,1fr)_auto]">
               <span className="pt-0.5 font-mono text-2xs tabular-nums text-slate-600">
                 {String(startIndex + index + 1).padStart(2, "0")}
               </span>
@@ -137,9 +141,6 @@ export function ScoringSuiteManifest({
               }`}>
                 <span className="whitespace-nowrap rounded border border-brass-500/25 bg-brass-500/[0.05] px-1.5 py-0.5 font-mono text-2xs tabular-nums text-brass-200">
                   {fmtScoringRows(item.source_rows, item.max_rows)}
-                </span>
-                <span className="whitespace-nowrap font-mono text-2xs text-brass-300">
-                  {item.metric} · {item.metric_direction === "min" ? "min" : "max"}
                 </span>
               </span>
             </summary>
@@ -209,7 +210,9 @@ function TaskTestSuite({ items }: { items: TaskTestSet[] }) {
   return (
     <ScoringSuiteManifest
       items={items}
-      note="defined by Task · unweighted average"
+      flat
+      showHeader={false}
+      summaryLayout="stacked"
     />
   );
 }
@@ -285,10 +288,11 @@ export function normalizeScoringSuite(items: TaskTestSet[]): TaskTestSet[] {
  * same prompt, output schema and evaluator contract, so they intentionally use
  * the same cards instead of unrelated single-file controls. */
 export function ScoringSuiteEditor({
-  items, lane, onChange,
+  items, lane, onChange, flat = false,
 }: {
   items: TaskTestSet[];
   lane: "Test" | "Validation";
+  flat?: boolean;
   onChange: (items: TaskTestSet[]) => void;
 }) {
   const update = (index: number, patch: Partial<TaskTestSet>) => onChange(
@@ -324,22 +328,22 @@ export function ScoringSuiteEditor({
   return (
     <div className="space-y-3">
       <div className="flex items-end justify-between gap-4 px-0.5">
-        {lane !== "Test" && <p className="font-mono text-2xs leading-relaxed text-slate-500">
+        {lane !== "Test" && !flat && <p className="font-mono text-2xs leading-relaxed text-slate-500">
           Each {lane} set has its own inference query, output format, answers, and metric.
         </p>}
         {items.length > 0 && <button
           type="button"
           onClick={addSet}
-          className="btn shrink-0 !py-1 !text-2xs"
+          className="launch-add-set"
         >
-          <Plus size={12} /> add {lane} set
+          <Plus size={16} /> Add {lane} set
         </button>}
       </div>
       {!items.length && (
         <button
           type="button"
           onClick={addSet}
-          className="w-full rounded-md border border-dashed border-hair px-4 py-5 font-mono text-xs text-slate-500 transition hover:border-brass-500/40 hover:text-brass-300"
+          className="launch-add-set"
         >
           Add the first {lane} set
         </button>
@@ -347,19 +351,20 @@ export function ScoringSuiteEditor({
       {addAttempted && items.length > 0 && missing.length > 0 && (
         <p role="status" className="text-xs text-coral-300">Complete the current sets before adding another: {missing.join(", ")}.</p>
       )}
-      <div ref={listRef} className="max-h-[min(40vh,28rem)] space-y-3 overflow-y-auto overscroll-contain pr-1" aria-label={`${lane} sets`}>
+      <div ref={listRef} className={flat ? "divide-y divide-hair" : "max-h-[min(40vh,28rem)] space-y-3 overflow-y-auto overscroll-contain pr-1"} aria-label={`${lane} sets`}>
       {items.map((item, index) => {
         const complete = scoringSuiteMissing([item], lane).length === 0;
         const editing = editingIndex === index || !complete;
-        return <section key={index} className="rounded-lg border border-hair bg-white/[0.018] p-4">
+        return <section key={index} className={flat ? "py-5" : "rounded-lg border border-hair bg-white/[0.018] p-4"}>
           <div className="mb-4 flex items-center justify-between">
-            <span className="font-mono text-xs uppercase tracking-[0.14em] text-brass-300">
-              {lane} set {index + 1}
+            <span className="flex min-w-0 items-center gap-3">
+              <span className={`shrink-0 tabular-nums ${editing ? "suite-entry-title" : "font-mono text-2xs text-slate-600"}`}>{String(index + 1).padStart(2, "0")}</span>
+              <span className={`min-w-0 break-words ${editing ? "suite-entry-title" : "font-mono text-xs text-slate-200"}`}>{item.name || `${lane} set`}</span>
             </span>
             <div className="flex items-center gap-2">
             <button type="button" disabled={editing && !complete}
               onClick={() => setEditingIndex(editing ? null : index)}
-              className="btn !py-1 !text-2xs disabled:opacity-30">
+              className="launch-next launch-next-compact">
               {editing ? "Done" : "Edit"}
             </button>
             <button
@@ -499,7 +504,7 @@ export function ScoringSuiteEditor({
                 hint="Blank uses every row in the selected split."
               />
             )}
-          </div> : <ScoringSuiteManifest items={[item]} setLabel={`${lane} set`} showHeader={false} startIndex={index} />}
+          </div> : flat ? null : <ScoringSuiteManifest items={[item]} setLabel={`${lane} set`} showHeader={false} startIndex={index} />}
         </section>;
       })}
       </div>
@@ -743,7 +748,7 @@ function UploadBox({
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={busy}
-        className={`btn !text-[13px] disabled:opacity-50 ${buttonClassName}`}
+        className={`launch-next ${buttonClassName}`}
       >
         <Upload size={12} /> {busy ? "Uploading…" : label}
       </button>
@@ -775,7 +780,7 @@ function UploadBox({
               type="button"
               onClick={() => input.current?.click()}
               disabled={busy}
-              className="btn !text-[13px] disabled:opacity-50"
+              className="launch-next"
             >
               Select from your computer
             </button>
@@ -1153,9 +1158,7 @@ export function TextField({
 export const MODEL_ID_HINT =
   "the full HuggingFace id, owner included: Qwen/Qwen3-0.6B, not Qwen3-0.6B";
 
-export const BUILTIN_METRICS = [
-  "accuracy", "exact_match", "f1", "token_f1", "bleu", "rouge_l",
-];
+
 
 export function methodConfigFromInputs(inputs: RunInputValues): Record<string, unknown> {
   const config: Record<string, unknown> = {};
@@ -1361,7 +1364,7 @@ export function MultiFileSlot({
           type="button"
           onClick={() => setShowUpload((v) => !v)}
           disabled={busy}
-          className="btn shrink-0 !text-[13px] disabled:opacity-50"
+          className="launch-next shrink-0"
         >
           <Upload size={12} /> {busy ? "Uploading…" : "Upload files"}
         </button>
@@ -1394,7 +1397,7 @@ export function MultiFileSlot({
           </div>
           <div className="flex items-center justify-center gap-2">
             <span className="font-mono text-2xs text-slate-600">or</span>
-            <button type="button" onClick={() => input.current?.click()} className="btn !text-[13px]">
+            <button type="button" onClick={() => input.current?.click()} className="launch-next">
               Select from your computer
             </button>
           </div>
@@ -1792,7 +1795,7 @@ export function RunInputs({
         </section>
         <section hidden={activeStep !== 1} aria-label="Test setup" className="motion-safe:animate-zevo-in space-y-3">
           {hasTaskTestSuite ? <TaskTestSuite items={taskTestSuite!} /> : (
-            <ScoringSuiteEditor items={testSets} lane="Test" onChange={items => onChange({ testSets: items })} />
+            <ScoringSuiteEditor items={testSets} lane="Test" flat onChange={items => onChange({ testSets: items })} />
           )}
         </section>
         <section hidden={activeStep !== 2} aria-label="Training" className="motion-safe:animate-zevo-in space-y-3">
@@ -1813,7 +1816,7 @@ export function RunInputs({
                   <button
                     type="button"
                     onClick={() => onChange({ validationSets: [emptyScoringSet()] })}
-                    className="w-full rounded-md border border-dashed border-hair px-4 py-5 font-mono text-xs text-slate-500 transition hover:border-brass-500/40 hover:text-brass-300"
+                    className="launch-add-set"
                   >
                     Add the first Validation set
                   </button>
@@ -1824,7 +1827,7 @@ export function RunInputs({
                     <>
                       <ScoringSuiteManifest items={validationSets} setLabel="Validation set" />
                       <button type="button" onClick={() => setEditingValidation(true)}
-                        className="btn !py-1 !text-2xs">
+                        className="launch-next launch-next-compact">
                         Edit
                       </button>
                     </>
@@ -1832,6 +1835,7 @@ export function RunInputs({
                     <ScoringSuiteEditor
                       items={validationSets}
                       lane="Validation"
+                      flat
                       onChange={(items) => onChange({ validationSets: items })}
                     />
                   )}

@@ -1,3 +1,4 @@
+import { resolveLaunchTask } from "../lib/taskSelection";
 import { SaveRunPrompt } from "./SaveRunPrompt";
 import { ClearableInput, ClearableTextarea } from "./ClearableField";
 import { ModelSaveFields, defaultModelSavePolicy, modelSaveReady, modelSaveSummaryValues } from "./ModelSaveFields";
@@ -109,6 +110,7 @@ export function CustomizedRunForm({
   onDirtyChange,
   onContextChange,
   initialTaskName = "",
+  initialTaskId = "",
   initialSettingId = "",
   initialRunName = "",
   initialInputs,
@@ -119,6 +121,7 @@ export function CustomizedRunForm({
   onDirtyChange?: (dirty: boolean) => void;
   onContextChange?: (context: { taskName: string; settingName: string }) => void;
   initialTaskName?: string;
+  initialTaskId?: string;
   initialSettingId?: string;
   initialRunName?: string;
   initialInputs?: Partial<RunInputValues>;
@@ -131,6 +134,7 @@ export function CustomizedRunForm({
   const { data: tasks = [] } = useSWR<TaskDTO[]>("/api/tasks");
   // Run-level fields
   const [taskName, setTaskName] = useState(initialTaskName);
+  const [taskId, setTaskId] = useState(initialTaskId || "");
   // What to call this particular execution, as opposed to the task it runs.
   const [runName, setRunName] = useState(initialRunName);
   const [objective, setObjective] = useState("");
@@ -173,12 +177,12 @@ export function CustomizedRunForm({
     onDirtyChange?.(dirtyForm);
   }, [dirtyForm, onDirtyChange]);
 
-  const predefined = useMemo(
-    () => tasks.find((task) => task.name === taskName.trim()) ?? null,
-    [tasks, taskName],
-  );
+  const matchingTasks = tasks.filter(task => task.name === taskName.trim());
+  const predefined = resolveLaunchTask(tasks, taskName, taskId);
+  const ambiguousTask = !predefined && matchingTasks.length > 1;
+
   const { data: savedSettings = [] } = useSWR<TaskSettingDTO[]>(
-    predefined ? `/api/tasks/${encodeURIComponent(predefined.name)}/settings` : null,
+    predefined ? `/api/tasks/${encodeURIComponent(predefined.id || predefined.name)}/settings` : null,
   );
   const picked = savedSettings.find((setting) => setting.id === pickedSetting) ?? null;
   useEffect(() => { onContextChange?.({ taskName: askTaskNameOnSave ? (saveSetting ? newTaskName : "") : taskName, settingName: picked?.name || "" }); }, [onContextChange, askTaskNameOnSave, saveSetting, newTaskName, taskName, picked?.name]);
@@ -202,7 +206,7 @@ export function CustomizedRunForm({
       metric: primaryTest?.metric ?? predefined.metric,
       metricDirection: primaryTest?.metric_direction ?? predefined.metric_direction,
     }));
-  }, [predefined?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [predefined?.id, predefined?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function applySetting(s: TaskSettingDTO) {
     setPickedSetting(s.id);
@@ -242,6 +246,7 @@ export function CustomizedRunForm({
   }, [initialSettingId, savedSettings.length]);
 
   function changeTaskName(next: string) {
+    setTaskId("");
     if (next.trim() !== taskName.trim()) {
       setPickedSetting("");
       setTouched(false);
@@ -276,6 +281,7 @@ export function CustomizedRunForm({
     ?? (!explicitComputeValue ? compute.defaultTarget : undefined)
   );
   const requiredMissing = [
+    ambiguousTask && "Choose a specific task from the list",
     !runName.trim() && "Run name",
     !taskName.trim() && "Task name",
     !objective.trim() && "Objective",
@@ -430,6 +436,7 @@ export function CustomizedRunForm({
       const body = {
         mode: "customized_pipeline",
         model_save_policy: modelSave,
+        ...(predefined?.id && !askTaskNameOnSave ? { task_id: predefined.id } : {}),
         task_name: askTaskNameOnSave && saveSetting ? newTaskName.trim() : taskName.trim(),
         run_name: runName.trim(),
         user_request,
@@ -514,6 +521,7 @@ export function CustomizedRunForm({
               <div>
                 <label className={labelCls}>Task name</label>
                 <TaskNameInput value={taskName} onChange={changeTaskName}
+                  selectedTaskId={taskId} onPick={(_, id) => setTaskId(id || "")}
                   placeholder="a predefined task, or name your own"
                   className={`${fieldCls} font-mono ${requiredFieldStateCls(Boolean(taskName.trim()))}`} />
               </div>
@@ -545,7 +553,7 @@ export function CustomizedRunForm({
             <section>
               <h3 className="field-label mb-1.5">Saved settings</h3>
               <TaskSettingHistory compact
-                task={predefined.name}
+                task={predefined.name} taskId={predefined.id}
                 onPick={applySetting}
                 selectedId={sourceSetting}
                 modified={Boolean(sourceSetting && !pickedSetting)}

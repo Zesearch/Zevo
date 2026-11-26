@@ -31,8 +31,7 @@
             if (v) localStorage.setItem(key, v);
             return localStorage.getItem(key);
           };
-          var variant = pick("light", "zevo-light-variant");
-          if (variant) document.documentElement.setAttribute("data-light", variant);
+          document.documentElement.setAttribute("data-light", "paper");
           var type = pick("type", "zevo-type");
           if (type) document.documentElement.setAttribute("data-type", type);
         } catch (e) {}

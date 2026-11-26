@@ -234,9 +234,9 @@ async def test_new_slurm_job_replaces_stale_queued_collect_payload(db) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requested_gpus", [None, 4])
+@pytest.mark.parametrize("requested_gpus,replace_allocation", [(None, False), (4, False), (None, True)])
 async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
-    db, monkeypatch, requested_gpus,
+    db, monkeypatch, requested_gpus, replace_allocation,
 ) -> None:
     await _seed(db, "train", cap=1, n_queued=0)
     async with db() as s:
@@ -258,7 +258,8 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
             id="instruction-wake", agent_id="train", ticket_id="train-replace",
             status="queued", source="on_demand", reason="message by orchestrator",
             payload={"run_instruction_id": "instruction-1", "instruction_action": "restart_activation",
-                     **({"requested_gpus": requested_gpus} if requested_gpus else {})},
+                     **({"requested_gpus": requested_gpus} if requested_gpus else {}),
+                     **({"replace_allocation": True} if replace_allocation else {})},
             scheduled_for=datetime.now(timezone.utc),
         ))
         await s.commit()
@@ -272,7 +273,7 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
 
     async def stop_workload(db, ticket, *, preserve_allocation=False, resize_allocation=False):
         cleanup_calls.append(preserve_allocation)
-        assert resize_allocation == bool(requested_gpus)
+        assert resize_allocation == bool(requested_gpus or replace_allocation)
         return {"attempted": True, "ok": True}
 
     monkeypatch.setattr(remote_jobs, "cancel_ticket_remote_job", stop_workload)
@@ -295,10 +296,11 @@ async def test_instruction_waits_for_old_slurm_release_before_specialist_runs(
         await s.commit()
 
     await wd._run_one("train", "instruction-wake", datetime.now(timezone.utc))
-    assert cleanup_calls == [not bool(requested_gpus)] * 2
+    assert cleanup_calls == [not bool(requested_gpus or replace_allocation)] * 2
     assert calls[0]["activation_payload"] == {
         "run_instruction_id": "instruction-1", "instruction_action": "restart_activation",
         **({"requested_gpus": requested_gpus} if requested_gpus else {}),
+                     **({"replace_allocation": True} if replace_allocation else {}),
     }
     async with db() as s:
         ticket = await s.get(Ticket, "train-replace")

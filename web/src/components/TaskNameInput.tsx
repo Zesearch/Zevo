@@ -4,7 +4,7 @@ import useSWR from "swr";
 
 /** Just the two fields the suggestion list shows. The full task row is bigger,
  *  but this component only ever names and describes one. */
-type TaskLite = { name: string; task_objective?: string };
+type TaskLite = { id?: string; name: string; task_objective?: string; created_by_name?: string; created_by_email?: string };
 
 /**
  * The task-name box: free text, with the predefined tasks offered as you type.
@@ -18,6 +18,7 @@ export function TaskNameInput({
   value,
   onChange,
   onPick,
+  selectedTaskId,
   placeholder = "",
   className = "",
   id,
@@ -25,7 +26,8 @@ export function TaskNameInput({
   value: string;
   onChange: (v: string) => void;
   /** Fired only when a suggestion was chosen, never on typing. */
-  onPick?: (name: string) => void;
+  onPick?: (name: string, taskId?: string) => void;
+  selectedTaskId?: string;
   placeholder?: string;
   className?: string;
   id?: string;
@@ -64,9 +66,9 @@ export function TaskNameInput({
     return () => document.removeEventListener("pointerdown", away);
   }, [open]);
 
-  function pick(name: string) {
-    onChange(name);
-    onPick?.(name);
+  function pick(task: TaskLite) {
+    onChange(task.name);
+    onPick?.(task.name, task.id);
     setOpen(false);
     setCursor(-1);
   }
@@ -91,7 +93,7 @@ export function TaskNameInput({
             );
           } else if (e.key === "Enter" && show && cursor >= 0) {
             e.preventDefault();
-            pick(matches[cursor].name);
+            pick(matches[cursor]);
           } else if (e.key === "Escape" && show) {
             // Swallowed, so closing the list does not also close the dialog.
             e.stopPropagation();
@@ -110,21 +112,24 @@ export function TaskNameInput({
       {show && (
         <ul id={listId} role="listbox" aria-label="Task name" className={`absolute left-0 right-0 top-full z-20 mt-1 max-h-56 overflow-y-auto rounded-md border border-hair bg-raised py-1 shadow-lg ${launchStyle ? "launch-select-menu" : ""}`}>
           {matches.map((t, i) => (
-            <li key={t.name} role="presentation">
+            <li key={t.id || t.name} role="presentation">
               {/* Mousedown, not click: the input's blur would otherwise fire
                   first and take the row out from under the pointer. */}
               <button
                 type="button"
                 role="option"
-                aria-selected={t.name === value}
+                aria-selected={selectedTaskId ? t.id === selectedTaskId : t.name === value}
                 data-active={i === cursor}
-                onMouseDown={(e) => { e.preventDefault(); pick(t.name); }}
+                onMouseDown={(e) => { e.preventDefault(); pick(t); }}
                 onMouseEnter={() => setCursor(i)}
                 className={`block w-full px-3 py-1.5 text-left transition ${
                   i === cursor ? "bg-brass-500/10" : "hover:bg-canvas/60"
                 }`}
               >
                 <span className="launch-option-title block truncate font-mono text-xs text-brass-300" title={t.name}>{t.name}</span>
+                {tasks.filter(candidate => candidate.name === t.name).length > 1 && (
+                  <span className="block text-xs text-slate-400">{t.created_by_name || t.created_by_email || t.id}</span>
+                )}
                 {t.task_objective && (
                   <span className="launch-option-description mt-0.5 block text-2xs text-slate-500">
                     {t.task_objective}

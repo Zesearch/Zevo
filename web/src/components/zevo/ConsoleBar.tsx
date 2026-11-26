@@ -8,7 +8,6 @@
 //
 // The Launch run button is not here — every page that can start a run offers it
 // in its own header, and ⌘K reaches it from anywhere.
-import { useState, type ChangeEvent } from "react";
 import useSWR from "swr";
 import { Link } from "react-router-dom";
 import { Command, Moon, Sun } from "lucide-react";
@@ -16,18 +15,7 @@ import type { ModelDTO, RunStatistics } from "../../lib/api";
 import { fmtCost, fmtDuration } from "../../lib/format";
 import logoUrl from "../../assets/zevo-logo.png";
 import { fireCommand } from "../../lib/commands";
-import {
-  LIGHT_VARIANTS,
-  TYPE_SETS,
-  applyLightVariant,
-  applyTypeSet,
-  readLightVariant,
-  readTypeSet,
-  useTheme,
-  type LightVariant,
-  type Theme,
-  type TypeSet,
-} from "../../lib/theme";
+import { useTheme, type Theme } from "../../lib/theme";
 
 type CostTotal = { total_usd: number; gpu_usd: number; agent_usd: number };
 
@@ -63,11 +51,11 @@ function ThemeSwitch() {
         {seg("dark", Moon, "Dark theme")}
         {seg("light", Sun, "Light theme")}
       </div>
-      {theme === "light" && <StylePicker />}
     </>
   );
 }
 
+/* Retired palette/type picker (Paper is the only light palette).
 // Light-theme styles, one dropdown: four palettes, each with the console's
 // own typefaces or the website's. The choice is remembered per browser.
 const PALETTES: Record<LightVariant, string> = {
@@ -108,6 +96,8 @@ function StylePicker() {
     </select>
   );
 }
+
+*/
 
 function Vital({ label, value, live = false }: { label: string; value: string; live?: boolean }) {
   return (

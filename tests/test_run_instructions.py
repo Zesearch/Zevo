@@ -135,8 +135,9 @@ async def test_needs_input_keeps_run_instruction_gate_closed(client_and_session)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replace_allocation", [False, True])
 async def test_orchestrator_routes_instruction_as_a_quiesced_specialist_wake(
-    client_and_session,
+    client_and_session, replace_allocation,
 ) -> None:
     client, Session = client_and_session
     posted = await client.post(
@@ -144,6 +145,8 @@ async def test_orchestrator_routes_instruction_as_a_quiesced_specialist_wake(
     )
     instruction_id = posted.json()["id"]
     async with Session() as session:
+        run = await session.get(Run, "run-1")
+        run.gpu_provider = "cluster"
         instruction = await session.get(RunInstruction, instruction_id)
         instruction.status = "delivered"
         await session.commit()
@@ -154,6 +157,7 @@ async def test_orchestrator_routes_instruction_as_a_quiesced_specialist_wake(
                 author="orchestrator",
                 run_instruction_id=instruction_id,
                 instruction_action="restart_activation",
+                replace_allocation=replace_allocation,
             ),
             session,
         )
@@ -165,7 +169,8 @@ async def test_orchestrator_routes_instruction_as_a_quiesced_specialist_wake(
             )
         )).scalars().all()
         assert len(wakeups) == 1
-        assert wakeups[0].payload == {"run_instruction_id": instruction_id, "instruction_action": "restart_activation"}
+        assert wakeups[0].payload == {"run_instruction_id": instruction_id, "instruction_action": "restart_activation",
+                                      **({"replace_allocation": True} if replace_allocation else {})}
 
 
 @pytest.mark.asyncio

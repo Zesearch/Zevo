@@ -2,13 +2,13 @@ import { levelOf } from "../lib/autonomy";
 import { useFileDisplayPath } from "../lib/useFileDisplayPath";
 import { useEffect, useState } from "react";
 import useSWR from "swr";
-import { ChevronRight, Folder, Pencil, Plus, Trash2, X } from "lucide-react";
-import { Note } from "./zevo/primitives";
+import { ChevronRight, Folder, Pencil, Plus, Trash2 } from "lucide-react";
 import { shortModel, splitDatasetPath } from "../lib/format";
 import {
   MODEL_ID_HINT,
   TRAINING_METHOD_OPTIONS,
   ScoringSuiteEditor,
+  RunSummaryTable,
   ScoringSuiteManifest,
   TrainingDataField,
   emptyScoringSet,
@@ -21,6 +21,8 @@ import { api } from "../lib/api";
 import type { TaskSettingDTO, TaskTestSet } from "../lib/api";
 import { toast } from "../lib/toast";
 import { ThemedSelect } from "./ThemedSelect";
+import { SettingNavigation } from "./SettingNavigation";
+import { Note } from "./zevo/primitives";
 
 /**
  * A task's settings, read back from the runs it has had.
@@ -220,7 +222,7 @@ function SettingChoice({
     : compactQuery;
 
   return (
-    <div className="min-w-0 rounded-md border border-hair bg-raised/55 p-3">
+    <div className="setting-choice min-w-0 py-2">
       <div className="table-label">{label}</div>
       <div
         title={title || value}
@@ -230,14 +232,14 @@ function SettingChoice({
       >
         {children ?? value}
       </div>
-      {query !== undefined && (
-        <div className="mt-2 border-t border-hair/70 pt-2">
-          <span className="font-mono text-[0.58rem] uppercase tracking-[0.12em] text-slate-600">
+      {query?.trim() && (
+        <div className="mt-4">
+          <span className="setting-query-label">
             query
           </span>
           <p
             title={query || "No query set"}
-            className={`mt-0.5 break-words font-mono text-[0.64rem] leading-relaxed ${
+            className={`setting-query mt-2 break-words ${
               queryExpanded ? "whitespace-pre-wrap" : ""
             } ${query ? "text-slate-400" : "text-slate-600"}`}
           >
@@ -251,7 +253,7 @@ function SettingChoice({
                 }}
                 aria-expanded={queryExpanded}
                 aria-label={`${queryExpanded ? "Show less of" : "Show more of"} ${label} query`}
-                className="ml-1 whitespace-nowrap font-mono text-[0.62rem] text-brass-300 transition hover:text-brass-200"
+                className="ml-2 whitespace-nowrap text-sm text-brass-300 transition hover:text-brass-200"
               >
                 {queryExpanded ? "less" : `${/[.!?。！？]$/.test(queryPreview) ? "" : "… "}more`}
               </button>
@@ -275,10 +277,10 @@ function SettingValidationCard({
   row: SettingDataRow;
   onOpenDataset?: (name: string, file?: string, split?: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const count = setting.validation_sets?.length ?? 0;
   return (
-    <div className="min-w-0 rounded-md border border-hair bg-raised/35 p-3 xl:col-span-2">
+    <div className="setting-validation min-w-0 py-5">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -290,23 +292,20 @@ function SettingValidationCard({
             size={12}
             className={`shrink-0 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`}
           />
-          <span className="table-label">Validation setup</span>
+          <span className="setting-detail-heading !mb-0">Validation</span>
         </span>
-        {!open && (
-          <span className="min-w-0 truncate font-mono text-xs text-brass-300" title={row.title}>
-            {count ? `${count} ${count === 1 ? "dataset" : "datasets"}` : row.value}
-          </span>
-        )}
+        {count > 0 && <span className="min-w-0 truncate font-mono text-xs text-brass-300" title={row.title}>
+          {count} {count === 1 ? "dataset" : "datasets"}
+        </span>}
       </button>
       {open && (
-        <div className="mt-3 border-t border-hair/70 pt-3">
+        <div className="mt-5">
           {count ? (
             <ScoringSuiteManifest
               items={setting.validation_sets}
-              title={`${count} ${count === 1 ? "dataset" : "datasets"}`}
-              note="independent Validation · Test remains 100%"
+              showHeader={false}
               setLabel="Validation set"
-              summaryLayout="inline"
+              summaryLayout="stacked"
             />
           ) : <SettingDatasetValue row={row} onOpenDataset={onOpenDataset} />}
         </div>
@@ -324,10 +323,11 @@ function SettingValidationCard({
  * needs a setting, so the setting IS the thing you start.
  */
 export function TaskSettingHistory({
-  task, onPick, onRun, onOpenDataset, onAddingChange,
+  task, taskId, onPick, onRun, onOpenDataset, onAddingChange,
   readOnly = false, busy = false, selectedId = "", modified = false, compact = false, onClear,
 }: {
   task: string;
+  taskId?: string;
   onPick?: (s: TaskSettingDTO) => void;
   onRun?: (s: TaskSettingDTO) => void;
   /** Given, the training data opens where you are instead of navigating to
@@ -350,15 +350,17 @@ export function TaskSettingHistory({
   modified?: boolean;
 }) {
   const { data, isLoading, mutate } = useSWR<TaskSettingDTO[]>(
-    task ? `/api/tasks/${encodeURIComponent(task)}/settings` : null,
+    task ? `/api/tasks/${encodeURIComponent(taskId || task)}/settings` : null,
   );
   // "" = nothing open, "new" = the blank form, an id = that row being edited.
   const [open, setOpen] = useState("");
+  const [selectedSetting, setSelectedSetting] = useState("");
   const settings = data ?? [];
+  const activeSetting = settings.some(setting => setting.id === selectedSetting) ? selectedSetting : settings[0]?.id || "";
   const displayPath = useFileDisplayPath();
 
   useEffect(() => {
-    onAddingChange?.(open === "new");
+    onAddingChange?.(!!open);
     return () => onAddingChange?.(false);
   }, [open, onAddingChange]);
 
@@ -367,7 +369,7 @@ export function TaskSettingHistory({
       `Remove this ${s.level} setting from ${task}? Runs already made with it are not affected.`,
     )) return;
     try {
-      await api(`/tasks/${encodeURIComponent(task)}/settings/${encodeURIComponent(s.id)}`, { method: "DELETE" });
+      await api(`/tasks/${encodeURIComponent(taskId || task)}/settings/${encodeURIComponent(s.id)}`, { method: "DELETE" });
     } catch (e) {
       toast(`Remove failed: ${e instanceof Error ? e.message : e}`, "error");
     }
@@ -480,20 +482,31 @@ export function TaskSettingHistory({
   // Adding is a separate form state, not another row in the saved-settings
   // table. Showing the table heading and its old rows above it made the form
   // look like an expansion of the list and left two competing page titles.
-  if (!readOnly && open === "new") {
+  if (!readOnly && open) {
     return (
-      <div className="min-w-0">
-        <SettingForm
-          task={task}
-          onDone={async () => { setOpen(""); await mutate(); }}
-          onCancel={() => setOpen("")}
-        />
-      </div>
+      <SettingForm
+        key={open}
+        task={taskId || task}
+        existing={settings.find(setting => setting.id === open)}
+        onDone={async () => { setOpen(""); await mutate(); }}
+        onCancel={() => setOpen("")}
+      />
     );
   }
 
   return (
-    <div className="min-w-0 space-y-3">
+    <SettingNavigation
+      label="Saved settings" numbered={false} active={activeSetting} onSelect={setSelectedSetting}
+      items={settings.map((setting, index) => {
+        const level = setting.level || levelOf(setting.dataset, setting.base_model, setting.training_method);
+        return { id: setting.id, label: setting.name || "Untitled setting",
+          description: <span className="setting-autonomy-badge"><LevelBadge level={level} /></span>,
+          accessory: index === 0 ? <Note to="/levels" size={13}>{LEVEL_BLURB[level] || "Autonomy level details."}</Note> : undefined,
+        };
+      })}
+      action={!readOnly && <button type="button" onClick={() => setOpen("new")} className="launch-next"><Plus size={16} /> Add setting</button>}
+    >
+    <div className="settings-detail min-w-0 space-y-6">
       {settings.length === 0 && !open && (
         <div className="rounded-lg border border-dashed border-hair px-3 py-4 text-2xs text-slate-400">
           {readOnly
@@ -502,19 +515,7 @@ export function TaskSettingHistory({
         </div>
       )}
 
-      {settings.map((s) => {
-        if (s.id === open) {
-          return (
-            <SettingForm
-              key={s.id}
-              task={task}
-              existing={s}
-              onDone={async () => { setOpen(""); await mutate(); }}
-              onCancel={() => setOpen("")}
-            />
-          );
-        }
-
+      {settings.filter(setting => setting.id === activeSetting).map((s) => {
         const [training, validation] = dataRows(s, displayPath);
         const methodTitle = s.training_method === "gkd"
           ? `${s.training_method} · teacher ${String(s.method_config?.teacher_model || "missing")}`
@@ -523,12 +524,10 @@ export function TaskSettingHistory({
           : s.training_method || "Zevo decides";
 
         return (
-          <div key={s.id} className="min-w-0 rounded-lg border border-hair bg-canvas/50 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-hair pb-3">
+          <div key={s.id} data-setting-section={s.id} tabIndex={-1} className="setting-detail-card min-w-0">
+            <div className="setting-detail-header flex flex-wrap items-center justify-between gap-4 pb-4">
               <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-                <span className="font-mono text-sm text-slate-100">{s.name || "—"}</span>
-                <LevelBadge level={s.level} />
-                <Note to="/levels" size={13}>Autonomy level details.</Note>
+                <h5 className="creation-card-title">{s.name || "—"}</h5>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
                 {onRun && (
@@ -537,9 +536,9 @@ export function TaskSettingHistory({
                     onClick={() => onRun(s)}
                     disabled={busy}
                     title="Start a run with this setting"
-                    className="rounded-md border border-phosphor-500/40 bg-phosphor-500/10 px-2.5 py-1 font-mono text-2xs text-phosphor-300 transition hover:bg-phosphor-500/20 hover:text-phosphor-200 disabled:opacity-50"
+                    className="launch-next launch-next-compact"
                   >
-                    run
+                    Launch run
                   </button>
                 )}
                 {!readOnly && (
@@ -565,7 +564,17 @@ export function TaskSettingHistory({
               </div>
             </div>
 
-            <div className="mt-3 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <section className="setting-detail-section">
+              <SettingValidationCard
+                setting={s}
+                row={validation}
+                onOpenDataset={onOpenDataset}
+              />
+
+            </section>
+            <details open className="setting-detail-section setting-detail-disclosure">
+            <summary className="setting-detail-heading"><ChevronRight size={12} />Training</summary>
+            <div className="grid min-w-0 gap-6 md:grid-cols-3">
               <SettingChoice label="Data" value={training.value} title={training.title} query={s.data_query}>
                 <SettingDatasetValue row={training} onOpenDataset={onOpenDataset} />
               </SettingChoice>
@@ -585,20 +594,16 @@ export function TaskSettingHistory({
               />
             </div>
 
-            <div className="mt-3 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-3">
-              <SettingValidationCard
-                setting={s}
-                row={validation}
-                onOpenDataset={onOpenDataset}
-              />
-
-              <div className="grid self-start grid-cols-3 gap-2 rounded-md border border-hair bg-raised/35 p-3">
+            </details>
+            <details open className="setting-detail-section setting-detail-disclosure">
+              <summary className="setting-detail-heading"><ChevronRight size={12} />Limits</summary>
+              <div className="grid grid-cols-3 gap-6">
                 {[
                   ["iterations", s.iteration_budget ? String(s.iteration_budget) : "∞"],
                   ["budget", s.max_cost_usd ? `$${s.max_cost_usd}` : "∞"],
                   ["stop at", s.stop_threshold != null ? String(s.stop_threshold) : "not set"],
                 ].map(([label, value]) => (
-                  <div key={label} className="min-w-0 text-center">
+                  <div key={label} className="min-w-0 text-left">
                     <div className="font-mono text-2xs uppercase tracking-[0.1em] text-slate-500">{label}</div>
                     <div
                       className={`mt-1.5 truncate font-mono text-slate-100 ${
@@ -611,21 +616,14 @@ export function TaskSettingHistory({
                   </div>
                 ))}
               </div>
-            </div>
+            </details>
           </div>
         );
       })}
 
-      {readOnly ? null : open ? null : (
-        <button
-          type="button"
-          onClick={() => setOpen("new")}
-          className="flex items-center gap-1.5 rounded-md py-1 font-mono text-2xs text-slate-400 transition hover:text-brass-300"
-        >
-          <Plus size={12} /> add a setting
-        </button>
-      )}
+
     </div>
+    </SettingNavigation>
   );
 }
 /** Write a setting down before running it — the only way onto the list for a
@@ -638,6 +636,8 @@ function SettingForm({ task, existing, onDone, onCancel }: {
   existing?: TaskSettingDTO;
   onDone: () => void; onCancel: () => void;
 }) {
+  const [step, setStep] = useState("basics");
+  const steps = ["basics", "validation", "train", "limits", "checklist"];
   const [v, setV] = useState({
     name: existing?.name ?? "",
     dataset: existing?.dataset ?? "",
@@ -665,12 +665,20 @@ function SettingForm({ task, existing, onDone, onCancel }: {
   const updateValidationSuite = (items: TaskTestSet[]) =>
     setV((x) => ({ ...x, validation_sets: items }));
   const useValidationSuite = () => updateValidationSuite([emptyScoringSet()]);
-  const useAutomaticValidation = () => updateValidationSuite([]);
   const auxiliaryModelMissing =
     (v.training_method === "gkd" && !v.teacher_model.trim())
     || (v.training_method === "online_dpo" && !v.reward_model.trim());
   const validationSuiteGaps = v.validation_sets.length
     ? scoringSuiteMissing(v.validation_sets, "Validation") : [];
+
+  const go = (next: string) => {
+    if (next === "checklist") {
+      if (!v.name.trim()) { setStep("basics"); return; }
+      if (validationSuiteGaps.length) { setStep("validation"); return; }
+      if (auxiliaryModelMissing) { setStep("train"); return; }
+    }
+    setStep(next);
+  };
 
   async function submit() {
     setBusy(true);
@@ -722,10 +730,20 @@ function SettingForm({ task, existing, onDone, onCancel }: {
   // left, which meant a file already sitting in the catalogue had to be
   // transcribed, and a typo in it surfaced hours later as a failed run.
   return (
-    <div className="space-y-4 py-1">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="field-label shrink-0">
-          name
+    <SettingNavigation label={existing ? "Edit setting" : "Add setting"} active={step} onSelect={go}
+      top={<button type="button" onClick={onCancel} disabled={busy} className="launch-back">← Saved settings</button>}
+      items={[
+      { id: "basics", label: "Basic information", group: "Required", complete: !!v.name.trim() },
+      { id: "validation", label: "Validation", group: "Optional", complete: !validationSuiteGaps.length },
+      { id: "train", label: "Training", group: "Optional", complete: !auxiliaryModelMissing },
+      { id: "limits", label: "Limits", group: "Optional", complete: true },
+      { id: "checklist", label: "Checklist" },
+    ]}>
+    <div className="setting-form space-y-8">
+      <section hidden={step !== "basics"} className="space-y-4">
+      <label className="block">
+        <span className="field-label mb-2 block">
+          Setting name
         </span>
         {/* Named, not numbered. `sN` is only the default: it looks like a
             position in a list and is not one — names are never reused, so
@@ -738,45 +756,36 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           onChange={set("name")}
           placeholder="what to call this line of attack"
           spellCheck={false}
-          className="min-w-0 flex-1 rounded border border-hair bg-canvas px-2 py-1 font-mono text-xs text-slate-100 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none"
+          className="w-full min-w-0 rounded border border-hair bg-canvas px-2 py-1 font-mono text-xs text-slate-100 placeholder:text-slate-600 placeholder:opacity-100 focus:border-brass-500/50 focus:outline-none"
         />
-        <LevelBadge level={levelOf(v.dataset, v.base_model, v.training_method)} />
-      </div>
+      </label>
 
-      <div className={`grid grid-cols-1 gap-4 ${v.validation_sets.length ? "" : "lg:grid-cols-2"}`}>
+      </section>
+      <section hidden={step !== "validation"} className="creation-section-heading space-y-6">
+
+      <div className="space-y-6">
         {v.validation_sets.length ? (
           <div className="min-w-0 self-start space-y-3">
             <ScoringSuiteEditor
               items={v.validation_sets}
               lane="Validation"
+              flat
               onChange={updateValidationSuite}
             />
-            {validationSuiteGaps.length > 0 && (
-              <p className="font-mono text-2xs text-coral-300">
-                Complete the Validation suite: {validationSuiteGaps.join(", ")}.
-              </p>
-            )}
-            <button
-              type="button"
-              onClick={useAutomaticValidation}
-              className="font-mono text-2xs text-slate-500 transition hover:text-brass-300"
-            >
-              Use automatic Validation from Test instead
-            </button>
           </div>
         ) : (
-          <div className="self-start rounded-md border border-brass-500/25 bg-brass-500/[0.04] px-4 py-3">
-            <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
-              <span className="field-label !text-brass-200">Constructed from Test suite</span>
-              <span className="font-mono text-xs leading-relaxed text-slate-400 sm:text-right">
-                20% per eligible set · minimum 200 rows
-              </span>
-            </div>
-            <button type="button" onClick={useValidationSuite} className="btn mt-3 !py-1 !text-2xs">
-              <Plus size={12} /> use independent Validation sets
+          <div className="space-y-3 py-2">
+            <button type="button" onClick={useValidationSuite} className="launch-add-set">
+              <Plus size={16} /> Add Validation set
             </button>
           </div>
         )}
+
+      </div>
+
+      </section>
+      <section hidden={step !== "train"} className="creation-section-heading space-y-6">
+
         <div className="space-y-3">
           <TrainingDataField
             value={v.dataset} label="Data" tag={false}
@@ -797,9 +806,7 @@ function SettingForm({ task, existing, onDone, onCancel }: {
             />
           </label>
         </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
         <label className="block">
           <span className="field-label mb-1 block">Base model</span>
           <input className={cls} value={v.base_model} onChange={set("base_model")} placeholder={MODEL_ID_HINT} />
@@ -814,13 +821,13 @@ function SettingForm({ task, existing, onDone, onCancel }: {
           />
         </label>
         <div className="block">
-          <span className="field-label mb-1 block">Training method</span>
+          <span className="field-label mb-1 block">Method</span>
           <ThemedSelect
             value={v.training_method}
             onChange={(value) => setV((x) => ({ ...x, training_method: value }))}
             options={TRAINING_METHOD_OPTIONS.map((value) => ({ value, label: value }))}
             placeholder="Optimization method used to train the model; blank lets Zevo choose"
-            ariaLabel="Training method"
+            ariaLabel="Method"
             buttonClassName={cls}
           />
           {trainingMethodSupportsLora(v.training_method) && (
@@ -861,6 +868,10 @@ function SettingForm({ task, existing, onDone, onCancel }: {
             <input className={cls} value={v.reward_model} onChange={set("reward_model")} placeholder="Online DPO reward model: Hugging Face owner/model id" />
           </label>
         )}
+      </div>
+      </section>
+      <section hidden={step !== "limits"} className="creation-section-heading space-y-6">
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
         <label className="block">
           <span className="field-label mb-1 block">Iterations</span>
           <input className={cls} value={v.iteration_budget} onChange={set("iteration_budget")} placeholder="Maximum optimization rounds; blank is unlimited" />
@@ -875,13 +886,47 @@ function SettingForm({ task, existing, onDone, onCancel }: {
         </label>
       </div>
 
+      </section>
+
+      <section hidden={step !== "checklist"}>
+        <RunSummaryTable optionalValues={[]} requiredValues={[
+            ["Setting name", v.name || "Not set"],
+            ["Autonomy level", `Level ${levelOf(v.dataset, v.base_model, v.training_method).replace("L", "")}`],
+            ["Validation", v.validation_sets.length ? v.validation_sets.map((item, index) => item.name || `Validation set ${index + 1}`).join(", ") : "Automatic · 20% per eligible Test set, minimum 200 rows"],
+            ["Training data", v.dataset || "Zevo decides"],
+            ["Data split", v.dataset_split || "Automatic"],
+            ["Data configuration", v.dataset_config || "Automatic"],
+            ["Data query", v.data_query || "Not specified"],
+            ["Base model", v.base_model || "Zevo decides"],
+            ["Model query", v.model_query || "Not specified"],
+            ["Training method", v.training_method || "Zevo decides"],
+            ["Method query", v.method_query || "Not specified"],
+            ...(trainingMethodSupportsLora(v.training_method) ? [["LoRA", v.use_peft === "true" ? "Enabled" : "Disabled"]] : []),
+            ...(v.training_method === "gkd" ? [["Teacher model", v.teacher_model || "Not set"]] : []),
+            ...(v.training_method === "online_dpo" ? [["Reward model", v.reward_model || "Not set"]] : []),
+            ["Iterations", v.iteration_budget || "Unlimited"],
+            ["Budget", v.max_cost_usd ? `$${v.max_cost_usd}` : "Unlimited"],
+            ["Stop threshold", v.stop_threshold || "Not set"],
+          ].map(([name, value]) => ({ name, value }))} />
+      </section>
+
       {/* Detailed prompt, loss, and inference pins are deliberately not a
           generic Setting form. They are entered under their consuming Agent
           in Launch Run → Customized → Agent Configuration. */}
 
-      <div className="flex items-center justify-end gap-1.5 border-t border-hair pt-3">
-        {error && <span className="mr-auto text-2xs text-coral-300">{error}</span>}
-        <button
+      {error && <p role="alert" className="text-sm text-coral-300">{error}</p>}
+      {step === "checklist" && (!v.name.trim() || validationSuiteGaps.length > 0 || auxiliaryModelMissing) && (
+        <p className="text-sm text-coral-300" role="status">
+          Complete before saving: {[
+            !v.name.trim() ? "setting name in Basic information" : "",
+            validationSuiteGaps.length ? "fields in Validation" : "",
+            auxiliaryModelMissing ? "auxiliary model in Training" : "",
+          ].filter(Boolean).join("; ")}.
+        </p>
+      )}
+      <div className="creation-actions">
+        <button type="button" onClick={() => step === "basics" ? onCancel() : setStep(steps[steps.indexOf(step) - 1])} disabled={busy} className="launch-back">{step === "basics" ? "Cancel" : "← Back"}</button>
+        {step !== "checklist" ? <button type="button" onClick={() => go(steps[steps.indexOf(step) + 1])} className="launch-next">Continue →</button> : <button
           type="button"
           onClick={() => void submit()}
           disabled={busy || !v.name.trim() || validationSuiteGaps.length > 0 || auxiliaryModelMissing}
@@ -894,18 +939,13 @@ function SettingForm({ task, existing, onDone, onCancel }: {
               ? `${v.training_method} needs its Hugging Face auxiliary model id`
               : ""
           }
-          className="rounded-md border border-brass-500/40 bg-brass-500/10 px-2.5 py-1 font-mono text-2xs text-brass-300 transition hover:bg-brass-500/20 disabled:opacity-50"
+          className="launch-next"
         >
-          {busy ? "saving…" : "save"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-md p-1 text-slate-600 transition hover:text-slate-300"
-        >
-          <X size={13} />
-        </button>
+          {busy ? "Saving…" : "Save setting"}
+        </button>}
+
       </div>
     </div>
+    </SettingNavigation>
   );
 }

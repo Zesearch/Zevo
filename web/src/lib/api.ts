@@ -69,6 +69,9 @@ export type TaskTestSet = {
 };
 
 export type TaskDTO = {
+  id?: string;
+  created_by_name?: string;
+  created_by_email?: string;
   name: string;
   task_objective: string;
   test_sets: TaskTestSet[];

@@ -581,7 +581,7 @@ async def delete_file_set_member(
         raise HTTPException(404, f"{filename!r} is not a file of file set {name!r}")
     if target.name in _META_FILES:
         raise HTTPException(400, f"{filename!r} is bookkeeping, not data")
-    await preserve_legacy_run_inputs(db, name)
+    await preserve_legacy_run_inputs(db, name, member=filename)
     target.unlink()
     # An emptied subfolder is not a file the dataset has; leaving it behind
     # makes the next listing show a folder with nothing in it.
